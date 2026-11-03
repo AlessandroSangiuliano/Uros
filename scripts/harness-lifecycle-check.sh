@@ -24,9 +24,16 @@
 #              qemu, and the next run names it in its conditions
 #   killed     a tool killed with SIGKILL takes its qemu with it
 #              (PR_SET_PDEATHSIG); the lock it cannot give back is said
+#   unitstop   each of them, run in a transient systemd user unit under a
+#              script with no trap, and the unit stopped with its qemu up --
+#              which signals what is left of the unit twice -- leaves neither
+#              its qemu nor the lock, and run-x86_64.sh says it was stopped
+#              (#801)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
-# ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered.
+# ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
+# under KVM before a signal could come, so a run to be signalled or killed
+# boots with its guest paused (#801).
 #
 # Usage:  harness-lifecycle-check.sh [--kvm] [--only CHECK[,CHECK...]] [--out DIR]
 # Exit:   0 every check PASS · 1 a check WRONG · 2 it could not be run (the
@@ -42,7 +49,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -138,11 +145,53 @@ leftovers() {	# QEMU-PID
 	return 0
 }
 
-run_harness() {	# NAME: run-x86_64.sh in the background, its log under OUT
-	UROS_X86_64_LOG="$OUT/$1.log" "$REPO/scripts/run-x86_64.sh" "${KVM[@]}" \
-		--entry "$ENTRY" 120 > "$OUT/$1.out" 2>&1 &
+run_harness() {	# NAME [QEMU-ARGS...]: run-x86_64.sh in the background, its log under OUT
+	local name=$1
+	shift
+	UROS_X86_64_LOG="$OUT/$name.log" "$REPO/scripts/run-x86_64.sh" "${KVM[@]}" \
+		--entry "$ENTRY" 120 "$@" > "$OUT/$name.out" 2>&1 &
 	RUN=$!
 	STARTED+=("$RUN")
+}
+# 🔴 AND HOW IT ENDED, WHICH `wait' CANNOT SAY (#801).  A run killed by signal N
+# and a run that exited with 128+N both read 128+N to a shell's wait, and since
+# the wait for qemu waits with `wait' (run-x86_64.sh, #801), a run whose trap
+# no longer ends it by the signal -- ablations/618-trap-goes-on.patch -- mostly
+# exits with that same number when set -e meets the interrupted wait: the check
+# found it in 1 boot of 4.  So a run to be signalled is started under
+# ended-by.py, which is its parent with the run's own pid and writes "signal N"
+# or "exit N" into NAME.ended.  RUN is the run's pid, read from NAME.ended.pid;
+# JOB is the watcher's, the one this shell waits for.
+run_harness_watched() {	# NAME [QEMU-ARGS...]
+	local name=$1 i
+	shift
+	rm -f "$OUT/$name.ended" "$OUT/$name.ended.pid"
+	UROS_X86_64_LOG="$OUT/$name.log" python3 -I "$REPO/scripts/ended-by.py" \
+		"$OUT/$name.ended" -- "$REPO/scripts/run-x86_64.sh" "${KVM[@]}" \
+		--entry "$ENTRY" 120 "$@" > "$OUT/$name.out" 2>&1 &
+	JOB=$!
+	RUN=""
+	for i in $(seq 1 100); do
+		[ -s "$OUT/$name.ended.pid" ] && break
+		sleep 0.05
+	done
+	RUN=$(cat "$OUT/$name.ended.pid" 2>/dev/null)
+	STARTED+=(${RUN:+"$RUN"} "$JOB")
+}
+# 🔴 A RUN THAT IS TO BE SIGNALLED OR KILLED BOOTS PAUSED (#801).  Under KVM
+# entry 6 ends within the two seconds a check waits after its qemu appears:
+# the run stopped that qemu itself, at its own end, and only then had the
+# signal -- so a trap that left the qemu running passed, 2 boots of 4 for
+# ablations/618-trap-leaves-qemu, both under KVM.  A guest held at qemu's -S
+# never ends: the qemu is there until something kills it, and the run is in
+# its boot until its 120 s of silence run out.
+PAUSED=(-S)
+# And before each signal, the qemu is asked for: gone already, it is a check
+# that cannot be posed, said as NOT ASKED -- the tools take no qemu flags.
+qemu_gone_before() {	# QEMU-PID CHECK: true, after saying so, if it has gone
+	kill -0 "$1" 2>/dev/null && return 1
+	say "$2" "its qemu (pid $1) had ended before the signal, so what the signal leaves could not be asked" "NOT ASKED"
+	return 0
 }
 images() {
 	stat -c '%i:%Y' "$BUILD/disk-x86_64.img" "$BUILD/disk-x86_64-ahci.img" \
@@ -177,36 +226,41 @@ fi
 # ── signals ───────────────────────────────────────────────────────────
 if wanted signals; then
 	for sig in TERM INT HUP; do
-		run_harness "signal-$sig"
-		if ! q=$(first_qemu_of "$RUN"); then
-			wait "$RUN"
-			say "signal $sig" "the run never started its qemu (exit $?, $OUT/signal-$sig.out)" "NOT ASKED"
+		run_harness_watched "signal-$sig" "${PAUSED[@]}"
+		if [ -z "$RUN" ] || ! q=$(first_qemu_of "$RUN"); then
+			wait "$JOB"
+			say "signal $sig" "the run never started its qemu (it ended by $(cat "$OUT/signal-$sig.ended" 2>/dev/null || echo 'nothing said'), $OUT/signal-$sig.out)" "NOT ASKED"
 			continue
 		fi
 		sleep 2
+		if qemu_gone_before "$q" "signal $sig"; then
+			ended_within "$RUN" 30 || kill -KILL "$RUN" 2>/dev/null
+			wait "$JOB" 2>/dev/null
+			continue
+		fi
 		kill -s "$sig" "$RUN"
 		if ! ended_within "$RUN" 30; then
 			kill -KILL "$RUN" 2>/dev/null
-			wait "$RUN" 2>/dev/null
+			wait "$JOB" 2>/dev/null
 			say "signal $sig" "the run WENT ON for 30 s after SIG$sig$(leftovers "$q")" WRONG
 			continue
 		fi
-		wait "$RUN"
-		rc=$?
-		want=$(( 128 + $(kill -l "$sig") ))
+		wait "$JOB"
+		ended=$(cat "$OUT/signal-$sig.ended" 2>/dev/null)
+		want="signal $(kill -l "$sig")"
 		left=$(leftovers "$q")
-		[ "$rc" = "$want" ] || left="$left; exited $rc, not $want: it did not end by the signal"
+		[ "$ended" = "$want" ] || left="$left; it ended by ${ended:-nothing said}, not by $want: it did not end by the signal"
 		if [ -n "$left" ]; then
 			say "signal $sig" "sent SIG$sig with its qemu (pid $q) up${left}" WRONG
 		else
-			say "signal $sig" "sent SIG$sig with its qemu (pid $q) up, the run exited $rc, its qemu gone and the lock given back" PASS
+			say "signal $sig" "sent SIG$sig with its qemu (pid $q) up, the run ended by it, its qemu gone and the lock given back" PASS
 		fi
 	done
 fi
 
 # ── lockover ──────────────────────────────────────────────────────────
 if wanted lockover; then
-	run_harness lockover
+	run_harness lockover "${PAUSED[@]}"
 	if ! q=$(first_qemu_of "$RUN"); then
 		wait "$RUN"
 		say lockover "the run never started its qemu (exit $?)" "NOT ASKED"
@@ -299,6 +353,11 @@ if wanted tools; then
 			continue
 		fi
 		sleep 2
+		if qemu_gone_before "$q" "tool $name"; then
+			ended_within "$P" 30 || kill -KILL "$P" 2>/dev/null
+			wait "$P" 2>/dev/null
+			continue
+		fi
 		kill -s TERM "$P"
 		went_on=""
 		ended_within "$P" 30 || { kill -KILL "$P" 2>/dev/null; went_on="; it WENT ON for 30 s"; }
@@ -316,7 +375,7 @@ fi
 
 # ── orphan ────────────────────────────────────────────────────────────
 if wanted orphan; then
-	run_harness orphan-killed
+	run_harness orphan-killed "${PAUSED[@]}"
 	if ! q=$(first_qemu_of "$RUN"); then
 		wait "$RUN"
 		say orphan "the run never started its qemu (exit $?)" "NOT ASKED"
@@ -365,6 +424,80 @@ if wanted killed; then
 		else
 			say "killed $name" "killed with SIGKILL, its qemu (pid $q) went with it; $lock" PASS
 		fi
+	fi
+fi
+
+# ── unitstop ──────────────────────────────────────────────────────────
+# #801: each stopped the way a campaign started with systemd-run is -- a
+# script with no trap runs it in a transient user unit, so the unit's main
+# process dies on the first SIGTERM and systemd signals what is left of the
+# unit again.  On 31 October run-x86_64.sh's trap was in the middle of giving
+# its lock back when the second one came, and the next run refused to start
+# until the directory was removed by hand.
+unit_qemu() {	# UNIT: the qemu in the unit's control group
+	local cg p
+	cg=$(systemctl --user show -p ControlGroup --value "$1" 2>/dev/null)
+	[ -n "$cg" ] || return 1
+	for p in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do
+		case $(cat "/proc/$p/comm" 2>/dev/null) in
+		qemu-system*)	echo "$p"; return 0 ;;
+		esac
+	done
+	return 1
+}
+if wanted unitstop; then
+	if ! systemctl --user show-environment > /dev/null 2>&1; then
+		say unitstop "no systemd user manager to start a unit under" "NOT ASKED"
+	else
+		for t in "${TOOLS[@]}"; do
+			name=$(basename "${t%% *}")
+			case $name in
+			*.py)	# shellcheck disable=SC2086
+				cmd=(python3 "$REPO"/$t "${KVM[@]}") ;;
+			*)	cmd=("$REPO/scripts/run-x86_64.sh" "${KVM[@]}" --entry "$ENTRY" 120 "${PAUSED[@]}") ;;
+			esac
+			U=uros-lifecycle-unitstop-$$-$name
+			# Two commands, so that bash cannot exec the tool in its own
+			# place: the wrapper stays the unit's main process.
+			systemd-run --user --quiet --collect --unit="$U" \
+				--setenv=UROS_BUILD_DIR="$BUILD" \
+				--setenv=UROS_X86_64_LOG="$OUT/unitstop-$name.log" \
+				--setenv=LIFECYCLE_OUT="$OUT/unitstop-$name.out" \
+				/bin/bash -c '"$@" > "$LIFECYCLE_OUT" 2>&1; echo "lifecycle: it ended on its own, status $?" >> "$LIFECYCLE_OUT"' \
+				bash "${cmd[@]}"
+			q=""
+			for i in $(seq 1 900); do
+				q=$(unit_qemu "$U") && break
+				systemctl --user is-active --quiet "$U" || break
+				sleep 0.1
+			done
+			if [ -z "$q" ]; then
+				systemctl --user stop "$U" 2>/dev/null
+				say "unitstop $name" "it never started its qemu under a unit ($OUT/unitstop-$name.out)" "NOT ASKED"
+				continue
+			fi
+			sleep 2
+			if qemu_gone_before "$q" "unitstop $name"; then
+				systemctl --user stop "$U" 2>/dev/null
+				continue
+			fi
+			systemctl --user stop "$U"
+			for i in $(seq 1 300); do
+				systemctl --user is-active --quiet "$U" || break
+				sleep 0.1
+			done
+			sleep 0.5
+			left=$(leftovers "$q")
+			if [ "$name" = run-x86_64.sh ] &&
+			   ! grep -q "^run-x86_64.sh: stopped by SIG" "$OUT/unitstop-$name.out"; then
+				left="$left; it never said it was stopped: its output ends $(tail -n 1 "$OUT/unitstop-$name.out")"
+			fi
+			if [ -n "$left" ]; then
+				say "unitstop $name" "its unit stopped with its qemu (pid $q) up$left" WRONG
+			else
+				say "unitstop $name" "its unit stopped with its qemu (pid $q) up, its qemu gone and the lock given back" PASS
+			fi
+		done
 	fi
 fi
 

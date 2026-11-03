@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #804
+Takes out: in the architectural set, LsRefillsFromSys:Dram's unit mask, 0x48 (LS_MABRESP_LCL_DRAM and LS_MABRESP_RMT_DRAM), for 0x5a, which adds the fills from another cache, local or remote (PPR 55922 Rev. 3.06, PMCx043): on Zen 2 the counter named for the last level's misses counts every fill from beyond the L2, as the one for its references does
+Machine: pavillion
+Expect: pmc test \(#804\): lines in 2 MiB, 32768 steps: .* LLC [0-9]+ \(WRONG
+Note: Judged on pavillion's metal (Ryzen 5 4600H, Family 17h Model 60h), the only Zen 2 here: QEMU on victus gives its guest victus's Zen 3, whose table this is not, and ablate.sh boots no kernel arguments, which the test needs.  Run from pavillion's GRUB entry uros-804b-llc, pmc=3 pmc_test=1, with the fixed tree's uros-804q-pmc3 beside it, 02/11/2026: caught in 1 boot of 1 (the 2 MiB walk, which the L3 holds, counted 28560 for 32768 steps, 87%, against at most 50%), the fixed tree 36 checks with 0 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pmc.c b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+--- a/uros/src/mach_kernel/x86_64/cpu/pmc.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+@@ -155,7 +155,7 @@
+ };
+ static const struct pmc_event pmc_zen2_arch[] = {
+ 	{ "LsRefillsFromSys:beyondL2",		0x043, 0x5a, -1, PMC_ROLE_LLC_REF },
+-	{ "LsRefillsFromSys:Dram",		0x043, 0x48, -1, PMC_ROLE_LLC_MISS },
++	{ "LsRefillsFromSys:Dram",		0x043, 0x5a, -1, PMC_ROLE_LLC_MISS },
+ 	{ "ExRetBrn",				0x0c2, 0x00, -1, PMC_ROLE_BRANCH },
+ 	{ "ExRetBrnMisp",			0x0c3, 0x00, -1, PMC_ROLE_BRANCH_MISS },
+ };

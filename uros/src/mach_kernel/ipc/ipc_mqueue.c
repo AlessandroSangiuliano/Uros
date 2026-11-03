@@ -1053,10 +1053,18 @@ ipc_mqueue_finish_receive(
 	dstat(++c_imfr_calls);
 
 
-	/* check sizes */
+	/*
+	 * check sizes
+	 *
+	 * #808: the message and the trailer asked for must both fit in
+	 * max_size, and the subtraction that asks it cannot go below zero: a
+	 * max_size smaller than the trailer is too small for any message,
+	 * where the unsigned difference let every message through.
+	 */
 	if (mr == MACH_MSG_SUCCESS) {
-		if (kmsg->ikm_header.msgh_size >
-				(max_size - REQUESTED_TRAILER_SIZE(option))) {
+		if (REQUESTED_TRAILER_SIZE(option) > max_size ||
+		    kmsg->ikm_header.msgh_size >
+				max_size - REQUESTED_TRAILER_SIZE(option)) {
 			/* the receive buffer isn't large enough */
 			mr = MACH_RCV_TOO_LARGE;
 		} else if (self->ith_scatter_list != MACH_MSG_BODY_NULL) {

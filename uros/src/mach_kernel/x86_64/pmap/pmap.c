@@ -1000,11 +1000,41 @@ int pmap_may_map(pmap_t pmap, uint64_t va)
 	return !(va_is_user(va) && pmap == pmap_kernel());
 }
 
+/*
+ * The size of the leaf that maps va, or zero when none does (#807): the walk
+ * pmap_extract() makes, in the same read section.
+ */
+static uint64_t pmap_leaf_size(pmap_t pmap, uint64_t va)
+{
+	boolean_t   held = pmap_read_enter_for(va);
+	uint64_t    size = 0;
+	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, &size);
+
+	pmap_read_leave(held);
+	return entry != PT_ENTRY_NULL ? size : 0;
+}
+
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired)
 {
 	uint64_t flags;
 	int rc;
+
+	/*
+	 * 🔴 NOT OVER A LARGE PAGE (#807).
+	 *
+	 * Every caller maps 4 KiB, and a larger leaf is the kernel's own -- the
+	 * direct map, the image -- over memory no VM object holds.  Taking it
+	 * away for one page unmaps all the rest, and pmap_forget() below would,
+	 * since it removes whatever leaf covers the address, of any size: a
+	 * fault from ring 3 on the direct map's base took a whole leaf of it,
+	 * 1 GiB or 2 MiB as direct_map_init() chose, that way.
+	 * So a large leaf is refused before anything is removed, with the
+	 * answer pmap_map_page() gives for it -- in both branches, because one
+	 * that only removes removes all the same.
+	 */
+	if (pmap_leaf_size(pmap, va) > PAGE_SIZE_4K)
+		return PMAP_MAP_BLOCKED;
 
 	if (prot == VM_PROT_NONE) {
 		pmap_forget(pmap, va);
@@ -1077,6 +1107,23 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	return rc;
 }
 
+/*
+ * 🔴 THE VM'S PMAP_ENTER, WHICH HEARS A REFUSAL (#807).
+ *
+ * vm/pmap.h's PMAP_ENTER calls pmap_enter() and drops the answer.  A large
+ * page refused means the VM asked to put one of its pages over the kernel's
+ * own mapping, which resolves no fault: taken as mapped, the fault would come
+ * back and ask again for ever, with nothing to say why.  So it is said here,
+ * and the machine stops.  PMAP_MAP_NO_FRAME is still dropped: that is #838.
+ */
+void pmap_enter_vm(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
+		   int wired)
+{
+	if (pmap_enter(pmap, va, pa, prot, wired) == PMAP_MAP_BLOCKED)
+		panic("PMAP_ENTER: 0x%lx lies under a large page of the kernel's",
+		      (unsigned long) va);
+}
+
 int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
 {
 	boolean_t held = pmap_read_enter();
@@ -1126,10 +1173,30 @@ uint64_t pmap_extract(pmap_t pmap, uint64_t va)
 }
 
 /*
- * Step a range one mapping at a time.  Advancing by the size the operation
- * reports skips a large page in one stride instead of touching its every
- * 4 KiB; where nothing is mapped, 4 KiB is the step that cannot overshoot a
- * mapping that starts partway through.
+ * Step a range one entry at a time, to the end of what the operation found at
+ * the address: the mapping's end, so a large page is one stride instead of its
+ * every 4 KiB -- or, where nothing is mapped, the end of the empty entry the
+ * walk stopped at.
+ *
+ * 🔴 NOT 4 KiB WHERE NOTHING IS MAPPED (#847).  The step used to be 4 KiB
+ * there, "the step that cannot overshoot a mapping that starts partway
+ * through", and an empty PML4 entry -- 512 GiB with nothing under it -- was
+ * 134,217,728 walks from the root, each in a read section of its own.
+ * vm_map_delete() removes across every entry it deletes, touched or not:
+ * #843's test gave back 128 TiB it had never touched, and one processor spent
+ * four to five minutes of KVM in this loop, more than a run's 1200 s of TCG.
+ * An entry that is not valid maps nothing anywhere in its reach, so the end of
+ * that reach, aligned, cannot overshoot a mapping either: the next one is
+ * walked again from the root.
+ *
+ * ⚠️ The END of the entry, not the address plus its size: at an address
+ * partway into a large page, the address plus 2 MiB went past the start of the
+ * next entry, and whatever was mapped there was never asked about.
+ *
+ * The hole is read again after the operation found nothing, in a section of
+ * its own.  A page entered between the two reads would be an enter racing a
+ * removal of the same range -- the 4 KiB step had that window too -- and
+ * should it happen, va is found mapped and the stride is the old 4 KiB.
  *
  * 🔴 An end below the start is refused, not walked as nothing (#612).  Four
  * boot self-tests passed PAGE_SIZE_4K where the end belongs; each removed
@@ -1145,13 +1212,33 @@ static void pmap_range_check(const char *who, uint64_t s, uint64_t e)
 		      (unsigned long) s);
 }
 
+/*
+ * Where the stride from s ends: past what the operation found there, size
+ * bytes of mapping, or past the hole it found when size is zero.  Zero when
+ * the end is past the top of the address space, which the callers stop at.
+ */
+static uint64_t pmap_stride_end(pmap_t pmap, uint64_t s, uint64_t size)
+{
+	if (size == 0) {
+		boolean_t held = pmap_read_enter_for(s);
+
+		size = pmap_hole(pmap->root_pa, s);
+		pmap_read_leave(held);
+		if (size == 0)
+			size = PAGE_SIZE_4K;
+	}
+	return (s | (size - 1)) + 1;
+}
+
 void pmap_remove(pmap_t pmap, uint64_t s, uint64_t e)
 {
 	pmap_range_check("pmap_remove", s, e);
 	while (s < e) {
-		uint64_t sz = pmap_forget(pmap, s);
+		uint64_t next = pmap_stride_end(pmap, s, pmap_forget(pmap, s));
 
-		s += sz ? sz : PAGE_SIZE_4K;
+		if (next <= s)
+			break;
+		s = next;
 	}
 }
 
@@ -1161,14 +1248,17 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 
 	pmap_range_check("pmap_protect", s, e);
 	while (s < e) {
-		uint64_t sz;
+		uint64_t sz, next;
 
 		if (prot == VM_PROT_NONE)
 			sz = pmap_forget(pmap, s);
 		else
 			sz = pmap_protect_page(pmap, s, flags);
 
-		s += sz ? sz : PAGE_SIZE_4K;
+		next = pmap_stride_end(pmap, s, sz);
+		if (next <= s)
+			break;
+		s = next;
 	}
 }
 
@@ -1425,11 +1515,11 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			 *
 			 * 🔑 And a zero here is a legitimate interleaving, not
 			 * a corrupt index: pmap_remove() on another processor
-			 * clears the entry through its own tables and then
-			 * blocks in pv_remove() waiting for this lock.  Its pv
-			 * entry is still on the list while its PTE is already
-			 * gone.  Removing it here is what that processor was
-			 * about to do, and it finds nothing left to remove.
+			 * clears the entry through its own tables and only
+			 * later takes this lock in pv_remove().  Its pv entry
+			 * is still on the list while its PTE is already gone.
+			 * Removing it here is what that processor was about to
+			 * do, and it finds nothing left to remove.
 			 */
 			e = pv_remove_locked(pa, hpmap, hva);
 			if (e != PV_ENTRY_NULL) {
@@ -1437,8 +1527,32 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 				dead = e;
 			}
 
-			if (size == 0)
+			/*
+			 * 🔴 BUT GONE FROM THE TABLES IS NOT GONE FROM EVERY
+			 * TLB (#811).  The remover that won clears the entry,
+			 * leaves its read section -- where it can be preempted
+			 * -- and only then flushes (pmap_unmap_page()), before
+			 * it reaches pv_remove().  Nothing orders that flush
+			 * before this return, so another processor may still
+			 * translate the address when this function says the
+			 * page is mapped nowhere, and the page is freed and
+			 * reused under it.  So the address is flushed here as
+			 * well, with the rest of the batch: what this returns
+			 * is ordered after a flush of every translation the pv
+			 * list named, whoever removed it.  The winner's own
+			 * flush comes too, and is merely a second one.  A pv
+			 * entry is only ever a 4 KiB leaf.
+			 */
+			if (size == 0) {
+				if (n < PV_FLUSH_BATCH) {
+					batch[n].pmap = hpmap;
+					batch[n].va = hva;
+					batch[n].size = PAGE_SIZE_4K;
+					n++;
+				} else
+					overflow = TRUE;
 				continue;
+			}
 
 			pmap_resident_drop(hpmap, hva);
 
@@ -1547,8 +1661,16 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			uint64_t size = pmap_protect_page_noflush(pv->pmap,
 								  pv->va, flags);
 
+			/*
+			 * #811, as in the removal loop above: a zero is an entry
+			 * another remover has cleared and may not have flushed
+			 * yet, and a translation that survives in a TLB still
+			 * grants what this call takes away -- a write after the
+			 * page was made read-only for a copy or a clean.
+			 * Flushed here as well, with the rest.
+			 */
 			if (size == 0)
-				continue;
+				size = PAGE_SIZE_4K;
 			if (n < PV_FLUSH_BATCH) {
 				batch[n].pmap = pv->pmap;
 				batch[n].va = pv->va;

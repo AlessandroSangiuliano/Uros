@@ -275,6 +275,9 @@ kmem_alloc_contig(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	size = round_page(size);
 	if ((flags & KMA_KOBJECT) == 0) {
 		object = vm_object_allocate(size);
@@ -368,6 +371,13 @@ kernel_memory_allocate(
 	vm_offset_t i;
 	kern_return_t kr;
 
+	/*
+	 * #808: within a page of the top, the rounding wraps to 0 on i386,
+	 * and a zero-length request then finds room anywhere.  Every kalloc
+	 * past kalloc_max comes through here.
+	 */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	size = round_page(size);
 	if ((flags & KMA_KOBJECT) == 0) {
 		/*
@@ -499,6 +509,9 @@ kmem_realloc(
 	oldmin = trunc_page(oldaddr);
 	oldmax = round_page(oldaddr + oldsize);
 	oldsize = oldmax - oldmin;
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(newsize) < newsize)
+		return KERN_INVALID_ARGUMENT;
 	newsize = round_page(newsize);
 
 	/*
@@ -613,6 +626,9 @@ kmem_alloc_pageable(
 	vm_offset_t addr;
 	kern_return_t kr;
 
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	addr = vm_map_min(map);
 	kr = vm_map_enter(map, &addr, round_page(size),
 			  (vm_offset_t) 0, TRUE,
@@ -640,6 +656,15 @@ kmem_free(
 	vm_size_t	size)
 {
 	kern_return_t kr;
+
+	/*
+	 * #808: a range that wraps past the top, or rounds past it, is not
+	 * one anything was allocated as, and vm_map_remove() would be handed
+	 * an end below its start.
+	 */
+	if (addr + size < addr || round_page(addr + size) < addr + size)
+		panic("kmem_free: 0x%lx + 0x%lx wraps", (unsigned long) addr,
+		      (unsigned long) size);
 
 	kr = vm_map_remove(map, trunc_page(addr),
 			   round_page(addr + size), VM_MAP_REMOVE_KUNWIRE);
@@ -781,6 +806,9 @@ kmem_suballoc(
 	vm_map_t map;
 	kern_return_t kr;
 
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	size = round_page(size);
 
 	/*
@@ -838,6 +866,17 @@ kmem_init(
 
 	/*
 	 *	Reserve virtual memory allocated up to this time.
+	 *
+	 *	kernel_map covers it so that nothing is ever allocated
+	 *	there, and that is all (#807).  The range was mapped before
+	 *	the VM existed -- the direct map on x86-64 and the image on
+	 *	i386, and on both the pages pmap_steal_memory() took for the
+	 *	VM's own tables -- and no VM object holds any of it.  So no
+	 *	access, not even as a maximum: a fault there is refused.
+	 *	With VM_PROT_DEFAULT on a null object, vm_fault() zero-filled
+	 *	a page for it and pmap_enter() took away whatever was mapped
+	 *	there to make room -- a whole leaf of the direct map, or a
+	 *	page of the VM's tables.
 	 */
 
 	if (start != VM_MIN_KERNEL_ADDRESS) {
@@ -846,7 +885,7 @@ kmem_init(
 				    &addr, start - VM_MIN_KERNEL_ADDRESS,
 				    (vm_offset_t) 0, TRUE,
 				    VM_OBJECT_NULL, (vm_offset_t) 0, FALSE,
-				    VM_PROT_DEFAULT, VM_PROT_ALL,
+				    VM_PROT_NONE, VM_PROT_NONE,
 				    VM_INHERIT_DEFAULT);
 	}
 

@@ -1,0 +1,42 @@
+Kind: ablation
+Issue: #807
+Takes out: pmap_enter()'s refusal of a leaf larger than 4 KiB -- pmap_verbs_selftest()'s unmapping branch then takes the direct map's leaf at the base away, and pmap_forget() drops the kernel pmap's resident count for a leaf it never counted, which is zero at that point of the boot: the machine stops there and names the address, before the self-test can say anything; on a kernel whose count were not zero the self-test's own WRONG would be the line
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: pmap: resident_count underflow at va 0xffff800000000000|UrMach x86-64: pmap_enter NONE over the [0-9]+ KiB leaf at the direct map's base -> not refused, WRONG
+Note: Judged under QEMU (TCG and KVM), pmap_verbs_selftest(), on victus 02/11/2026 at 54555cb5: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4, every ablated boot stopping at the resident count's underflow at 0xffff800000000000 right after the self-test's pmap_remove line.  A first run at 22198036 expected only the self-test's WRONG, which never comes, and caught 0 of 4 boots that had all stopped there.  Judged again on the union of the critical fixes, 72778d46, on victus 02/11/2026: caught 4 of 4, and the fixed tree passed 4 of 4.
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -1000,20 +1000,6 @@
+ 	return !(va_is_user(va) && pmap == pmap_kernel());
+ }
+ 
+-/*
+- * The size of the leaf that maps va, or zero when none does (#807): the walk
+- * pmap_extract() makes, in the same read section.
+- */
+-static uint64_t pmap_leaf_size(pmap_t pmap, uint64_t va)
+-{
+-	boolean_t   held = pmap_read_enter_for(va);
+-	uint64_t    size = 0;
+-	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, &size);
+-
+-	pmap_read_leave(held);
+-	return entry != PT_ENTRY_NULL ? size : 0;
+-}
+-
+ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
+ 	       int wired)
+ {
+@@ -1033,9 +1019,6 @@
+ 	 * answer pmap_map_page() gives for it -- in both branches, because one
+ 	 * that only removes removes all the same.
+ 	 */
+-	if (pmap_leaf_size(pmap, va) > PAGE_SIZE_4K)
+-		return PMAP_MAP_BLOCKED;
+-
+ 	if (prot == VM_PROT_NONE) {
+ 		pmap_forget(pmap, va);
+ 		return PMAP_MAP_OK;

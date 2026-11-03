@@ -265,6 +265,18 @@ if [ $CHECK = 1 ]; then
 fi
 
 [ $ABLATIONS -gt 0 ] || die 2 "no ablation among the patches: there is nothing for a test to catch"
+
+# #804: a patch that only a machine's metal can judge -- Intel's counters, which
+# no QEMU here offers: victus and pavillion are AMD, and OMEGA's KVM gives no
+# virtual PMU on its hybrid processor.  Booted here, both arms would print the
+# same refusal and the ablation would read as not caught.  Its Note says how it
+# was run there; --check-all still asks whether it applies.
+for p in "${EXPANDED[@]}"; do
+	machine=$(header "$p" Machine | head -n 1)
+	[ -z "$machine" ] ||
+		die 2 "$(basename "$p") is judged on $machine's metal (its Machine:), not under QEMU: its Note says how it was run"
+done
+
 check_applies "${EXPANDED[@]}" || exit 2
 
 # #670: a test read off the screen.  Screen: lines, one argument of
@@ -341,11 +353,31 @@ cleanup() {
 
 	[ $KEEP = 1 ] && return
 	for arm in "${ARMS[@]}"; do
-		[ -d "$RUNDIR/$arm" ] && git -C "$REPO" worktree remove --force "$RUNDIR/$arm"
+		[ -d "$RUNDIR/$arm" ] || continue
+		git -C "$REPO" worktree remove --force "$RUNDIR/$arm" ||
+			echo "ablate: the $arm arm's worktree was not removed: git worktree remove --force $RUNDIR/$arm" >&2
 	done
 	return 0
 }
+# 🔴 A SECOND SIGNAL WAITS UNTIL THE WORKTREES ARE GONE (#801), as in
+# run-x86_64.sh.  Stopping a unit signals what is left of it twice -- its main
+# process, a script with no trap, dies on the first -- and the second ended
+# the EXIT trap's git worktree remove: a run stopped in a boot left both arms,
+# 2 runs of 2.  So INT, TERM and HUP are ignored while they go, and get their
+# default back only for the kill that ends the script; and a removal that
+# fails says which, where under set -e it ended the loop before the other arm.
+stopped_by() {
+	trap - EXIT
+	trap '' INT TERM HUP
+	cleanup
+	echo "ablate: stopped by SIG$1" >&2
+	trap - INT TERM HUP
+	kill -s "$1" "$$"
+}
 trap cleanup EXIT
+trap 'stopped_by INT' INT
+trap 'stopped_by TERM' TERM
+trap 'stopped_by HUP' HUP
 
 # The build is configured with every OSFMK_* and UROS_* option of the main
 # build, because this tree's configuration cannot be reproduced from the

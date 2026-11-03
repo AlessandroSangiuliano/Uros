@@ -70,6 +70,7 @@
 #include <mach/mach_syscalls.h>	/* #688: syscall_task_info() */
 #include <mach/ndr.h>		/* #688: NDR_record, for its message */
 #include <mach/mach_port.h>	/* #662: mach_port_names(), to count the space */
+#include <mach/notify.h>	/* #843: arm thirty-five's no-senders */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -212,6 +213,12 @@ static volatile int		arm_eighteen_stop;
 static volatile int		arm_eighteen_named_the_victim = -2;
 static volatile int		arm_eighteen_exception, arm_eighteen_code;
 
+static volatile int		arm_thirty_two_armed;
+static volatile mach_port_t	arm_thirty_two_thread;
+static volatile int		arm_thirty_two_task_seen;
+static volatile int		arm_thirty_two_named_the_victim = -2;
+static volatile int		arm_thirty_two_exception;
+
 /*
  * What exc_server calls when the message arrives.  MIG demands this name and
  * this shape.
@@ -258,6 +265,19 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 		arm_eighteen_exception = exception;
 		arm_eighteen_code = (codeCnt > 0) ? (int) code[0] : 0;
 		arm_eighteen_named_the_victim = (thread == arm_eighteen_thread);
+		(void) thread_terminate(thread);
+		(void) mach_port_deallocate(mach_task_self(), thread);
+		(void) mach_port_deallocate(mach_task_self(), task);
+		return KERN_SUCCESS;
+	}
+	if (arm_thirty_two_armed) {
+		/*
+		 * The task's port, second: the thread's has had its answer, and
+		 * this is where the kernel goes when that answer failed.
+		 */
+		arm_thirty_two_task_seen = 1;
+		arm_thirty_two_exception = exception;
+		arm_thirty_two_named_the_victim = (thread == arm_thirty_two_thread);
 		(void) thread_terminate(thread);
 		(void) mach_port_deallocate(mach_task_self(), thread);
 		(void) mach_port_deallocate(mach_task_self(), task);
@@ -3900,6 +3920,1362 @@ arm_twenty_six_a_receive_that_slept_keeps_six(void)
 	return arm_26_done(1);
 }
 
+/*
+ * Arm twenty-seven (#808): a send whose size cannot take the trailer is
+ * refused, cleanly, before the kernel adds the trailer to it.
+ *
+ * ipc_kmsg_get() sizes the kernel buffer by `send_size + MAX_TRAILER_SIZE' in
+ * mach_msg_size_t, which is 32 bits, and then copies `send_size' bytes into
+ * it.  A send_size near 2^32 wraps the sum to a small buffer and the copy runs
+ * past it -- the kernel heap overrun of #808.  The fix refuses such a size up
+ * front with MACH_SEND_TOO_LARGE, before any buffer or copy, so on a healthy
+ * tree this arm overruns nothing: the trap returns at its first test.
+ *
+ * The message is a bare header with a real send right as its destination, so
+ * nothing but its size is wrong; the size check precedes the port work, so the
+ * destination only keeps the trap on the ordinary send path.
+ */
+static int
+arm_twenty_seven_send_size_cannot_take_the_trailer(void)
+{
+	mach_port_t		port;
+	mach_msg_header_t	hdr;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [27] mach_port_allocate failed (%d) — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+	kr = mach_port_insert_right(mach_task_self(), port, port,
+				    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [27] insert_right failed (%d) — WRONG\n", kr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+
+	hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	hdr.msgh_size = sizeof hdr;
+	hdr.msgh_remote_port = port;
+	hdr.msgh_local_port = MACH_PORT_NULL;
+	hdr.msgh_reserved = 0;
+	hdr.msgh_id = 0;
+
+	/*
+	 * A multiple of four, at least a header, and larger than any size the
+	 * trailer fits after: the value the kernel must refuse rather than add
+	 * to.  The buffer handed over is one header; the fix never reads past
+	 * it.
+	 */
+	mr = mach_msg(&hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		      (mach_msg_size_t) 0xFFFFFFFCu, 0, MACH_PORT_NULL,
+		      0, MACH_PORT_NULL);
+
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_SEND_TOO_LARGE) {
+		printf("act_test: [27] a send of 0xFFFFFFFC bytes answered "
+		       "0x%x, not MACH_SEND_TOO_LARGE — WRONG (#808)\n",
+		       (int) mr);
+		return 0;
+	}
+
+	printf("act_test: [27] a send whose size cannot take the trailer was "
+	       "refused with MACH_SEND_TOO_LARGE, before the buffer (#808)\n");
+	return 1;
+}
+
+/*
+ * A receive right with a send right beside it, for the arms below that only
+ * need a port of their own.  MACH_PORT_NULL, said, when either step fails.
+ */
+static mach_port_t
+arm_own_port(int arm)
+{
+	mach_port_t	port;
+	kern_return_t	kr;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [%d] mach_port_allocate failed (%d) — "
+		       "WRONG\n", arm, kr);
+		return MACH_PORT_NULL;
+	}
+	kr = mach_port_insert_right(mach_task_self(), port, port,
+				    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [%d] insert_right failed (%d) — WRONG\n",
+		       arm, kr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return MACH_PORT_NULL;
+	}
+	return port;
+}
+
+/*
+ * Arm twenty-eight (#808): a send past the largest message the kernel takes
+ * inline is refused as too large, not left to fail for want of a buffer.
+ *
+ * The kernel's buffer for a message comes from kalloc, which has nothing past
+ * kalloc_map -- 8 MiB -- to give.  Since #808 a send past IKM_MAX_MSG_SIZE, a
+ * little less than that, is answered MACH_SEND_TOO_LARGE before any buffer is
+ * asked for; before it the size passed the only bound there was, the
+ * allocation failed, and the answer was MACH_SEND_NO_BUFFER.  The message is a
+ * bare header at the start of 8 MiB and a page of mapped memory, so a kernel
+ * that tried to copy it in would find every byte it asked for.
+ */
+#define	A28_SIZE	((mach_msg_size_t) (8u * 1024 * 1024 + 4))
+
+static int
+arm_twenty_eight_send_past_the_inline_limit(void)
+{
+	vm_address_t		buf = 0;
+	vm_size_t		len = A28_SIZE + vm_page_size;
+	mach_msg_header_t	*hdr;
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	kern_return_t		kr;
+
+	kr = vm_allocate(mach_task_self(), &buf, len, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [28] vm_allocate of %lu bytes failed (%d) — "
+		       "WRONG\n", (unsigned long) len, kr);
+		return 0;
+	}
+	port = arm_own_port(28);
+	if (port == MACH_PORT_NULL) {
+		(void) vm_deallocate(mach_task_self(), buf, len);
+		return 0;
+	}
+
+	hdr = (mach_msg_header_t *) buf;
+	hdr->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	hdr->msgh_size = A28_SIZE;
+	hdr->msgh_remote_port = port;
+	hdr->msgh_local_port = MACH_PORT_NULL;
+	hdr->msgh_reserved = 0;
+	hdr->msgh_id = 0;
+
+	mr = mach_msg(hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT, A28_SIZE, 0,
+		      MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	(void) vm_deallocate(mach_task_self(), buf, len);
+
+	if (mr != MACH_SEND_TOO_LARGE) {
+		printf("act_test: [28] a send of %u bytes, past the largest "
+		       "inline message, answered 0x%x%s, not MACH_SEND_TOO_LARGE "
+		       "— WRONG (#808)\n", (unsigned) A28_SIZE, (int) mr,
+		       mr == MACH_SEND_NO_BUFFER
+		       ? " (MACH_SEND_NO_BUFFER: the kernel tried to allocate it)"
+		       : "");
+		return 0;
+	}
+
+	printf("act_test: [28] a send of %u bytes, past the largest inline "
+	       "message, was refused with MACH_SEND_TOO_LARGE before any "
+	       "buffer (#808)\n", (unsigned) A28_SIZE);
+	return 1;
+}
+
+/*
+ * Arm twenty-nine (#808): a receive is measured with the trailer it asks for.
+ *
+ * The queue compared the message with rcv_size less the smallest trailer,
+ * because mach_msg_receive() handed it the timeout bit and nothing else of
+ * the option, while the copyout then wrote the trailer the option asked for:
+ * a message that fitted with the smallest trailer and not with the sender's
+ * was taken, and written past rcv_size into the receiver's own memory.  Here
+ * the buffer is rcv_size bytes with canaries after them, rcv_size holding the
+ * message and the smallest trailer only; the receive must answer
+ * MACH_RCV_TOO_LARGE and leave every canary.
+ */
+#define	A29_CANARY	0xa5
+
+static int
+arm_twenty_nine_receive_measured_with_its_trailer(void)
+{
+	struct {
+		mach_msg_header_t	h;
+		unsigned int		body[6];
+	} out;
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[256];
+	} in;
+	mach_msg_size_t		rcv_size = sizeof out + sizeof (mach_msg_trailer_t);
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i, hit = 0;
+
+	port = arm_own_port(29);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	out.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	out.h.msgh_size = sizeof out;
+	out.h.msgh_remote_port = port;
+	out.h.msgh_local_port = MACH_PORT_NULL;
+	out.h.msgh_reserved = 0;
+	out.h.msgh_id = 29;
+	for (i = 0; i < 6; i++)
+		out.body[i] = i;
+
+	mr = mach_msg(&out.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof out, 0,
+		      MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [29] the send answered 0x%x — WRONG\n",
+		       (int) mr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+
+	for (i = 0; i < sizeof in.bytes; i++)
+		in.bytes[i] = A29_CANARY;
+
+	mr = mach_msg(&in.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT |
+		      MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
+		      MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SENDER),
+		      0, rcv_size, port, 0, MACH_PORT_NULL);
+
+	for (i = rcv_size; i < sizeof in.bytes; i++)
+		if (in.bytes[i] != A29_CANARY)
+			hit++;
+
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_RCV_TOO_LARGE || hit != 0) {
+		printf("act_test: [29] a %u-byte message received into %u bytes "
+		       "with the sender's trailer asked for answered 0x%x, and %u "
+		       "bytes past rcv_size changed — WRONG, expected "
+		       "MACH_RCV_TOO_LARGE and none (#808)\n",
+		       (unsigned) sizeof out, (unsigned) rcv_size, (int) mr, hit);
+		return 0;
+	}
+
+	printf("act_test: [29] a %u-byte message received into %u bytes with the "
+	       "sender's trailer asked for was MACH_RCV_TOO_LARGE, and nothing "
+	       "past rcv_size changed (#808)\n", (unsigned) sizeof out,
+	       (unsigned) rcv_size);
+	return 1;
+}
+
+/*
+ * Arm thirty (#808): a scatter list is measured with its body's own size.
+ *
+ * With MACH_RCV_OVERWRITE the receive buffer, past its header, is a list of
+ * descriptors: a body, then as many descriptors as the body says.  The check
+ * added the count's 4 bytes for the body, which on x86-64 is 8, so a list
+ * that ended 4 bytes short of its last descriptor passed it.  Here the list
+ * is a body that says one descriptor and room for 4 bytes less than that,
+ * and no message is queued: the receive must answer MACH_RCV_INVALID_TYPE,
+ * from the list, before it looks at the queue -- a kernel that let the list
+ * through answers MACH_RCV_TIMED_OUT instead.
+ */
+static int
+arm_thirty_scatter_list_one_word_short(void)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[128];
+	} buf;
+	mach_msg_body_t		*body = (mach_msg_body_t *) (&buf.h + 1);
+	mach_msg_size_t		scatter_size;
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i;
+
+	scatter_size = sizeof (mach_msg_header_t) + 4
+		       + sizeof (mach_msg_descriptor_t);
+
+	port = arm_own_port(30);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < sizeof buf.bytes; i++)
+		buf.bytes[i] = 0;
+	body->msgh_descriptor_count = 1;
+
+	mr = mach_msg_overwrite(&buf.h, MACH_RCV_MSG | MACH_RCV_OVERWRITE |
+				MACH_RCV_TIMEOUT, 0, sizeof buf, port, 0,
+				MACH_PORT_NULL, &buf.h, scatter_size);
+
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_RCV_INVALID_TYPE) {
+		printf("act_test: [30] a scatter list of %u bytes for one "
+		       "%u-byte descriptor after an %u-byte body answered 0x%x, "
+		       "not MACH_RCV_INVALID_TYPE — WRONG (#808)\n",
+		       (unsigned) (scatter_size - sizeof (mach_msg_header_t)),
+		       (unsigned) sizeof (mach_msg_descriptor_t),
+		       (unsigned) sizeof (mach_msg_body_t), (int) mr);
+		return 0;
+	}
+
+	printf("act_test: [30] a scatter list of %u bytes for one %u-byte "
+	       "descriptor after an %u-byte body was refused with "
+	       "MACH_RCV_INVALID_TYPE (#808)\n",
+	       (unsigned) (scatter_size - sizeof (mach_msg_header_t)),
+	       (unsigned) sizeof (mach_msg_descriptor_t),
+	       (unsigned) sizeof (mach_msg_body_t));
+	return 1;
+}
+
+/*
+ * Arm thirty-one (#840): a complex message's descriptor count is bounded by
+ * the message's size in bytes.
+ *
+ * ipc_kmsg_copyin_body() compared the descriptors' end with
+ * `&kmsg->ikm_header + msgh_size', a sum that moves msgh_size headers of 24
+ * bytes: a count of up to 24 times what the message holds passed, and the
+ * descriptors past its end were taken as its own.  Here a message holds one
+ * port descriptor and says two, then fifty, and each send must answer
+ * MACH_SEND_MSG_TOO_SMALL.  One too many goes first: on a kernel without the
+ * bound the second descriptor is read from just past the message, where the
+ * kernel's own trailer lies, and the send answers something else -- fifty
+ * would read whatever follows the buffer, so it is not asked after a WRONG.
+ */
+static int
+arm_thirty_one_descriptor_count_past_the_message(void)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_port_descriptor_t	d;
+	} m;
+	static const unsigned	says[] = { 2, 50 };
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i, j;
+
+	port = arm_own_port(31);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < sizeof says / sizeof says[0]; i++) {
+		for (j = 0; j < sizeof m; j++)
+			((unsigned char *) &m)[j] = 0;
+		m.h.msgh_bits = MACH_MSGH_BITS_COMPLEX
+				| MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+		m.h.msgh_size = sizeof m;
+		m.h.msgh_remote_port = port;
+		m.h.msgh_local_port = MACH_PORT_NULL;
+		m.h.msgh_id = 31;
+		m.b.msgh_descriptor_count = says[i];
+		m.d.name = MACH_PORT_NULL;
+		m.d.disposition = MACH_MSG_TYPE_COPY_SEND;
+		m.d.type = MACH_MSG_PORT_DESCRIPTOR;
+
+		mr = mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m,
+			      0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+		if (mr != MACH_SEND_MSG_TOO_SMALL) {
+			printf("act_test: [31] a %u-byte message holding one "
+			       "descriptor and saying %u answered 0x%x, not "
+			       "MACH_SEND_MSG_TOO_SMALL — WRONG (#840)\n",
+			       (unsigned) sizeof m, says[i], (int) mr);
+			(void) mach_port_destroy(mach_task_self(), port);
+			return 0;
+		}
+	}
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	printf("act_test: [31] a %u-byte message holding one descriptor and "
+	       "saying 2, then 50, was refused with MACH_SEND_MSG_TOO_SMALL "
+	       "both times (#840)\n", (unsigned) sizeof m);
+	return 1;
+}
+
+/*
+ * Arm thirty-two (#841): an exception answered with more than the kernel's
+ * stub asked for is a failed answer, and nothing more.
+ *
+ * The kernel raises an exception with mach_msg_rpc_from_kernel(), receiving
+ * the answer into the generated stub's union of request and reply, on its own
+ * stack, with rcv_size the reply it expects -- 36 bytes for exception_raise.
+ * The size of the answer is the answerer's.  When it was larger, the kernel
+ * said MACH_RCV_TOO_LARGE, but copied all of it into that union first.
+ *
+ * Here a thread's own exception port gets the exception and is answered with
+ * 4096 bytes of zeroes, then the task's port gets it, as it must when the
+ * thread's answer failed, and the thread is ended there.  A kernel that copies
+ * the 4096 bytes writes them over its own stack, and the returns that follow
+ * come back to nothing.  The address the thread loads from is mapped by no arm.
+ */
+#define	A32_PROBE	((vm_offset_t) 0x0000500000000000ULL)
+#define	A32_ANSWER	4096
+#define	A32_RAISE_ID	2401	/* exception_raise, exc.defs */
+
+static mach_port_t		arm_thirty_two_port;
+static volatile kern_return_t	arm_thirty_two_set_kr = -1;
+
+static void *
+arm_thirty_two_victim(void *arg)
+{
+	(void) arg;
+	arm_thirty_two_thread = mach_thread_self();
+	arm_thirty_two_set_kr =
+	    thread_set_exception_ports(arm_thirty_two_thread,
+				       EXC_MASK_BAD_ACCESS, arm_thirty_two_port,
+				       EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+	if (arm_thirty_two_set_kr == KERN_SUCCESS)
+		(void) *(volatile unsigned long *) A32_PROBE;
+	return NULL;
+}
+
+static int
+arm_thirty_two_exception_answered_too_large(void)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[1024];
+	} req, kreq, kans;
+	static union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[A32_ANSWER];
+	} ans;
+	mach_port_t		tport, kport;
+	mach_msg_return_t	mr, sent = MACH_MSG_SUCCESS;
+	kern_return_t		kr;
+	pthread_t		victim;
+	unsigned		i;
+	int			ok = 0;
+
+	tport = arm_own_port(32);
+	if (tport == MACH_PORT_NULL)
+		return 0;
+	kport = arm_own_port(32);
+	if (kport == MACH_PORT_NULL) {
+		(void) mach_port_destroy(mach_task_self(), tport);
+		return 0;
+	}
+	kr = task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+				      kport, EXCEPTION_DEFAULT,
+				      THREAD_STATE_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [32] task_set_exception_ports failed (%d) — "
+		       "WRONG\n", kr);
+		(void) mach_port_destroy(mach_task_self(), tport);
+		(void) mach_port_destroy(mach_task_self(), kport);
+		return 0;
+	}
+
+	arm_thirty_two_port = tport;
+	arm_thirty_two_armed = 1;
+	if (pthread_create(&victim, NULL, arm_thirty_two_victim, NULL) != 0) {
+		printf("act_test: [32] pthread_create failed — WRONG\n");
+		arm_thirty_two_armed = 0;
+		ok = -1;
+	}
+
+	/* The thread's port first: the request, and an answer far too large. */
+	if (ok == 0) {
+		mr = mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof req, tport, 5000, MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS || req.h.msgh_id != A32_RAISE_ID) {
+			printf("act_test: [32] the thread's port got 0x%x, id %d, "
+			       "not exception_raise (the set answered %d) — "
+			       "WRONG\n", (int) mr,
+			       mr == MACH_MSG_SUCCESS ? req.h.msgh_id : -1,
+			       (int) arm_thirty_two_set_kr);
+			ok = -1;
+		}
+	}
+	if (ok == 0) {
+		for (i = 0; i < sizeof ans.bytes; i++)
+			ans.bytes[i] = 0;
+		ans.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+		ans.h.msgh_size = A32_ANSWER;
+		ans.h.msgh_remote_port = req.h.msgh_remote_port;
+		ans.h.msgh_local_port = MACH_PORT_NULL;
+		ans.h.msgh_id = req.h.msgh_id + 100;
+		sent = mach_msg(&ans.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+				A32_ANSWER, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+		/*
+		 * The request was received raw, not through exc_server, so its
+		 * two rights -- the thread's and the task's -- are this arm's
+		 * to give back.
+		 */
+		{
+			struct {
+				mach_msg_header_t		h;
+				mach_msg_body_t			b;
+				mach_msg_port_descriptor_t	thread, task;
+			} *rq = (void *) &req;
+
+			if ((req.h.msgh_bits & MACH_MSGH_BITS_COMPLEX)
+			    && rq->b.msgh_descriptor_count >= 2) {
+				(void) mach_port_deallocate(mach_task_self(),
+							    rq->thread.name);
+				(void) mach_port_deallocate(mach_task_self(),
+							    rq->task.name);
+			}
+		}
+
+		/* Then the task's port, answered by catch_exception_raise(). */
+		mr = mach_msg(&kreq.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof kreq, kport, 5000, MACH_PORT_NULL);
+		if (mr == MACH_MSG_SUCCESS) {
+			(void) exc_server(&kreq.h, &kans.h);
+			(void) mach_msg(&kans.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+					kans.h.msgh_size, 0, MACH_PORT_NULL, 0,
+					MACH_PORT_NULL);
+		}
+	}
+
+	arm_thirty_two_armed = 0;
+	(void) task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+					MACH_PORT_NULL, EXCEPTION_DEFAULT,
+					THREAD_STATE_NONE);
+	if (arm_thirty_two_thread != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(),
+					    arm_thirty_two_thread);
+	(void) mach_port_destroy(mach_task_self(), tport);
+	(void) mach_port_destroy(mach_task_self(), kport);
+
+	if (ok != 0)
+		return 0;
+	if (sent != MACH_MSG_SUCCESS || !arm_thirty_two_task_seen
+	    || arm_thirty_two_exception != EXC_BAD_ACCESS
+	    || arm_thirty_two_named_the_victim != 1) {
+		printf("act_test: [32] after a %d-byte answer at the thread's "
+		       "port (sent 0x%x), the task's port %s exception %d, "
+		       "naming the thread %d — WRONG, expected EXC_BAD_ACCESS "
+		       "there, for the same thread (#841)\n", A32_ANSWER,
+		       (int) sent, arm_thirty_two_task_seen ? "got"
+						     : "never got",
+		       arm_thirty_two_exception,
+		       arm_thirty_two_named_the_victim);
+		return 0;
+	}
+
+	printf("act_test: [32] an exception answered at the thread's port with "
+	       "%d bytes, where the kernel's stub reads 36, was taken as a "
+	       "failed answer and went on to the task's port (#841)\n",
+	       A32_ANSWER);
+	return 1;
+}
+
+/*
+ * Arm thirty-three (#842): a receive asking for a trailer this kernel does not
+ * have is refused before anything is received.
+ *
+ * The elements a receive asks for are four bits of its option, and indexed a
+ * table of three trailer sizes with nothing to stop them: past it, a value
+ * read from beyond the table became the trailer's size.  Here three receives
+ * ask for elements 3 and 15 and for trailer format 1, on a port with nothing
+ * queued and a timeout of zero.  Each must answer MACH_RCV_INVALID_TRAILER; a
+ * kernel that does not look answers MACH_RCV_TIMED_OUT, before it gets as far
+ * as the table, so asking is safe there too.
+ */
+static int
+arm_thirty_three_trailer_not_there(void)
+{
+	static const struct {
+		mach_msg_option_t	trailer;
+		const char		*what;
+	} ask[] = {
+		{ MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+		  | MACH_RCV_TRAILER_ELEMENTS(3), "element 3" },
+		{ MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+		  | MACH_RCV_TRAILER_ELEMENTS(15), "element 15" },
+		{ MACH_RCV_TRAILER_TYPE(1), "format 1" },
+	};
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[256];
+	} buf;
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i;
+
+	port = arm_own_port(33);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < sizeof ask / sizeof ask[0]; i++) {
+		mr = mach_msg(&buf.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT
+			      | ask[i].trailer, 0, sizeof buf, port, 0,
+			      MACH_PORT_NULL);
+		if (mr != MACH_RCV_INVALID_TRAILER) {
+			printf("act_test: [33] a receive asking for trailer %s "
+			       "answered 0x%x, not MACH_RCV_INVALID_TRAILER — "
+			       "WRONG (#842)\n", ask[i].what, (int) mr);
+			(void) mach_port_destroy(mach_task_self(), port);
+			return 0;
+		}
+	}
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	printf("act_test: [33] receives asking for trailer element 3, element "
+	       "15 and format 1 were each refused with MACH_RCV_INVALID_TRAILER "
+	       "(#842)\n");
+	return 1;
+}
+
+/*
+ * Arm thirty-four (#844): an RPC whose reply does not fit is told so with the
+ * reply's own sequence number in its trailer.
+ *
+ * On the hot path of mach_msg_overwrite_trap(), a reply too large for
+ * rcv_size goes to slow_copyout, where msg_receive_error() writes a header
+ * and the trailer asked for -- and took the sequence number from a variable
+ * only the slow receive sets, so on the hot path it was whatever the kernel's
+ * stack held.  Here the reply port has had three messages received from it,
+ * so the replies are its fourth and on, sequence numbers 3, 4, ...; a server
+ * thread answers A34_ROUNDS RPCs, each with 256 bytes into a receive of 64
+ * that asks for the sequence number, and each trailer must say its own reply's.
+ *
+ * Many rounds and not one, because only an RPC the hot path carries reaches
+ * the defect, and one RPC did not reliably take it: a first ablation with a
+ * single round caught 1 boot of 4.  After the first round the server is
+ * already waiting in its receive when the next request comes, which is when
+ * the hot path hands off.
+ */
+#define	A34_PRELOAD	3
+#define	A34_ROUNDS	32
+#define	A34_REPLY	256
+#define	A34_RCV		64
+
+static mach_port_t		arm_thirty_four_service;
+static volatile mach_msg_return_t arm_thirty_four_server_rcv = -1;
+static volatile mach_msg_return_t arm_thirty_four_server_snd = -1;
+
+static void *
+arm_thirty_four_server(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[256];
+	} req;
+	static union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[A34_REPLY];
+	} rep;
+	unsigned	i, round;
+
+	(void) arg;
+	for (i = 0; i < sizeof rep.bytes; i++)
+		rep.bytes[i] = 0;
+
+	for (round = 0; round < A34_ROUNDS; round++) {
+		arm_thirty_four_server_rcv =
+		    mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			     sizeof req, arm_thirty_four_service, 10000,
+			     MACH_PORT_NULL);
+		if (arm_thirty_four_server_rcv != MACH_MSG_SUCCESS)
+			return NULL;
+
+		rep.h.msgh_bits = MACH_MSGH_BITS(
+		    MACH_MSGH_BITS_REMOTE(req.h.msgh_bits), 0);
+		rep.h.msgh_size = A34_REPLY;
+		rep.h.msgh_remote_port = req.h.msgh_remote_port;
+		rep.h.msgh_local_port = MACH_PORT_NULL;
+		rep.h.msgh_id = req.h.msgh_id + 100;
+		arm_thirty_four_server_snd =
+		    mach_msg(&rep.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			     A34_REPLY, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	}
+	return NULL;
+}
+
+static int
+arm_thirty_four_rpc_reply_seqno(void)
+{
+	mach_msg_header_t	small;
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[A34_RCV];
+	} buf;
+	mach_msg_seqno_trailer_t	*tr;
+	mach_port_t		reply;
+	mach_msg_return_t	mr, bad_mr = MACH_MSG_SUCCESS;
+	pthread_t		server;
+	unsigned		i, round, bad_round = A34_ROUNDS;
+	unsigned		bad_seqno = 0;
+
+	arm_thirty_four_service = arm_own_port(34);
+	if (arm_thirty_four_service == MACH_PORT_NULL)
+		return 0;
+	reply = arm_own_port(34);
+	if (reply == MACH_PORT_NULL) {
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_four_service);
+		return 0;
+	}
+
+	/* Three messages through the reply port, so the next is number 3. */
+	for (i = 0; i < A34_PRELOAD; i++) {
+		small.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+		small.msgh_size = sizeof small;
+		small.msgh_remote_port = reply;
+		small.msgh_local_port = MACH_PORT_NULL;
+		small.msgh_reserved = 0;
+		small.msgh_id = 34;
+		mr = mach_msg(&small, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			      sizeof small, 0, MACH_PORT_NULL, 0,
+			      MACH_PORT_NULL);
+		if (mr == MACH_MSG_SUCCESS)
+			mr = mach_msg(&buf.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+				      sizeof buf, reply, 0, MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS) {
+			printf("act_test: [34] message %u through the reply port "
+			       "answered 0x%x — WRONG\n", i, (int) mr);
+			(void) mach_port_destroy(mach_task_self(), reply);
+			(void) mach_port_destroy(mach_task_self(),
+						 arm_thirty_four_service);
+			return 0;
+		}
+	}
+
+	if (pthread_create(&server, NULL, arm_thirty_four_server, NULL) != 0) {
+		printf("act_test: [34] pthread_create failed — WRONG\n");
+		(void) mach_port_destroy(mach_task_self(), reply);
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_four_service);
+		return 0;
+	}
+	/* Let the server get to its receive, so the RPC can hand off to it. */
+	for (i = 0; i < 20 && arm_thirty_four_server_rcv == -1; i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+
+	for (round = 0; round < A34_ROUNDS; round++) {
+		for (i = 0; i < sizeof buf.bytes; i++)
+			buf.bytes[i] = 0;
+		buf.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						 MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		buf.h.msgh_size = sizeof (mach_msg_header_t);
+		buf.h.msgh_remote_port = arm_thirty_four_service;
+		buf.h.msgh_local_port = reply;
+		buf.h.msgh_reserved = 0;
+		buf.h.msgh_id = 3400;
+		mr = mach_msg(&buf.h, MACH_SEND_MSG | MACH_RCV_MSG
+			      | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+			      | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SEQNO),
+			      sizeof (mach_msg_header_t), A34_RCV, reply,
+			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		tr = (mach_msg_seqno_trailer_t *)
+		     (buf.bytes + ((sizeof (mach_msg_header_t) + 3) & ~3UL));
+
+		if (bad_round == A34_ROUNDS
+		    && (mr != MACH_RCV_TOO_LARGE
+			|| tr->msgh_seqno != A34_PRELOAD + round)) {
+			bad_round = round;
+			bad_seqno = (unsigned) tr->msgh_seqno;
+			bad_mr = mr;
+		}
+		/* A request that was never sent leaves the server waiting. */
+		if (mr != MACH_RCV_TOO_LARGE && mr != MACH_MSG_SUCCESS)
+			break;
+	}
+
+	(void) pthread_join(server, NULL);
+	(void) mach_port_destroy(mach_task_self(), reply);
+	(void) mach_port_destroy(mach_task_self(), arm_thirty_four_service);
+
+	if (bad_round < A34_ROUNDS) {
+		printf("act_test: [34] RPC %u of %u, whose %u-byte reply does not "
+		       "fit %u bytes, answered 0x%x, its trailer saying sequence "
+		       "number %u (server: 0x%x, 0x%x) — WRONG, expected "
+		       "MACH_RCV_TOO_LARGE and %u (#844)\n", bad_round + 1,
+		       A34_ROUNDS, A34_REPLY, A34_RCV, (int) bad_mr, bad_seqno,
+		       (int) arm_thirty_four_server_rcv,
+		       (int) arm_thirty_four_server_snd,
+		       A34_PRELOAD + bad_round);
+		return 0;
+	}
+
+	printf("act_test: [34] %u RPCs whose %u-byte replies do not fit %u bytes "
+	       "were each MACH_RCV_TOO_LARGE, their trailers saying their own "
+	       "sequence numbers, %u to %u, read back (#844)\n", A34_ROUNDS,
+	       A34_REPLY, A34_RCV, A34_PRELOAD, A34_PRELOAD + A34_ROUNDS - 1);
+	return 1;
+}
+
+/*
+ * Arm thirty-five (#843): an out-of-line port array the receiver has no room
+ * for is released alone; the descriptors delivered before it stay delivered.
+ *
+ * ipc_kmsg_copyout_body() delivers a message's descriptors in order.  When
+ * vm_allocate() failed for a port array in the receiver's map, it cleaned the
+ * whole body from the first descriptor, so rights already moved to the
+ * receiver were released a second time.
+ *
+ * Here a port P, with a no-senders notification asked for, has one send
+ * right, and it travels in a port descriptor; a port array follows, and the
+ * message is received with this task's address space full, so the array has
+ * nowhere to go.  The receive must report the array's failure, P's right must
+ * arrive, and P must not hear "no senders": the right is this task's again.
+ * A kernel that releases it twice takes P's count of send rights to zero while
+ * the right is held, and the notification comes.  Nothing is printed while
+ * the space is full: printing may need memory.
+ */
+#define	A35_FILL_MAX	1024
+
+static vm_address_t	a35_fill_addr[A35_FILL_MAX];
+static vm_size_t	a35_fill_size[A35_FILL_MAX];
+
+/* Every hole of the address space taken, largest first; the count taken. */
+static unsigned
+a35_fill_the_space(void)
+{
+	vm_size_t	size;
+	unsigned	n = 0;
+
+	for (size = (vm_size_t) 1 << 46; size >= vm_page_size; size >>= 1) {
+		while (n < A35_FILL_MAX) {
+			vm_address_t	addr = 0;
+
+			if (vm_allocate(mach_task_self(), &addr, size, TRUE)
+			    != KERN_SUCCESS)
+				break;
+			a35_fill_addr[n] = addr;
+			a35_fill_size[n] = size;
+			n++;
+		}
+	}
+	return n;
+}
+
+static void
+a35_empty_the_space(unsigned n)
+{
+	while (n > 0) {
+		n--;
+		(void) vm_deallocate(mach_task_self(), a35_fill_addr[n],
+				     a35_fill_size[n]);
+	}
+}
+
+static int
+arm_thirty_five_port_array_with_no_room(void)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_port_descriptor_t	port;
+		mach_msg_ool_ports_descriptor_t	ports;
+	} m;
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[512];
+	} r, note;
+	mach_port_t		dest, p, q, notify, prev = MACH_PORT_NULL;
+	mach_port_t		one[1];
+	mach_port_urefs_t	refs = 0;
+	mach_msg_return_t	mr, sent, heard;
+	vm_address_t		probe = 0;
+	kern_return_t		kr, full;
+	unsigned		filled, i;
+	int			ok = 0;
+
+	dest = arm_own_port(35);
+	p = arm_own_port(35);		/* one send right: the one that travels */
+	q = arm_own_port(35);
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&notify);
+	if (dest == MACH_PORT_NULL || p == MACH_PORT_NULL
+	    || q == MACH_PORT_NULL || kr != KERN_SUCCESS) {
+		printf("act_test: [35] the ports could not be made — WRONG\n");
+		return 0;
+	}
+	kr = mach_port_request_notification(mach_task_self(), p,
+					    MACH_NOTIFY_NO_SENDERS, 0, notify,
+					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [35] the no-senders request answered %d — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+
+	for (i = 0; i < sizeof m; i++)
+		((unsigned char *) &m)[i] = 0;
+	m.h.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			| MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.h.msgh_size = sizeof m;
+	m.h.msgh_remote_port = dest;
+	m.h.msgh_local_port = MACH_PORT_NULL;
+	m.h.msgh_id = 35;
+	m.b.msgh_descriptor_count = 2;
+	m.port.name = p;
+	m.port.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	m.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	one[0] = q;
+	m.ports.address = one;
+	m.ports.count = 1;
+	m.ports.deallocate = FALSE;
+	m.ports.copy = MACH_MSG_PHYSICAL_COPY;
+	m.ports.disposition = MACH_MSG_TYPE_COPY_SEND;
+	m.ports.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;
+
+	sent = mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+	for (i = 0; i < sizeof r.bytes; i++)	/* its pages, touched now */
+		r.bytes[i] = 0;
+
+	/* ── the space full: no printing until it is emptied ── */
+	filled = a35_fill_the_space();
+	full = vm_allocate(mach_task_self(), &probe, vm_page_size, TRUE);
+	mr = MACH_MSG_SUCCESS;
+	if (sent == MACH_MSG_SUCCESS && full != KERN_SUCCESS)
+		mr = mach_msg(&r.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof r, dest, 0, MACH_PORT_NULL);
+	if (full == KERN_SUCCESS)
+		(void) vm_deallocate(mach_task_self(), probe, vm_page_size);
+	a35_empty_the_space(filled);
+	/* ── emptied ── */
+
+	(void) mach_port_get_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND,
+				  &refs);
+	heard = mach_msg(&note.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			 sizeof note, notify, 200, MACH_PORT_NULL);
+
+	if (sent != MACH_MSG_SUCCESS)
+		printf("act_test: [35] the send answered 0x%x — WRONG\n",
+		       (int) sent);
+	else if (full == KERN_SUCCESS)
+		printf("act_test: [35] %u allocations did not fill the address "
+		       "space, a page was still free — WRONG\n", filled);
+	else if ((mr & ~MACH_MSG_MASK) != MACH_RCV_BODY_ERROR
+		 || (mr & MACH_MSG_VM_SPACE) == 0)
+		printf("act_test: [35] a receive whose port array had no room "
+		       "answered 0x%x, not MACH_RCV_BODY_ERROR with "
+		       "MACH_MSG_VM_SPACE — WRONG (#843)\n", (int) mr);
+	else if (heard == MACH_MSG_SUCCESS)
+		printf("act_test: [35] P heard \"no senders\" (id %d) while this "
+		       "task holds %u send right%s to it: the right delivered "
+		       "was released again with the array — WRONG (#843)\n",
+		       note.h.msgh_id, (unsigned) refs, refs == 1 ? "" : "s");
+	else if (refs != 1)
+		printf("act_test: [35] P's delivered send right is held %u "
+		       "times, not once — WRONG (#843)\n", (unsigned) refs);
+	else {
+		printf("act_test: [35] with the address space full (%u "
+		       "allocations), the port array failed alone, 0x%x, and "
+		       "the right delivered before it stayed, held once and "
+		       "with no \"no senders\" (#843)\n", filled, (int) mr);
+		ok = 1;
+	}
+
+	(void) mach_port_destroy(mach_task_self(), dest);
+	(void) mach_port_destroy(mach_task_self(), p);
+	(void) mach_port_destroy(mach_task_self(), q);
+	(void) mach_port_destroy(mach_task_self(), notify);
+	return ok;
+}
+
+/*
+ * Arm thirty-six (#810): a vm_write() of a small physical copy to an address
+ * this task does not have is refused, and its copy is freed once.
+ *
+ * A small out-of-line region sent with MACH_MSG_PHYSICAL_COPY becomes a
+ * kernel-buffer copy, and vm_write() hands it to
+ * vm_map_copyout_kernel_buffer(), whose copyout fails on an address nothing
+ * maps -- and which freed the buffer all the same, before the destruction of
+ * the failed request freed it again.  The library's vm_write() takes a trap
+ * and sends a virtual copy, so the request is built here by hand, to this
+ * task's own port.
+ *
+ * 🔴 Sized as MIG sizes it, to the end of its last field: the server compares
+ * msgh_size with 68, and sizeof the struct is 72 with its padding.  Sized 72 it
+ * was refused with MIG_BAD_ARGUMENTS before vm_write() ran -- an error in the
+ * reply, all this arm asked for, with the double free put back as without it:
+ * the ablation was caught 0 times in 4 (02/11).  The reply must be the
+ * copyout's own KERN_INVALID_ADDRESS, which only that routine gives here.
+ *
+ * 🔴 Then one message of A36_COPIES physical copies of that size, each with
+ * bytes of its own, received and read back.  The copies' buffers come from one
+ * kalloc zone through a per-processor magazine, last in first out and fifteen
+ * deep, and a free into a full magazine goes to the zone's list instead
+ * (kern/zalloc.c).  The element freed twice is handed out twice: by the next
+ * two allocations when the magazine had room for both frees, or else once now
+ * and once when the magazine is refilled from the zone, within thirty more.
+ * Two copies asked for one at a time, as this arm first did, saw it in no boot
+ * of 8 -- the kernel fell later, on an assertion about a port, or not at all.
+ * Thirty-two in one copyin, back to back, take both.  A36_ROUNDS times.
+ */
+#define	A36_BYTES	64
+#define	A36_COPIES	32
+#define	A36_NOWHERE	((vm_address_t) 0x0000700000000000ULL)	/* no arm maps it */
+#define	A36_VM_WRITE	2027	/* vm_write, mach.defs */
+#define	A36_ROUNDS	16
+
+union arm36_msg {
+	struct {
+		mach_msg_header_t		head;
+		mach_msg_body_t			body;
+		mach_msg_ool_descriptor_t	data;
+		NDR_record_t			ndr;
+		vm_address_t			address;
+		mach_msg_type_number_t		count;
+	}	in;
+	struct {
+		mach_msg_header_t	head;
+		NDR_record_t		ndr;
+		kern_return_t		ret;
+	}	out;
+	char	room[256];
+};
+
+struct arm36_many {
+	mach_msg_header_t		head;
+	mach_msg_body_t			body;
+	mach_msg_ool_descriptor_t	data[A36_COPIES];
+};
+
+static unsigned char	arm36_bytes[A36_COPIES][A36_BYTES];
+
+/* One message of A36_COPIES physical copies; copy j holds the byte 0x40 + j. */
+static mach_msg_return_t
+arm36_send_many(mach_port_t port)
+{
+	struct arm36_many	c;
+	unsigned		i, j;
+
+	for (j = 0; j < A36_COPIES; j++)
+		for (i = 0; i < A36_BYTES; i++)
+			arm36_bytes[j][i] = (unsigned char) (0x40 + j);
+	for (i = 0; i < sizeof c; i++)
+		((unsigned char *) &c)[i] = 0;
+	c.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			   | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	c.head.msgh_size = sizeof c;
+	c.head.msgh_remote_port = port;
+	c.head.msgh_local_port = MACH_PORT_NULL;
+	c.head.msgh_id = 36;
+	c.body.msgh_descriptor_count = A36_COPIES;
+	for (j = 0; j < A36_COPIES; j++) {
+		c.data[j].address = arm36_bytes[j];
+		c.data[j].size = A36_BYTES;
+		c.data[j].deallocate = FALSE;
+		c.data[j].copy = MACH_MSG_PHYSICAL_COPY;
+		c.data[j].type = MACH_MSG_OOL_DESCRIPTOR;
+	}
+	return mach_msg(&c.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof c, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/*
+ * The copies back: how many of their bytes are not their own, and in
+ * *firstp the first copy that has any.
+ */
+static int
+arm36_receive_many(mach_port_t port, mach_msg_return_t *mrp, int *firstp)
+{
+	union {
+		struct arm36_many	c;
+		unsigned char		room[1024];
+	} r;
+	int		off = 0;
+	unsigned	i, j;
+
+	*firstp = -1;
+	*mrp = mach_msg(&r.c.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			sizeof r, port, 1000, MACH_PORT_NULL);
+	if (*mrp != MACH_MSG_SUCCESS)
+		return -1;
+	if (r.c.body.msgh_descriptor_count != A36_COPIES)
+		return -1;
+	for (j = 0; j < A36_COPIES; j++) {
+		unsigned char	*got = (unsigned char *) r.c.data[j].address;
+		int		bad = 0;
+
+		for (i = 0; i < A36_BYTES; i++)
+			if (got[i] != (unsigned char) (0x40 + j))
+				bad++;
+		if (bad != 0 && *firstp < 0)
+			*firstp = (int) j;
+		off += bad;
+		(void) vm_deallocate(mach_task_self(), (vm_address_t) got,
+				     r.c.data[j].size);
+	}
+	return off;
+}
+
+static int
+arm_thirty_six_vm_write_small_physical_copy(void)
+{
+	union arm36_msg		m;
+	static unsigned char	src[A36_BYTES];
+	mach_port_t		reply, port;
+	mach_msg_return_t	mr = MACH_MSG_SUCCESS, sent = MACH_MSG_SUCCESS;
+	mach_msg_return_t	got = MACH_MSG_SUCCESS;
+	kern_return_t		ret = KERN_INVALID_ADDRESS;
+	int			off = 0, first = -1;
+	unsigned		i, round;
+
+	reply = arm_own_port(36);
+	port = arm_own_port(36);
+	if (reply == MACH_PORT_NULL || port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < A36_BYTES; i++)
+		src[i] = 0x36;
+	for (round = 0; round < A36_ROUNDS; round++) {
+		for (i = 0; i < sizeof m; i++)
+			((unsigned char *) &m)[i] = 0;
+		m.in.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+				      | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						       MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		m.in.head.msgh_size = __builtin_offsetof(union arm36_msg, in.count)
+				      + sizeof m.in.count;
+		m.in.head.msgh_remote_port = mach_task_self();
+		m.in.head.msgh_local_port = reply;
+		m.in.head.msgh_id = A36_VM_WRITE;
+		m.in.body.msgh_descriptor_count = 1;
+		m.in.data.address = src;
+		m.in.data.size = A36_BYTES;
+		m.in.data.deallocate = FALSE;
+		m.in.data.copy = MACH_MSG_PHYSICAL_COPY;
+		m.in.data.type = MACH_MSG_OOL_DESCRIPTOR;
+		m.in.ndr = NDR_record;
+		m.in.address = A36_NOWHERE;
+		m.in.count = A36_BYTES;
+
+		mr = mach_msg(&m.in.head,
+			      MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+			      m.in.head.msgh_size, sizeof m, reply, 5000,
+			      MACH_PORT_NULL);
+		ret = mr == MACH_MSG_SUCCESS ? m.out.ret : KERN_FAILURE;
+
+		sent = arm36_send_many(port);
+		off = sent == MACH_MSG_SUCCESS
+		      ? arm36_receive_many(port, &got, &first) : -1;
+
+		if (mr != MACH_MSG_SUCCESS || ret != KERN_INVALID_ADDRESS
+		    || sent != MACH_MSG_SUCCESS || got != MACH_MSG_SUCCESS
+		    || off != 0)
+			break;
+	}
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	(void) mach_port_destroy(mach_task_self(), reply);
+
+	if (mr != MACH_MSG_SUCCESS || ret != KERN_INVALID_ADDRESS) {
+		printf("act_test: [36] round %u: a vm_write of a %d-byte physical "
+		       "copy to 0x%lx answered 0x%x, its reply 0x%x — WRONG, "
+		       "expected the copyout's KERN_INVALID_ADDRESS in the "
+		       "reply (#810)\n", round + 1, A36_BYTES,
+		       (unsigned long) A36_NOWHERE, (int) mr, (int) ret);
+		return 0;
+	}
+	if (round < A36_ROUNDS) {
+		printf("act_test: [36] round %u: after a refused vm_write, %d "
+		       "physical copies of %d bytes in one message came back with "
+		       "%d bytes not their own, the first at copy %d (send 0x%x, "
+		       "receive 0x%x) — WRONG: one kalloc buffer handed out twice "
+		       "(#810)\n", round + 1, A36_COPIES, A36_BYTES, off, first,
+		       (int) sent, (int) got);
+		return 0;
+	}
+
+	printf("act_test: [36] %u vm_writes of a %d-byte physical copy to 0x%lx "
+	       "were each refused with KERN_INVALID_ADDRESS, and the %d copies of "
+	       "that size sent after each in one message came back with their "
+	       "own bytes (#810)\n", A36_ROUNDS, A36_BYTES,
+	       (unsigned long) A36_NOWHERE, A36_COPIES);
+	return 1;
+}
+
+/*
+ * Arm thirty-seven (#812): a snapshot taken of memory never touched stays as
+ * it was taken, however the memory is then read and written.
+ *
+ * vm_object_copy_delayed() write-protects only the pages resident when the
+ * copy is taken.  A page first touched afterwards by a read was zero-filled
+ * by vm_fault()'s fast path and mapped writable, so the write after it went
+ * straight into the source -- where the copy reads it, through its shadow.
+ * Here three snapshots are taken of a range never touched: vm_read(), vm_copy()
+ * to a second range, and an out-of-line send to a port of this task not yet
+ * received.  Then the range is read, so the fast path fills its pages, and
+ * written.  All three snapshots must still read zero.
+ *
+ * 🔴 The range is mapped a second time first, with vm_remap() and no copy.  A
+ * range just allocated has no object, and an anonymous object copies
+ * symmetrically -- shadows and needs_copy, no object->copy -- so its snapshots
+ * never reached the branch the fix is in: the ablation was caught 0 times in
+ * 4 (02/11).  A second mapping of the same object makes it copy-delay
+ * (vm_remap_extract(), as a shared fork does), and creates the object without
+ * touching a page of it; each snapshot is then a delayed copy, and the read
+ * after them is a zero fill in an object that has a copy.
+ */
+#define	A37_PAGES	2
+
+/* How many bytes of [p, p + len) are not zero. */
+static unsigned
+a37_not_zero(const volatile unsigned char *p, vm_size_t len)
+{
+	unsigned	n = 0;
+	vm_size_t	i;
+
+	for (i = 0; i < len; i++)
+		if (p[i] != 0)
+			n++;
+	return n;
+}
+
+static int
+arm_thirty_seven_snapshot_of_untouched_memory(void)
+{
+	struct {
+		mach_msg_header_t		head;
+		mach_msg_body_t			body;
+		mach_msg_ool_descriptor_t	data;
+	} s;
+	union {
+		struct {
+			mach_msg_header_t		head;
+			mach_msg_body_t			body;
+			mach_msg_ool_descriptor_t	data;
+		} m;
+		unsigned char	room[256];
+	} r;
+	vm_size_t		len = A37_PAGES * vm_page_size;
+	vm_address_t		src = 0, dst = 0, alias = 0;
+	vm_offset_t		rd = 0;
+	mach_msg_type_number_t	rdcnt = 0;
+	vm_prot_t		cur, max;
+	kern_return_t		kr1, kr2, kr3;
+	mach_msg_return_t	sent, got = MACH_RCV_TIMED_OUT;
+	volatile unsigned char	*p;
+	unsigned		bad_read = 0, bad_copy = 0, bad_msg = 0;
+	unsigned		i, sum = 0;
+	mach_port_t		port;
+
+	port = arm_own_port(37);
+	if (port == MACH_PORT_NULL)
+		return 0;
+	kr1 = vm_allocate(mach_task_self(), &src, len, TRUE);
+	kr2 = vm_allocate(mach_task_self(), &dst, len, TRUE);
+	kr3 = kr1 == KERN_SUCCESS
+	      ? vm_remap(mach_task_self(), &alias, len, 0, TRUE, mach_task_self(),
+			 src, FALSE, &cur, &max, VM_INHERIT_NONE)
+	      : KERN_FAILURE;
+	if (kr1 != KERN_SUCCESS || kr2 != KERN_SUCCESS || kr3 != KERN_SUCCESS) {
+		printf("act_test: [37] vm_allocate answered %d and %d, the second "
+		       "mapping %d — WRONG\n", kr1, kr2, kr3);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+
+	/* Three snapshots of a range nothing has touched. */
+	kr1 = vm_read(mach_task_self(), src, len, &rd, &rdcnt);
+	kr2 = vm_copy(mach_task_self(), src, len, dst);
+	for (i = 0; i < sizeof s; i++)
+		((unsigned char *) &s)[i] = 0;
+	s.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			   | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	s.head.msgh_size = sizeof s;
+	s.head.msgh_remote_port = port;
+	s.head.msgh_local_port = MACH_PORT_NULL;
+	s.head.msgh_id = 37;
+	s.body.msgh_descriptor_count = 1;
+	s.data.address = (void *) src;
+	s.data.size = len;
+	s.data.deallocate = FALSE;
+	s.data.copy = MACH_MSG_VIRTUAL_COPY;
+	s.data.type = MACH_MSG_OOL_DESCRIPTOR;
+	sent = mach_msg(&s.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof s, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+	/* Read first, so the fast path fills the pages; then write them. */
+	p = (volatile unsigned char *) src;
+	for (i = 0; i < A37_PAGES; i++)
+		sum += p[i * vm_page_size];
+	for (i = 0; i < len; i++)
+		p[i] = 0x37;
+
+	if (kr1 == KERN_SUCCESS)
+		bad_read = a37_not_zero((const volatile unsigned char *) rd,
+					rdcnt);
+	if (kr2 == KERN_SUCCESS)
+		bad_copy = a37_not_zero((const volatile unsigned char *) dst,
+					len);
+	if (sent == MACH_MSG_SUCCESS) {
+		got = mach_msg(&r.m.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			       sizeof r, port, 1000, MACH_PORT_NULL);
+		if (got == MACH_MSG_SUCCESS) {
+			bad_msg = a37_not_zero(
+			    (const volatile unsigned char *) r.m.data.address,
+			    r.m.data.size);
+			(void) vm_deallocate(mach_task_self(),
+					     (vm_address_t) r.m.data.address,
+					     r.m.data.size);
+		}
+	}
+
+	if (kr1 == KERN_SUCCESS)
+		(void) vm_deallocate(mach_task_self(), rd, rdcnt);
+	(void) vm_deallocate(mach_task_self(), src, len);
+	(void) vm_deallocate(mach_task_self(), alias, len);
+	(void) vm_deallocate(mach_task_self(), dst, len);
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (kr1 != KERN_SUCCESS || kr2 != KERN_SUCCESS
+	    || sent != MACH_MSG_SUCCESS || got != MACH_MSG_SUCCESS) {
+		printf("act_test: [37] the snapshots could not all be taken: "
+		       "vm_read %d, vm_copy %d, send 0x%x, receive 0x%x "
+		       "(sum %u) — WRONG\n", kr1, kr2, (int) sent, (int) got,
+		       sum);
+		return 0;
+	}
+	if (bad_read != 0 || bad_copy != 0 || bad_msg != 0) {
+		printf("act_test: [37] after a read and a write of %lu bytes "
+		       "never touched before, the snapshots taken earlier changed: "
+		       "%u bytes of vm_read's, %u of vm_copy's, %u of the "
+		       "out-of-line message's — WRONG (#812)\n",
+		       (unsigned long) len, bad_read, bad_copy, bad_msg);
+		return 0;
+	}
+
+	printf("act_test: [37] snapshots of %lu bytes never touched -- vm_read, "
+	       "vm_copy and an out-of-line send -- read zero after the range "
+	       "was read and then written (sum %u) (#812)\n",
+	       (unsigned long) len, sum);
+	return 1;
+}
+
+/*
+ * Arm thirty-eight (#813): task_wire() is refused without the privileged host
+ * port.
+ *
+ * task_wire() took the task's own port alone and set its map to wire every
+ * entry it would ever create, with no limit anywhere: any task could wire all
+ * it allocated, and drain the free pool of every task in the system.  It now
+ * takes the privileged host port, as vm_wire() does.  Here it is asked on the
+ * host's ordinary port and must answer KERN_INVALID_HOST.  A kernel that does
+ * not ask sets the flag, and the arm clears it again at once, so the rest of
+ * this program does not run with every allocation wired.
+ */
+static int
+arm_thirty_eight_task_wire_unprivileged(void)
+{
+	mach_port_t	host = mach_host_self();
+	kern_return_t	kr;
+
+	kr = task_wire(host, mach_task_self(), TRUE);
+	if (kr == KERN_SUCCESS)
+		(void) task_wire(host, mach_task_self(), FALSE);
+	(void) mach_port_deallocate(mach_task_self(), host);
+
+	if (kr != KERN_INVALID_HOST) {
+		printf("act_test: [38] task_wire on the host's ordinary port "
+		       "answered %d, not KERN_INVALID_HOST (%d) — WRONG (#813)\n",
+		       kr, KERN_INVALID_HOST);
+		return 0;
+	}
+
+	printf("act_test: [38] task_wire on the host's ordinary port was "
+	       "refused with KERN_INVALID_HOST, %d (#813)\n", kr);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -4547,6 +5923,31 @@ main(int argc, char **argv)
 		arms--;
 	else
 		passed += r;
+
+	arms++;		/* arm twenty-seven, #808 */
+	passed += arm_twenty_seven_send_size_cannot_take_the_trailer();
+	arms++;		/* arm twenty-eight, #808 */
+	passed += arm_twenty_eight_send_past_the_inline_limit();
+	arms++;		/* arm twenty-nine, #808 */
+	passed += arm_twenty_nine_receive_measured_with_its_trailer();
+	arms++;		/* arm thirty, #808 */
+	passed += arm_thirty_scatter_list_one_word_short();
+	arms++;		/* arm thirty-one, #840 */
+	passed += arm_thirty_one_descriptor_count_past_the_message();
+	arms++;		/* arm thirty-two, #841 */
+	passed += arm_thirty_two_exception_answered_too_large();
+	arms++;		/* arm thirty-three, #842 */
+	passed += arm_thirty_three_trailer_not_there();
+	arms++;		/* arm thirty-four, #844 */
+	passed += arm_thirty_four_rpc_reply_seqno();
+	arms++;		/* arm thirty-five, #843 */
+	passed += arm_thirty_five_port_array_with_no_room();
+	arms++;		/* arm thirty-six, #810 */
+	passed += arm_thirty_six_vm_write_small_physical_copy();
+	arms++;		/* arm thirty-seven, #812 */
+	passed += arm_thirty_seven_snapshot_of_untouched_memory();
+	arms++;		/* arm thirty-eight, #813 */
+	passed += arm_thirty_eight_task_wire_unprivileged();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

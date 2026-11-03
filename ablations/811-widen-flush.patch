@@ -1,0 +1,26 @@
+Kind: widen
+Issue: #811
+Holds open: the window between pmap_unmap_page()'s exchange and its flush, for the address of collect_bench.c's lost-race arm only (LOST_VA, PML4 slot 14) -- 50000 pauses, so that pmap_page_protect() on another processor lands in it every round
+Run: --entry 9 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
+--- a/uros/src/mach_kernel/x86_64/pmap/map.c
++++ b/uros/src/mach_kernel/x86_64/pmap/map.c
+@@ -471,6 +471,17 @@
+ {
+ 	uint64_t size = pmap_unmap_page_noflush(pmap, va, removed);
+ 
++	/*
++	 * widen-811: hold the remover of collect_bench.c's lost-race arm
++	 * (LOST_VA, PML4 slot 14) between its exchange and its flush.
++	 */
++	if (size != 0 && va == ((uint64_t) 14 << PML4_SHIFT)) {
++		volatile unsigned k;
++
++		for (k = 0; k < 50000; k++)
++			cpu_pause();
++	}
++
+ 	if (size != 0)
+ 		tlb_flush_range(pmap, va, size);
+ 

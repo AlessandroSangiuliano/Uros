@@ -617,7 +617,16 @@ typedef integer_t mach_msg_option_t;
 extern mach_msg_trailer_size_t trailer_size[];
 
 #define GET_RCV_ELEMENTS(y) (((y) >> 24) & 0xf)
-#define REQUESTED_TRAILER_SIZE(y) (trailer_size[GET_RCV_ELEMENTS(y)])
+
+/*
+ * #842: never past trailer_size[], which has an entry per element up to
+ * MACH_RCV_TRAILER_SENDER.  A receive from user space asking for more is
+ * refused before this is reached (MACH_RCV_INVALID_TRAILER); the clamp is
+ * for the kernel's own callers, whose options are constants.
+ */
+#define REQUESTED_TRAILER_SIZE(y)					\
+	(trailer_size[GET_RCV_ELEMENTS(y) > MACH_RCV_TRAILER_SENDER	\
+		      ? MACH_RCV_TRAILER_SENDER : GET_RCV_ELEMENTS(y)])
 
 /*
  *  Much code assumes that mach_msg_return_t == kern_return_t.
@@ -671,6 +680,9 @@ typedef kern_return_t mach_msg_return_t;
 		/* Invalid out-of-line memory pointer. */
 #define MACH_SEND_NO_BUFFER		0x1000000d
 		/* No message buffer is available. */
+#define MACH_SEND_TOO_LARGE		0x1000000e
+		/* The message, or an array it carries, is larger than the
+		   kernel can take (#808).  The code the other Machs give it. */
 #define MACH_SEND_INVALID_TYPE		0x1000000f
 		/* Invalid msg-type specification. */
 #define MACH_SEND_INVALID_HEADER	0x10000010

@@ -7,13 +7,13 @@ Script: signals
 Expect: lifecycle: signal [A-Z]+: .*(did not end by the signal|WENT ON)
 
 diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
-index 892ee446..a60ec41a 100755
+index 906d804e..6ef13abf 100755
 --- a/scripts/run-x86_64.sh
 +++ b/scripts/run-x86_64.sh
-@@ -1030,7 +1030,6 @@ stopped_by() {
- 	trap - EXIT INT TERM HUP
+@@ -1204,7 +1204,6 @@ stopped_by() {
  	give_back
  	echo "run-x86_64.sh: stopped by SIG$1 -- its qemu stopped and the lock given back" >&2
+ 	trap - INT TERM HUP
 -	kill -s "$1" "$$"
  }
  trap give_back EXIT

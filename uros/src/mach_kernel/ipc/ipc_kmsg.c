@@ -551,6 +551,43 @@ ipc_kmsg_destroy(
 }
 
 /*
+ * Release one out-of-line port array still in the kernel's hands: each right
+ * it carries, destroyed with the descriptor's disposition, and the array
+ * kalloc gave it.
+ *
+ * ipc_kmsg_clean_body() calls it for every array of a message.  And
+ * ipc_kmsg_copyout_body() calls it for the one array it cannot deliver
+ * (#843), where cleaning the whole body -- what it did -- also released the
+ * descriptors already delivered: rights now the receiver's, and, where a copy
+ * object had been, the receiver's address.
+ */
+static void
+ipc_kmsg_clean_ool_ports(
+	mach_msg_ool_ports_descriptor_t	*dsc,
+	boolean_t			rt)
+{
+	ipc_object_t		*objects = (ipc_object_t *) dsc->address;
+	mach_msg_type_number_t	j;
+
+	if (dsc->count == 0)
+		return;
+
+	assert(objects != (ipc_object_t *) 0);
+
+	/* destroy port rights carried in the message */
+	for (j = 0; j < dsc->count; j++) {
+		ipc_object_t object = objects[j];
+
+		if (!IO_VALID(object))
+			continue;
+		ipc_object_destroy(object, dsc->disposition);
+	}
+
+	/* destroy memory carried in the message */
+	KFREE((vm_offset_t) dsc->address, ipc_port_array_size(dsc->count), rt);
+}
+
+/*
  *	Routine:	ipc_kmsg_clean_body
  *	Purpose:
  *		Cleans the body of a kernel message.
@@ -629,40 +666,9 @@ ipc_kmsg_clean_body(
 		}
 		break;
 	    }
-	    case MACH_MSG_OOL_PORTS_DESCRIPTOR : {
-		ipc_object_t             	*objects;
-		mach_msg_type_number_t   	j;
-		mach_msg_ool_ports_descriptor_t	*dsc;
-
-		dsc = &saddr->ool_ports;
-		objects = (ipc_object_t *) dsc->address;
-
-		if (dsc->count == 0) {
-			break;
-		}
-
-		assert(objects != (ipc_object_t *) 0);
-		
-		/* destroy port rights carried in the message */
-		
-		for (j = 0; j < dsc->count; j++) {
-		    ipc_object_t object = objects[j];
-		    
-		    if (!IO_VALID(object))
-			continue;
-		    
-		    ipc_object_destroy(object, dsc->disposition);
-		}
-
-		/* destroy memory carried in the message */
-
-		assert(dsc->count != 0);
-
-		KFREE((vm_offset_t) dsc->address,
-		     ipc_port_array_size(dsc->count),
-		     rt);
+	    case MACH_MSG_OOL_PORTS_DESCRIPTOR :
+		ipc_kmsg_clean_ool_ports(&saddr->ool_ports, rt);
 		break;
-	    }
 	    default : {
 		printf("cleanup: don't understand this type of descriptor\n");
 	    }
@@ -793,6 +799,19 @@ ipc_kmsg_free(
 }
 
 /*
+ * #808: what makes IKM_MAX_MSG_SIZE a bound for the sums on a message's
+ * size.  With kalloc_map no larger than 2 GiB, a message that fits in it,
+ * plus its trailer, the kmsg in front of it and kalloc's rounding to a page,
+ * stays below the 32 bits of an i386 vm_size_t -- and of mach_msg_size_t,
+ * on both targets.  A kalloc_map grown past this has to bring a new bound
+ * with it.
+ */
+_Static_assert(KALLOC_MAP_SIZE <= ((vm_size_t) 1 << 31),
+	       "a message as large as kalloc_map must keep its sums in 32 bits");
+_Static_assert(IKM_MAX_MSG_SIZE % 4 == 0,
+	       "the largest inline message must be a size a send can give");
+
+/*
  *	Routine:	ipc_kmsg_get
  *	Purpose:
  *		Allocates a kernel message buffer.
@@ -803,6 +822,7 @@ ipc_kmsg_free(
  *		MACH_MSG_SUCCESS	Acquired a message buffer.
  *		MACH_SEND_MSG_TOO_SMALL	Message smaller than a header.
  *		MACH_SEND_MSG_TOO_SMALL	Message size not long-word multiple.
+ *		MACH_SEND_TOO_LARGE	Message larger than IKM_MAX_MSG_SIZE.
  *		MACH_SEND_NO_BUFFER	Couldn't allocate a message buffer.
  *		MACH_SEND_INVALID_DATA	Couldn't copy message data.
  */
@@ -826,6 +846,17 @@ ipc_kmsg_get(
 
 	if ((size < sizeof(mach_msg_header_t)) || (size & 3))
 		return MACH_SEND_MSG_TOO_SMALL;
+
+	/*
+	 * #808: the buffer is sized for the message AND its trailer, in
+	 * mach_msg_size_t, which is 32 bits on both targets, and then for the
+	 * kmsg in front of it, in a vm_size_t of 32 bits on i386.  A size
+	 * past the largest message the kernel takes inline is refused here,
+	 * before anything is added to it: the sums below must be the size of
+	 * the buffer that copyinmsg() then fills with `size' bytes.
+	 */
+	if (size > IKM_MAX_MSG_SIZE)
+		return MACH_SEND_TOO_LARGE;
 
 #if	MACH_RT
 	/*
@@ -961,6 +992,16 @@ ipc_kmsg_get_from_kernel(
 
 	assert(size >= sizeof(mach_msg_header_t));
 	assert((size & 3) == 0);
+
+	/*
+	 * #808: the same sums as ipc_kmsg_get()'s, on a size from the
+	 * kernel.  No buffer holds a message past the largest one the kernel
+	 * takes inline, and this routine may answer only with a resource
+	 * error, so it says there is none -- in a release kernel too, where
+	 * the asserts above are not there to stop the sums from wrapping.
+	 */
+	if (size > IKM_MAX_MSG_SIZE)
+		return MACH_SEND_NO_BUFFER;
 
 	/* round up for ikm_cache */
 	msg_and_trailer_size = size + MAX_TRAILER_SIZE;
@@ -1768,18 +1809,31 @@ ipc_kmsg_copyin_body(
 
     body = (mach_msg_body_t *) (&kmsg->ikm_header + 1);
     saddr = (mach_msg_descriptor_t *) (body + 1);
-    eaddr = saddr + body->msgh_descriptor_count;
-    
-    /* make sure the message does not ask for more msg descriptors
-     * than the message can hold.
+
+    /*
+     * Make sure the message does not ask for more descriptors than it can
+     * hold.
+     *
+     * 🔴 #840: in integers, and before any descriptor's address is formed.
+     * The test this replaces compared descriptor pointers with
+     * `&kmsg->ikm_header + msgh_size', a sum on a mach_msg_header_t * that
+     * moved msgh_size HEADERS of 24 bytes, not msgh_size bytes -- so a
+     * count of descriptors running far past the message, and past the
+     * buffer that holds it, was taken as the message's own, and every later
+     * walk of the count followed it.  Its other half, `eaddr <= saddr',
+     * relied on the pointer sum overflowing, which C leaves undefined.  The
+     * size is checked first, so that the count is read from inside the
+     * message; a complex message with no descriptor is refused as it was.
      */
-    
-    if (eaddr <= saddr ||
-	eaddr > (mach_msg_descriptor_t *) (&kmsg->ikm_header + 
-			    kmsg->ikm_header.msgh_size)) {
+    if (kmsg->ikm_header.msgh_size < sizeof(mach_msg_base_t) ||
+	body->msgh_descriptor_count == 0 ||
+	body->msgh_descriptor_count >
+	    (kmsg->ikm_header.msgh_size - sizeof(mach_msg_base_t))
+	    / sizeof(mach_msg_descriptor_t)) {
 	ipc_kmsg_clean_partial(kmsg,0,0,0);
 	return MACH_SEND_MSG_TOO_SMALL;
     }
+    eaddr = saddr + body->msgh_descriptor_count;
 
     /*
      * #442: room for the descriptors' ports, now that the count has been
@@ -2100,6 +2154,19 @@ ipc_kmsg_copyin_body(
 		 * first task it created inherited them; and the kernel took a
 		 * mutex on 0x4d8da8 from ring 0, inside ipc_task_init.
 		 */
+		/*
+		 * #808: the count is the caller's, and both sizes below are
+		 * vm_size_t, which is 32 bits on i386; the larger is then
+		 * handed to kalloc, which has nothing past kalloc_map to give
+		 * and rounds to a page in that same vm_size_t.  A count whose
+		 * array kalloc_map could not hold is refused before either is
+		 * computed, so each is the size of what it stands for and the
+		 * allocation is one kalloc can make.
+		 */
+		if (dsc->count > KALLOC_MAP_SIZE / sizeof(ipc_port_t)) {
+		    ipc_kmsg_clean_partial(kmsg, i, paddr, space_needed);
+		    return MACH_SEND_TOO_LARGE;
+		}
 		length = ipc_port_array_size(dsc->count);
 		names_length = mach_port_name_array_size(dsc->count);
 		
@@ -3245,8 +3312,7 @@ ipc_kmsg_copyout_body(
 			 */
 			if (rt) {
 			    mr |= MACH_MSG_INVALID_RT_DESCRIPTOR;
-			    ipc_kmsg_clean_body(kmsg,
-						body->msgh_descriptor_count);
+			    ipc_kmsg_clean_ool_ports(dsc, rt);	/* #843 */
 			    dsc->address = 0;
 			    INCREMENT_SCATTER(sstart);
 			    break;
@@ -3259,8 +3325,13 @@ ipc_kmsg_copyout_body(
 			dsc->copy = MACH_MSG_ALLOCATE;
 		    	if ((kr = vm_allocate(map, &addr, length, TRUE)) !=
 		    						KERN_SUCCESS) {
-			    ipc_kmsg_clean_body(kmsg,
-						body->msgh_descriptor_count);
+			    /*
+			     * #843: this array only, as a failed out-of-line
+			     * region above releases only its own copy.  The
+			     * descriptors before it are delivered, and the ones
+			     * after it go on to be.
+			     */
+			    ipc_kmsg_clean_ool_ports(dsc, KMSG_IS_RT(kmsg));
 			    dsc->address = 0;
 
 			    if (kr == KERN_RESOURCE_SHORTAGE){

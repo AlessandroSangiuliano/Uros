@@ -60,7 +60,7 @@
  * compares with it, so it is said once.  The two used to be written apart and
  * disagreed -- "of 4 arms passed" printed, and an exit status that asked for 3.
  */
-#define FT_ARMS		5
+#define FT_ARMS		6
 
 /*
  * Where the second arm faults, and why this address.
@@ -72,9 +72,11 @@
  *
  * ⚠️ Not a null pointer, and not a kernel address.  Zero is where a hundred
  * other defects also land, so a report naming zero would not distinguish this
- * arm from any of them; and an address in the upper half would be refused by
- * the processor before the kernel had an opinion, which tests the hardware
- * rather than #467.
+ * arm from any of them.  And an address in the upper half is a question of
+ * its own: the processor faults on it like on any other, and the kernel has
+ * to answer it without asking a map -- arm six (#807).  This comment used to
+ * say the processor refused it before the kernel had an opinion; the kernel
+ * had one, and it was to resolve the fault in kernel_map.
  */
 #define UNOWNED		((vm_offset_t) 0x0000200000000000ULL)
 
@@ -387,6 +389,68 @@ step_caught(mach_port_t thread, mach_port_t task, exception_data_t code,
 }
 
 /*
+ * ── Arm six's thread and handler: a load from ring 3 on the kernel half ───
+ *
+ * The thread loads one word from kh_target, an address of the kernel half,
+ * and nothing should let it: the processor faults, and the kernel has to send
+ * that fault to this task without asking any map (#807).  There is no address
+ * to make good, so the handler sends the thread on to a landing instead, as
+ * arm five's does.  A thread that comes back from the load with a value has
+ * read the kernel's memory, and says so.
+ */
+static mach_port_t		kh_port;
+static volatile int		kh_seen, kh_type, kh_landed, kh_fell_through;
+static volatile natural_t	kh_code0;
+static volatile uint64_t	kh_target;
+static volatile kern_return_t	kh_state_kr;
+
+static void
+the_kernel_half_landing(void)
+{
+	kh_landed = 1;
+	pthread_exit(NULL);
+}
+
+static void *
+the_thread_that_reads_the_kernel_half(void *arg)
+{
+	uint64_t	word;
+
+	(void) arg;
+	__asm__ volatile("movq	(%1), %0" : "=r" (word) : "r" (kh_target)
+			 : "memory");
+	(void) word;
+	kh_fell_through = 1;
+	return NULL;
+}
+
+static kern_return_t
+kh_caught(mach_port_t thread, mach_port_t task, int exception,
+	  exception_data_t code, mach_msg_type_number_t codeCnt)
+{
+	struct x86_64_thread_state	st;
+	mach_msg_type_number_t		n = x86_64_THREAD_STATE_COUNT;
+
+	kh_type = exception;
+	kh_code0 = (codeCnt > 0) ? code[0] : 0;
+	kh_seen = 1;
+
+	kh_state_kr = thread_get_state(thread, x86_64_THREAD_STATE,
+				       (thread_state_t) &st, &n);
+	if (kh_state_kr == KERN_SUCCESS) {
+		st.rip = (uint64_t) (uintptr_t) the_kernel_half_landing;
+		st.rsp = (st.rsp & ~15UL) - 8;	/* as a call leaves it */
+		kh_state_kr = thread_set_state(thread, x86_64_THREAD_STATE,
+					       (thread_state_t) &st,
+					       x86_64_THREAD_STATE_COUNT);
+	}
+
+	(void) mach_port_deallocate(mach_task_self(), thread);
+	(void) mach_port_deallocate(mach_task_self(), task);
+	return KERN_SUCCESS;
+}
+
+/*
  * What exc_server calls when the message arrives.  MIG demands this name and
  * this shape; it is the whole of the handler.
  */
@@ -397,6 +461,8 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 {
 	if (exception == EXC_BREAKPOINT)
 		return step_caught(thread, task, code, codeCnt);
+	if (exception_port == kh_port)
+		return kh_caught(thread, task, exception, code, codeCnt);
 
 	(void) exception_port;
 	(void) task;
@@ -598,12 +664,13 @@ arm_two_exception_to_the_task(void)
 }
 
 /*
- * One exception message, waited for at most `ms' milliseconds, handled and
- * answered.  mach_msg_server_once() waits for ever, and a step that never
- * traps would leave this program waiting with it.
+ * One exception message on `port', waited for at most `ms' milliseconds,
+ * handled and answered.  mach_msg_server_once() waits for ever, and a step
+ * that never traps -- or a fault the kernel keeps resolving (arm six) --
+ * would leave this program waiting with it.
  */
 static boolean_t
-step_serve_one(mach_msg_timeout_t ms)
+serve_one(mach_port_t port, mach_msg_timeout_t ms)
 {
 	union {
 		mach_msg_header_t	head;
@@ -611,7 +678,7 @@ step_serve_one(mach_msg_timeout_t ms)
 	} req, rep;
 
 	if (mach_msg(&req.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof req,
-		     step_port, ms, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		     port, ms, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
 		return FALSE;
 	(void) exc_server(&req.head, &rep.head);
 	(void) mach_msg(&rep.head, MACH_SEND_MSG, rep.head.msgh_size, 0,
@@ -648,7 +715,7 @@ arm_five_single_step(void)
 		return 0;
 	}
 
-	if (!step_serve_one(5000)) {
+	if (!serve_one(step_port, 5000)) {
 		printf("fault_test: [5] no exception arrived in 5 s%s — WRONG\n",
 		       step_fell_through ? ", and the thread went on past the "
 					   "step" : "");
@@ -662,7 +729,7 @@ arm_five_single_step(void)
 	 */
 	for (waited = 0; !step_landed && !step_fell_through && waited < 500;
 	     waited++)
-		(void) step_serve_one(10);
+		(void) serve_one(step_port, 10);
 	if (step_landed || step_fell_through)
 		(void) pthread_join(stepper, NULL);
 
@@ -706,6 +773,167 @@ arm_five_single_step(void)
 	return ok;
 }
 
+/*
+ * [6] A LOAD FROM RING 3 ON THE KERNEL HALF IS THE TASK'S ERROR, AND NOTHING
+ * MORE (#807).
+ *
+ * The page-fault path chose its map by the address alone, so a fault from
+ * ring 3 on a kernel address went to kernel_map -- where kmem_init() had
+ * reserved the direct map as ordinary zero-fill memory, and vm_fault()
+ * "resolved" the load by putting a page in place of the direct map's leaf.
+ * The page was the kernel's, so the load faulted again, and again, and the
+ * kernel had lost the memory the leaf mapped.
+ *
+ * Two addresses, both inside kernel_map: the direct map's base, and the
+ * kernel heap's base, where the VM keeps the tables it took before it existed.
+ * For each the task must be told EXC_BAD_ACCESS with KERN_INVALID_ADDRESS,
+ * the answer of a map that does not hold the address -- because none was
+ * asked.  KERN_PROTECTION_FAILURE is kernel_map's answer, since kmem_init()
+ * reserves that range with no access: the kernel asked its own map.  No
+ * exception at all within five seconds is the old behaviour, the fault
+ * resolved over and over.
+ *
+ * The addresses are DIRECT_MAP_BASE and KERNEL_HEAP_BASE of
+ * x86_64/pmap/layout.h, written out because no header hands them to a task.
+ * The subcode would say which address faulted, but it carries 32 bits (#837).
+ *
+ * Then the kernel is asked to zero-fill pages for this task, which it does
+ * through the direct map: a kernel that had lost part of it would stop there.
+ */
+#define KH_PAGES	64
+
+static int
+arm_six_kernel_half(void)
+{
+	static const struct {
+		uint64_t	va;
+		const char	*what;
+	} probe[] = {
+		{ 0xffff800000000000ULL, "the direct map's base" },
+		{ 0xffffc00000000000ULL, "the kernel heap's base" },
+	};
+	kern_return_t	kr;
+	vm_address_t	fresh = 0;
+	unsigned	i, waited, zeroed = 0;
+	int		ok = 1;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&kh_port);
+	if (kr == KERN_SUCCESS)
+		kr = mach_port_insert_right(mach_task_self(), kh_port,
+					    kh_port, MACH_MSG_TYPE_MAKE_SEND);
+	if (kr == KERN_SUCCESS)
+		kr = task_set_exception_ports(mach_task_self(),
+					      EXC_MASK_BAD_ACCESS, kh_port,
+					      EXCEPTION_DEFAULT,
+					      THREAD_STATE_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("fault_test: [6] the exception port could not be set up "
+		       "(%d) — WRONG\n", kr);
+		return 0;
+	}
+
+	for (i = 0; i < sizeof probe / sizeof probe[0]; i++) {
+		pthread_t	reader;
+
+		kh_seen = kh_landed = kh_fell_through = 0;
+		kh_type = 0;
+		kh_code0 = 0;
+		kh_state_kr = KERN_SUCCESS;
+		kh_target = probe[i].va;
+
+		if (pthread_create(&reader, NULL,
+				   the_thread_that_reads_the_kernel_half,
+				   NULL) != 0) {
+			printf("fault_test: [6] pthread_create failed — WRONG\n");
+			ok = 0;
+			break;
+		}
+
+		if (!serve_one(kh_port, 5000)) {
+			printf("fault_test: [6] a load from ring 3 at 0x%lx, %s, "
+			       "raised no exception in 5 s%s — WRONG (#807)\n",
+			       (unsigned long) probe[i].va, probe[i].what,
+			       kh_fell_through
+			       ? ", and came back with the kernel's word"
+			       : ": the kernel kept resolving it");
+			ok = 0;
+			continue;	/* that reader cannot be joined */
+		}
+
+		for (waited = 0; !kh_landed && !kh_fell_through && waited < 500;
+		     waited++)
+			(void) serve_one(kh_port, 10);
+		if (kh_landed || kh_fell_through)
+			(void) pthread_join(reader, NULL);
+
+		/*
+		 * Each outcome is one printf, the whole line.  Printed in two,
+		 * the line let another thread's output in between, and under
+		 * TCG it did: it came out cut right after its code.
+		 */
+#define KH_LINE	"fault_test: [6] a load from ring 3 at 0x%lx, %s, reached " \
+		"the task as exception %d code %u — "
+#define KH_ARGS	(unsigned long) probe[i].va, probe[i].what, kh_type, \
+		(unsigned) kh_code0
+
+		if (kh_type == EXC_BAD_ACCESS && kh_code0 == KERN_INVALID_ADDRESS
+		    && kh_landed) {
+			printf(KH_LINE "EXC_BAD_ACCESS, KERN_INVALID_ADDRESS: "
+			       "no map was asked\n", KH_ARGS);
+			continue;
+		}
+		ok = 0;
+		if (kh_type == EXC_BAD_ACCESS
+		    && kh_code0 == KERN_PROTECTION_FAILURE)
+			printf(KH_LINE "WRONG, KERN_PROTECTION_FAILURE is "
+			       "kernel_map's answer: the kernel asked its own "
+			       "map (#807)\n", KH_ARGS);
+		else if (kh_type != EXC_BAD_ACCESS
+			 || kh_code0 != KERN_INVALID_ADDRESS)
+			printf(KH_LINE "WRONG, expected EXC_BAD_ACCESS (%d) code "
+			       "KERN_INVALID_ADDRESS (%d)\n", KH_ARGS,
+			       EXC_BAD_ACCESS, KERN_INVALID_ADDRESS);
+		else
+			printf(KH_LINE "WRONG, the thread did not arrive where "
+			       "the handler sent it (state %d)%s\n", KH_ARGS,
+			       kh_state_kr, kh_fell_through
+			       ? ", it went on past the load" : "");
+#undef KH_ARGS
+#undef KH_LINE
+	}
+
+	(void) task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+					MACH_PORT_NULL, EXCEPTION_DEFAULT,
+					THREAD_STATE_NONE);
+	(void) mach_port_mod_refs(mach_task_self(), kh_port,
+				  MACH_PORT_RIGHT_RECEIVE, -1);
+	(void) mach_port_deallocate(mach_task_self(), kh_port);
+
+	kr = vm_allocate(mach_task_self(), &fresh, KH_PAGES * vm_page_size,
+			 TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("fault_test: [6] vm_allocate of %d pages answered %d — "
+		       "WRONG\n", KH_PAGES, kr);
+		return 0;
+	}
+	for (i = 0; i < KH_PAGES; i++) {
+		volatile uint64_t *w = (volatile uint64_t *)
+				       (fresh + (vm_address_t) i * vm_page_size);
+
+		if (*w == 0)
+			zeroed++;
+		*w = i + 1;
+	}
+	(void) vm_deallocate(mach_task_self(), fresh, KH_PAGES * vm_page_size);
+
+	printf("fault_test: [6] and then the kernel zero-filled %u of %d new "
+	       "pages for this task%s\n", zeroed, KH_PAGES,
+	       zeroed == KH_PAGES ? ": it still reaches its memory"
+				  : " — WRONG");
+	return ok && zeroed == KH_PAGES;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -736,6 +964,7 @@ main(int argc, char **argv)
 	passed += arm_four_copy_that_must_fail();
 	passed += arm_two_exception_to_the_task();
 	passed += arm_five_single_step();
+	passed += arm_six_kernel_half();
 
 	printf("fault_test: %d of %d arms passed\n", passed, FT_ARMS);
 

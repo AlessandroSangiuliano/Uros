@@ -778,7 +778,8 @@ static void pmap_selftest(void)
  * primitives: enter it read/write and confirm extract finds the frame and a
  * write lands; reprotect read-only and confirm the write bit clears; remove
  * it and confirm extract now finds nothing.  This is the shape the MI side
- * will call.
+ * will call.  And ask it to map over the direct map's large leaf, which it
+ * must refuse (#807).
  */
 static void pmap_verbs_selftest(void)
 {
@@ -788,6 +789,7 @@ static void pmap_verbs_selftest(void)
 	volatile uint32_t *page = (volatile uint32_t *)(uintptr_t)va;
 	pt_entry_t *e;
 	uint64_t got;
+	uint64_t size = 0, big = 0;
 	int rc;
 
 	rc = pmap_enter(k, va, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
@@ -809,6 +811,43 @@ static void pmap_verbs_selftest(void)
 	kputs("UrMach x86-64: pmap_remove -> extract ");
 	kputhex64(got);
 	kputs(got == 0 ? ", gone\r\n" : ", STILL MAPPED?!\r\n");
+
+	/*
+	 * 🔴 And never over a large page (#807).  DIRECT_MAP_BASE is mapped by a
+	 * large leaf, but not necessarily of direct_map_page_size: by now it is
+	 * 2 MiB, because split_selftest() split the leaf over its witness, which
+	 * lies in the first GiB.  So the size is read first, and pmap_enter() must
+	 * refuse the leaf in both of its branches and leave one of that size.  On
+	 * a kernel that takes the leaf away, neither branch comes back to say so:
+	 * pmap_forget() drops the kernel pmap's resident count for a leaf it never
+	 * counted, the count is zero at this point of the boot, and the machine
+	 * stops there naming the address -- measured, in
+	 * ablations/807-pmap-enter-takes-the-leaf.  And with no large leaf there,
+	 * nothing is asked: the unmapping branch would take a real mapping away.
+	 */
+	e = pmap_walk(k->root_pa, DIRECT_MAP_BASE, &big);
+	if (e == PT_ENTRY_NULL || big <= PAGE_SIZE_4K) {
+		kputs("UrMach x86-64: no large leaf at the direct map's base to "
+		      "ask pmap_enter() about, WRONG\r\n");
+	} else {
+		rc = pmap_enter(k, DIRECT_MAP_BASE, frame, VM_PROT_NONE, 0);
+		kputs("UrMach x86-64: pmap_enter NONE over the ");
+		kputdec(big / 1024);
+		kputs(" KiB leaf at the direct map's base -> ");
+		kputs(rc == PMAP_MAP_BLOCKED ? "refused\r\n"
+					     : "not refused, WRONG\r\n");
+
+		rc = pmap_enter(k, DIRECT_MAP_BASE, frame,
+				VM_PROT_READ | VM_PROT_WRITE, 0);
+		e = pmap_walk(k->root_pa, DIRECT_MAP_BASE, &size);
+		kputs("UrMach x86-64: pmap_enter RW over it -> ");
+		kputs(rc == PMAP_MAP_BLOCKED ? "refused" : "not refused");
+		kputs(", the leaf there now ");
+		kputdec(e != PT_ENTRY_NULL ? size / 1024 : 0);
+		kputs(rc == PMAP_MAP_BLOCKED && e != PT_ENTRY_NULL && size == big
+		      ? " KiB\r\n" : " KiB, WRONG\r\n");
+	}
+
 	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
@@ -868,6 +907,92 @@ static void pv_selftest(uint32_t info)
 
 	pmap_destroy(u);
 	boot_frame_free(frame);		/* #612: nothing left, frame included */
+}
+
+/*
+ * #847: a range operation strides over what is empty to the end of the empty
+ * entry, and no further.
+ *
+ * Three pages of one frame in a fresh space, each where a stride one level too
+ * long would jump it: the first after an empty GiB and seven empty 2 MiB
+ * entries, the last 4 KiB of the 2 MiB region it opens, and the first page of
+ * the next PML4 entry after 504 empty 2 MiB entries.  One pmap_remove() across
+ * them must take all three.
+ *
+ * Then a fourth page, at the start of the PML4 entry after an empty one, and
+ * one pmap_remove() from the empty entry's start to just past the page: one
+ * stride of 512 GiB and the page.  At 4 KiB a step it was 134,217,728 walks,
+ * most of a second under KVM and tens of seconds under TCG, so its cycles are
+ * printed beside a bound neither the stride nor the step comes near: on
+ * victus, 759 to 825 cycles under KVM and 62,205 to 67,551 under TCG, and
+ * 3.9 and 47.8 billion with the 4 KiB step back.
+ *
+ * ⚠️ The least of three.  One reading of a region this short is at the host's
+ * mercy: a host that takes the processor away for 10 ms inside it makes the
+ * stride look like the step, and a boot fails for nothing.  Three removals of
+ * the same page, and the least of them against the bound; the step back is
+ * slow all three times.
+ */
+#define	HOLES_BOUND_CYCLES	40000000ULL	/* 10 ms at 4 GHz */
+#define	HOLES_TRIES		3
+
+static void range_holes_selftest(void)
+{
+	uint64_t slot = 1ULL << PML4_SHIFT;
+	uint64_t b = 2 * slot - 2 * PAGE_SIZE_1G;
+	uint64_t va[3] = {
+		b + PAGE_SIZE_1G + 7 * PAGE_SIZE_2M,
+		b + PAGE_SIZE_1G + 8 * PAGE_SIZE_2M - PAGE_SIZE_4K,
+		2 * slot,
+	};
+	uint64_t far = 4 * slot;
+	pmap_t u = pmap_create(0);
+	uint64_t frame = boot_frame_alloc();
+	uint64_t t0, t1, least = ~0ULL;
+	int i, mapped = 0, left = 0;
+
+	for (i = 0; i < 3; i++) {
+		pmap_enter(u, va[i], frame, VM_PROT_READ, 0);
+		mapped += pmap_extract(u, va[i]) == frame;
+	}
+	pmap_remove(u, b, 2 * slot + PAGE_SIZE_4K);
+	for (i = 0; i < 3; i++)
+		left += pmap_extract(u, va[i]) != 0;
+	kputs("UrMach x86-64: one removal across three pages placed past empty "
+	      "entries, of 2 MiB, 1 GiB and to a PML4 boundary: ");
+	kputdec(mapped);
+	kputs(" mapped, ");
+	kputdec(left);
+	kputs(mapped == 3 && left == 0 ? " left (#847)\r\n"
+				       : " left -- WRONG (#847)\r\n");
+
+	mapped = 0;
+	left = 0;
+	for (i = 0; i < HOLES_TRIES; i++) {
+		pmap_enter(u, far, frame, VM_PROT_READ, 0);
+		mapped += pmap_extract(u, far) == frame;
+		t0 = rdtsc_ordered();
+		pmap_remove(u, 3 * slot, far + PAGE_SIZE_4K);
+		t1 = rdtsc_ordered();
+		left += pmap_extract(u, far) != 0;
+		if (t1 - t0 < least)
+			least = t1 - t0;
+	}
+	kputs("UrMach x86-64: removing an empty 512 GiB and the page after it took ");
+	kputdec(least);
+	kputs(" cycles, against a bound of ");
+	kputdec(HOLES_BOUND_CYCLES);
+	if (mapped != HOLES_TRIES || left)
+		kputs(", and the page was not taken every time -- WRONG "
+		      "(the least of three, #847)\r\n");
+	else if (least > HOLES_BOUND_CYCLES)
+		kputs(" -- WRONG, as if the hole was walked 4 KiB at a time "
+		      "(the least of three, #847)\r\n");
+	else
+		kputs(", the page taken (the least of three, #847)\r\n");
+
+	pmap_destroy(u);
+	boot_frame_free(frame);
 }
 
 /*
@@ -10677,6 +10802,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ramoops_init();		/* #373: the zone, once the direct map can be split */
 	pmap_verbs_selftest();
 	pv_selftest(info);
+	range_holes_selftest();	/* #847 */
 	phys_ops_selftest();
 	phys_copy_selftest();
 	wx_selftest();

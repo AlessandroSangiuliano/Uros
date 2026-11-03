@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #844
+Takes out: the trailer's own sequence number at slow_copyout, putting back temp_seqno -- on the hot path it holds whatever the stack did, and act_test's arm 34, whose RPC replies do not fit, reads a sequence number other than its reply's 3 in the trailer
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[34\] RPC [0-9]+ of [0-9]+, whose [0-9]+-byte reply does not fit [0-9]+ bytes, answered 0x[0-9a-f]+, its trailer saying sequence number [0-9]+ .* WRONG
+Note: Judged under QEMU (TCG and KVM), act_test's arm 34 making 32 RPCs, on victus 02/11/2026 at a22678ca: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.  The arm's first form, one RPC, was caught 1 time in 4: only an RPC the hot path carries reaches slow_copyout.
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -3012,9 +3012,8 @@
+ 		 */
+ 		reply_size = send_size + trailer->msgh_trailer_size;
+ 		if (rcv_size < reply_size) {
+-			if (msg_receive_error(kmsg, msg, option,
+-					      trailer->msgh_seqno, space,
+-					      rcv_size) == MACH_RCV_INVALID_DATA) {
++			if (msg_receive_error(kmsg, msg, option, temp_seqno,
++				        space, rcv_size) == MACH_RCV_INVALID_DATA) {
+ 				mr = MACH_RCV_INVALID_DATA;
+ 				return(mr);
+ 			}
+@@ -3035,8 +3034,7 @@
+ 			} 
+ 			else {
+ 				if (msg_receive_error(kmsg, msg, option,
+-				    trailer->msgh_seqno, space, rcv_size)
+-						== MACH_RCV_INVALID_DATA)
++				    temp_seqno, space, rcv_size) == MACH_RCV_INVALID_DATA)
+ 					mr = MACH_RCV_INVALID_DATA;
+ 			}
+ 

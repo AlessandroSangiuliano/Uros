@@ -42,6 +42,12 @@
  * honouring the request would mean splitting that page into a table of
  * smaller ones, which is a real operation with its own shootdown
  * consequences and does not belong hidden inside this one.
+ *
+ * ⚠️ A refusal only its callers can keep.  pmap_enter() unmaps whatever is
+ * at the address before it maps -- and pmap_unmap_page() takes a leaf of any
+ * size -- so it used to remove the large page first and never meet this
+ * answer at all.  It now asks the leaf's size before it removes anything and
+ * answers PMAP_MAP_BLOCKED itself (#807).
  */
 /*
  * `lock' is the address space's writer lock, or NULL for a caller that has no

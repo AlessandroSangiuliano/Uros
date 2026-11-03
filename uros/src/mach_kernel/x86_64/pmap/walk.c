@@ -25,7 +25,20 @@ static inline pt_entry_t *table_at(uint64_t table_pa)
 	return (pt_entry_t *)(uintptr_t)phys_to_direct(table_pa);
 }
 
-pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out)
+/*
+ * Nothing mapped at the address: say how much around it is empty, when asked.
+ * The span is the reach of the entry the walk stopped at, because an entry
+ * that is not valid has nothing under it anywhere in that reach (#847).
+ */
+static inline pt_entry_t *missed(uint64_t *hole_out, uint64_t span)
+{
+	if (hole_out)
+		*hole_out = span;
+	return PT_ENTRY_NULL;
+}
+
+static pt_entry_t *walk_down(uint64_t root_pa, uint64_t va,
+			     uint64_t *page_size_out, uint64_t *hole_out)
 {
 	pt_entry_t *table;
 	pt_entry_t *entry;
@@ -72,19 +85,19 @@ pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out)
 	 * window a reader can still be inside.  Everywhere else it is a frame.
 	 */
 	if (root_pa == 0)
-		return PT_ENTRY_NULL;
+		return missed(hole_out, 1ULL << PML4_SHIFT);
 
 	/* PML4 — always a table; PS is not defined at this level. */
 	table = table_at(root_pa);
 	entry = &table[pml4_index(va)];
 	if (!pte_is_valid(*entry))
-		return PT_ENTRY_NULL;
+		return missed(hole_out, 1ULL << PML4_SHIFT);
 
 	/* PDPT — may be a 1 GiB leaf. */
 	table = table_at(pte_to_pa(*entry));
 	entry = &table[pdpt_index(va)];
 	if (!pte_is_valid(*entry))
-		return PT_ENTRY_NULL;
+		return missed(hole_out, PAGE_SIZE_1G);
 	if (pte_is_leaf(*entry)) {
 		if (page_size_out)
 			*page_size_out = PAGE_SIZE_1G;
@@ -95,7 +108,7 @@ pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out)
 	table = table_at(pte_to_pa(*entry));
 	entry = &table[pd_index(va)];
 	if (!pte_is_valid(*entry))
-		return PT_ENTRY_NULL;
+		return missed(hole_out, PAGE_SIZE_2M);
 	if (pte_is_leaf(*entry)) {
 		if (page_size_out)
 			*page_size_out = PAGE_SIZE_2M;
@@ -106,11 +119,24 @@ pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out)
 	table = table_at(pte_to_pa(*entry));
 	entry = &table[pt_index(va)];
 	if (!pte_is_valid(*entry))
-		return PT_ENTRY_NULL;
+		return missed(hole_out, PAGE_SIZE_4K);
 
 	if (page_size_out)
 		*page_size_out = PAGE_SIZE_4K;
 	return entry;
+}
+
+pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out)
+{
+	return walk_down(root_pa, va, page_size_out, 0);
+}
+
+uint64_t pmap_hole(uint64_t root_pa, uint64_t va)
+{
+	uint64_t hole = 0;
+
+	(void) walk_down(root_pa, va, 0, &hole);
+	return hole;
 }
 
 int pmap_resolve(uint64_t root_pa, uint64_t va, uint64_t *pa_out,

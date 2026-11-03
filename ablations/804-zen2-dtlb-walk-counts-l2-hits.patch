@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #804
+Takes out: LsL1DTlbMiss:L2Miss's unit mask, 0xf0 (the reloads that miss the L2 TLB, 1G, 2M, coalesced and 4K), for 0x0f, the reloads that hit it (PPR 55922 Rev. 3.06, PMCx045): on Zen 2 the counter named for the data page walks counts the L1 DTLB misses the L2 TLB serves
+Machine: pavillion
+Expect: pmc test \(#804\): lines in 2 MiB, 32768 steps: .* dtlb-walk [0-9]+ \(WRONG
+Note: Judged on pavillion's metal (Ryzen 5 4600H, Family 17h Model 60h), the only Zen 2 here: QEMU on victus gives its guest victus's Zen 3, whose table this is not, and ablate.sh boots no kernel arguments, which the test needs.  Run from pavillion's GRUB entry uros-804b-dtlb, pmc=2 pmc_test=1, with the fixed tree's uros-804q-pmc2 beside it, 02/11/2026: caught in 1 boot of 1 (the 2 MiB walk, 512 pages that miss the L1 DTLB and hit the L2 TLB, counted 28529 for 32768 steps, 87%, against at most 5%), the fixed tree 29 checks with 0 wrong.  Only that walk can catch it on the metal: the 16384 pages hit the L2 TLB at 40% of their steps, over the floor of 25% that the L2 TLB's coalesced pages set for the walks
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pmc.c b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+--- a/uros/src/mach_kernel/x86_64/cpu/pmc.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+@@ -148,7 +148,7 @@
+ 	{ "LsRefillsFromSys:Dram",		0x043, 0x48, -1, PMC_ROLE_LLC_MISS },
+ };
+ static const struct pmc_event pmc_zen2_tlb[] = {
+-	{ "LsL1DTlbMiss:L2Miss",		0x045, 0xf0, -1, PMC_ROLE_DTLB_WALK },
++	{ "LsL1DTlbMiss:L2Miss",		0x045, 0x0f, -1, PMC_ROLE_DTLB_WALK },
+ 	{ "LsL1DTlbMiss:L2Hit",			0x045, 0x0f, -1, PMC_ROLE_DTLB_L2_HIT },
+ 	{ "BpL1TlbMissL2TlbMiss",		0x085, 0x07, -1, PMC_ROLE_ITLB_WALK },
+ 	{ "LsRefillsFromSys:Dram",		0x043, 0x48, -1, PMC_ROLE_LLC_MISS },

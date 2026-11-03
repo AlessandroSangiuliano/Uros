@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #810
+Takes out: the free of the copy only on a copyout that worked, putting back the free whatever the copyout did -- act_test's arm 36 then has its refused vm_write's copy freed by the copyout and again by the destruction of the request, and the second free finds the copy marked freed by the first
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: vm_map_copy_discard: copy [0-9a-fx]+ has type 0 -- freed already, or never a copy
+Note: Judged under QEMU (TCG and KVM), act_test's arm 36, on victus 02/11/2026 at b845d5c8: the ablated tree caught 8 of 8 and the fixed tree passed 8 of 8, every ablated boot stopped by the second free's panic; on OMEGA at the same tree, 4 of 4 and 4 of 4.  Before the free was marked, the arm alone saw the double free in no boot, and the ablated kernel fell later, on an assertion about a port, 5 times in 8 at best.
+
+diff --git a/uros/src/mach_kernel/vm/vm_map.c b/uros/src/mach_kernel/vm/vm_map.c
+--- a/uros/src/mach_kernel/vm/vm_map.c
++++ b/uros/src/mach_kernel/vm/vm_map.c
+@@ -4304,19 +4304,9 @@ vm_map_copyout_kernel_buffer(
+ 	 * range this routine entered for the copy goes with the failure, where
+ 	 * it stayed in the target map.
+ 	 */
+-	if (kr != KERN_SUCCESS) {
+-		if (!overwrite) {
+-			(void) vm_map_remove(map, *addr,
+-					     *addr + round_page(copy->size),
+-					     VM_MAP_NO_FLAGS);
+-			*addr = 0;
+-		}
+-		return(kr);
+-	}
+-
+ 	vm_map_copy_kernel_buffer_free(copy);
+ 
+-	return(KERN_SUCCESS);
++	return(kr);
+ }
+ 		
+ /*

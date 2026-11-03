@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #840
+Takes out: the integer bound on a complex message's descriptor count, putting back the comparison with &kmsg->ikm_header + msgh_size, which moves msgh_size headers -- a count of one more than the message holds then passes, the second descriptor is read from just past the message, and act_test's arm 31 is answered something other than MACH_SEND_MSG_TOO_SMALL
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[31\] a [0-9]+-byte message holding one descriptor and saying 2 answered 0x[0-9a-f]+, not MACH_SEND_MSG_TOO_SMALL
+Note: Judged under QEMU (TCG and KVM), act_test's arm 31, on victus 02/11/2026 at b2ae36a0: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+--- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
++++ b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+@@ -1819,15 +1819,13 @@
+      * size is checked first, so that the count is read from inside the
+      * message; a complex message with no descriptor is refused as it was.
+      */
+-    if (kmsg->ikm_header.msgh_size < sizeof(mach_msg_base_t) ||
+-	body->msgh_descriptor_count == 0 ||
+-	body->msgh_descriptor_count >
+-	    (kmsg->ikm_header.msgh_size - sizeof(mach_msg_base_t))
+-	    / sizeof(mach_msg_descriptor_t)) {
++    eaddr = saddr + body->msgh_descriptor_count;
++    if (eaddr <= saddr ||
++	eaddr > (mach_msg_descriptor_t *) (&kmsg->ikm_header + 
++			    kmsg->ikm_header.msgh_size)) {
+ 	ipc_kmsg_clean_partial(kmsg,0,0,0);
+ 	return MACH_SEND_MSG_TOO_SMALL;
+     }
+-    eaddr = saddr + body->msgh_descriptor_count;
+ 
+     /*
+      * #442: room for the descriptors' ports, now that the count has been

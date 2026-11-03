@@ -35,6 +35,15 @@
 pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out);
 
 /*
+ * How much is empty around an address nothing maps: the reach of the entry the
+ * walk stopped at -- 512 GiB for an empty PML4 entry, 1 GiB, 2 MiB, or 4 KiB
+ * for an empty PT entry.  Nothing is mapped anywhere in that reach, aligned to
+ * it.  Zero when va is mapped.  The walk's rules hold: a read section for the
+ * lower half (#604).  What the range operations stride by (#847).
+ */
+uint64_t pmap_hole(uint64_t root_pa, uint64_t va);
+
+/*
  * Translate va to the physical address it maps to, offset included.
  * Returns 1 when mapped, 0 when not — a return value rather than a sentinel
  * because physical address zero is a perfectly good answer.

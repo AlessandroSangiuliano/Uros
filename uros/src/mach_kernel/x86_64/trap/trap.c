@@ -964,6 +964,7 @@ static uint64_t expect_vector;
 static uint64_t expect_vector_too;	/* #781: a second answer, or the first */
 static uint64_t expect_resume;
 static int expect_armed;
+static int expect_quiet;		/* #811: resumed without the line */
 
 static struct trap_record last_trap;
 
@@ -1011,14 +1012,26 @@ void trap_expect(uint64_t vector, uint64_t resume_rip)
 	trap_expect_either(vector, vector, resume_rip);
 }
 
-void trap_expect_either(uint64_t vector, uint64_t or_vector,
-			uint64_t resume_rip)
+static void expect_arm(uint64_t vector, uint64_t or_vector,
+		       uint64_t resume_rip, int quiet)
 {
 	expect_vector = vector;
 	expect_vector_too = or_vector;
 	expect_resume = resume_rip;
+	expect_quiet = quiet;
 	expect_armed = 1;
 	last_trap.caught = 0;
+}
+
+void trap_expect_either(uint64_t vector, uint64_t or_vector,
+			uint64_t resume_rip)
+{
+	expect_arm(vector, or_vector, resume_rip, 0);
+}
+
+void trap_expect_quiet(uint64_t vector, uint64_t resume_rip)
+{
+	expect_arm(vector, vector, resume_rip, 1);
 }
 
 void trap_expect_cancel(void)
@@ -2158,31 +2171,34 @@ void trap_dispatch(struct trap_frame *frame)
 
 		trap_record_frame(frame);
 
-		tputs("UrMach x86-64: expected ");
-		tputs(trap_name(frame->vector));
-		tputs(" (error ");
-		tputhex(frame->error);
-		if (frame->vector == T_PAGE_FAULT) {
-			tputs(", at ");
-			tputhex(read_cr2());
-			tputs(frame->error & PF_PRESENT
-			      ? ", refused by the mapping"
-			      : ", nothing mapped there");
-		}
-		tputs(") — resuming\r\n");
+		if (!expect_quiet) {
+			tputs("UrMach x86-64: expected ");
+			tputs(trap_name(frame->vector));
+			tputs(" (error ");
+			tputhex(frame->error);
+			if (frame->vector == T_PAGE_FAULT) {
+				tputs(", at ");
+				tputhex(read_cr2());
+				tputs(frame->error & PF_PRESENT
+				      ? ", refused by the mapping"
+				      : ", nothing mapped there");
+			}
+			tputs(") — resuming\r\n");
 
-		/*
-		 * ⚠️ Here as well as on the fault report, and that is the point
-		 * of putting it here at all.
-		 *
-		 * The report path only runs on a fault nobody expected, which
-		 * ends the boot -- so a description written only there is
-		 * exercised on the one occasion when nobody can afford to find
-		 * out it was wrong.  The probes take this arm on every boot, so
-		 * the sentence is produced and read where it costs nothing.
-		 */
-		if (carries_a_selector(frame->vector))
-			report_selector_error(frame->error);
+			/*
+			 * ⚠️ Here as well as on the fault report, and that is
+			 * the point of putting it here at all.
+			 *
+			 * The report path only runs on a fault nobody
+			 * expected, which ends the boot -- so a description
+			 * written only there is exercised on the one occasion
+			 * when nobody can afford to find out it was wrong.  The
+			 * probes take this arm on every boot, so the sentence
+			 * is produced and read where it costs nothing.
+			 */
+			if (carries_a_selector(frame->vector))
+				report_selector_error(frame->error);
+		}
 
 		/*
 		 * The frame is what iretq will reload, so changing the saved
@@ -2230,12 +2246,25 @@ void trap_dispatch(struct trap_frame *frame)
 	 * faulted in stopped the machine, with a report that described the
 	 * fault perfectly and could do nothing about it.
 	 *
-	 * ⚠️ Which map is asked is decided by the ADDRESS, not by the ring.
-	 * A kernel path reaching a user address on a task's behalf -- copyin,
-	 * copyout, the argument block the bootstrap builds -- faults at ring 0
-	 * on an address the task owns, and asking the kernel map about it would
-	 * answer no about the wrong space.  i386 makes the same split, in the
-	 * same place, on the same test.
+	 * ⚠️ Which map is asked is decided by the RING first, and by the address
+	 * only after it (#807).
+	 *
+	 * Ring 3 owns the lower half and nothing else, so a fault from ring 3 on
+	 * a kernel-half address is the task's own error, and no map is asked
+	 * about it: the task gets EXC_BAD_ACCESS with the answer its own map
+	 * would give, that the address is not in it.  Asking kernel_map instead
+	 * "resolved" such a fault -- kmem_init() reserves the direct map there,
+	 * vm_fault() zero-filled a page for it, and pmap_enter() took away the
+	 * direct map's leaf there -- 1 GiB, or 2 MiB as direct_map_init() may
+	 * choose -- to make room, for an unprivileged load.
+	 * i386 asks the thread's map for every fault from user mode
+	 * (i386/trap.c, user_trap()), which answers the same for a kernel
+	 * address.
+	 *
+	 * At ring 0 the address decides.  A kernel path reaching a user address
+	 * on a task's behalf -- copyin, copyout, the argument block the
+	 * bootstrap builds -- faults at ring 0 on an address the task owns, and
+	 * asking the kernel map about it would answer no about the wrong space.
 	 *
 	 * The protection asked for is what was ATTEMPTED, from the error code,
 	 * and not what would be convenient: asking for write on a read fault
@@ -2248,7 +2277,10 @@ void trap_dispatch(struct trap_frame *frame)
 		vm_map_t	map;
 		vm_prot_t	prot;
 
-		if (va_is_kernel(addr))
+		if (va_is_kernel(addr) && (frame->cs & 3) == USER_RPL) {
+			map = VM_MAP_NULL;
+			fault_kr = KERN_INVALID_ADDRESS;
+		} else if (va_is_kernel(addr))
 			map = kernel_map;
 		else
 			map = (act != THR_ACT_NULL) ? act->map : VM_MAP_NULL;
@@ -2263,7 +2295,9 @@ void trap_dispatch(struct trap_frame *frame)
 		 * before there is a thread -- and there are plenty, this kernel
 		 * boots a long way before the first one -- has no task to ask,
 		 * and inventing kernel_map for it would hand an early boot
-		 * failure to a subsystem that is not up.
+		 * failure to a subsystem that is not up.  And a fault from ring
+		 * 3 on the kernel half has no map at all, as above: it goes on
+		 * to the task with KERN_INVALID_ADDRESS (#807).
 		 */
 		if (map != VM_MAP_NULL) {
 			fault_kr = fault_in(map, addr, prot, frame);

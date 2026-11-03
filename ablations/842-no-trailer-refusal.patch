@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #842
+Takes out: the refusal at mach_msg_overwrite_trap() of a trailer format other than 0 or of elements past MACH_RCV_TRAILER_SENDER -- act_test's arm 33 then asks for element 3 on an empty port and is answered MACH_RCV_TIMED_OUT instead of MACH_RCV_INVALID_TRAILER
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[33\] a receive asking for trailer element 3 answered 0x[0-9a-f]+, not MACH_RCV_INVALID_TRAILER
+Note: Judged under QEMU (TCG and KVM), act_test's arm 33, on victus 02/11/2026 at 51afce0d: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1141,11 +1141,6 @@
+ 	 * message out.  And format 0 is the only one there is.  Every receive
+ 	 * from user space comes through here: urmach_msg() calls this trap.
+ 	 */
+-	if ((option & MACH_RCV_MSG) &&
+-	    ((option & MACH_RCV_TRAILER_TYPE(0xf))
+-		!= MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) ||
+-	     GET_RCV_ELEMENTS(option) > MACH_RCV_TRAILER_SENDER))
+-		return MACH_RCV_INVALID_TRAILER;
+ 
+ #if	ENABLE_HOTPATH
+ 	/* BEGINNING OF HOT PATH */
