@@ -102,7 +102,24 @@ context_switch_to:
 	 * A start at the top, where a fresh frame used to be popped: the two
 	 * words it left there, a zero frame pointer and a zero return address
 	 * where a backtrace stops, and the flags it carried, CTX_RFLAGS_INITIAL
-	 * (context.c), interrupts on.
+	 * (context.c) -- interrupts on, and nothing else set.
+	 *
+	 * 🔴 BY STI AND CLAC, NOT BY POPFQ, AND CLAC IS NOT OPTIONAL (#777).
+	 *
+	 * popfq is microcode, and of the flags it loaded here only three are
+	 * the processor's to keep across a call and so not already what the
+	 * ABI says: IF, which sti sets; AC, which copyin() and copyout() set
+	 * around their window (pmap_user_access_begin(), pmap.h), and which
+	 * ring 3 may set for itself -- an interrupt or a fault through the IDT
+	 * does not clear it on the way into the handler (Intel SDM Vol. 3A,
+	 * 253668-093US, 7.12.1.3: TF, VM, RF, NT, and IF through an interrupt
+	 * gate; only FRED's delivery clears AC, 8.3.5), so the outgoing thread
+	 * may switch away with it set, and a thread starting here with it set
+	 * would run with SMAP's check off for every kernel access until its
+	 * next copy; and TF, set only while the debugger steps an
+	 * instruction, which is the debugger's to clear.  DF is clear at every
+	 * call by the ABI.  clac exists only where SMAP does, and pmap_smap_on
+	 * says so, as it does for the copies.
 	 */
 	leaq	-16(%rdx), %rsp		/* its own stack, from the top */
 	movq	$0, 8(%rsp)
@@ -110,8 +127,11 @@ context_switch_to:
 	xorl	%ebp, %ebp
 	movq	%rcx, %r13		/* context_thread_start's entry ... */
 	xorl	%r12d, %r12d		/* ... and its argument */
-	pushq	$0x202			/* CTX_RFLAGS_INITIAL */
-	popfq
+	cmpl	$0, pmap_smap_on(%rip)
+	je	3f
+	clac
+3:
+	sti
 	jmp	context_thread_start
 
 /*
