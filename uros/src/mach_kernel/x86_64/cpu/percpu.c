@@ -332,4 +332,18 @@ syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count)
 	*count  = percpu()->syscall_ret_count;
 	enable_preemption();
 }
+
+/*
+ * And what the way out through the frame has cost it, for the system calls
+ * that slept (#777): the other half of the returns since #771, read the same
+ * way.
+ */
+void
+syscall_profile_frame_return_cycles(uint64_t *cycles, uint64_t *count)
+{
+	disable_preemption();
+	*cycles = percpu()->frame_ret_cycles;
+	*count  = percpu()->frame_ret_count;
+	enable_preemption();
+}
 #endif	/* SYSCALL_PROFILE */

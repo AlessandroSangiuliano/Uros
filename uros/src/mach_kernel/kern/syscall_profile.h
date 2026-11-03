@@ -964,6 +964,8 @@ extern uint64_t	syscall_profile_entry_tsc(void);
  * only the per-processor block can hold — see the note above SP_PHASES.
  */
 extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
+extern void	syscall_profile_frame_return_cycles(uint64_t *cycles,
+						    uint64_t *count);
 
 #define	SP_ENTER(n)	syscall_profile_enter(n)
 #define	SP_LEAVE()	syscall_profile_leave()

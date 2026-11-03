@@ -211,4 +211,15 @@ syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count)
 	*cycles = 0;
 	*count  = 0;
 }
+
+/*
+ * And the way out of a call that slept, which x86-64 times in its frame's
+ * tail (#777): not timed here either, and said by the same zero.
+ */
+void
+syscall_profile_frame_return_cycles(uint64_t *cycles, uint64_t *count)
+{
+	*cycles = 0;
+	*count  = 0;
+}
 #endif	/* SYSCALL_PROFILE */
