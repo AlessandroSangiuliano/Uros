@@ -207,6 +207,9 @@ typedef struct {
     unsigned int same_task;
     unsigned int other_task;
     unsigned int other_task_fenced;
+    int		 has_undo;	/* #777: the kernel answered the two below */
+    unsigned int undone_receive;
+    unsigned int undone_return;
 } handoff_snap_t;
 
 static int
@@ -224,6 +227,10 @@ handoff_snap(handoff_snap_t *s)
     s->same_task  = info.same_task;
     s->other_task = info.other_task;
     s->other_task_fenced = info.other_task_fenced;
+    /* #777: a kernel from before the undo answers four fields, and says so. */
+    s->has_undo = (count >= HOST_RPC_HANDOFF_INFO_COUNT);
+    s->undone_receive = s->has_undo ? info.undone_receive : 0;
+    s->undone_return  = s->has_undo ? info.undone_return : 0;
     return 1;
 }
 
@@ -271,6 +278,20 @@ print_handoff_stats(const char *label, int ok,
 	printf("  [-X] %-30s reach %u: %u woken on their waker's "
 	       "processor, %u of another task\n",
 	       label, after->reach, same + other, other);
+
+    /*
+     * #777: the bets of this row that were lost and undone, on a line of its
+     * own so the [-X] line keeps the form the analyses read.  A kernel from
+     * before the undo has nothing to say here, and says nothing.
+     */
+    if (before->has_undo && after->has_undo)
+	printf("  [undo] %-28s %u bet(s) lost and undone: %u at a receive "
+	       "that found a message, %u at a return to user space without a "
+	       "block\n", label,
+	       (after->undone_receive - before->undone_receive) +
+	       (after->undone_return - before->undone_return),
+	       after->undone_receive - before->undone_receive,
+	       after->undone_return - before->undone_return);
 }
 
 /* ===================================================================
