@@ -741,12 +741,13 @@ typedef struct {
 } echo_child_t;
 
 /*
- * 0 when the child's thread is running.  On a failure, says which step under
- * `label' and returns -1, leaving what it took, as bench_inter_rpc() always
- * has.
+ * 0 when the child's thread is running in `entry'.  On a failure, says which
+ * step under `label' and returns -1, leaving what it took, as
+ * bench_inter_rpc() always has.  #777's suites start children of their own
+ * kinds the same way: a consumer, and a server for several clients.
  */
 static int
-echo_child_start(const char *label, echo_child_t *c)
+child_start(const char *label, echo_child_t *c, void (*entry)(void))
 {
     kern_return_t		kr;
     vm_offset_t			child_stack;
@@ -823,7 +824,7 @@ echo_child_start(const char *label, echo_child_t *c)
     kr = thread_create(c->task, &c->thread);
     if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return -1; }
 
-    kr = bench_child_thread_start(c->thread, child_echo_entry,
+    kr = bench_child_thread_start(c->thread, entry,
 				  child_stack + CHILD_STACK_SIZE);
     if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return -1; }
 
@@ -834,6 +835,13 @@ echo_child_start(const char *label, echo_child_t *c)
     if (kr) { printf("  %s: thread_resume failed %d\n", label, kr); return -1; }
 
     return 0;
+}
+
+/* The echo child of inter, isweep and icc. */
+static int
+echo_child_start(const char *label, echo_child_t *c)
+{
+    return child_start(label, c, child_echo_entry);
 }
 
 /*
