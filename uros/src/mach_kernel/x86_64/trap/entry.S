@@ -689,7 +689,57 @@ restart_mach_syscall:
  * said here the first time (tail_off_its_stack) rather than once the stack
  * has grown into memory nothing guards (#780).
  */
+/*
+ * 🔴 THE WAY OUT OF A CALL THAT SLEPT, TIMED AS THE OTHER WAY OUT IS (#777).
+ *
+ * syscall/entry.S times its SYSRET tail from just after thread_return_ast()
+ * to just before the registers are cleared, into the processor's block, and
+ * the profile prints that as the trap's return.  Since #771 a receive that
+ * blocked leaves through here instead, and nothing timed it: on omen's metal
+ * the return counted 16 of every 32 traps, the ones that did not block, and
+ * "31 against 31" said nothing about the path #771 had changed.
+ *
+ * So the same span here, into a sum and count of its own: from this tail's
+ * top -- one jmp after thread_return_ast() in each of the three callers -- to
+ * the RESTORE_REGS of either way, for the frames thread_set_syscall_return()
+ * marked as calls that slept.  Both ends are taken with interrupts off, as
+ * thread_return_ast() leaves them (trap.c), and act_user_return_frame() in
+ * between does not block: it returns, or gives the thread a #GP and never
+ * comes back here, leaving a mark nobody reads.
+ *
+ * ⚠️ Not the same instructions at either end: past both timers this way
+ * loads fifteen registers where the SYSRET one clears six, and counts two
+ * more things.  A few cycles, outside both, and swapgs and sysretq or iretq
+ * outside both as well.
+ */
+	.macro	FRAME_RETURN_MARK
+#if	SYSCALL_PROFILE
+	lfence
+	rdtsc
+	shlq	$32, %rdx
+	orq	%rdx, %rax
+	movq	%rax, %gs:PERCPU_FRAME_RET_MARK
+#endif
+	.endm
+
+	/* %rsp at the frame; %rax and %rdx free: RESTORE_REGS is next. */
+	.macro	FRAME_RETURN_TIMED
+#if	SYSCALL_PROFILE
+	cmpq	$TF_VECTOR_SLEPT, TF_VECTOR(%rsp)
+	jne	1f
+	lfence
+	rdtsc
+	shlq	$32, %rdx
+	orq	%rdx, %rax
+	subq	%gs:PERCPU_FRAME_RET_MARK, %rax
+	addq	%rax, %gs:PERCPU_FRAME_RET_CYC
+	incq	%gs:PERCPU_FRAME_RET_CNT
+1:
+#endif
+	.endm
+
 thread_user_frame_return:
+	FRAME_RETURN_MARK			/* #777: the way out began */
 	cmpq	%gs:PERCPU_KERNEL_STACK, %rsp	/* where each tail puts it (#780) */
 	jne	tail_off_its_stack
 	callq	act_user_return_frame	/* %rax = the frame, iretq-able (#780) */
@@ -740,6 +790,7 @@ thread_user_frame_return:
 	jne	.Lframe_iretq
 	testl	$TF_RFLAGS_IRETQ_ONLY, %edx
 	jnz	.Lframe_iretq
+	FRAME_RETURN_TIMED			/* #777 */
 	RESTORE_REGS
 	/*
 	 * #771: a system call that slept, by the mark thread_set_syscall_return()
@@ -760,6 +811,7 @@ thread_user_frame_return:
 	sysretq
 
 .Lframe_iretq:
+	FRAME_RETURN_TIMED			/* #777 */
 	RESTORE_REGS
 	cmpq	$TF_VECTOR_SLEPT, (%rsp)	/* #771: as on the SYSRET way */
 	jne	.Lframe_iretq_counted
