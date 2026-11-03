@@ -19,7 +19,7 @@ One row per micro-optimization of a hot path: what it took out, where it is, and
 | A thread resumed in its continuation starts with `sti`, and `clac` where SMAP is on, instead of `popfq` | `50e6cf1e` | #777 | `popfq` at the fresh start | None measurable: +2 to +12 ns on the sweep, median +5 | Taken out: `popfq` again |
 | A thread resumed from frames it saved gets its interrupt flag back by `sti` or `cli`, and `clac`, instead of `popfq` | `568bad02` | #777 | `popfq` on every resume of saved frames, which includes the mach_msg hot path's direct switch | None measurable: comb -15 to +8 ns on four samples, sweep +3 to +11 ns | Taken out: `popfq` again |
 
-Measured 03/11/2026, against `220356c7` (arm A), on `feature/777-hand-off-where-the-sender-blocks`.
+Measured 03/11/2026, against `220356c7` (arm A), on `feature/777-hand-off-where-the-sender-blocks`. The first row was measured again the same day in a second session, against both A and the epic at `ccac34fd`: 30-38 ns a round trip across the sweep, and the branch as a whole about 27 ns faster than the epic.
 
 ### What the first row recovered
 
