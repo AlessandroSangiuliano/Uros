@@ -3131,41 +3131,49 @@ bench_tsc(void)
 static unsigned long long	g_tsc_per_us;	/* 0 until measured */
 
 /*
- * The TSC's rate against the clock, over 20 ms, measured once.
+ * The TSC's rate against the clock, measured once: the clock read twice, around
+ * TSC_CAL_TICKS of the TSC spun through -- 20 to 70 ms on the machines measured.
  *
- * ⚠️ A clock that steps back between two readings -- the thread moved to a
- * processor whose reading is a little behind -- makes elapsed_ns() answer
- * nearly 2^64: the first version's loop ended at once, with a rate of 0, under
- * KVM at four processors (03/11).  A step back starts the measurement again, a
- * rate outside 100 MHz to 20 GHz is refused, and a refusal says what it saw.
+ * ⚠️ TWO READINGS OF THE CLOCK, NOT A LOOP OF THEM.  The clock can step back by
+ * a little between two readings on two processors (#318), and elapsed_ns() then
+ * answers nearly 2^64.  The first version polled the clock until 20 ms had gone
+ * and ended at once on such a step, with a rate of 0 (KVM, four processors,
+ * 03/11); the second started again on one, and on omen's metal, at ccac34fd,
+ * met one in each of ten tries.  Two readings tens of milliseconds apart are
+ * not undone by a step of microseconds.  A rate outside 100 MHz to 20 GHz is
+ * still refused, and a refusal says what it saw.
  */
+#define	TSC_CAL_TICKS	(1ULL << 26)
+
 static int
 tsc_calibrate(const char *label)
 {
     tvalspec_t		t0, t1;
-    unsigned long long	c0, c1, ns;
+    unsigned long long	c0, c1;
+    unsigned long	spins;
     long long		d;
     int			tries;
 
     if (g_tsc_per_us != 0)
 	return 0;
-    for (tries = 0; tries < 10; tries++) {
+    for (tries = 0; tries < 3; tries++) {
 	get_time(&t0);
 	c0 = bench_tsc();
-	do {
-	    get_time(&t1);
-	    d = ((long long)t1.tv_sec - (long long)t0.tv_sec) * 1000000000LL +
-		((long long)t1.tv_nsec - (long long)t0.tv_nsec);
-	} while (d >= 0 && d < 20000000LL);
+	/* Bounded: a TSC that stopped must not hold the benchmark for ever. */
+	for (spins = 0; bench_tsc() - c0 < TSC_CAL_TICKS && spins < (1UL << 30);
+	     spins++)
+	    ;
 	c1 = bench_tsc();
-	if (d < 0)
-	    continue;	/* the clock stepped back: again */
-	ns = (unsigned long long)d;
-	g_tsc_per_us = (c1 - c0) * 1000ULL / ns;
-	if (g_tsc_per_us >= 100 && g_tsc_per_us <= 20000)
-	    return 0;
-	printf("  %s: the TSC ran %llu ticks in %llu ns of the clock, %llu a "
-	       "microsecond -- refused\n", label, c1 - c0, ns, g_tsc_per_us);
+	get_time(&t1);
+	d = ((long long)t1.tv_sec - (long long)t0.tv_sec) * 1000000000LL +
+	    ((long long)t1.tv_nsec - (long long)t0.tv_nsec);
+	if (d > 1000000LL) {
+	    g_tsc_per_us = (c1 - c0) * 1000ULL / (unsigned long long)d;
+	    if (g_tsc_per_us >= 100 && g_tsc_per_us <= 20000)
+		return 0;
+	}
+	printf("  %s: the TSC ran %llu ticks in %lld ns of the clock -- "
+	       "refused\n", label, c1 - c0, d);
 	g_tsc_per_us = 0;
     }
     printf("  %s: the TSC's rate could not be measured in %d tries -- not "
