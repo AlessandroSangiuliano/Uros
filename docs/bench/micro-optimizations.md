@@ -16,8 +16,8 @@ One row per micro-optimization of a hot path: what it took out, where it is, and
 | Change | Commit | Issue | Takes out | Saved per round trip | Status |
 | --- | --- | --- | --- | --- | --- |
 | A thread that blocks with a continuation is switched as i386's `Switch_context` does it: nothing saved for it, and its restart reached by a jump | `4966956c` | #777 | The registers saved for a thread whose frames are abandoned, the frame written for it to resume through, and a `ret` into that frame that the processor had seen no call for | **inter: 30-47 ns (85-131 cycles) at every size of the sweep, median 36 ns (100 cycles); intra: 17-42 ns; comb: none (it does not block)** | On the branch |
-| A thread resumed in its continuation starts with `sti`, and `clac` where SMAP is on, instead of `popfq` | `50e6cf1e` | #777 | `popfq` at the fresh start | None measurable: +2 to +12 ns on the sweep, median +5 | To be decided |
-| A thread resumed from frames it saved gets its interrupt flag back by `sti` or `cli`, and `clac`, instead of `popfq` | `568bad02` | #777 | `popfq` on every resume of saved frames, which includes the mach_msg hot path's direct switch | None measurable: comb -15 to +8 ns on four samples, sweep +3 to +11 ns | To be decided |
+| A thread resumed in its continuation starts with `sti`, and `clac` where SMAP is on, instead of `popfq` | `50e6cf1e` | #777 | `popfq` at the fresh start | None measurable: +2 to +12 ns on the sweep, median +5 | Taken out: `popfq` again |
+| A thread resumed from frames it saved gets its interrupt flag back by `sti` or `cli`, and `clac`, instead of `popfq` | `568bad02` | #777 | `popfq` on every resume of saved frames, which includes the mach_msg hot path's direct switch | None measurable: comb -15 to +8 ns on four samples, sweep +3 to +11 ns | Taken out: `popfq` again |
 
 Measured 03/11/2026, against `220356c7` (arm A), on `feature/777-hand-off-where-the-sender-blocks`.
 
