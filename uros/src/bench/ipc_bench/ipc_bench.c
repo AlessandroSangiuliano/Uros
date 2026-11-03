@@ -2070,7 +2070,7 @@ ool_echo_thread_func(void *arg)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -2126,7 +2126,7 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -2150,7 +2150,7 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -2253,7 +2253,7 @@ oolp_echo_thread_func(void *arg)
 	reply.head.msgh_remote_port = msg.head.msgh_remote_port;
 	reply.head.msgh_local_port  = MACH_PORT_NULL;
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
-	mach_msg(&reply.head, MACH_SEND_MSG, sizeof(reply), 0,
+	mach_msg(&reply.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(reply), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     return (void *) 0;
@@ -2355,7 +2355,7 @@ bench_ool_ports(unsigned int nports)
 
     for (i = 0; i < 20u; i++) {
 	OOLP_FILL();
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -2364,7 +2364,7 @@ bench_ool_ports(unsigned int nports)
     get_time(&t0);
     for (i = 0; i < (unsigned int) iters; i++) {
 	OOLP_FILL();
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -2458,7 +2458,7 @@ child_ool_echo_entry(void)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -2546,7 +2546,7 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -2569,7 +2569,7 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
