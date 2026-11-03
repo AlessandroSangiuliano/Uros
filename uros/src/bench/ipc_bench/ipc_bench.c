@@ -3235,6 +3235,22 @@ wait_hist_print(const char *label, const wait_hist_t *h)
 #define	PROD_MSGS	500
 #define	PROD_WORK_US	2000	/* the producer's work between two sends */
 
+/*
+ * 🔑 WHOSE IS A LONG WAIT: THE SCHEDULER'S, OR THE WHOLE MACHINE'S.
+ *
+ * On omen's metal, at the first measurement, a few waits a boot still reached
+ * 2.5 ms with the hand-off out of the way.  A wait the kernel caused leaves the
+ * rest of the machine running; one that stopped every processor -- a system
+ * management interrupt, firmware -- stops a thread spinning elsewhere too.  So
+ * the consumer notes when each wait of a millisecond or more began, and a
+ * thread of this task spins beside the producer noting every gap of 100 us or
+ * more in its own reading of the TSC: a long wait with a gap at the same time
+ * is the machine's.
+ */
+#define	PROD_LONG_MAX	8	/* noted, of each kind */
+#define	PROD_LONG_US	1000
+#define	STALL_GAP_US	100
+
 typedef struct {
     mach_msg_header_t	head;
     unsigned long long	stamp;	/* bench_tsc() at the send */
@@ -3245,6 +3261,10 @@ typedef struct {
 typedef struct {
     mach_msg_header_t	head;
     wait_hist_t		hist;
+    unsigned int	nlong;	/* waits of PROD_LONG_US or more, all of them */
+    unsigned int	pad;
+    unsigned long long	long_at[PROD_LONG_MAX];	/* the send's TSC */
+    unsigned long long	long_us[PROD_LONG_MAX];
 } prod_answer_t;
 
 static void __attribute__((noreturn, used))
@@ -3252,16 +3272,24 @@ child_prod_entry(void)
 {
     struct { prod_msg_t m; char trailer[64]; }	in;
     prod_answer_t				out;
-    wait_hist_t					h;
-    unsigned long long				now;
+    unsigned long long				now, us;
 
-    memset(&h, 0, sizeof h);
+    memset(&out, 0, sizeof out);
     for (;;) {
 	mach_msg(&in.m.head, MACH_RCV_MSG, 0, sizeof(in), CHILD_RECV_NAME,
 		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	now = bench_tsc();
 	if (!in.m.done) {
-	    wait_hist_add(&h, in.m.stamp, now);
+	    wait_hist_add(&out.hist, in.m.stamp, now);
+	    us = (now > in.m.stamp && g_tsc_per_us != 0)
+		? (now - in.m.stamp) / g_tsc_per_us : 0;
+	    if (us >= PROD_LONG_US) {
+		if (out.nlong < PROD_LONG_MAX) {
+		    out.long_at[out.nlong] = in.m.stamp;
+		    out.long_us[out.nlong] = us;
+		}
+		out.nlong++;
+	    }
 	    continue;
 	}
 	out.head.msgh_bits	  = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
@@ -3269,11 +3297,53 @@ child_prod_entry(void)
 	out.head.msgh_remote_port = CHILD_SEND_NAME;
 	out.head.msgh_local_port  = MACH_PORT_NULL;
 	out.head.msgh_id	  = 777;
-	out.hist		  = h;
 	mach_msg(&out.head, MACH_SEND_MSG, sizeof(out), 0, MACH_PORT_NULL,
 		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	memset(&h, 0, sizeof h);
+	memset(&out, 0, sizeof out);
     }
+}
+
+static volatile int		g_stall_stop;
+static unsigned int		g_nstall;	/* gaps seen, all of them */
+static unsigned long long	g_stall_at[PROD_LONG_MAX];
+static unsigned long long	g_stall_us[PROD_LONG_MAX];
+
+/* Spins until told to stop, noting each gap of STALL_GAP_US or more. */
+static void *
+stall_watch_func(void *arg)
+{
+    unsigned long long	last, now, gap = STALL_GAP_US * g_tsc_per_us;
+
+    (void)arg;
+    last = bench_tsc();
+    while (!g_stall_stop) {
+	now = bench_tsc();
+	if (now - last >= gap) {
+	    if (g_nstall < PROD_LONG_MAX) {
+		g_stall_at[g_nstall] = last;
+		g_stall_us[g_nstall] = (now - last) / g_tsc_per_us;
+	    }
+	    g_nstall++;
+	}
+	last = now;
+    }
+    return (void *)0;
+}
+
+/* "N: at +T us for D us, ..." -- times from `t0', the first `n' of `count'. */
+static void
+print_long_list(const char *tag, const char *label, const char *what,
+		unsigned int count, const unsigned long long *at,
+		const unsigned long long *dur, unsigned long long t0)
+{
+    unsigned int	i, n = count < PROD_LONG_MAX ? count : PROD_LONG_MAX;
+
+    printf("  [%s] %-28s %u %s", tag, label, count, what);
+    for (i = 0; i < n; i++)
+	printf("%s at +%llu us for %llu us", i ? "," : ":",
+	       (at[i] > t0 && g_tsc_per_us != 0) ? (at[i] - t0) / g_tsc_per_us : 0,
+	       dur[i]);
+    printf("\n");
 }
 
 static void
@@ -3301,7 +3371,8 @@ bench_producer(void)
     struct { prod_answer_t a; char trailer[64]; }	ans;
     handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
     int			ho_ok = 0, i, round;
-    unsigned long long	t;
+    unsigned long long	t, t0 = 0;
+    pthread_t		watch;
 
     if (tsc_calibrate(label) != 0)
 	return;
@@ -3313,16 +3384,24 @@ bench_producer(void)
     for (round = 0; round < 2; round++) {
 	int	msgs = round == 0 ? 20 : PROD_MSGS;
 
-	if (round == 1)
+	if (round == 1) {
+	    g_stall_stop = 0;
+	    g_nstall = 0;
+	    pthread_create(&watch, NULL, stall_watch_func, NULL);
 	    ho_ok = handoff_snap(&ho_before);
+	    t0 = bench_tsc();
+	}
 	for (i = 0; i < msgs; i++) {
 	    prod_send(&c, 0);
 	    t = bench_tsc();
 	    while (bench_tsc() - t < PROD_WORK_US * g_tsc_per_us)
 		;
 	}
-	if (round == 1)
+	if (round == 1) {
 	    ho_ok &= handoff_snap(&ho_after);
+	    g_stall_stop = 1;
+	    pthread_join(watch, NULL);
+	}
 	prod_send(&c, 1);
 	mach_msg(&ans.a.head, MACH_RCV_MSG, 0, sizeof(ans), c.to_parent,
 		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -3331,6 +3410,10 @@ bench_producer(void)
     printf("  %s   %d messages to a consumer in a task of its own\n",
 	   label, PROD_MSGS);
     wait_hist_print(label, &ans.a.hist);
+    print_long_list("long", label, "wait(s) of 1 ms or more", ans.a.nlong,
+		    ans.a.long_at, ans.a.long_us, t0);
+    print_long_list("stall", label, "gap(s) of 100 us or more on a thread "
+		    "spinning beside it", g_nstall, g_stall_at, g_stall_us, t0);
     print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
     echo_child_stop(&c);
 }
