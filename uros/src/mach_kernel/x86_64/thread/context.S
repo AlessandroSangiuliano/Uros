@@ -76,7 +76,7 @@ context_switch_to:
 	 * from that thread reached ipi_call_others() and panicked, three
 	 * subsystems away from the switch that disarmed it.
 	 *
-	 * Pushed first so it lies immediately below the return address, read
+	 * Pushed first so it lies immediately below the return address, popped
 	 * last so it is restored with everything else already in place.
 	 */
 	pushfq
@@ -97,60 +97,14 @@ context_switch_to:
 	popq	%r12
 	popq	%rbx
 	popq	%rbp
-	/*
-	 * 🔴 THE FLAG IT SAVED, BY CLI OR STI, NOT BY POPFQ (#777).
-	 *
-	 * Of the word pushfq saved, IF is the thread's own and is put back as
-	 * it was, by the instruction that sets it or the one that clears it;
-	 * AC is cleared, as at the fresh start below and for its reason --
-	 * clear at every switch today, and the switch not depending on that --
-	 * which is also what the saved word holds: a thread that switches away
-	 * inside a copy's window does it from a handler trap_dispatch() has
-	 * already closed the window for, and the iretq at the end of that
-	 * handler reopens it from the frame the gate pushed.  DF is clear by
-	 * the ABI, and TF is the debugger's, as below.  popfq was microcode on
-	 * every switch that resumed saved frames: the mach_msg hot path's
-	 * direct switch, a preemption, any block without a continuation.
-	 *
-	 * The cmpl goes first because it sets the flags the test reads; lea
-	 * moves %rsp past the word without touching them.
-	 */
-	cmpl	$0, pmap_smap_on(%rip)
-	je	3f
-	clac
-3:
-	testl	$0x200, (%rsp)		/* RFLAGS.IF, as it switched away */
-	leaq	8(%rsp), %rsp
-	jz	4f
-	sti
-	ret
-4:
-	cli
+	popfq
 	ret
 2:
 	/*
 	 * A start at the top, where a fresh frame used to be popped: the two
 	 * words it left there, a zero frame pointer and a zero return address
 	 * where a backtrace stops, and the flags it carried, CTX_RFLAGS_INITIAL
-	 * (context.c) -- interrupts on, and nothing else set.
-	 *
-	 * 🔴 BY STI AND CLAC, NOT BY POPFQ, AND CLAC IS NOT OPTIONAL (#777).
-	 *
-	 * popfq is microcode, and of the flags it loaded here only three are
-	 * the processor's to keep across a call and so not already what the
-	 * ABI says.  IF, which sti sets.  AC, which copyin() and copyout() set
-	 * around their window (pmap_user_access_begin(), pmap.h) and ring 3
-	 * may set for itself, and which a gate does not clear (Intel SDM Vol.
-	 * 3A, 253668-093US, 7.12.1.3; only FRED's delivery does, 8.3.5).
-	 * Today it is clear at every switch -- trap_dispatch() clears it first
-	 * (#468, #792), a syscall's FMASK does, and no copy blocks inside its
-	 * window -- and it is cleared here all the same: a start that is right
-	 * only while three files elsewhere stay right would, the day one of
-	 * them changed, run a thread with SMAP's check off for every kernel
-	 * access until its next copy.  And TF, set only while the debugger
-	 * steps an instruction, which is the debugger's to clear.  DF is clear
-	 * at every call by the ABI.  clac exists only where SMAP does, and
-	 * pmap_smap_on says so, as it does for the copies.
+	 * (context.c), interrupts on.
 	 */
 	leaq	-16(%rdx), %rsp		/* its own stack, from the top */
 	movq	$0, 8(%rsp)
@@ -158,11 +112,8 @@ context_switch_to:
 	xorl	%ebp, %ebp
 	movq	%rcx, %r13		/* context_thread_start's entry ... */
 	xorl	%r12d, %r12d		/* ... and its argument */
-	cmpl	$0, pmap_smap_on(%rip)
-	je	3f
-	clac
-3:
-	sti
+	pushq	$0x202			/* CTX_RFLAGS_INITIAL */
+	popfq
 	jmp	context_thread_start
 
 /*
