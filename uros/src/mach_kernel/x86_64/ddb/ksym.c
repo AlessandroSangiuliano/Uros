@@ -46,7 +46,7 @@ struct elf64_sym {
  * typed STT_FUNC — is wrong. A compiler emits that type; an assembler does
  * not, unless the source says `.type` by hand. So requiring it silently
  * excludes every hand-written entry point: the trap stubs, syscall_entry,
- * context_switch_raw, the halt the boot ends on. Precisely the code a
+ * context_switch_to, the halt the boot ends on. Precisely the code a
  * backtrace is most needed for, and precisely the code least likely to have
  * remembered a directive.
  *

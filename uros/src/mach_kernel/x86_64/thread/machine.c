@@ -212,8 +212,8 @@ act_machine_switch_pcb(thread_act_t thr_act)
  */
 /*
  * Where a thread that has never run begins -- and, since #771, where a thread
- * switched to with a continuation begins again, from the frame
- * context_reset_to_continuation() built at the top of its stack.
+ * switched to with a continuation begins again, at the top of its stack: since
+ * #777 by context_switch_to()'s jump, with no frame built for it (context.S).
  *
  * context_init() can only place a function and one argument, and the argument
  * a new thread needs -- which thread it took the processor from -- is not
@@ -242,8 +242,9 @@ thread_begin_trampoline(void *unused)
 	 * new thread starts from carries CTX_RFLAGS_INITIAL, IF set.  From then
 	 * on every thread arrived here with interrupts on, before the dispatch,
 	 * and the sti had nothing left to do; since #771 so does every thread
-	 * resumed in its continuation, whose frame is built the same way, once
-	 * per receive that slept.  The dispatch runs with interrupts on, as it
+	 * resumed in its continuation, once per receive that slept -- since
+	 * #777 with no frame, the start loading the same constant (context.S's
+	 * context_switch_to()).  The dispatch runs with interrupts on, as it
 	 * does after every other switch: a thread resumed in place returns into
 	 * thread_invoke() with the flag it blocked with and dispatches there.
 	 *
@@ -256,9 +257,9 @@ thread_begin_trampoline(void *unused)
 #if	MACH_ASSERT
 	if (!interrupts_enabled())
 		panic("thread %p arrived in the trampoline with interrupts off: the "
-		      "frame the switch popped did not carry IF, which "
-		      "CTX_RFLAGS_INITIAL sets for a thread that has never run and "
-		      "for one reset to its continuation (#455, #771)",
+		      "switch did not set IF, which CTX_RFLAGS_INITIAL carries for "
+		      "a thread that has never run and for one resumed in its "
+		      "continuation (#455, #771, #777)",
 		      current_thread());
 #endif	/* MACH_ASSERT */
 
@@ -1051,13 +1052,14 @@ void fpu_area_free(void *area)
  *
  * 🔴 `continuation' is honoured now (#771).  A non-null one means the
  * outgoing thread blocked declaring it does not need its kernel stack kept:
- * its resume point is reset to the top of its stack, in thread_continue, and
- * the frames it is running in now are abandoned.  It used to be `(void)'d,
- * and the thread resumed by returning through those frames, on the stack it
- * blocked on -- so the continuation was never run and no stack could ever be
- * given up, which #772 (stack hand-off) needs.  The reset keeps the thread's
- * floating-point area, which still holds its live user state (its save is
- * below, before the switch); only the kernel register-save frame is rebuilt.
+ * it resumes at the top of its stack, in thread_continue, and the frames it is
+ * running in now are abandoned.  It used to be `(void)'d, and the thread
+ * resumed by returning through those frames, on the stack it blocked on -- so
+ * the continuation was never run and no stack could ever be given up, which
+ * #772 (stack hand-off) needed.  Its floating-point area is kept, since it
+ * still holds the live user state (its save is below, before the switch);
+ * since #777 nothing else of the thread is written -- no registers, no frame
+ * -- as i386's Switch_context writes nothing for one (cswitch.S).
  */
 thread_t
 switch_context(thread_t old, void (*continuation)(void), thread_t new)
@@ -1189,15 +1191,15 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	if (continuation != 0) {
 		/*
 		 * The outgoing thread needs none of the frames it blocked in:
-		 * reset its resume point to the top of its stack, then switch
-		 * away abandoning them (#771).  It keeps the stack itself --
-		 * giving that up is #772's.  thread_begin_trampoline ends in
-		 * thread_continue(), which runs the continuation.
+		 * switch away abandoning them, with nothing saved, and it
+		 * starts again at the top of its stack (#771, #777).  It keeps
+		 * the stack itself -- giving that up was #772's.
+		 * thread_begin_trampoline ends in thread_continue(), which runs
+		 * the continuation.
 		 */
-		context_reset_to_continuation(&old_act->mact.pcb->ctx,
-					      thread_begin_trampoline);
 		context_switch_continuation(&old_act->mact.pcb->ctx,
-					    &new_act->mact.pcb->ctx);
+					    &new_act->mact.pcb->ctx,
+					    thread_begin_trampoline);
 	} else
 		context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
 

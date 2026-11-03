@@ -12,7 +12,8 @@
 	.code64
 
 /*
- * context_switch_raw(uint64_t *old_rsp, uint64_t fresh_rsp)
+ * context_switch_to(uint64_t *old_rsp, uint64_t fresh_rsp,
+ *		     uint64_t fresh_stack, void (*fresh_entry)(void *))
  *
  * Six pushes, one store, one load, six pops, and a return that goes
  * somewhere else.  The instruction that makes it a switch rather than a
@@ -24,10 +25,36 @@
  * them out, and the three must be read together — a thread that has
  * never run is resumed by exactly this code, so its stack has to be a
  * forgery good enough to fool it.
+ *
+ * 🔴 AND BOTH HALVES OPTIONAL, AS i386 HAS THEM FOR A CONTINUATION (#777).
+ *
+ * i386's Switch_context (i386/cswitch.S) saves nothing for a thread that
+ * blocks with a continuation and resumes every thread with a jump; this was
+ * context_switch_raw(), which always saved and always returned:
+ *
+ *   - old_rsp 0: the outgoing thread blocked with a continuation, and nothing
+ *     of it is saved -- not its registers, not a frame.  It will start again
+ *     at the top of its stack, and the frames it is running in now are given
+ *     up.  Since #771 it saved the registers it abandoned, and a frame was
+ *     written for it to come back through, every time a receive blocked;
+ *   - fresh_rsp 0: the incoming thread resumes in its continuation, so it has
+ *     no frame to pop.  It starts at the top of its stack, fresh_stack, in
+ *     fresh_entry(0) by way of context_thread_start -- reached by a jump, as
+ *     i386 reaches Thread_continue.  Since #771 it was reached by a `ret`
+ *     into the frame built for it: a return the processor had seen no call
+ *     for, where every other return after a switch goes to where both
+ *     threads called from.  On omen's metal that switch cost 40-47 TSC
+ *     cycles more than before #771.
+ *
+ * ⚠️ One routine with both, called from one place (context_switch_body()),
+ * for the returns that remain: a thread resumed from frames it saved returns
+ * to that one call site, which is where the outgoing thread called from too.
  */
-	.globl	context_switch_raw
+	.globl	context_switch_to
 	.align	16
-context_switch_raw:
+context_switch_to:
+	testq	%rdi, %rdi
+	jz	1f
 	/*
 	 * 🔥 RFLAGS FIRST, AND IT IS THE INTERRUPT FLAG THAT MATTERS.
 	 *
@@ -57,10 +84,11 @@ context_switch_raw:
 	pushq	%r13
 	pushq	%r14
 	pushq	%r15
-
 	movq	%rsp, (%rdi)		/* the old thread is now this word */
+1:
+	testq	%rsi, %rsi
+	jz	2f
 	movq	%rsi, %rsp		/* and from here we are the new one */
-
 	popq	%r15
 	popq	%r14
 	popq	%r13
@@ -69,12 +97,29 @@ context_switch_raw:
 	popq	%rbp
 	popfq
 	ret
+2:
+	/*
+	 * A start at the top, where a fresh frame used to be popped: the two
+	 * words it left there, a zero frame pointer and a zero return address
+	 * where a backtrace stops, and the flags it carried, CTX_RFLAGS_INITIAL
+	 * (context.c), interrupts on.
+	 */
+	leaq	-16(%rdx), %rsp		/* its own stack, from the top */
+	movq	$0, 8(%rsp)
+	movq	$0, (%rsp)
+	xorl	%ebp, %ebp
+	movq	%rcx, %r13		/* context_thread_start's entry ... */
+	xorl	%r12d, %r12d		/* ... and its argument */
+	pushq	$0x202			/* CTX_RFLAGS_INITIAL */
+	popfq
+	jmp	context_thread_start
 
 /*
  * Where a thread that has never run begins.
  *
- * It is reached by the `ret` above, from a frame context_init() wrote — so
- * it is not called, and there is no caller to return to.  What would be the
+ * It is reached by the `ret` above, from a frame context_init() wrote, or by
+ * the jump above for a thread resuming in its continuation (#777) — so it is
+ * not called, and there is no caller to return to.  What would be the
  * return address is a deliberate zero, which is what stops a backtrace here
  * rather than letting it walk into whatever the stack held before.
  *
