@@ -76,7 +76,7 @@ context_switch_to:
 	 * from that thread reached ipi_call_others() and panicked, three
 	 * subsystems away from the switch that disarmed it.
 	 *
-	 * Pushed first so it lies immediately below the return address, popped
+	 * Pushed first so it lies immediately below the return address, read
 	 * last so it is restored with everything else already in place.
 	 */
 	pushfq
@@ -97,7 +97,35 @@ context_switch_to:
 	popq	%r12
 	popq	%rbx
 	popq	%rbp
-	popfq
+	/*
+	 * 🔴 THE FLAG IT SAVED, BY CLI OR STI, NOT BY POPFQ (#777).
+	 *
+	 * Of the word pushfq saved, IF is the thread's own and is put back as
+	 * it was, by the instruction that sets it or the one that clears it;
+	 * AC is cleared, as at the fresh start below and for its reason --
+	 * clear at every switch today, and the switch not depending on that --
+	 * which is also what the saved word holds: a thread that switches away
+	 * inside a copy's window does it from a handler trap_dispatch() has
+	 * already closed the window for, and the iretq at the end of that
+	 * handler reopens it from the frame the gate pushed.  DF is clear by
+	 * the ABI, and TF is the debugger's, as below.  popfq was microcode on
+	 * every switch that resumed saved frames: the mach_msg hot path's
+	 * direct switch, a preemption, any block without a continuation.
+	 *
+	 * The cmpl goes first because it sets the flags the test reads; lea
+	 * moves %rsp past the word without touching them.
+	 */
+	cmpl	$0, pmap_smap_on(%rip)
+	je	3f
+	clac
+3:
+	testl	$0x200, (%rsp)		/* RFLAGS.IF, as it switched away */
+	leaq	8(%rsp), %rsp
+	jz	4f
+	sti
+	ret
+4:
+	cli
 	ret
 2:
 	/*
