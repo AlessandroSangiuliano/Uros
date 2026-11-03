@@ -2717,6 +2717,7 @@ bench_mach_print(int iters)
  *   inter    — inter-task Mach IPC RPC
  *   isweep   — inter-task RPC swept by size, repeated within one boot (#446)
  *   icc      — concurrent inter-task RPC, 1, 2 and 4 pairs, repeated (#446)
+ *   prod     — a producer that does not wait, to a consumer in a task of its own (#777)
  *   forkrace — concurrent task_create/task_terminate, no IPC (#558)
  *   port     — port alloc/destroy, mach_port_names
  *   pp       — protected payload (test + intra + inter)
@@ -2747,10 +2748,12 @@ bench_mach_print(int iters)
 #define SUITE_ISWEEP	(1u << 16)	/* inter-task RPC by size, repeated (#446) */
 #define SUITE_FORKRACE	(1u << 17)	/* concurrent task_create/terminate (#558) */
 #define SUITE_ICC	(1u << 18)	/* concurrent inter-task RPC (#446) */
+#define SUITE_PROD	(1u << 19)	/* a producer that does not wait (#777) */
 
 /*
  *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME, and so is
- *	`icc' (#446), which creates child tasks per run for the same reason.
+ *	`icc' (#446), which creates child tasks per run for the same reason,
+ *	and so is #777's `prod', which does too.
  *
  *	It answers one question, it creates a child task per measurement, and
  *	it prints a block that is read as a picture rather than as a row in
@@ -2759,7 +2762,8 @@ bench_mach_print(int iters)
  *	compared against those runs.  Naming it in `suites NOT run' is the
  *	honest form: it says the suite exists and did not run.
  */
-#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC)
+#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC \
+			 & ~SUITE_PROD)
 
 static int
 streq(const char *a, const char *b)
@@ -2793,6 +2797,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
 	else if (streq(argv[i], "icc"))	    mask |= SUITE_ICC;
+	else if (streq(argv[i], "prod"))    mask |= SUITE_PROD;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
 	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
@@ -3081,6 +3086,204 @@ bench_concurrent_intertask(int n, int iters_per_thread)
 
     for (i = 0; i < n; i++)
 	echo_child_stop(&w[i].child);
+}
+
+/* ===================================================================
+ * Senders that do not block (#777)
+ *
+ * Every sender in the suites above blocks right after it sends, which is the
+ * case the hand-off on block (-X) was made for.  #777 makes the hand-off happen
+ * only where the kernel knows the sender blocks, and this suite is a case that
+ * change makes a difference to -- a sender that does NOT block next:
+ *
+ *   prod  a producer that sends a message, works PROD_WORK_US without
+ *	   blocking, and sends the next: a plain send, no option bit.  Where
+ *	   every send bets on a block (-X before #777), the consumer it wakes is
+ *	   queued behind it on its processor until a tick, a quantum, or a full
+ *	   queue makes the producer stop.
+ *
+ * It says how long the woken thread waited -- the consumer from a message's
+ * send to its receive -- in TSC ticks, turned into microseconds by a rate this
+ * task measures against the clock first.  #777's
+ * question is how many of those waits reach a millisecond.  The child is
+ * created after the measurement, so its copy of this memory holds the rate:
+ * it may not call MIG, and does not need to.
+ * =================================================================== */
+
+static inline unsigned long long
+bench_tsc(void)
+{
+    unsigned int	lo, hi;
+
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
+static unsigned long long	g_tsc_per_us;	/* 0 until measured */
+
+/* The TSC's rate against the clock, over 20 ms, measured once. */
+static int
+tsc_calibrate(void)
+{
+    tvalspec_t		t0, t1;
+    unsigned long long	c0, c1, ns;
+
+    if (g_tsc_per_us != 0)
+	return 0;
+    get_time(&t0);
+    c0 = bench_tsc();
+    do {
+	get_time(&t1);
+	ns = elapsed_ns(&t0, &t1);
+    } while (ns < 20000000ULL);
+    c1 = bench_tsc();
+    g_tsc_per_us = (c1 - c0) * 1000ULL / ns;
+    return g_tsc_per_us != 0 ? 0 : -1;
+}
+
+/* How long woken threads waited, by decade of microseconds. */
+#define	WAIT_BUCKETS	5	/* < 10 us, < 100 us, < 1 ms, < 10 ms, more */
+
+typedef struct {
+    unsigned int	n;
+    unsigned int	bucket[WAIT_BUCKETS];
+    unsigned long long	max_us;
+} wait_hist_t;
+
+/*
+ * `from' and `to' may be read on two processors.  Their TSCs run together on
+ * every machine this measures, but a reading that comes out before the stamp
+ * is counted as no wait rather than as an unsigned wrap.
+ */
+static void
+wait_hist_add(wait_hist_t *h, unsigned long long from, unsigned long long to)
+{
+    unsigned long long	us;
+    int			b;
+
+    us = (to > from && g_tsc_per_us != 0) ? (to - from) / g_tsc_per_us : 0;
+    b = us < 10 ? 0 : us < 100 ? 1 : us < 1000 ? 2 : us < 10000 ? 3 : 4;
+    h->n++;
+    h->bucket[b]++;
+    if (us > h->max_us)
+	h->max_us = us;
+}
+
+static void
+wait_hist_print(const char *label, const wait_hist_t *h)
+{
+    printf("  [wait] %-28s %u: %u under 10 us, %u under 100 us, %u under "
+	   "1 ms, %u under 10 ms, %u longer; max %llu us; %u of 1 ms or more\n",
+	   label, h->n, h->bucket[0], h->bucket[1], h->bucket[2], h->bucket[3],
+	   h->bucket[4], h->max_us, h->bucket[3] + h->bucket[4]);
+}
+
+/* ---- prod: a producer that does not wait ---- */
+
+#define	PROD_MSGS	500
+#define	PROD_WORK_US	2000	/* the producer's work between two sends */
+
+typedef struct {
+    mach_msg_header_t	head;
+    unsigned long long	stamp;	/* bench_tsc() at the send */
+    unsigned int	done;	/* 1: answer the histogram, start a new one */
+    unsigned int	pad;
+} prod_msg_t;
+
+typedef struct {
+    mach_msg_header_t	head;
+    wait_hist_t		hist;
+} prod_answer_t;
+
+static void __attribute__((noreturn, used))
+child_prod_entry(void)
+{
+    struct { prod_msg_t m; char trailer[64]; }	in;
+    prod_answer_t				out;
+    wait_hist_t					h;
+    unsigned long long				now;
+
+    memset(&h, 0, sizeof h);
+    for (;;) {
+	mach_msg(&in.m.head, MACH_RCV_MSG, 0, sizeof(in), CHILD_RECV_NAME,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	now = bench_tsc();
+	if (!in.m.done) {
+	    wait_hist_add(&h, in.m.stamp, now);
+	    continue;
+	}
+	out.head.msgh_bits	  = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	out.head.msgh_size	  = sizeof(out);
+	out.head.msgh_remote_port = CHILD_SEND_NAME;
+	out.head.msgh_local_port  = MACH_PORT_NULL;
+	out.head.msgh_id	  = 777;
+	out.hist		  = h;
+	mach_msg(&out.head, MACH_SEND_MSG, sizeof(out), 0, MACH_PORT_NULL,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	memset(&h, 0, sizeof h);
+    }
+}
+
+static void
+prod_send(echo_child_t *c, unsigned int done)
+{
+    prod_msg_t	m;
+
+    m.head.msgh_bits	    = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.head.msgh_size	    = sizeof(m);
+    m.head.msgh_remote_port = c->to_child;
+    m.head.msgh_local_port  = MACH_PORT_NULL;
+    m.head.msgh_id	    = 1;
+    m.done		    = done;
+    m.pad		    = 0;
+    m.stamp		    = bench_tsc();
+    mach_msg(&m.head, MACH_SEND_MSG, sizeof(m), 0, MACH_PORT_NULL,
+	     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static void
+bench_producer(void)
+{
+    const char		*label = "producer, 2 ms between sends";
+    echo_child_t	c;
+    struct { prod_answer_t a; char trailer[64]; }	ans;
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok = 0, i, round;
+    unsigned long long	t;
+
+    if (tsc_calibrate() != 0) {
+	printf("  %s: the TSC's rate could not be measured -- not measured\n",
+	       label);
+	return;
+    }
+    if (child_start(label, &c, child_prod_entry) != 0)
+	return;
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    /* Round 0 warms the pair up and its answer is thrown away. */
+    for (round = 0; round < 2; round++) {
+	int	msgs = round == 0 ? 20 : PROD_MSGS;
+
+	if (round == 1)
+	    ho_ok = handoff_snap(&ho_before);
+	for (i = 0; i < msgs; i++) {
+	    prod_send(&c, 0);
+	    t = bench_tsc();
+	    while (bench_tsc() - t < PROD_WORK_US * g_tsc_per_us)
+		;
+	}
+	if (round == 1)
+	    ho_ok &= handoff_snap(&ho_after);
+	prod_send(&c, 1);
+	mach_msg(&ans.a.head, MACH_RCV_MSG, 0, sizeof(ans), c.to_parent,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    printf("  %s   %d messages to a consumer in a task of its own\n",
+	   label, PROD_MSGS);
+    wait_hist_print(label, &ans.a.hist);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
+    echo_child_stop(&c);
 }
 
 /*
@@ -3423,7 +3626,7 @@ main(int argc, char **argv)
 	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
 	    { SUITE_ISWEEP,  "isweep" }, { SUITE_FORKRACE, "forkrace" },
-	    { SUITE_ICC,     "icc" },
+	    { SUITE_ICC,     "icc" },     { SUITE_PROD,    "prod" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -3628,6 +3831,16 @@ main(int argc, char **argv)
 	    bench_concurrent_intertask(4, BENCH_ITERS);
 	}
 
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Senders that do not block next: a producer, and a server with
+     * requests queued [#777]
+     * --------------------------------------------------------- */
+    if (suites & SUITE_PROD) {
+	printf("--- Producer that does not wait (#777) ---\n");
+	bench_producer();
 	printf("\n");
     }
 
