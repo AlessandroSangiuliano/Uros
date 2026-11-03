@@ -15,10 +15,12 @@
  * context_switch_to(uint64_t *old_rsp, uint64_t fresh_rsp,
  *		     uint64_t fresh_stack, void (*fresh_entry)(void *))
  *
- * Six pushes, one store, one load, six pops, and a return that goes
- * somewhere else.  The instruction that makes it a switch rather than a
- * call is the load: after it, the values popped belong to a different
- * thread and the return address is wherever that thread stopped.
+ * Seven pushes, one store, one load, seven pops -- RFLAGS and the six
+ * callee-saved registers each way -- and a return that goes somewhere
+ * else (#793: it said six since RFLAGS joined the frame).  The instruction
+ * that makes it a switch rather than a call is the load: after it, the
+ * values popped belong to a different thread and the return address is
+ * wherever that thread stopped.
  *
  * The registers are pushed in the order CTX_R15..CTX_RETURN in
  * <thread/context.h> name them and the initial frame in context_init() lays
@@ -108,18 +110,19 @@ context_switch_to:
 	 *
 	 * popfq is microcode, and of the flags it loaded here only three are
 	 * the processor's to keep across a call and so not already what the
-	 * ABI says: IF, which sti sets; AC, which copyin() and copyout() set
-	 * around their window (pmap_user_access_begin(), pmap.h), and which
-	 * ring 3 may set for itself -- an interrupt or a fault through the IDT
-	 * does not clear it on the way into the handler (Intel SDM Vol. 3A,
-	 * 253668-093US, 7.12.1.3: TF, VM, RF, NT, and IF through an interrupt
-	 * gate; only FRED's delivery clears AC, 8.3.5), so the outgoing thread
-	 * may switch away with it set, and a thread starting here with it set
-	 * would run with SMAP's check off for every kernel access until its
-	 * next copy; and TF, set only while the debugger steps an
-	 * instruction, which is the debugger's to clear.  DF is clear at every
-	 * call by the ABI.  clac exists only where SMAP does, and pmap_smap_on
-	 * says so, as it does for the copies.
+	 * ABI says.  IF, which sti sets.  AC, which copyin() and copyout() set
+	 * around their window (pmap_user_access_begin(), pmap.h) and ring 3
+	 * may set for itself, and which a gate does not clear (Intel SDM Vol.
+	 * 3A, 253668-093US, 7.12.1.3; only FRED's delivery does, 8.3.5).
+	 * Today it is clear at every switch -- trap_dispatch() clears it first
+	 * (#468, #792), a syscall's FMASK does, and no copy blocks inside its
+	 * window -- and it is cleared here all the same: a start that is right
+	 * only while three files elsewhere stay right would, the day one of
+	 * them changed, run a thread with SMAP's check off for every kernel
+	 * access until its next copy.  And TF, set only while the debugger
+	 * steps an instruction, which is the debugger's to clear.  DF is clear
+	 * at every call by the ABI.  clac exists only where SMAP does, and
+	 * pmap_smap_on says so, as it does for the copies.
 	 */
 	leaq	-16(%rdx), %rsp		/* its own stack, from the top */
 	movq	$0, 8(%rsp)
