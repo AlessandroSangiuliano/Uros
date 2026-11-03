@@ -765,8 +765,10 @@ thread_user_frame_return:
 	 *   - rip is canonical, asked again HERE, with interrupts off: on Intel
 	 *     a SYSRET to a non-canonical rip faults in ring 0 on the user's
 	 *     stack (CVE-2012-0217), so the check that makes it safe is the
-	 *     one next to it, not act_user_return_frame()'s, which ran with
-	 *     interrupts on.
+	 *     one next to it, not act_user_return_frame()'s a call earlier --
+	 *     which runs with interrupts off as well, as thread_return_ast()
+	 *     leaves them (trap.c), and is simply not the instruction that
+	 *     would fault.
 	 *
 	 * Anything else is an iretq, as before.  The registers are read here
 	 * for the decision only: RESTORE_REGS loads all fifteen either way.
