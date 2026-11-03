@@ -290,11 +290,19 @@ struct host_rpc_handoff_info {
 	unsigned int	same_task;	/* woken threads of the waker's task */
 	unsigned int	other_task;	/* woken threads of another task */
 	unsigned int	other_task_fenced; /* of another task, kept out */
+	/*
+	 * #777: the bets lost and undone, by where it showed.  Appended, so a
+	 * caller that asks for the four above (HOST_RPC_HANDOFF_INFO_COUNT_446)
+	 * still gets them, and the count it is handed back says which it got.
+	 */
+	unsigned int	undone_receive;	/* a receive that found a message */
+	unsigned int	undone_return;	/* a return to user space unblocked */
 };
 
 typedef struct host_rpc_handoff_info	host_rpc_handoff_info_data_t;
 typedef struct host_rpc_handoff_info	*host_rpc_handoff_info_t;
 #define HOST_RPC_HANDOFF_INFO_COUNT \
 		(sizeof(host_rpc_handoff_info_data_t)/sizeof(integer_t))
+#define HOST_RPC_HANDOFF_INFO_COUNT_446	4	/* the fields before #777 */
 
 #endif	/* _MACH_HOST_INFO_H_ */
