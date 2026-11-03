@@ -2718,6 +2718,7 @@ bench_mach_print(int iters)
  *   isweep   — inter-task RPC swept by size, repeated within one boot (#446)
  *   icc      — concurrent inter-task RPC, 1, 2 and 4 pairs, repeated (#446)
  *   prod     — a producer that does not wait, to a consumer in a task of its own (#777)
+ *   srvq     — a server with requests queued, 2 and 4 clients (#777)
  *   forkrace — concurrent task_create/task_terminate, no IPC (#558)
  *   port     — port alloc/destroy, mach_port_names
  *   pp       — protected payload (test + intra + inter)
@@ -2749,11 +2750,12 @@ bench_mach_print(int iters)
 #define SUITE_FORKRACE	(1u << 17)	/* concurrent task_create/terminate (#558) */
 #define SUITE_ICC	(1u << 18)	/* concurrent inter-task RPC (#446) */
 #define SUITE_PROD	(1u << 19)	/* a producer that does not wait (#777) */
+#define SUITE_SRVQ	(1u << 20)	/* a server with requests queued (#777) */
 
 /*
  *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME, and so is
  *	`icc' (#446), which creates child tasks per run for the same reason,
- *	and so is #777's `prod', which does too.
+ *	and so are #777's `prod' and `srvq', which do too.
  *
  *	It answers one question, it creates a child task per measurement, and
  *	it prints a block that is read as a picture rather than as a row in
@@ -2763,7 +2765,7 @@ bench_mach_print(int iters)
  *	honest form: it says the suite exists and did not run.
  */
 #define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC \
-			 & ~SUITE_PROD)
+			 & ~SUITE_PROD & ~SUITE_SRVQ)
 
 static int
 streq(const char *a, const char *b)
@@ -2798,6 +2800,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
 	else if (streq(argv[i], "icc"))	    mask |= SUITE_ICC;
 	else if (streq(argv[i], "prod"))    mask |= SUITE_PROD;
+	else if (streq(argv[i], "srvq"))    mask |= SUITE_SRVQ;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
 	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
@@ -3093,21 +3096,27 @@ bench_concurrent_intertask(int n, int iters_per_thread)
  *
  * Every sender in the suites above blocks right after it sends, which is the
  * case the hand-off on block (-X) was made for.  #777 makes the hand-off happen
- * only where the kernel knows the sender blocks, and this suite is a case that
- * change makes a difference to -- a sender that does NOT block next:
+ * only where the kernel knows the sender blocks, and these two suites are the
+ * cases that change makes a difference to -- a sender that does NOT block next:
  *
  *   prod  a producer that sends a message, works PROD_WORK_US without
  *	   blocking, and sends the next: a plain send, no option bit.  Where
  *	   every send bets on a block (-X before #777), the consumer it wakes is
  *	   queued behind it on its processor until a tick, a quantum, or a full
  *	   queue makes the producer stop.
+ *   srvq  a server with requests queued: several clients, each in an RPC of
+ *	   its own (the send and the receive of the reply in one call, as MIG's
+ *	   stubs make it), to one server whose reply and next receive are one
+ *	   call (as mach_msg_server() makes it).  With a request already queued
+ *	   the server's reply does not block, and the client it answers must not
+ *	   wait behind it.
  *
- * It says how long the woken thread waited -- the consumer from a message's
- * send to its receive -- in TSC ticks, turned into microseconds by a rate this
- * task measures against the clock first.  #777's
- * question is how many of those waits reach a millisecond.  The child is
- * created after the measurement, so its copy of this memory holds the rate:
- * it may not call MIG, and does not need to.
+ * Both say how long the woken thread waited -- the consumer from a message's
+ * send to its receive, a client a whole round trip -- in TSC ticks, turned into
+ * microseconds by a rate this task measures against the clock first.  #777's
+ * question is how many of those waits reach a millisecond.  The children are
+ * created after the measurement, so their copy of this memory holds the rate:
+ * they may not call MIG, and do not need to.
  * =================================================================== */
 
 static inline unsigned long long
@@ -3167,6 +3176,18 @@ wait_hist_add(wait_hist_t *h, unsigned long long from, unsigned long long to)
     h->bucket[b]++;
     if (us > h->max_us)
 	h->max_us = us;
+}
+
+static void
+wait_hist_merge(wait_hist_t *into, const wait_hist_t *h)
+{
+    int	b;
+
+    into->n += h->n;
+    for (b = 0; b < WAIT_BUCKETS; b++)
+	into->bucket[b] += h->bucket[b];
+    if (h->max_us > into->max_us)
+	into->max_us = h->max_us;
 }
 
 static void
@@ -3284,6 +3305,140 @@ bench_producer(void)
     wait_hist_print(label, &ans.a.hist);
     print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
     echo_child_stop(&c);
+}
+
+/* ---- srvq: a server with requests queued ---- */
+
+#define	SRVQ_WORK_US	5	/* the server's work on each request */
+#define	SRVQ_ITERS	5000	/* round trips a client */
+
+static void __attribute__((noreturn, used))
+child_srvq_entry(void)
+{
+    bench_recv_buf_t	buf;
+    mach_msg_option_t	opt = MACH_RCV_MSG;
+    mach_msg_size_t	send_size = 0;
+    unsigned long long	t;
+
+    for (;;) {
+	mach_msg(&buf.head, opt, send_size, sizeof(buf), CHILD_RECV_NAME,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	t = bench_tsc();
+	while (bench_tsc() - t < SRVQ_WORK_US * g_tsc_per_us)
+	    ;
+	/*
+	 * The reply, to the send-once right the request carried, and the next
+	 * request, in one call, as mach_msg_server() makes them.
+	 */
+	buf.head.msgh_bits	 = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	buf.head.msgh_size	 = sizeof(bench_null_msg_t);
+	buf.head.msgh_local_port = MACH_PORT_NULL;
+	buf.head.msgh_id	+= 100;
+	opt	  = MACH_SEND_MSG | MACH_RCV_MSG;
+	send_size = sizeof(bench_null_msg_t);
+    }
+}
+
+typedef struct {
+    mach_port_t	server;		/* this task's send right to the server */
+    mach_port_t	reply;		/* this client's reply port */
+    int		iters;
+    wait_hist_t	hist;
+    pthread_t	th;
+} srvq_client_t;
+
+static volatile int	g_srvq_ready, g_srvq_go;
+
+static void *
+srvq_client_func(void *arg)
+{
+    srvq_client_t	*c = (srvq_client_t *)arg;
+    bench_recv_buf_t	buf;
+    unsigned long long	t;
+    int			i;
+
+    for (i = -WARMUP_ITERS; i < c->iters; i++) {
+	if (i == 0) {
+	    __sync_fetch_and_add(&g_srvq_ready, 1);
+	    while (!g_srvq_go)
+		(void) syscall_thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_NONE, 0);
+	}
+	buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	buf.head.msgh_size	  = sizeof(bench_null_msg_t);
+	buf.head.msgh_remote_port = c->server;
+	buf.head.msgh_local_port  = c->reply;
+	buf.head.msgh_id	  = 1;
+	t = bench_tsc();
+	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG,
+		 sizeof(bench_null_msg_t), sizeof(buf), c->reply,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (i >= 0)
+	    wait_hist_add(&c->hist, t, bench_tsc());
+    }
+    return (void *)0;
+}
+
+static void
+bench_server_queue(int k)
+{
+    char		label[64];
+    echo_child_t	s;
+    srvq_client_t	c[MAX_CC_THREADS];
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    wait_hist_t		all;
+    tvalspec_t		t0, t1;
+    unsigned long long	total_ns;
+    long		total_rpc;
+    int			i, ho_ok;
+
+    if (k > MAX_CC_THREADS)
+	k = MAX_CC_THREADS;
+    snprintf(label, sizeof label, "server with requests queued x%d", k);
+    if (tsc_calibrate() != 0) {
+	printf("  %s: the TSC's rate could not be measured -- not measured\n",
+	       label);
+	return;
+    }
+    if (child_start(label, &s, child_srvq_entry) != 0)
+	return;
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    g_srvq_ready = 0;
+    g_srvq_go = 0;
+    for (i = 0; i < k; i++) {
+	memset(&c[i], 0, sizeof c[i]);
+	c[i].server = s.to_child;
+	c[i].iters = SRVQ_ITERS;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			   &c[i].reply);
+	pthread_create(&c[i].th, NULL, srvq_client_func, &c[i]);
+    }
+    while (g_srvq_ready < k)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    ho_ok = handoff_snap(&ho_before);
+    get_time(&t0);
+    g_srvq_go = 1;
+    for (i = 0; i < k; i++)
+	pthread_join(c[i].th, NULL);
+    get_time(&t1);
+    ho_ok &= handoff_snap(&ho_after);
+
+    memset(&all, 0, sizeof all);
+    for (i = 0; i < k; i++)
+	wait_hist_merge(&all, &c[i].hist);
+    total_ns  = elapsed_ns(&t0, &t1);
+    total_rpc = (long)k * SRVQ_ITERS;
+    printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
+	   label, total_rpc, total_ns, total_ns / (total_rpc ? total_rpc : 1));
+    wait_hist_print(label, &all);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
+
+    for (i = 0; i < k; i++)
+	mach_port_destroy(mach_task_self(), c[i].reply);
+    echo_child_stop(&s);
 }
 
 /*
@@ -3627,6 +3782,7 @@ main(int argc, char **argv)
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
 	    { SUITE_ISWEEP,  "isweep" }, { SUITE_FORKRACE, "forkrace" },
 	    { SUITE_ICC,     "icc" },     { SUITE_PROD,    "prod" },
+	    { SUITE_SRVQ,    "srvq" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -3841,6 +3997,12 @@ main(int argc, char **argv)
     if (suites & SUITE_PROD) {
 	printf("--- Producer that does not wait (#777) ---\n");
 	bench_producer();
+	printf("\n");
+    }
+    if (suites & SUITE_SRVQ) {
+	printf("--- Server with requests queued (#777) ---\n");
+	bench_server_queue(2);
+	bench_server_queue(4);
 	printf("\n");
     }
 
