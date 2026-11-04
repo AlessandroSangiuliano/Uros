@@ -283,6 +283,28 @@ _pthread_free_stack(pthread_t self)
 }
 
 /*
+ * #617: what a thread ending through the full pool does with its own stack.
+ * It still runs on it -- it returns from here and calls thread_terminate() --
+ * so the stack goes on dying_stacks, with a right to the thread's port, and
+ * not on free_stacks, where a pthread_create() could put a new thread on it
+ * first.  The right is the one the caller terminates; it dies with the
+ * thread, and _pthread_reclaim_dying_stacks() gives it back.
+ */
+static thread_port_t
+_pthread_free_own_stack(pthread_t self)
+{
+	vm_address_t *base = (vm_address_t *) STACK_LOWEST((vm_address_t)self);
+	thread_port_t me = mach_thread_self();
+
+	base[1] = (vm_address_t) me;
+	LOCK(_free_stacks_lock);
+	base[0] = (vm_address_t) dying_stacks;
+	dying_stacks = base;
+	UNLOCK(_free_stacks_lock);
+	return me;
+}
+
+/*
  * [Internal] thread pool — recycle kernel threads instead of destroying them.
  *
  * When a pthread exits, its kernel thread parks on a futex (self->pool_wake)
@@ -1167,6 +1189,7 @@ pthread_exit(void *value_ptr)
 {
 	pthread_t self = pthread_self();
 	kern_return_t kern_res;
+	thread_port_t me;
 	int num_joiners;
 
 	_pthread_run_thread_cleanup(self);
@@ -1236,9 +1259,9 @@ pthread_exit(void *value_ptr)
 	/* Try to park this kernel thread in the pool for reuse */
 	if (_pthread_pool_park(self))
 		return;		/* NOT REACHED — park loops into trampoline */
-	/* Pool full — actually terminate */
-	_pthread_free_stack(self);
-	MACH_CALL(thread_terminate(mach_thread_self()), kern_res);
+	/* Pool full — actually terminate, on a stack still ours (#617) */
+	me = _pthread_free_own_stack(self);
+	MACH_CALL(thread_terminate(me), kern_res);
 
 	/*
 	 * 🔴 NOT REACHED — AND IF IT IS, THIS THREAD HAS NO STACK (#569).
