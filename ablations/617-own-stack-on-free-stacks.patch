@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #617
+Over: 617-widen-stack-given-back.patch
+Takes out: 214dcec5's dying_stacks -- _pthread_free_own_stack() pushes the ending thread's stack on free_stacks again, as _pthread_free_stack() did, before pthread_exit() calls thread_terminate(); with the ending thread held by the widen, pthread_test's full-pool case must see its ninth new thread given that stack while the ending thread's port is alive
+Run: --entry 14 600 -smp 4
+Expect: #617: a new thread was given the stack of a thread still ending: FAIL
+
+diff --git a/uros/src/lib/libpthreads/pthread.c b/uros/src/lib/libpthreads/pthread.c
+index af23271e..8bc951ad 100644
+--- a/uros/src/lib/libpthreads/pthread.c
++++ b/uros/src/lib/libpthreads/pthread.c
+@@ -298,8 +298,8 @@ _pthread_free_own_stack(pthread_t self)
+ 
+ 	base[1] = (vm_address_t) me;
+ 	LOCK(_free_stacks_lock);
+-	base[0] = (vm_address_t) dying_stacks;
+-	dying_stacks = base;
++	base[0] = (vm_address_t) free_stacks;
++	free_stacks = base;
+ 	UNLOCK(_free_stacks_lock);
+ 	return me;
+ }

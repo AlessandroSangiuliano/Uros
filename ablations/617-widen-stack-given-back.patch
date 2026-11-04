@@ -1,0 +1,51 @@
+Kind: widen
+Issue: #617
+Holds open: a thread ending through the full pool, between giving its stack back and thread_terminate() -- it waits 100 ms there, and pthread_test's full-pool case creates nine threads meanwhile, the ninth taking a stack from free_stacks; with the fix in, the ending thread's stack waits on dying_stacks for its port to die and the ninth gets another, with the fix out the ninth gets that stack while the thread is still on it; each wait says so on the console that needs no lock, so that a fixed run that passes shows the window was open; at most 64 waits in a task
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/lib/libpthreads/pthread.c b/uros/src/lib/libpthreads/pthread.c
+index 7d17d2b6..af23271e 100644
+--- a/uros/src/lib/libpthreads/pthread.c
++++ b/uros/src/lib/libpthreads/pthread.c
+@@ -1184,6 +1184,33 @@ _pthread_run_thread_cleanup(pthread_t self)
+ 	mig_dealloc_reply_port(MACH_PORT_NULL);
+ }
+ 
++/*
++ * ablations/617-widen-stack-given-back.patch: #617's widened window, and not
++ * an ablation.  A thread ending through the full pool waits WIDEN_617_MS
++ * between giving its stack back and thread_terminate(), so that a
++ * pthread_create() meanwhile meets it: with the fix in, the stack waits on
++ * dying_stacks for the thread's port to die and the new thread gets another;
++ * with the fix out it is on free_stacks, the new thread gets it, and the
++ * ending thread returns through its frames.  Said on the console that needs
++ * no lock, so that a fixed run that passes shows the window was open.  At
++ * most WIDEN_617_TIMES in a task.
++ */
++#define	WIDEN_617_MS		100
++#define	WIDEN_617_TIMES		64
++
++static int	widen_617_waits;	/* a budget, not a census */
++
++static void
++widen_617_given_back(void)
++{
++	if (widen_617_waits >= WIDEN_617_TIMES)
++		return;
++	widen_617_waits++;
++	mach_print("#617 widen: a thread ending through the full pool waits "
++		   "100 ms between giving its stack back and thread_terminate()\n");
++	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, WIDEN_617_MS);
++}
++
+ void 
+ pthread_exit(void *value_ptr)
+ {
+@@ -1261,6 +1288,7 @@ pthread_exit(void *value_ptr)
+ 		return;		/* NOT REACHED — park loops into trampoline */
+ 	/* Pool full — actually terminate, on a stack still ours (#617) */
+ 	me = _pthread_free_own_stack(self);
++	widen_617_given_back();
+ 	MACH_CALL(thread_terminate(me), kern_res);
+ 
+ 	/*
