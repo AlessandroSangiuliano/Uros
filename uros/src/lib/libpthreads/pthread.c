@@ -63,10 +63,20 @@ int _pthread_stack_size __attribute__((weak));
 static int __pthread_stack_size, __pthread_stack_mask;
 static vm_address_t lowest_stack;
 static vm_address_t *free_stacks;
+/*
+ * #617: the stacks of threads that ended themselves through the full pool.
+ * Such a thread gives its stack back before it calls thread_terminate(), and
+ * goes on running on it until the kernel takes the thread, so a stack here is
+ * not free yet.  The word after the link holds a right to the thread's port,
+ * and _pthread_allocate_stack() moves a stack to free_stacks only once that
+ * right is a dead name.
+ */
+static vm_address_t *dying_stacks;
 /* #377: serialize the stack free-list.  The thread pool has _thread_pool_lock;
  * this list had none, so a concurrent pop (_pthread_allocate_stack) and push
  * (_pthread_free_stack) raced under SMP thread churn -- corrupting the list and
- * handing the same stack to two threads (stack-smash crash, scale sweep >8). */
+ * handing the same stack to two threads (stack-smash crash, scale sweep >8).
+ * It guards dying_stacks too (#617). */
 static pthread_lock_t _free_stacks_lock = 0;
 
 #define STACK_LOWEST(sp)	((sp) & ~__pthread_stack_mask)
@@ -103,6 +113,62 @@ a fresh stack.  Without one the pool nests a whole exit path per reuse and \
 walks the stack into its guard page."
 #endif
 
+/*
+ * #617: move to free_stacks every dying stack whose thread is gone.
+ *
+ * 🔑 GONE MEANS THE RIGHT KEPT WITH THE STACK IS A DEAD NAME.  The kernel
+ * destroys a thread's port as it destroys the thread, and a thread inside
+ * thread_terminate() does not come back to its user stack, so once that
+ * right has died nothing runs on the stack any more.  A right that still
+ * names a live port, and one whose type cannot be read, leave their stack
+ * where it is: a stack held too long is memory, one handed on too early is a
+ * crash.
+ *
+ * ⚠️ The kernel is asked outside the lock: mach_port_type() is a call, and
+ * every thread creating or ending would spin behind it.  The list is taken
+ * whole first, so two threads reclaiming at once each look at their own
+ * stacks.
+ */
+static void
+_pthread_reclaim_dying_stacks(void)
+{
+	vm_address_t *list, *next, *gone = 0, *kept = 0;
+	mach_port_type_t type;
+
+	LOCK(_free_stacks_lock);
+	list = dying_stacks;
+	dying_stacks = 0;
+	UNLOCK(_free_stacks_lock);
+
+	for (; list != 0; list = next) {
+		next = (vm_address_t *) list[0];
+		if (mach_port_type(mach_task_self(), (mach_port_t) list[1],
+				   &type) == KERN_SUCCESS &&
+		    (type & MACH_PORT_TYPE_DEAD_NAME)) {
+			(void) mach_port_deallocate(mach_task_self(),
+						    (mach_port_t) list[1]);
+			list[0] = (vm_address_t) gone;
+			gone = list;
+		} else {
+			list[0] = (vm_address_t) kept;
+			kept = list;
+		}
+	}
+
+	LOCK(_free_stacks_lock);
+	for (list = kept; list != 0; list = next) {
+		next = (vm_address_t *) list[0];
+		list[0] = (vm_address_t) dying_stacks;
+		dying_stacks = list;
+	}
+	for (list = gone; list != 0; list = next) {
+		next = (vm_address_t *) list[0];
+		list[0] = (vm_address_t) free_stacks;
+		free_stacks = list;
+	}
+	UNLOCK(_free_stacks_lock);
+}
+
 static vm_address_t
 _pthread_allocate_stack(void)
 {
@@ -110,6 +176,12 @@ _pthread_allocate_stack(void)
 	kern_return_t kr;
 
 	LOCK(_free_stacks_lock);			/* #377 */
+	if (free_stacks == 0 && dying_stacks != 0)
+	{
+		UNLOCK(_free_stacks_lock);
+		_pthread_reclaim_dying_stacks();	/* #617 */
+		LOCK(_free_stacks_lock);
+	}
 	if (free_stacks == 0)
 	{
 	    /* Allocating guard pages is done by doubling
