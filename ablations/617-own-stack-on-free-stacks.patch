@@ -1,21 +1,22 @@
 Kind: ablation
 Issue: #617
 Over: 617-widen-stack-given-back.patch
-Takes out: 214dcec5's dying_stacks -- pthread_exit() puts its own stack straight on free_stacks again before thread_terminate(), so with the ending thread held by the widen, pthread_test's full-pool case must see its ninth new thread given that stack while the ending thread's port is alive
+Takes out: 214dcec5's dying_stacks -- _pthread_free_own_stack() pushes the ending thread's stack on free_stacks again, as _pthread_free_stack() did, before pthread_exit() calls thread_terminate(); with the ending thread held by the widen, pthread_test's full-pool case must see its ninth new thread given that stack while the ending thread's port is alive
 Run: --entry 14 600 -smp 4
 Expect: #617: a new thread was given the stack of a thread still ending: FAIL
 
 diff --git a/uros/src/lib/libpthreads/pthread.c b/uros/src/lib/libpthreads/pthread.c
-index af23271e..3e0471fc 100644
+index af23271e..8bc951ad 100644
 --- a/uros/src/lib/libpthreads/pthread.c
 +++ b/uros/src/lib/libpthreads/pthread.c
-@@ -1287,7 +1287,8 @@ pthread_exit(void *value_ptr)
- 	if (_pthread_pool_park(self))
- 		return;		/* NOT REACHED — park loops into trampoline */
- 	/* Pool full — actually terminate, on a stack still ours (#617) */
--	me = _pthread_free_own_stack(self);
-+	me = mach_thread_self();
-+	_pthread_free_stack(self);
- 	widen_617_given_back();
- 	MACH_CALL(thread_terminate(me), kern_res);
+@@ -298,8 +298,8 @@ _pthread_free_own_stack(pthread_t self)
  
+ 	base[1] = (vm_address_t) me;
+ 	LOCK(_free_stacks_lock);
+-	base[0] = (vm_address_t) dying_stacks;
+-	dying_stacks = base;
++	base[0] = (vm_address_t) free_stacks;
++	free_stacks = base;
+ 	UNLOCK(_free_stacks_lock);
+ 	return me;
+ }
