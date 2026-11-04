@@ -1406,7 +1406,7 @@ act_attach(
 #if	MACH_ASSERT
 	assert(thread == current_thread() || thread->top_act == THR_ACT_NULL);
 	if (watchacts & WA_ACT_LNK)
-		printf("act_attach(thr_act %p(%d) thread %p(%d) mask %d)\n",
+		printf("act_attach(thr_act %p(%d) thread %p(%ld) mask %d)\n",
 		       thr_act, thr_act->ref_count, thread, thread->ref_count,
 		       init_alert_mask);
 #endif	/* MACH_ASSERT */
@@ -1444,7 +1444,7 @@ act_detach(
 
 #if	MACH_ASSERT
 	if (watchacts & (WA_EXIT|WA_ACT_LNK))
-		printf("act_detach: thr_act %p(%d), thrd %p(%d) task=%p(%d)\n",
+		printf("act_detach: thr_act %p(%d), thrd %p(%ld) task=%p(%d)\n",
 		       cur_act, cur_act->ref_count,
 		       cur_thread, cur_thread->ref_count,
 		       cur_act->task,

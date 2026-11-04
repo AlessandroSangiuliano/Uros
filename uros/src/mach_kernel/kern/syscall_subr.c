@@ -229,9 +229,11 @@ swtch_pri(
 
 	/*
 	 *	XXX need to think about depression duration.
-	 *	XXX currently using min quantum.
+	 *	XXX currently using min quantum -- in milliseconds, which is
+	 *	what thread_depress_priority() takes: min_quantum is ticks,
+	 *	ten of them, and given as it was it depressed for one (#787).
 	 */
-	thread_depress_priority(thread, min_quantum);
+	thread_depress_priority(thread, min_quantum * 1000 / hz);
 
 	counter(c_swtch_pri_block++);
 	thread_block((void (*)(void))0);
@@ -330,8 +332,20 @@ syscall_thread_switch(
 			if (thread) {
 				s = splsched();
 				thread_lock(thread);
+				/*
+				 * #787: and not bound, asked before rem_runq(),
+				 * which takes a thread off any queue -- another
+				 * processor's local one included -- for
+				 * thread_run() to run it wherever this thread is
+				 * by then.  Not even one bound to this processor:
+				 * this thread can be moved between the splx()
+				 * below and thread_run(), and nothing holds it
+				 * here.  The class of #615; a bound hint gets the
+				 * plain block below instead.
+				 */
 				if (thread &&
 					(thread->processor_set == cur_thread->processor_set) &&
+					(thread->bound_processor == PROCESSOR_NULL) &&
 					(rem_runq(thread) != RUN_QUEUE_NULL)) {
 					/*
 					 *	Hah, got it!!
@@ -535,6 +549,15 @@ thread_depress_timeout(
     }
 
     thread_unlock(thread);
+    /*
+     * Release the reference set_timeout() took for this timer (#787
+     * section 11): the depression timer holds one on its thread while it
+     * is set, so a thread terminated as its depression runs out is not
+     * freed before this runs.  Released whatever the depression's state,
+     * as thread_timeout() releases its own; softclock() cleared the timer
+     * before calling, so no reset_timeout() releases it in our stead.
+     */
+    thread_deallocate(thread);
     splx(s);
 }
 

@@ -1000,6 +1000,18 @@ processor_set_destroy(
 		 * locking.
 		 */
 		thread_freeze(thread);
+		/*
+		 * #787 section 12: let go of the set's lock before
+		 * thread_doassign(), which takes it itself -- the set being
+		 * destroyed is the thread's own, so without this it locked the
+		 * set's mutex a second time and slept for good holding it, the
+		 * self-deadlock of #486 and section 9.  The task loop above
+		 * drops the lock before task_assign() for the same reason; this
+		 * loop did not, which the "double locking" comment got backwards.
+		 * thread_doassign() is entered with the activation locked, as it
+		 * expects, and gives every thread lock back before it returns.
+		 */
+		pset_unlock(pset);
 		thread_doassign(thread, &default_pset, TRUE);
 		/*
 		 * All thread-related locks released at this point.
@@ -1379,18 +1391,24 @@ processor_set_policy_disable(
 	    if (change_threads) {
 		register queue_head_t		*list;
 		register thread_t		thread;
-		policy_base_t			base;
-		policy_timeshare_base_data_t	ts_data;
 
-		base = (policy_base_t) &ts_data;
-		ts_data.base_priority = 0;
+		/*
+		 * #787: under thread_lock_act(), the work of a policy change
+		 * and nothing that takes the activation's lock again.
+		 * thread_policy() did, act_lock_thread() on the mutex held
+		 * here, and the caller slept for good holding it and the
+		 * set's lock.  thread_policy_common() takes the thread's lock
+		 * alone, and keeps the base priority -- thread_policy() was
+		 * asked for a base of 0, the highest, which it refuses above
+		 * the thread's limit, so no thread would have been moved.
+		 */
 		list = &pset->threads;
 		thread = (thread_t) queue_first(list);
 		while (!queue_end(list, (queue_entry_t) thread)) {
 		    thr_act = thread_lock_act(thread);
 		    if (thr_act && thread->policy == policy)
-			thread_policy(thr_act, POLICY_TIMESHARE, base, 
-			              POLICY_TIMESHARE_BASE_COUNT, FALSE);
+			(void) thread_policy_common(thread, POLICY_TIMESHARE,
+						    0, pset);
 		    thread_unlock_act(thread);
 		    thread = (thread_t) queue_next(&thread->pset_threads);
 		}
@@ -1540,10 +1558,17 @@ processor_set_things(
 				    }
 
 				    case THING_THREAD: {
-					thread_t *threads = (thread_t *) addr;
+					/*
+					 * #787: activations, each with the
+					 * reference act_locked_act_reference()
+					 * took above; thread_deallocate() dropped
+					 * a thread's reference on them instead.
+					 */
+					thread_act_t *thr_acts =
+					    (thread_act_t *) addr;
 
 					for (i = 0; i < actual; i++)
-						thread_deallocate(threads[i]);
+						act_deallocate(thr_acts[i]);
 					break;
 				    }
 				}
@@ -1645,7 +1670,8 @@ processor_set_base(
 	{
 		policy_rr_base_t rr_base = (policy_rr_base_t) base;
 
-		if (invalid_pri(rr_base->base_priority)) {
+		if (invalid_pri(rr_base->base_priority) ||
+		    invalid_rr_quantum(rr_base->quantum)) {	/* #787 */
 			ret = KERN_INVALID_ARGUMENT;
 			break;	
 		}
@@ -1816,9 +1842,15 @@ processor_set_limit(
             	list = &pset->threads;
             	thread = (thread_t) queue_first(list);
             	while (!queue_end(list, (queue_entry_t) thread)) {
+			/*
+			 * #787: the _locked variant, as
+			 * processor_set_max_priority() has -- the activation's
+			 * lock is held here, and thread_max_priority() took it
+			 * again and slept for good.
+			 */
 			thr_act = thread_lock_act(thread);
-			if (thr_act && thread->policy == policy) 
-                        	thread_max_priority(thr_act, pset, max);
+			if (thr_act && thread->policy == policy)
+                        	thread_max_priority_locked(thread, pset, max);
 			thread_unlock_act(thread);
                 	thread = (thread_t) queue_next(&thread->pset_threads);
             	}
@@ -1859,7 +1891,9 @@ processor_set_policy_control(
 
 	switch (flavor) {
 	case PROCESSOR_SET_ENABLED_POLICIES:
-		if (count != sizeof(policy_t))
+		/* #787: a count of natural_t's, as processor_set_info() hands
+		   back -- sizeof(policy_t), 4, refused the count it gave. */
+		if (count != PROCESSOR_SET_ENABLED_POLICIES_COUNT)
 			return(KERN_INVALID_ARGUMENT);
 		policy = (policy_t) *policy_info;
 		for (i = POLICY_TIMESHARE ; i <= POLICY_FIFO ; i = i << 1) {

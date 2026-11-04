@@ -1056,7 +1056,7 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 #endif	/* WAKER_TRACK */
 		panic("switch_context: thread %p, activation %p, has no "
 		      "floating-point area -- a thread already destroyed: "
-		      "state 0x%x%s, ref_count %d, active %d; the activation's "
+		      "state 0x%x%s, ref_count %ld, active %d; the activation's "
 		      "ref_count %d, active %d, thread %p (#749)",
 		      new, new_act, new->state,
 		      (new->state & TH_HALTED) ? " (halted: the reaper's)" : "",

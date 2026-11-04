@@ -1,0 +1,39 @@
+Kind: ablation
+Issue: #787
+Over: 787-widen-doassign-window.patch
+Takes out: thread_doassign()'s check, after the retry, that the thread is not already in the set it is being moved to (#787 section 4) -- the retry substitutes the default set for the one destroyed, and for a default-set thread that makes the two the same, so the lock loop locks the default set's mutex a second time and sleeps holding it. doassign_test's assignment does not come back.
+Accel: tcg,kvm
+Run: --entry 66 300 -smp 4
+Expect: doassign_test: WRONG .* did not come back
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index d3bfe176..ef707bac 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -2127,25 +2127,7 @@ thread_doassign(
+ 	 *	Retry if new_pset is inactive — reassigning to default_pset
+ 	 *	requires re-acquiring both pset locks in order.
+ 	 */
+-	for (;;) {
+-	    /*
+-	     * #787: the retry's default set is the set a thread of the
+-	     * default set is already in.  Nothing to move then, and the
+-	     * branch below would lock the one mutex twice and hold it for
+-	     * good, and with it every thread and task creation.  Undone as
+-	     * the stop's failure is, above, with the stop itself.
+-	     */
+-	    if (pset == new_pset) {
+-		if (thread != current_thread())
+-		    thread_unstop(thread);
+-		(void)act_lock_thread(thr_act);
+-		thread_release(thr_act);
+-		act_locked_act_deallocate(thr_act);
+-		act_unlock_thread(thr_act);
+-		if (release_freeze)
+-		    thread_unfreeze(thread);
+-		return;
+-	    }
++	for (;;) {	/* 787-doassign-no-recheck: no pset == new_pset test */
+ 	    if (pset < new_pset) {
+ 		pset_lock(pset);
+ 		pset_lock(new_pset);

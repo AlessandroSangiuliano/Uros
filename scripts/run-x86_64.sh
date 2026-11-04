@@ -567,6 +567,22 @@ must_report 'refused_fault_test: starting' 'refused_fault_test: \(PASS\|WRONG\|N
 	'Each probe stores and fetches a fixed number of times and the verdict is printed either way; a run that stops after the start line has a probe spinning on a protection fault that vm_fault keeps answering success to, retried for ever (#750).'
 must_report 'mutex_uaf_test: starting' 'mutex_uaf_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'One mutex_unlock() through the release window, verdict printed either way; a run that stops after the start line has the ablated release spinning on an interlock the probe left clear and then held, or faulting inside the freed mutex (#753).'
+must_report 'timer_ref_test: starting' 'timer_ref_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait is bounded by the clock'"'"'s ticks and the verdict is printed either way; a run that stops after the start line has stopped in a wait for a sleeper, its timer or the reaper that the ticks did not end (#787).'
+must_report 'pset_test: starting' 'pset_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Each of the two set calls is bounded by the clock'"'"'s ticks and the verdict is printed either way; a run that stops after the start line has a call asleep on the activation lock it holds, and the set'"'"'s lock with it (#787).'
+must_report 'rr_resume_test: starting' 'rr_resume_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait is bounded by the clock'"'"'s ticks and the threads stop on a flag this one sets, so the verdict is printed either way; a run that stops after the start line has two round-robin threads that never let this one run again (#787).'
+must_report 'dispatch_test: starting' 'dispatch_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait is bounded by the clock'"'"'s ticks and the verdict is printed either way; a run that stops after the start line has H or L woken and never run (#787).'
+must_report 'passover_test: starting' 'passover_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Each round blocks once and the spinner stops on a flag, so the verdict is printed either way; a run that stops after the start line has this thread never given its processor back (#787).'
+must_report 'bound_ipi_test: starting' 'bound_ipi_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait is bounded by the clock'"'"'s ticks and the threads stop on a flag, so the verdict is printed either way; a run that stops after the start line has X woken and never run on its processor (#787).'
+must_report 'depress_ref_test: starting' 'depress_ref_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait is bounded by the clock'"'"'s ticks and the worker stops on a flag, so the verdict is printed either way; a run that stops after the start line has the worker never let go (#787).'
+must_report 'doassign_test: starting' 'doassign_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait is bounded by the clock'"'"'s ticks, so the verdict is printed either way; a run that stops after the start line has thread_doassign() wedged on the set'"'"'s mutex (#787).'
 must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
 must_report 'profile_entry: starting' 'profile_entry: \(PASS\|WRONG\|NOT ASKED\)' \

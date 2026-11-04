@@ -333,7 +333,8 @@ typedef struct thread_shuttle {
 	decl_simple_lock_data(,lock)	/* scheduling lock (thread_lock()) */
 	decl_simple_lock_data(,w_lock)  /* covers wake_active (wake_lock())*/
 	decl_mutex_data(,rpc_lock)	/* RPC lock (rpc_lock()) */
-	int		ref_count;	/* number of references to me */
+	long		ref_count;	/* number of references to me:
+					   thread_ref_take/drop() (#787) */
         
         vm_offset_t     kernel_stack;   /* its own, from creation to
                                            destruction (#648) */
@@ -687,6 +688,21 @@ MACRO_END
 /* Initialize thread module */
 extern void		thread_init(void);
 
+/*
+ * The two ways a thread's reference count changes (#787): an atomic
+ * increment, and an atomic decrement that answers with the count it leaves.
+ * reset_timeout() and untimeout() drop a timer's reference for callers that
+ * hold the thread's lock and for callers that do not, so the lock could not
+ * make the count whole: their decrement, beside an increment under the lock,
+ * lost one of the two.  The lock still orders what the count is read with,
+ * thread_deallocate()'s last reference and the processor set's.  The field
+ * is a long because that is what atomic_incl() works on, as for ipc_space
+ * (#453); on x86-64 it fills the hole before kernel_stack, and on i386 a
+ * long is an int, so no field moves.
+ */
+#define	thread_ref_take(th)	atomic_incl(&(th)->ref_count, 1)
+#define	thread_ref_drop(th)	atomic_add_fetchl(&(th)->ref_count, -1)
+
 /* Take reference on thread (make sure it doesn't go away) */
 extern void		thread_reference(
 				thread_t	th);
@@ -715,6 +731,14 @@ extern kern_return_t	thread_max_priority_locked(
 				thread_t	thread,
 				processor_set_t	pset,
 				int		max_priority);
+
+/* Change a thread's policy, base priority kept, while holding RPC locks:
+   it takes the thread's lock alone (#787) */
+extern kern_return_t	thread_policy_common(
+				thread_t	thread,
+				int		policy,
+				int		data,
+				processor_set_t	pset);
 
 /* Set a thread's priority while holding RPC locks */
 extern kern_return_t	thread_priority_locked(

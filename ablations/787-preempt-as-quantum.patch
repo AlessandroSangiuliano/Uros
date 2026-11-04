@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #787
+Takes out: AST_BLOCK on the processor a wakeup preempts -- thread_setrun() raises AST_QUANTUM again, as before #787, and thread_dispatch() puts the preempted thread at the tail of its queue with a new quantum, as for a quantum run out. rr_resume_test's two RR threads then take over from each other at every tick's wakeup, and the one running when H woke is not the one that runs after it.
+Accel: tcg,kvm
+Run: --entry 61 300 -smp 1
+Expect: rr_resume_test: WRONG .* went behind its peer
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 63469ef3..602f3eb9 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -2858,7 +2858,7 @@ thread_setrun(
+ 	 * left of its quantum, which is what AST_BLOCK gets it, as ast_taken()
+ 	 * already does for a thread preempted in its first quantum.
+ 	 */
+-	ast_t			ast_flags = AST_BLOCK;
++	ast_t			ast_flags = AST_QUANTUM;	/* 787-preempt-as-quantum: a preemption taken for a quantum run out */
+ 
+ 	mp_disable_preemption();
+ 

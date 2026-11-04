@@ -514,28 +514,31 @@ wait_queue_init(void)
 
 /*
  *	Thread timeout routine, called when timer expires.
+ *
+ *	softclock() calls it once for each firing of the thread's timer, and
+ *	the timer that fired holds the reference set_timeout() took: it is
+ *	released here whatever the timer's state (#787).  A wakeup after
+ *	softclock() took the timer off the queue, and before this call, finds
+ *	it TELT_PENDING, and reset_timeout() makes it TELT_UNSET with nothing
+ *	to give back -- the reference is still this call's -- so a release on
+ *	PENDING alone lost it, and the thread was never freed.  The wait is
+ *	ended on PENDING only: on UNSET a wakeup ended it, and on SET the
+ *	thread has set its timer again since, for a later wait.
  */
 void
 thread_timeout(
 	thread_t thread)
 {
 	spl_t		s;
-	boolean_t	did_timeout;
 
 	s = splsched();
 	thread_lock(thread);
 	if (thread->timer.set == TELT_PENDING) {
-		did_timeout = TRUE;
 		thread->timer.set = TELT_UNSET;
 		clear_wait_locked(thread, THREAD_TIMED_OUT, FALSE);
-	} else {
-		did_timeout = FALSE;
 	}
 	thread_unlock(thread);
-	if (did_timeout) {
-		/* deallocate the extra reference for the timeout */
-		thread_deallocate(thread);
-	}
+	thread_deallocate(thread);	/* the fired timer's reference */
 	splx(s);
 }
 
@@ -751,7 +754,7 @@ thread_will_wait(thread_t thread)
 	s = splsched();
 	thread_lock(thread);
 
-	assert(thread->wait_result = -1);	/* for later assertions */
+	thread->wait_result = -1;	/* none yet: a waker writes it (#787) */
 	thread->state |= TH_WAIT;
 
 	thread_unlock(thread);
@@ -777,7 +780,7 @@ thread_will_wait_with_timeout(thread_t thread, mach_msg_timeout_t msecs)
 	s = splsched();
 	thread_lock(thread);
 
-	assert(thread->wait_result = -1);	/* for later assertions */
+	thread->wait_result = -1;	/* none yet: a waker writes it (#787) */
 	thread->state |= TH_WAIT;
 
 	set_timeout(&thread->timer, ticks);
@@ -2237,6 +2240,18 @@ thread_block_reason(
 	aborted = (thread->state & TH_ABORT);
 	if( aborted )
 		clear_wait_locked( thread, THREAD_INTERRUPTED, TRUE );
+	/*
+	 * #787: a wait that ended before the block -- wake_dequeued() takes
+	 * TH_WAIT off a thread that is still running and leaves TH_UNINT --
+	 * leaves the state TH_RUN|TH_UNINT, and thread_select() keeps the
+	 * running thread only at exactly TH_RUN: it gave way to anything
+	 * runnable, a lower priority included, until a tick looked again.
+	 * The wait is over and the bit with it, here, before the selection;
+	 * thread_invoke() cleared it only once the thread was switched back
+	 * to, after it had been passed over.
+	 */
+	if ((thread->state & (TH_WAIT | TH_UNINT)) == TH_UNINT)
+		thread->state &= ~TH_UNINT;
 	thread_unlock(thread);
 
 #if	FAST_TAS
@@ -2860,7 +2875,15 @@ thread_setrun(
 #if	NCPUS > 1
 	register processor_set_t	pset;
 #endif	/* NCPUS > 1 */
-	ast_t			ast_flags = AST_QUANTUM;
+	/*
+	 * #787: a preemption, not a quantum run out.  AST_QUANTUM made
+	 * thread_dispatch() put the preempted thread at the tail of its
+	 * queue and give an RR thread a new quantum; POSIX wants a preempted
+	 * FIFO or RR thread at the head of its priority's list with what was
+	 * left of its quantum, which is what AST_BLOCK gets it, as ast_taken()
+	 * already does for a thread preempted in its first quantum.
+	 */
+	ast_t			ast_flags = AST_BLOCK;
 
 	mp_disable_preemption();
 
@@ -3038,9 +3061,20 @@ thread_setrun(
 		     *	Turn off first_quantum to allow csw.
 		     */
 		if (processor->state == PROCESSOR_DISPATCHING) {
-		    cur_th = processor->next_thread;
-		    processor->next_thread = th;
-		    th = cur_th;
+		    /*
+		     * #787: a second wakeup while this processor dispatches
+		     * takes next_thread's place only if it is better.  The
+		     * swap was made whatever the two priorities, and the
+		     * better thread waited behind the worse for up to a tick:
+		     * on one processor, a wakeup of two sleepers, the better
+		     * first, inverted them every time.  The NCPUS == 1 branch
+		     * below, which no build compiles, always compared.
+		     */
+		    if (processor->next_thread->sched_pri > th->sched_pri) {
+			cur_th = processor->next_thread;
+			processor->next_thread = th;
+			th = cur_th;
+		    }
 		} else {
 		    processor->first_quantum = FALSE;
 		    ast_on(cpu_number(), ast_flags);
@@ -3092,12 +3126,16 @@ thread_setrun(
 	    }
 
 	    /*
-	     * Cause ast on processor if processor is on line, and the
-	     * currently executing thread is not bound to that processor
-	     * (bound threads have implicit priority over non-bound threads).
-	     * We also avoid sending the AST to the idle thread (if it got
-	     * scheduled in the window between the 'if' above and here),
-	     * since the idle_thread is bound.
+	     * Cause ast on processor if processor is on line and the bound
+	     * thread outranks what runs there: by its priority, or, its
+	     * queue having been empty, by its binding -- bound threads have
+	     * implicit priority over non-bound threads.  #787: only the
+	     * second was asked, so a bound thread better than the running
+	     * one, queued behind others, waited for that processor's next
+	     * tick.  An idle thread is bound and the worst of all, so an
+	     * idle processor caught in the window between the 'if' above and
+	     * here is sent the AST too; its handler looks at the idle thread
+	     * (#748), and the idle loop finds the queue.
 	     */
 	    rq = &(processor->runq);
 	    if (processor == current_processor()) {
@@ -3107,9 +3145,12 @@ thread_setrun(
 		    (current_thread()->bound_processor == PROCESSOR_NULL ||
 		     current_thread()->sched_pri > th->sched_pri)) {
 		    if (processor->state == PROCESSOR_DISPATCHING) {
-			cur_th = processor->next_thread;
-			processor->next_thread = th;
-			th = cur_th;
+			/* #787: as in the unbound branch, only if better */
+			if (processor->next_thread->sched_pri > th->sched_pri) {
+			    cur_th = processor->next_thread;
+			    processor->next_thread = th;
+			    th = cur_th;
+			}
 		    } else {
 			processor->first_quantum = FALSE;
 			ast_on(cpu_number(), ast_flags);
@@ -3117,20 +3158,26 @@ thread_setrun(
 		}
 		(void)run_queue_enqueue(rq, th, tail);
 
-	    } else if (run_queue_enqueue(rq, th, tail) == 0 &&
-		       processor->state != PROCESSOR_OFF_LINE &&
-		       (th = cpu_data[processor->slot_num].active_thread) &&
-		       (th->bound_processor != processor)) {
+	    } else {
+		boolean_t	was_empty = (run_queue_enqueue(rq, th, tail) == 0);
+		thread_t	active;
+
+		if (processor->state != PROCESSOR_OFF_LINE &&
+		    (active = cpu_data[processor->slot_num].active_thread)
+							!= THREAD_NULL &&
+		    ((was_empty && active->bound_processor != processor) ||
+		     active->sched_pri > th->sched_pri)) {
 #if 0
-		/*
-		 * Using ast_on() for another processor is illegal.
-		 * We could pass some flags to cause_ast_check()
-		 * to have it send more information about the ASTs we
-		 * want to raise and let it handle it...
-		 */
-		ast_on(processor->slot_num, ast_flags);
+		    /*
+		     * Using ast_on() for another processor is illegal.
+		     * We could pass some flags to cause_ast_check()
+		     * to have it send more information about the ASTs we
+		     * want to raise and let it handle it...
+		     */
+		    ast_on(processor->slot_num, ast_flags);
 #endif
-		cause_ast_check(processor);
+		    cause_ast_check(processor);
+		}
 	    }
 	}
 #else	/* NCPUS > 1 */
@@ -4037,7 +4084,7 @@ do_runq_scan(
 			     * have better luck next time.
 			     */
 			    if (simple_lock_try(&thread->lock)) {
-				    thread->ref_count++;
+				    thread_ref_take(thread);
 				    thread_unlock(thread);
 				    stuck_threads[stuck_count++] = thread;
 			    }

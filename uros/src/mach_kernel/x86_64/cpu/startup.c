@@ -45,6 +45,14 @@
 #include <cpu/sprintf_test.h>	/* #655: -K */
 #include <cpu/console_marks_test.h>	/* #757: the marks, on the console */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
+#include <time/timer_ref_test.h>	/* #787: -o */
+#include <cpu/pset_test.h>	/* #787: -q */
+#include <cpu/doassign_test.h>	/* #787: -z */
+#include <time/rr_resume_test.h>	/* #787: -k */
+#include <time/dispatch_test.h>	/* #787: -d */
+#include <time/passover_test.h>	/* #787: -g */
+#include <time/bound_ipi_test.h>	/* #787: -h */
+#include <time/depress_ref_test.h>	/* #787: -y */
 #include <cpu/census_test.h>	/* #657: -c */
 #include <cpu/clock_pins_test.h>	/* #600: the clock's pins are not a line's */
 #include <trap/refused_fault_test.h>	/* #750: -j */
@@ -871,6 +879,72 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('u'))
 			mutex_uaf_test();
+
+		/*
+		 * -o: a thread whose wakeup meets its timeout is destroyed
+		 * (#787).  -E's reasons: the waker is this thread, bound where
+		 * it is, and the sleepers run where the scheduler puts them;
+		 * returns, so the boot goes on.
+		 */
+		if (boot_flag('o'))
+			timer_ref_test();
+
+		/*
+		 * -q: a processor set's thread-changing calls come back (#787).
+		 * -E's reasons: the driver and worker run where the scheduler
+		 * puts them; returns, so the boot goes on.
+		 */
+		if (boot_flag('q'))
+			pset_test();
+
+		/*
+		 * -z: thread_doassign()'s retry does not lock the default set's
+		 * mutex twice (#787).  NOT ASKED without the widen that adds the
+		 * probe; returns, so the boot goes on.
+		 */
+		if (boot_flag('z'))
+			doassign_test();
+
+		/*
+		 * -k: a round-robin thread preempted by a wakeup resumes before
+		 * its peer (#787).  One processor only, NOT ASKED on more;
+		 * returns, so the boot goes on.
+		 */
+		if (boot_flag('k'))
+			rr_resume_test();
+
+		/*
+		 * -d: a second wakeup on a dispatching processor does not take
+		 * the place of a better thread (#787).  NOT ASKED on a build
+		 * without the widen whose call site reaches its tick probe;
+		 * returns, so the boot goes on.
+		 */
+		if (boot_flag('d'))
+			dispatch_test();
+
+		/*
+		 * -g: a thread woken before it blocks is not passed over for a
+		 * lower priority (#787).  Its threads are bound to one
+		 * processor; returns, so the boot goes on.
+		 */
+		if (boot_flag('g'))
+			passover_test();
+
+		/*
+		 * -h: a thread woken onto another processor's queue, better
+		 * than what runs there, does not wait for its tick (#787).
+		 * NOT ASKED on one processor; returns, so the boot goes on.
+		 */
+		if (boot_flag('h'))
+			bound_ipi_test();
+
+		/*
+		 * -y: the priority-depression timer holds a reference on its
+		 * thread (#787).  One processor is enough; returns, so the
+		 * boot goes on.
+		 */
+		if (boot_flag('y'))
+			depress_ref_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

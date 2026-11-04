@@ -516,6 +516,7 @@
 #include <kern/queue.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
+#include <kern/syscall_subr.h>	/* thread_depress_timeout (#787) */
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/thread_act.h>
@@ -589,11 +590,6 @@ vm_size_t		stack_max_use = KERNEL_STACK_SIZE - 64;
 #endif	/* MACH_DEBUG */
 
 /* Forwards */
-kern_return_t	thread_policy_common(
-			thread_t	thread,
-			int		policy,
-			int		data,
-			processor_set_t	pset);
 void		thread_collect_scan(void);
 void		thread_stats(void);
 kern_return_t
@@ -968,7 +964,7 @@ thread_terminate_self(void)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_EXIT)
-		printf("thread_terminate_self() thr_act=%p(%d) thr=%p(%d)\n",
+		printf("thread_terminate_self() thr_act=%p(%d) thr=%p(%ld)\n",
 			    current_act(), current_act()->ref_count,
 			    current_thread(), current_thread()->ref_count);
 #endif	/* MACH_ASSERT */
@@ -1583,7 +1579,7 @@ thread_deallocate(
 	 */
 	s = splsched();
 	thread_lock(thread);
-	if (--thread->ref_count > 0) {
+	if (thread_ref_drop(thread) > 0) {
 		thread_unlock(thread);
 		splx(s);
 		return;
@@ -1598,7 +1594,7 @@ thread_deallocate(
 	 *	the thread, and then lock the pset in the proper order.
 	 */
 	assert(thread->ref_count == 0); /* Else this is an extra dealloc! */
-	thread->ref_count++;
+	thread_ref_take(thread);
 	thread_unlock(thread);
 	splx(s);
 
@@ -1612,17 +1608,34 @@ thread_deallocate(
 	s = splsched();
 	thread_lock(thread);
 
-	if (thread->ref_count == 2 &&
-	    thread->timer.set == TELT_SET &&
-	    thread->timer.fcn == (timeout_fcn_t) thread_timeout) {
+	{
 		/*
-		 * Only 2 references left: ours and the timeout's.
-		 * Cancel the timeout and proceed with the thread termination.
+		 * The references a set timer holds on the thread (#787): the
+		 * wait timer and the depression timer each take one in
+		 * set_timeout().  When the only references left are ours and
+		 * those timers', cancel them -- reset_timeout_check() gives
+		 * each one back -- so the drop below reaches zero and the
+		 * thread is freed.  A timer that has fired is TELT_PENDING,
+		 * not TELT_SET: its reference is in flight to its timeout
+		 * function, which will deallocate the thread, so it is not
+		 * counted here and the drop then leaves the thread for it.
 		 */
-		reset_timeout_check(&thread->timer);
+		int	timer_refs = 0;
+
+		if (thread->timer.set == TELT_SET &&
+		    thread->timer.fcn == (timeout_fcn_t) thread_timeout)
+			timer_refs++;
+		if (thread->depress_timer.set == TELT_SET &&
+		    thread->depress_timer.fcn ==
+			(timeout_fcn_t) thread_depress_timeout)
+			timer_refs++;
+		if (thread->ref_count == 1 + timer_refs) {
+			reset_timeout_check(&thread->timer);
+			reset_timeout_check(&thread->depress_timer);
+		}
 	}
 
-	if (--thread->ref_count > 0) {
+	if (thread_ref_drop(thread) > 0) {
 #if	MACH_HOST
 		boolean_t need_wakeup = FALSE;
 		/*
@@ -1692,7 +1705,7 @@ thread_reference(
 
 	s = splsched();
 	thread_lock(thread);
-	thread->ref_count++;
+	thread_ref_take(thread);
 	thread_unlock(thread);
 	splx(s);
 }
@@ -1931,7 +1944,7 @@ reaper_thread(void)
 
 #if	MACH_ASSERT
 			if (watchacts & (WA_EXIT|WA_THR))
-			    printf("Reaper: thr=%p(%d) thr_act=%p(%d)\n",
+			    printf("Reaper: thr=%p(%ld) thr_act=%p(%d)\n",
 					thread, thread->ref_count,
 					thread->top_act ? thread->top_act : 0,
 					thread->top_act ?
@@ -2115,6 +2128,24 @@ thread_doassign(
 	 *	requires re-acquiring both pset locks in order.
 	 */
 	for (;;) {
+	    /*
+	     * #787: the retry's default set is the set a thread of the
+	     * default set is already in.  Nothing to move then, and the
+	     * branch below would lock the one mutex twice and hold it for
+	     * good, and with it every thread and task creation.  Undone as
+	     * the stop's failure is, above, with the stop itself.
+	     */
+	    if (pset == new_pset) {
+		if (thread != current_thread())
+		    thread_unstop(thread);
+		(void)act_lock_thread(thr_act);
+		thread_release(thr_act);
+		act_locked_act_deallocate(thr_act);
+		act_unlock_thread(thr_act);
+		if (release_freeze)
+		    thread_unfreeze(thread);
+		return;
+	    }
 	    if (pset < new_pset) {
 		pset_lock(pset);
 		pset_lock(new_pset);
@@ -2613,7 +2644,8 @@ thread_set_policy(
 		dat = rr_base->quantum;
 		bas = rr_base->base_priority;
 		max = rr_limit->max_priority;
-		if (invalid_pri(bas) || invalid_pri(max)) {
+		if (invalid_pri(bas) || invalid_pri(max) ||
+		    invalid_rr_quantum(dat)) {	/* #787 */
 			ret = KERN_INVALID_ARGUMENT;
 			break;
 		}

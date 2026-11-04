@@ -1,0 +1,60 @@
+Kind: ablation
+Issue: #787
+Takes out: the _locked variants in processor_set_policy_disable() and processor_set_limit() -- each walks the set's threads holding thread_lock_act(thread) and calls thread_policy() and thread_max_priority(), which take act_lock_thread() again, the mutex already held. The x86-64 mutex has no owner check, so the driver sleeps for good holding the worker's activation lock and the set's lock. pset_test's driver does not come back from the first call, and the watcher says so.
+Accel: tcg,kvm
+Run: --entry 60 300 -smp 4
+Expect: pset_test: WRONG .* did not come back
+
+diff --git a/uros/src/mach_kernel/kern/processor.c b/uros/src/mach_kernel/kern/processor.c
+index 95e3824a..dc725e05 100644
+--- a/uros/src/mach_kernel/kern/processor.c
++++ b/uros/src/mach_kernel/kern/processor.c
+@@ -1379,24 +1379,18 @@ processor_set_policy_disable(
+ 	    if (change_threads) {
+ 		register queue_head_t		*list;
+ 		register thread_t		thread;
++		policy_base_t			base;
++		policy_timeshare_base_data_t	ts_data;
+ 
+-		/*
+-		 * #787: under thread_lock_act(), the work of a policy change
+-		 * and nothing that takes the activation's lock again.
+-		 * thread_policy() did, act_lock_thread() on the mutex held
+-		 * here, and the caller slept for good holding it and the
+-		 * set's lock.  thread_policy_common() takes the thread's lock
+-		 * alone, and keeps the base priority -- thread_policy() was
+-		 * asked for a base of 0, the highest, which it refuses above
+-		 * the thread's limit, so no thread would have been moved.
+-		 */
++		base = (policy_base_t) &ts_data;
++		ts_data.base_priority = 0;
+ 		list = &pset->threads;
+ 		thread = (thread_t) queue_first(list);
+ 		while (!queue_end(list, (queue_entry_t) thread)) {
+ 		    thr_act = thread_lock_act(thread);
+ 		    if (thr_act && thread->policy == policy)
+-			(void) thread_policy_common(thread, POLICY_TIMESHARE,
+-						    0, pset);
++			thread_policy(thr_act, POLICY_TIMESHARE, base, 
++			              POLICY_TIMESHARE_BASE_COUNT, FALSE);
+ 		    thread_unlock_act(thread);
+ 		    thread = (thread_t) queue_next(&thread->pset_threads);
+ 		}
+@@ -1822,15 +1816,9 @@ processor_set_limit(
+             	list = &pset->threads;
+             	thread = (thread_t) queue_first(list);
+             	while (!queue_end(list, (queue_entry_t) thread)) {
+-			/*
+-			 * #787: the _locked variant, as
+-			 * processor_set_max_priority() has -- the activation's
+-			 * lock is held here, and thread_max_priority() took it
+-			 * again and slept for good.
+-			 */
+ 			thr_act = thread_lock_act(thread);
+-			if (thr_act && thread->policy == policy)
+-                        	thread_max_priority_locked(thread, pset, max);
++			if (thr_act && thread->policy == policy) 
++                        	thread_max_priority(thr_act, pset, max);
+ 			thread_unlock_act(thread);
+                 	thread = (thread_t) queue_next(&thread->pset_threads);
+             	}

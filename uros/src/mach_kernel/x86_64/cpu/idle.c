@@ -270,6 +270,17 @@ machine_idle_wake(int cpu)
 		return;
 
 	/*
+	 * Not the processor this runs on (#787).  Its `halted' is set only
+	 * from machine_idle()'s check with interrupts off to the end of its
+	 * `sti; hlt', so if it is set here, this is an interrupt that ended
+	 * the halt, and machine_idle() returns after it to an idle loop that
+	 * reads next_thread.  The knock was an IPI to itself, on every wakeup
+	 * from idle at one processor.
+	 */
+	if (cpu == cpu_number())
+		return;
+
+	/*
 	 * The other half of the pair.  The caller has already published the
 	 * thread and the DISPATCHING state; this fence is what puts those
 	 * stores ahead of the load below, and without it a processor that
