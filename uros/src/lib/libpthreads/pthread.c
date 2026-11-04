@@ -1264,22 +1264,23 @@ pthread_exit(void *value_ptr)
 	MACH_CALL(thread_terminate(me), kern_res);
 
 	/*
-	 * 🔴 NOT REACHED — AND IF IT IS, THIS THREAD HAS NO STACK (#569).
+	 * 🔴 NOT REACHED — AND IF IT IS, THERE IS NOTHING TO RETURN TO (#569).
 	 *
 	 * thread_terminate does not return on success.  Its answer was stored
 	 * in a variable nobody read, so a refusal simply fell out of this
-	 * function -- and _pthread_free_stack() ran two lines above, so what
-	 * it fell into was a return through memory that has been given back.
+	 * function, into a caller that had finished with this thread.
 	 *
-	 * There is nothing to unwind to and no caller to tell, so it says what
-	 * happened and stops running.  Suspended rather than spinning on
-	 * terminate: a kernel that refused once will refuse again, and a
-	 * thread burning a processor is worse than one standing still.
+	 * The stack is still this thread's (#617): it waits on dying_stacks
+	 * for the thread's port to die, which a refusal means it has not.  But
+	 * pthread_exit() does not return, so the thread says what happened and
+	 * stops running.  Suspended rather than spinning on terminate: a
+	 * kernel that refused once will refuse again, and a thread burning a
+	 * processor is worse than one standing still.
 	 */
-	printf("pthread: thread_terminate refused: %d — this thread has no "
-	       "stack left to return through, so it stops here\n", kern_res);
+	printf("pthread: thread_terminate refused: %d — pthread_exit() does "
+	       "not return, so this thread stops here\n", kern_res);
 	for (;;)
-		(void) thread_suspend(mach_thread_self());
+		(void) thread_suspend(me);
 }
 
 /*
