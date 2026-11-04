@@ -2931,6 +2931,7 @@ test_futex_wait_page_unmapped(void)
 #define	OWNSTACK_BLOCKED	1
 #define	OWNSTACK_GONE		2	/* its port is a dead name */
 #define	OWNSTACK_UNKNOWN	3	/* a call failed: see its answer */
+#define	OWNSTACK_ENDING		4	/* its port is alive and holds no thread */
 
 static volatile int		ownstack_fill_end;	/* main -> fillers */
 static volatile int		ownstack_filler_out[OWNSTACK_POOL];
@@ -3009,6 +3010,16 @@ ownstack_state(mach_port_t thread, kern_return_t *krp)
 		if (mach_port_type(mach_task_self(), thread, &type) ==
 		    KERN_SUCCESS && (type & MACH_PORT_TYPE_DEAD_NAME))
 			return OWNSTACK_GONE;
+		/*
+		 * Or it is being destroyed.  The kernel takes the thread off
+		 * its port before it destroys the port (ipc_thread_terminate(),
+		 * then ipc_thr_act_terminate()), and in between thread_info()
+		 * finds no thread there, KERN_INVALID_ARGUMENT, or an inactive
+		 * one, KERN_TERMINATED.  A thread in that state runs no user
+		 * code; its port has not died yet, so its stack is not free.
+		 */
+		if (kr == KERN_INVALID_ARGUMENT || kr == KERN_TERMINATED)
+			return OWNSTACK_ENDING;
 		*krp = kr;
 		return OWNSTACK_UNKNOWN;
 	}
@@ -3058,6 +3069,8 @@ test_exit_keeps_own_stack(void)
 	pthread_attr_t detached;
 	pthread_t th[OWNSTACK_TAKERS];
 	kern_return_t kr = KERN_SUCCESS;
+	static const char *const phase[] = { "", "before the new threads came",
+		"while they were created", "while waiting for it to end" };
 	char buf[220];
 	int i, n, made, met = -1, reused = 0, unknown = 0, before, after;
 
@@ -3131,14 +3144,17 @@ test_exit_keeps_own_stack(void)
 			continue;
 		}
 		n = ownstack_state(ownstack_leaver_port, &kr);
-		if (n == OWNSTACK_UNKNOWN)
-			unknown = 1;
+		if (n == OWNSTACK_UNKNOWN && unknown == 0)
+			unknown = 2;
 		else if (n != OWNSTACK_GONE && met < 0) {
 			met = made;
 			mach_print("pthread_test: #617: a new thread was given "
 				   "the stack of a thread still ending: FAIL\n");
 		}
 	}
+
+	if (before == OWNSTACK_UNKNOWN && unknown == 0)
+		unknown = 1;
 
 	/* The leaver's kernel thread dies, unless the pool kept it. */
 	after = OWNSTACK_RUNNING;
@@ -3148,6 +3164,8 @@ test_exit_keeps_own_stack(void)
 			break;
 		ownstack_nap();
 	}
+	if (after == OWNSTACK_UNKNOWN && unknown == 0)
+		unknown = 3;
 
 	ownstack_takers_end = 1;
 	for (i = 0; i < made; i++)
@@ -3163,12 +3181,13 @@ test_exit_keeps_own_stack(void)
 			 "stack of the leaver while its kernel thread was "
 			 "still there (#617)", met + 1, OWNSTACK_TAKERS);
 		test_fail(name, buf);
-	} else if (unknown || before == OWNSTACK_UNKNOWN ||
-		   after == OWNSTACK_UNKNOWN) {
+	} else if (unknown) {
 		snprintf(buf, sizeof(buf), "mach_port_type() or thread_info() "
-			 "answered %d about the leaver (#617)", (int) kr);
+			 "answered %d about the leaver %s (#617)", (int) kr,
+			 phase[unknown]);
 		test_fail(name, buf);
-	} else if (reused || after != OWNSTACK_GONE) {
+	} else if (reused || (after != OWNSTACK_GONE &&
+			      after != OWNSTACK_ENDING)) {
 		printf("  [%d] %s: NOT ASKED — the leaver was parked, the pool "
 		       "not being full (#617)\n", ++test_num, name);
 	} else if (before != OWNSTACK_BLOCKED) {
