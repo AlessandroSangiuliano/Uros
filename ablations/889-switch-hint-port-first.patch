@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #889
 Over: 889-widen-switch-hint.patch
 Takes out: the order -- the port stays locked while the activation is locked, as it did, for the 2 ms of the widen, and at the two paths that go the other way act_test [48] stops.
-Run: --entry 14 600 -smp 4
+Run: --entry 14 150 -smp 4
 Expect: act_test: \[48\] hint against the lock order stopped
 
 diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c

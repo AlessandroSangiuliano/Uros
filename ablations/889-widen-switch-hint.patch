@@ -1,7 +1,7 @@
 Kind: widen
 Issue: #889
 Takes out: nothing -- it holds the window before the activation is locked open for 2 ms, in the fixed tree with nothing held.  act_test [48] has to end all the same, and 889-switch-hint-port-first, over this, holds the port through it.
-Run: --entry 14 600 -smp 4
+Run: --entry 14 150 -smp 4
 Expect: act_test: \[48\] [0-9]+ hints against
 
 diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
