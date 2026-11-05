@@ -38,6 +38,12 @@
  *	    log, with the size of what it refused, sends the line on through
  *	    mach_print, and returns a negative value.  It is here because the
  *	    console [3] and [4] ask about is the one printf writes to.
+ *	[6] the console refuses to give a status it does not have (#851), and
+ *	    the array of any get-status is cleared before a driver sees it.
+ *	    The first half is what a healthy kernel shows; with the refusal
+ *	    taken out the answer is all zeros, and with the clear taken out too
+ *	    it is what the block last held.  So a block of that size is soiled
+ *	    first, by a message of this task's own.
  *
  * ⚠️ [2] and [4] ask the port the task holds, not the flag: a bootstrap that
  * gave the master host port to "none" fails [2] as well as [1], by the port
@@ -84,6 +90,51 @@ say_asking(const char *line)
 	buf[n++] = '\n';
 	buf[n] = 0;
 	mach_print(buf);
+}
+
+/*
+ * [6]: a kmsg of the size of a device_get_status() reply, filled with a word
+ * nothing else writes, sent and received, so that the kalloc() block the reply
+ * is about to take last held that.  A few rounds, for the magazine of each
+ * processor this may run on.
+ */
+#define	A6_WORD		0x5a5aa5a5
+#define	A6_WORDS	1024
+#define	A6_SOIL		5120
+
+static void
+a6_soil(void)
+{
+	static union {
+		mach_msg_header_t	h;
+		int			word[A6_SOIL / sizeof (int)];
+	} m, r;
+	mach_port_t	port;
+	unsigned	i, round;
+
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &port) != KERN_SUCCESS)
+		return;
+	if (mach_port_insert_right(mach_task_self(), port, port,
+				   MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS) {
+		for (round = 0; round < 8; round++) {
+			for (i = 0; i < A6_SOIL / sizeof (int); i++)
+				m.word[i] = A6_WORD;
+			m.h.msgh_bits =
+			    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+			m.h.msgh_size = A6_SOIL;
+			m.h.msgh_remote_port = port;
+			m.h.msgh_local_port = MACH_PORT_NULL;
+			m.h.msgh_id = 6;
+			if (mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+				     A6_SOIL, 0, MACH_PORT_NULL, 0,
+				     MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+				break;
+			(void) mach_msg(&r.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+					0, sizeof (r), port, 0, MACH_PORT_NULL);
+		}
+	}
+	(void) mach_port_destroy(mach_task_self(), port);
 }
 
 /*
@@ -376,6 +427,48 @@ main(int argc, char **argv)
 			       "(%s)\n", ret, refusal, want,
 			       delivered ? "came out through mach_print"
 					 : "is not in it", line);
+	}
+
+	/* [6] A status the console does not have. */
+	arms++;
+	{
+		static int		status[A6_WORDS];
+		mach_port_t		console = MACH_PORT_NULL;
+		mach_msg_type_number_t	count = A6_WORDS;
+		unsigned		i, first = A6_WORDS;
+
+		kr = bootstrap_console(bootstrap_port, &console);
+		if (kr == KERN_SUCCESS) {
+			a6_soil();
+			kr = device_get_status(console, 0x851, status, &count);
+		}
+		if (kr == D_INVALID_OPERATION) {
+			printf("boot_ports_test: [6] the console refused a "
+			       "status it does not have, 0x%x (%s)\n", kr,
+			       line);
+			passed++;
+		} else if (kr != KERN_SUCCESS)
+			printf("boot_ports_test: [6] WRONG — asking the console "
+			       "answered 0x%x, not D_INVALID_OPERATION (%s)\n",
+			       kr, line);
+		else {
+			for (i = count; i-- > 0; )
+				if (status[i] != 0)
+					first = i;
+			if (first == A6_WORDS)
+				printf("boot_ports_test: [6] WRONG — the console "
+				       "answered success with %u words, all "
+				       "zero: it has no status to give (%s)\n",
+				       (unsigned)count, line);
+			else
+				printf("boot_ports_test: [6] WRONG — the console "
+				       "answered success with %u words, and "
+				       "word %u is 0x%x, which nothing in the "
+				       "call wrote (%s)\n", (unsigned)count,
+				       first, status[first], line);
+		}
+		if (console != MACH_PORT_NULL)
+			(void) mach_port_deallocate(mach_task_self(), console);
 	}
 
 	if (host != MACH_PORT_NULL)
