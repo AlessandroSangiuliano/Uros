@@ -523,6 +523,9 @@ typedef struct thread_shuttle {
 					 * (#777: where mach_msg knows it) --
 					 * thread_setrun should run its wakee
 					 * on THIS cpu, not a remote idle one */
+	struct thread_shuttle *handoff_target; /* #777: the one thread the hint
+					 * is for, named by whoever wakes it;
+					 * a name only, compared and not followed */
 	struct thread_shuttle *handoff_wakee; /* #777: the thread its last hint
 					 * queued on this cpu, until it blocks;
 					 * a name only, looked for on the run

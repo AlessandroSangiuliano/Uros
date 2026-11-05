@@ -419,8 +419,8 @@ mach_msg_send(
 	 * #777: the hand-off on block only where this thread blocks next -- its
 	 * caller says so (MACH_SEND_HANDOFF), or the receive after it will.  A
 	 * plain send that goes on running leaves the thread it wakes to an idle
-	 * processor.  One-shot: the first wakeup takes it, and it is cleared
-	 * below whether or not the send woke anyone.
+	 * processor.  One-shot, for the receiver alone: ipc_mqueue_deliver()
+	 * names it, and the hint is cleared below whether or not it did.
 	 */
 	if (sched_rpc_handoff) {
 		thread_t self = current_thread();

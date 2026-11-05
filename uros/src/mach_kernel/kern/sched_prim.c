@@ -3050,8 +3050,10 @@ thread_setrun(
 	     * idle CPU (cold caches, wake-from-idle latency -- the measured
 	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
 	     * runq: thread_select picks it up the moment the waker blocks, on
-	     * the one CPU where its data is warm.  One-shot: consumed by the
-	     * first wakeup of the send.  Always on x86-64; by -X or -P on i386.
+	     * the one CPU where its data is warm.  One-shot, and for the one
+	     * thread ipc_mqueue_deliver() names, the receiver; any other wakeup
+	     * on the way goes the ordinary way.  Always on x86-64; by -X or -P
+	     * on i386.
 	     *
 	     * Same-task only on i386.  The fence was put up there, where a
 	     * switch between tasks on one CPU reloads cr3 and throws the whole
@@ -3066,8 +3068,8 @@ thread_setrun(
 
 		/* #370: self is THREAD_NULL on an early-AP that has not yet
 		 * installed its current thread; nothing to hand off then. */
-		if (self != THREAD_NULL && self->handoff_hint) {
-			self->handoff_hint = FALSE;
+		if (self != THREAD_NULL && self->handoff_target == th) {
+			self->handoff_target = THREAD_NULL;
 			if (
 #if	MACH_HOST
 			    pset == current_processor()->processor_set &&
