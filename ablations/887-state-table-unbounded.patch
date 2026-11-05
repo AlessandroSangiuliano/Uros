@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #887
 Takes out: the bound of urmach_state_count() -- the table is indexed with whatever comes, as kern/exception.c did.  state_test asks for the numbers on either side of the table at boot.
 Run: --entry 14 600 -smp 4
-Expect: state_test: WRONG|page fault|panic
+Expect: state_test: WRONG — a flavour outside the table was given a size
 
 diff --git a/uros/src/mach_kernel/x86_64/thread/state.c b/uros/src/mach_kernel/x86_64/thread/state.c
 index 9a73cddc..4990191f 100644
