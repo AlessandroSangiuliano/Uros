@@ -1,0 +1,57 @@
+Kind: ablation
+Issue: #749
+Takes out: nothing -- a probe: thread_machine_destroy() says when a shuttle's last reference went after act_free() had freed its activation, and whether the activation top_act names is by then a live one whose floating-point area is freed under it, each with the backtrace of whoever dropped that last reference
+Run: --entry 14 600 -smp 4
+Expect: #749 probe: shuttle 0x[0-9a-f]+'s last reference went after its activation
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index f44c4405..d50633f7 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -487,6 +487,46 @@ thread_machine_destroy(thread_t thread)
+ 		atomic_inc64(&machine_stacks_given_back);
+ 	}
+ 
++	/*
++	 * 749 probe: is the activation this shuttle names still its own?
++	 * act_free() drops the activation's reference on the shuttle and then
++	 * frees the activation.  When that reference was the shuttle's last,
++	 * this runs inside act_free() and finds the activation as act_free()
++	 * left it: thread 0, ref_count 0, not active, pcb still there.  When
++	 * someone else held one, the last comes later, from them, and top_act
++	 * names memory the activation zone may have given to a new activation.
++	 */
++	if (thr_act != THR_ACT_NULL) {
++		static volatile uint64_t	probe749_late, probe749_live;
++		pcb_t				ppcb = thr_act->mact.pcb;
++		uint64_t			n;
++
++		if (ppcb == PCB_NULL) {
++			n = __atomic_add_fetch(&probe749_late, 1, __ATOMIC_RELAXED);
++			if (n <= 4 || (n & (n - 1)) == 0) {
++				printf("#749 probe: shuttle %p's last reference "
++				       "went after its activation %p was freed, "
++				       "%lu so far; its area is not freed:\n",
++				       thread, thr_act, (unsigned long) n);
++				x86_64_backtrace((uint64_t)
++						 __builtin_frame_address(0));
++			}
++		} else if (thr_act->ref_count != 0 || thr_act->active ||
++			   (thr_act->thread != THREAD_NULL &&
++			    thr_act->thread != thread)) {
++			n = __atomic_add_fetch(&probe749_live, 1, __ATOMIC_RELAXED);
++			printf("#749 probe: shuttle %p's last reference went "
++			       "after its activation was freed, and %p is now "
++			       "a live activation (thread %p, ref_count %d, "
++			       "active %d): its floating-point area %p is freed "
++			       "here, %lu so far:\n",
++			       thread, thr_act, thr_act->thread,
++			       (int) thr_act->ref_count, (int) thr_act->active,
++			       ppcb->ctx.fpu_area, (unsigned long) n);
++			x86_64_backtrace((uint64_t) __builtin_frame_address(0));
++		}
++	}
++
+ 	if (thr_act == THR_ACT_NULL || thr_act->mact.pcb == PCB_NULL)
+ 		return;
+ 
