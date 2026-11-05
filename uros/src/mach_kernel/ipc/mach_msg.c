@@ -289,7 +289,7 @@ mach_msg_format_0_trailer_t trailer_template = {
  * right or set, a port inside a set -- returns at once, so it is no bet.
  */
 static boolean_t
-mach_msg_rcv_will_block(
+urmach_msg_rcv_will_block(
 	ipc_space_t	space,
 	mach_port_t	reply_name,
 	mach_port_t	rcv_name)
@@ -434,7 +434,7 @@ mach_msg_send(
 		if (self->handoff_wakee != THREAD_NULL)
 			(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RETURN);
 		if ((option & MACH_SEND_HANDOFF) ||
-		    mach_msg_rcv_will_block(space, reply_name, rcv_name))
+		    urmach_msg_rcv_will_block(space, reply_name, rcv_name))
 			self->handoff_hint = TRUE;
 	}
 #endif	/* NCPUS > 1 */
@@ -3074,8 +3074,8 @@ mach_msg_overwrite_trap_call(
 				(void) thread_handoff_undo(
 				    SCHED_HANDOFF_UNDO_RETURN);
 			if ((option & MACH_SEND_HANDOFF) ||
-			    mach_msg_rcv_will_block(space, reply_name,
-						    rcv_name))
+			    urmach_msg_rcv_will_block(space, reply_name,
+						      rcv_name))
 				self->handoff_hint = TRUE;
 		}
 #endif	/* NCPUS > 1 */
