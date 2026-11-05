@@ -29,6 +29,24 @@
  * that returned success and a null port for everything would pass a check that
  * only ever asks for a name that exists.  [feedback: proofs by absence need a
  * presence, and a test needs an arm that can fail]
+ *
+ * ── Whose name it is (#744) ──
+ *
+ * Arms [3] to [8] ask what a signature is for.  A name checked in again, or
+ * checked out, is refused to anyone who does not present the signature it was
+ * checked in with -- [3] and [5] with no signature, [4] with another -- and a
+ * name nobody holds yet is refused without one ([6]), or under the port being
+ * registered, which everyone who looks the name up can present ([7]).
+ *
+ * 🔑 [8] is the control for all five: the name's own signature checks it out.
+ * A name server that refused everything would pass [3] to [7], and only [8]
+ * tells refusing the wrong caller from refusing every caller.
+ *
+ * Each refusal is asserted by its WHOLE value, as [2] is, and the two values
+ * are two halves: NETNAME_INVALID_PORT is the name server refusing a signature
+ * nobody holds alone, NETNAME_NOT_YOURS the signature the name was checked in
+ * with refusing a different one.  With the first taken out, [3] and [5] get the
+ * second, and [6] and [7] get through.
  */
 
 #include <mach.h>
@@ -51,14 +69,50 @@ extern mach_port_t	name_server_port;
 
 #define	TEST_NAME	"netname_test"
 #define	ABSENT_NAME	"netname_test_absent"
+#define	UNSIGNED_NAME	"netname_test_unsigned"
+#define	SELF_SIGNED_NAME "netname_test_self_signed"
+
+/*
+ * Whether TEST_NAME still answers with `mine'.  A task holds one name for all
+ * its rights to one port, so the send right a look-up hands back arrives under
+ * the name of the receive right this task already has: equal names are the
+ * same port.  The name server's own signature check rests on the same fact.
+ */
+static int
+still_mine(mach_port_t mine, mach_port_t *got)
+{
+	*got = MACH_PORT_NULL;
+	return netname_look_up(name_server_port, "", TEST_NAME, got)
+		== NETNAME_SUCCESS && *got == mine;
+}
+
+/*
+ * A second port, with a send right to sign with: another task's signature as
+ * far as the name server can tell, since all it compares is the port.
+ */
+static mach_port_t
+another_port(void)
+{
+	mach_port_t	p = MACH_PORT_NULL;
+
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p)
+	    != KERN_SUCCESS)
+		return MACH_PORT_NULL;
+	if (mach_port_insert_right(mach_task_self(), p, p,
+				   MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS)
+		return MACH_PORT_NULL;
+	return p;
+}
 
 int
 main(int argc, char **argv)
 {
 	mach_port_t	mine = MACH_PORT_NULL;
 	mach_port_t	got  = MACH_PORT_NULL;
+	mach_port_t	sig  = MACH_PORT_NULL;
+	mach_port_t	other = MACH_PORT_NULL;
 	kern_return_t	kr;
-	int		passed = 0, arms = 0;
+	int		passed = 0, arms = 0, registered = 0, kept;
 
 	printf("netname_test: started (#426)\n");
 	if (argc > 0 && argv != 0 && argv[0] != 0)
@@ -68,48 +122,51 @@ main(int argc, char **argv)
 		printf("netname_test: WRONG — no name server port in this "
 		       "task's registered ports, so it cannot be contacted "
 		       "from here at all\n");
-		printf("netname_test: 0 of 2 arms passed\n");
+		printf("netname_test: 0 of 8 arms passed\n");
 		return 1;
 	}
 
 	kr = mach_port_allocate(mach_task_self(),
 				MACH_PORT_RIGHT_RECEIVE, &mine);
+	if (kr == KERN_SUCCESS)
+		kr = urmach_netname_signature(&sig);
 	if (kr != KERN_SUCCESS) {
-		printf("netname_test: WRONG — mach_port_allocate %d\n", kr);
-		printf("netname_test: 0 of 2 arms passed\n");
+		printf("netname_test: WRONG — no port or no signature: %d\n",
+		       kr);
+		printf("netname_test: 0 of 8 arms passed\n");
 		return 1;
 	}
 
 	/*
 	 * [1] Register, then look up, and compare the NAMES.
 	 *
-	 * ⚠️ The right that comes back is a send right the server made from
-	 * its own copy, so it arrives under a name of this space's choosing --
-	 * which may differ from `mine'.  What must agree is what the two names
-	 * refer to, and mach_port_names() would be a long way round: asking
-	 * the kernel to compare them is what MACH_MSG_TYPE_MAKE_SEND on the
-	 * same receive right guarantees, so a successful look-up that yields a
-	 * VALID send right is the claim, and a null or dead one is the failure.
+	 * The right that comes back is a send right the server made from its
+	 * own copy, and it arrives under the name of the receive right this
+	 * task holds, because a task holds one name for all its rights to one
+	 * port (still_mine()).  So the look-up must hand back `mine' itself:
+	 * a valid send right to some other port is a wrong answer, and it used
+	 * to pass here.
 	 */
 	arms++;
-	kr = netname_check_in(name_server_port, TEST_NAME,
-			      MACH_PORT_NULL, mine);
+	kr = netname_check_in(name_server_port, TEST_NAME, sig, mine);
 	if (kr != NETNAME_SUCCESS) {
 		printf("netname_test: [1] WRONG — netname_check_in(\"%s\") "
 		       "returned %d\n", TEST_NAME, kr);
 	} else {
+		registered = 1;
 		kr = netname_look_up(name_server_port, "",
 				     TEST_NAME, &got);
 		if (kr != NETNAME_SUCCESS)
 			printf("netname_test: [1] WRONG — checked in, and "
 			       "netname_look_up(\"%s\") returned %d\n",
 			       TEST_NAME, kr);
-		else if (got == MACH_PORT_NULL || got == MACH_PORT_DEAD)
+		else if (got != mine)
 			printf("netname_test: [1] WRONG — look-up succeeded "
-			       "and handed back port 0x%x\n", got);
+			       "and handed back port 0x%x, not 0x%x\n",
+			       got, mine);
 		else {
-			printf("netname_test: [1] registered \"%s\" and got a "
-			       "live send right back (0x%x) — the name server "
+			printf("netname_test: [1] registered \"%s\" and got "
+			       "the same port back (0x%x) — the name server "
 			       "answered an RPC from another task\n",
 			       TEST_NAME, got);
 			passed++;
@@ -151,6 +208,141 @@ main(int argc, char **argv)
 		       "not NETNAME_NOT_CHECKED_IN(%d): the name server did "
 		       "not answer this call\n",
 		       ABSENT_NAME, kr, NETNAME_NOT_CHECKED_IN);
+
+	/*
+	 * [3] The name checked in again with no signature is refused, by the
+	 * name server and before the name is looked at.
+	 */
+	arms++;
+	kr = netname_check_in(name_server_port, TEST_NAME, MACH_PORT_NULL,
+			      mine);
+	kept = still_mine(mine, &got);
+	if (!registered)
+		printf("netname_test: [3] WRONG — not asked: [1] never "
+		       "checked \"%s\" in\n", TEST_NAME);
+	else if (kr == NETNAME_INVALID_PORT && kept) {
+		printf("netname_test: [3] \"%s\" checked in again with no "
+		       "signature: refused with NETNAME_INVALID_PORT, and it "
+		       "still answers with 0x%x (#744)\n", TEST_NAME, got);
+		passed++;
+	} else
+		printf("netname_test: [3] WRONG — \"%s\" checked in again with "
+		       "no signature: %d, not NETNAME_INVALID_PORT(%d), and it "
+		       "answers with 0x%x, not 0x%x (#744)\n", TEST_NAME, kr,
+		       NETNAME_INVALID_PORT, got, mine);
+
+	/*
+	 * [4] The name checked in again under another signature is refused by
+	 * the one it was checked in with.
+	 *
+	 * ⚠️ For `mine' and not for `other': a port signing for itself is [7]'s
+	 * refusal, which the name server makes before it looks for the name,
+	 * so this arm would be asking that question and not its own.
+	 */
+	arms++;
+	other = another_port();
+	kr = (other == MACH_PORT_NULL) ? KERN_RESOURCE_SHORTAGE
+		: netname_check_in(name_server_port, TEST_NAME, other, mine);
+	kept = still_mine(mine, &got);
+	if (!registered)
+		printf("netname_test: [4] WRONG — not asked: [1] never "
+		       "checked \"%s\" in\n", TEST_NAME);
+	else if (kr == NETNAME_NOT_YOURS && kept) {
+		printf("netname_test: [4] \"%s\" checked in again under another "
+		       "signature: refused with NETNAME_NOT_YOURS, and it still "
+		       "answers with 0x%x (#744)\n", TEST_NAME, got);
+		passed++;
+	} else
+		printf("netname_test: [4] WRONG — \"%s\" checked in again under "
+		       "another signature: %d, not NETNAME_NOT_YOURS(%d), and "
+		       "it answers with 0x%x, not 0x%x (#744)\n", TEST_NAME, kr,
+		       NETNAME_NOT_YOURS, got, mine);
+
+	/*
+	 * [5] The name checked out with no signature is refused.
+	 */
+	arms++;
+	kr = netname_check_out(name_server_port, TEST_NAME, MACH_PORT_NULL);
+	kept = still_mine(mine, &got);
+	if (!registered)
+		printf("netname_test: [5] WRONG — not asked: [1] never "
+		       "checked \"%s\" in\n", TEST_NAME);
+	else if (kr == NETNAME_INVALID_PORT && kept) {
+		printf("netname_test: [5] \"%s\" checked out with no signature: "
+		       "refused with NETNAME_INVALID_PORT, and it still answers "
+		       "with 0x%x (#744)\n", TEST_NAME, got);
+		passed++;
+	} else
+		printf("netname_test: [5] WRONG — \"%s\" checked out with no "
+		       "signature: %d, not NETNAME_INVALID_PORT(%d), and it "
+		       "answers with 0x%x, not 0x%x (#744)\n", TEST_NAME, kr,
+		       NETNAME_INVALID_PORT, got, mine);
+
+	/*
+	 * [6] A name nobody holds is refused without a signature: refusing a
+	 * null signature only where the name is taken would leave every name
+	 * to whoever asks for it first without one.
+	 */
+	arms++;
+	kr = netname_check_in(name_server_port, UNSIGNED_NAME, MACH_PORT_NULL,
+			      mine);
+	got = MACH_PORT_NULL;
+	kept = netname_look_up(name_server_port, "", UNSIGNED_NAME, &got)
+	       == NETNAME_NOT_CHECKED_IN;
+	if (kr == NETNAME_INVALID_PORT && kept) {
+		printf("netname_test: [6] \"%s\", which nobody holds, checked in "
+		       "with no signature: refused with NETNAME_INVALID_PORT, "
+		       "and it is not checked in (#744)\n", UNSIGNED_NAME);
+		passed++;
+	} else
+		printf("netname_test: [6] WRONG — \"%s\" checked in with no "
+		       "signature: %d, not NETNAME_INVALID_PORT(%d), and a "
+		       "look-up hands back 0x%x (#744)\n", UNSIGNED_NAME, kr,
+		       NETNAME_INVALID_PORT, got);
+
+	/*
+	 * [7] A port cannot sign for itself: everyone who looks the name up
+	 * holds a send right to it, and could present it.
+	 */
+	arms++;
+	kr = (other == MACH_PORT_NULL) ? KERN_RESOURCE_SHORTAGE
+		: netname_check_in(name_server_port, SELF_SIGNED_NAME, other,
+				   other);
+	got = MACH_PORT_NULL;
+	kept = netname_look_up(name_server_port, "", SELF_SIGNED_NAME, &got)
+	       == NETNAME_NOT_CHECKED_IN;
+	if (kr == NETNAME_INVALID_PORT && kept) {
+		printf("netname_test: [7] \"%s\" checked in signed by the port "
+		       "it publishes: refused with NETNAME_INVALID_PORT, and it "
+		       "is not checked in (#744)\n", SELF_SIGNED_NAME);
+		passed++;
+	} else
+		printf("netname_test: [7] WRONG — \"%s\" checked in signed by "
+		       "the port it publishes: %d, not NETNAME_INVALID_PORT(%d), "
+		       "and a look-up hands back 0x%x (#744)\n",
+		       SELF_SIGNED_NAME, kr, NETNAME_INVALID_PORT, got);
+
+	/*
+	 * [8] The control for [3] to [7]: the name's own signature checks it
+	 * out, and then the name is gone.
+	 */
+	arms++;
+	kr = netname_check_out(name_server_port, TEST_NAME, sig);
+	got = MACH_PORT_NULL;
+	kept = netname_look_up(name_server_port, "", TEST_NAME, &got)
+	       == NETNAME_NOT_CHECKED_IN;
+	if (!registered)
+		printf("netname_test: [8] WRONG — not asked: [1] never "
+		       "checked \"%s\" in\n", TEST_NAME);
+	else if (kr == NETNAME_SUCCESS && kept) {
+		printf("netname_test: [8] \"%s\" checked out under its own "
+		       "signature, and it is gone — the refusals above were "
+		       "about who asked (#744)\n", TEST_NAME);
+		passed++;
+	} else
+		printf("netname_test: [8] WRONG — \"%s\" checked out under its "
+		       "own signature: %d, not NETNAME_SUCCESS, and a look-up "
+		       "hands back 0x%x (#744)\n", TEST_NAME, kr, got);
 
 	printf("netname_test: %d of %d arms passed\n", passed, arms);
 	return (passed == arms) ? 0 : 1;
