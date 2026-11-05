@@ -7053,9 +7053,13 @@ arm_forty_four_index_zero_name(void)
  * processor that happens by itself; at more, the server is there first unless
  * ablations/881-widen-receiver-held.patch holds it, and then nothing was asked.
  *
- * While the sender is parked, a kernel RPC with this port as its reply port:
- * the queue is empty and a sender is parked, which the hot path once asserted
- * could not be.  A limit of 0, which mach_port.defs rules out, is refused.
+ * Two rounds, because the two questions get in each other's way.  In the second,
+ * while the sender is parked, a kernel RPC with this port as its reply port: the
+ * queue is empty and a sender is parked, which the hot path once asserted could
+ * not be.  But a server that has come back to the port by then takes that reply
+ * as it would any message, the slow way, and that wakes the sender, which then
+ * says nothing of the hot path's wakeup.  So the first round makes no such call.
+ * A limit of 0, which mach_port.defs rules out, is refused.
  */
 #define	A45_RPC		4500
 #define	A45_ONE		4501
@@ -7067,7 +7071,7 @@ arm_forty_four_index_zero_name(void)
 static mach_port_t	a45_port;
 static volatile mach_port_t a45_server_thread, a45_sender_thread;
 static volatile mach_msg_return_t a45_second;
-static volatile int	a45_done;
+static volatile int	a45_second_next, a45_done;
 
 static void *
 a45_server(void *arg)
@@ -7122,6 +7126,7 @@ a45_sender(void *arg)
 	(void) arg;
 	a45_sender_thread = mach_thread_self();
 	(void) a45_send(A45_ONE, 0);
+	a45_second_next = 1;
 	a45_second = a45_send(A45_TWO, A45_TIMEOUT);
 	(void) a45_send(A45_FIN, A45_TIMEOUT);
 	a45_done = 1;
@@ -7148,9 +7153,14 @@ a45_rpc(mach_port_t dest, mach_port_t rcv, int id)
 			rcv, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 }
 
+/*
+ * Answers 1 for a sender seen parked that went on, 0 for one that did not, and
+ * -1 if it was never seen parked.
+ */
 static int
-arm_forty_five_parked_sender(void)
+a45_round(int with_rpc)
 {
+	const char		*round = with_rpc ? ", around a kernel RPC" : "";
 	mach_port_t		task = mach_task_self(), reply;
 	mach_port_limits_t	l;
 	struct thread_basic_info info;
@@ -7187,7 +7197,7 @@ arm_forty_five_parked_sender(void)
 
 	a45_server_thread = a45_sender_thread = MACH_PORT_NULL;
 	a45_second = -1;
-	a45_done = 0;
+	a45_second_next = a45_done = 0;
 	if (pthread_create(&server, NULL, a45_server, NULL) != 0) {
 		printf("act_test: [45] pthread_create failed — WRONG\n");
 		return 0;
@@ -7207,7 +7217,7 @@ arm_forty_five_parked_sender(void)
 	}
 	for (i = 0; i < 4000 && !a45_done && !parked; i++) {
 		n = THREAD_BASIC_INFO_COUNT;
-		if (a45_sender_thread != MACH_PORT_NULL &&
+		if (a45_second_next &&
 		    thread_info(a45_sender_thread, THREAD_BASIC_INFO,
 				(thread_info_t) &info, &n) == KERN_SUCCESS &&
 		    info.run_state == TH_STATE_WAITING)
@@ -7216,7 +7226,7 @@ arm_forty_five_parked_sender(void)
 			(void) thread_switch(MACH_PORT_NULL,
 					     SWITCH_OPTION_WAIT, 1);
 	}
-	if (parked && !a45_done) {
+	if (with_rpc && parked && !a45_done) {
 		/* A reply to this port, with the sender parked on it. */
 		mr = a45_rpc(task, a45_port, A45_NO_SUCH_ID);
 		if (mr != MACH_MSG_SUCCESS && mr != MACH_RCV_TOO_LARGE) {
@@ -7245,13 +7255,30 @@ arm_forty_five_parked_sender(void)
 	(void) pthread_join(server, NULL);
 	(void) mach_port_deallocate(task, a45_sender_thread);
 	(void) mach_port_deallocate(task, a45_server_thread);
-	if (ok && !parked)
+	if (!ok)
+		return 0;
+	if (!parked) {
 		printf("act_test: [45] the server took the first message before "
-		       "the second was sent — NOT ASKED\n");
-	else if (ok)
-		printf("act_test: [45] a sender parked by a message the hot path "
-		       "held went on when it was taken — OK\n");
-	return ok;
+		       "the second was sent%s — NOT ASKED\n", round);
+		return -1;
+	}
+	printf("act_test: [45] a sender parked by a message the hot path held "
+	       "went on when it was taken%s — OK\n", round);
+	return 1;
+}
+
+static int
+arm_forty_five_parked_sender(void)
+{
+	int	alone, around;
+
+	alone = a45_round(0);
+	if (alone == 0)
+		return 0;
+	around = a45_round(1);
+	if (around == 0)
+		return 0;
+	return (alone > 0 || around > 0) ? 1 : -1;
 }
 
 int
@@ -7387,7 +7414,11 @@ main(int argc, char **argv)
 	arms++;		/* arm forty-four, #880 */
 	passed += arm_forty_four_index_zero_name();
 	arms++;		/* arm forty-five, #881 */
-	passed += arm_forty_five_parked_sender();
+	r = arm_forty_five_parked_sender();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
