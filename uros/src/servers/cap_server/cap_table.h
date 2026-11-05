@@ -76,7 +76,7 @@ int  cap_verify_hmac(const struct uros_cap *token);
  * key from a mix of available entropy sources.  In Issue B the kernel
  * takes over key management via urmach_cap_register.
  */
-void cap_key_init(void);
+const char *cap_key_init(void);	/* the key's random source, or NULL (#744) */
 
 /*
  * Push the HMAC key to the UrMach kernel via urmach_cap_register with a

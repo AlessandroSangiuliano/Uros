@@ -720,6 +720,7 @@ main(int argc, char **argv)
 {
     kern_return_t kr;
     mach_port_t sig = MACH_PORT_NULL;
+    const char *key_source;
 
     kr = bootstrap_ports(bootstrap_port,
                          &host_port, &device_port,
@@ -741,10 +742,15 @@ main(int argc, char **argv)
     printf("cap: argc=%d\n", argc);
     (void)argv;
 
-    cap_key_init();
+    key_source = cap_key_init();
     cap_table_init();
     cap_manifest_table_init();
-    printf("cap: hmac key initialized, table ready\n");
+    if (key_source != NULL)
+        printf("cap: hmac key from %s, table ready (#744)\n", key_source);
+    else
+        printf("cap: hmac key from the TSC alone -- this processor has no "
+               "RDSEED or RDRAND that answers, so the key can be guessed "
+               "(#744)\n");
 
     int ekr = cap_key_export_to_kernel();
     if (ekr != KERN_SUCCESS)
