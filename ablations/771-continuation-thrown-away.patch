@@ -6,25 +6,25 @@ Run: --entry 25 1200 -smp 1
 Expect: (switch_context: thread [^ ]+ resumes in frames it saved, and its continuation field says|handoff: WRONG — a thread that blocked with a continuation came back from thread_block)
 
 diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
-index aead184e..0728b44b 100644
+index 3c6948ac..f03adc85 100644
 --- a/uros/src/mach_kernel/x86_64/thread/machine.c
 +++ b/uros/src/mach_kernel/x86_64/thread/machine.c
-@@ -1123,20 +1123,7 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
+@@ -1188,20 +1188,7 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
  	 */
  	old->continuation = continuation;
  
 -	if (continuation != 0) {
 -		/*
 -		 * The outgoing thread needs none of the frames it blocked in:
--		 * reset its resume point to the top of its stack, then switch
--		 * away abandoning them (#771).  It keeps the stack itself --
--		 * giving that up is #772's.  thread_begin_trampoline ends in
--		 * thread_continue(), which runs the continuation.
+-		 * switch away abandoning them, with nothing saved, and it
+-		 * starts again at the top of its stack (#771, #777).  It keeps
+-		 * the stack itself -- giving that up was #772's.
+-		 * thread_begin_trampoline ends in thread_continue(), which runs
+-		 * the continuation.
 -		 */
--		context_reset_to_continuation(&old_act->mact.pcb->ctx,
--					      thread_begin_trampoline);
 -		context_switch_continuation(&old_act->mact.pcb->ctx,
--					    &new_act->mact.pcb->ctx);
+-					    &new_act->mact.pcb->ctx,
+-					    thread_begin_trampoline);
 -	} else
 -		context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
 +	context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
