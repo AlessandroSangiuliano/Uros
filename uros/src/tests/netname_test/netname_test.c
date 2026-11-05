@@ -228,7 +228,7 @@ main(int argc, char **argv)
 	} else
 		printf("netname_test: [3] WRONG — \"%s\" checked in again with "
 		       "no signature: %d, not NETNAME_INVALID_PORT(%d), and it "
-		       "answers with 0x%x, not 0x%x (#744)\n", TEST_NAME, kr,
+		       "answers with 0x%x, this task's being 0x%x (#744)\n", TEST_NAME, kr,
 		       NETNAME_INVALID_PORT, got, mine);
 
 	/*
@@ -255,7 +255,7 @@ main(int argc, char **argv)
 	} else
 		printf("netname_test: [4] WRONG — \"%s\" checked in again under "
 		       "another signature: %d, not NETNAME_NOT_YOURS(%d), and "
-		       "it answers with 0x%x, not 0x%x (#744)\n", TEST_NAME, kr,
+		       "it answers with 0x%x, this task's being 0x%x (#744)\n", TEST_NAME, kr,
 		       NETNAME_NOT_YOURS, got, mine);
 
 	/*
@@ -275,7 +275,7 @@ main(int argc, char **argv)
 	} else
 		printf("netname_test: [5] WRONG — \"%s\" checked out with no "
 		       "signature: %d, not NETNAME_INVALID_PORT(%d), and it "
-		       "answers with 0x%x, not 0x%x (#744)\n", TEST_NAME, kr,
+		       "answers with 0x%x, this task's being 0x%x (#744)\n", TEST_NAME, kr,
 		       NETNAME_INVALID_PORT, got, mine);
 
 	/*
