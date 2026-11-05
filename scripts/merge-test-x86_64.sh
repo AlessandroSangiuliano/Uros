@@ -251,6 +251,8 @@ ENTRIES="
 64 harness - 1
 65 harness
 65 harness - 1
+67 harness
+67 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.

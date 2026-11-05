@@ -45,6 +45,7 @@
 #include <cpu/sprintf_test.h>	/* #655: -K */
 #include <cpu/console_marks_test.h>	/* #757: the marks, on the console */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
+#include <cpu/wakee_test.h>	/* #777: -w */
 #include <time/timer_ref_test.h>	/* #787: -o */
 #include <cpu/pset_test.h>	/* #787: -q */
 #include <cpu/doassign_test.h>	/* #787: -z */
@@ -938,6 +939,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('y'))
 			depress_ref_test();
+
+		/*
+		 * -w: the hand-off on block reaches the thread it names, and
+		 * that thread does not wait behind another one when its waker
+		 * leaves (#777).  It binds a thread here, which a task cannot;
+		 * returns, so the boot goes on.
+		 */
+		if (boot_flag('w'))
+			wakee_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
