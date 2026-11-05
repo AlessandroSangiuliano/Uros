@@ -1,0 +1,19 @@
+Kind: widen
+Issue: #868
+Takes out: nothing -- it holds the fill of the cache open for 120 ms on the message act_test [51] marks, with both ports locked, so that a right can be deallocated between the mapping's validation and what is stored.  In the fixed tree the arm passes all the same.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[51\] a right given up by each route was refused
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 1c43f328..219de4d3 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1618,6 +1618,8 @@ urmach_msg_overwrite_trap_call(
+ 							&_sgen)) {
+ 				reply_port = lf_reply;
+ 				dest_port  = lf_dest;
++				if (hdr->msgh_id == 5151)
++					delay(120000);
+ 				self->ith_port_cache[0].ipc_name  = reply_name;
+ 				self->ith_port_cache[0].ipc_port  = reply_port;
+ 				self->ith_port_cache[0].ipc_space = space;
