@@ -1,6 +1,6 @@
 Kind: widen
 Issue: #881
-Holds open: the moment between a receiver parked by the hot path being given its message and taking it off the count -- 20 ms, on a port with a limit of one, so that at more than one processor a sender finds the count full and parks; act_test [45] is the only one that sets such a limit
+Holds open: the moment between a receiver parked by the hot path being given its message and taking it off the count -- 60 ms, on a port with a limit of one, so that at more than one processor a sender finds the count full and parks; act_test [45] is the only one that sets such a limit
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
@@ -12,7 +12,7 @@ index a86c9251..47be94b4 100644
  		dest_port = kmsg->ikm_dest;
  
 +		if (dest_port->ip_qlimit == 1)
-+			delay(20000);
++			delay(60000);
  		ip_lock(dest_port);
  		urmach_port_message_taken(dest_port);
  		ip_unlock(dest_port);
