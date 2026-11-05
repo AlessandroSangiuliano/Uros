@@ -8065,6 +8065,328 @@ arm_forty_nine_subsystem_released_once(void)
 	return ok;
 }
 
+/*
+ * Arm fifty-one (#868): a right given up is gone, whatever the port cache of the
+ * hot path remembers.
+ *
+ * One thread, and a fast RPC: a combined send and receive with COPY_SEND and
+ * MAKE_SEND_ONCE, the shape that fills the per-thread cache and hits it.  Nobody
+ * serves the destination, so the answer is put on the reply port first, by this
+ * thread.  After a few of those the right is given up, by each route that did
+ * not move is_generation, and the RPC is asked again.  It must be refused.
+ *
+ * The reply's route comes last, because on a development kernel with the check
+ * taken out it stops the machine in an assert, and the others say WRONG and go
+ * on.  The one in the middle needs a second thread: a right deallocated while
+ * the cache is being filled, in the window ablations/868-widen-fill.patch holds
+ * open, must not go in under the generation that counts its removal.
+ */
+#define	A51_ID		5151	/* the message the widen waits for */
+#define	A51_ROUNDS	6
+#define	A51_NEW_PORTS	16
+
+union a51_msg {
+	mach_msg_header_t	h;
+	unsigned char		b[256];
+};
+
+static volatile unsigned	a51_go, a51_done;
+static volatile mach_port_t	a51_target;
+
+static void
+a51_zero(union a51_msg *m)
+{
+	unsigned	i;
+
+	for (i = 0; i < sizeof *m; i++)
+		m->b[i] = 0;
+}
+
+/* The answer an RPC will find, put there in advance. */
+static void
+a51_answer(mach_port_t reply, mach_msg_type_name_t how)
+{
+	union a51_msg	m;
+
+	a51_zero(&m);
+	m.h.msgh_bits = MACH_MSGH_BITS(how, 0);
+	m.h.msgh_size = sizeof m.h;
+	m.h.msgh_remote_port = reply;
+	m.h.msgh_id = 50;
+	(void) mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m.h, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+static mach_msg_return_t
+a51_rpc(mach_port_t dest, mach_port_t reply, int id)
+{
+	union a51_msg	m;
+
+	a51_zero(&m);
+	m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+				       MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	m.h.msgh_size = sizeof m.h;
+	m.h.msgh_remote_port = dest;
+	m.h.msgh_local_port = reply;
+	m.h.msgh_id = id;
+	return mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG, sizeof m.h,
+			sizeof m, reply, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static void
+a51_drain(mach_port_t port)
+{
+	union a51_msg	m;
+
+	while (mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof m,
+			port, 0, MACH_PORT_NULL) == MACH_MSG_SUCCESS)
+		mach_msg_destroy(&m.h);
+}
+
+/* A right into a message, which stays queued on `to'. */
+static mach_msg_return_t
+a51_move(mach_port_t to, mach_port_t what, mach_msg_type_name_t how)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_port_descriptor_t	d;
+	} m;
+
+	m.h.msgh_bits = MACH_MSGH_BITS_COMPLEX |
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.h.msgh_size = sizeof m;
+	m.h.msgh_remote_port = to;
+	m.h.msgh_local_port = MACH_PORT_NULL;
+	m.h.msgh_id = 51;
+	m.b.msgh_descriptor_count = 1;
+	m.d.name = what;
+	m.d.disposition = how;
+	m.d.type = MACH_MSG_PORT_DESCRIPTOR;
+	return mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/* The cache filled, and hit once. */
+static int
+a51_warm(mach_port_t dest, mach_port_t reply)
+{
+	mach_msg_return_t	mr;
+	unsigned		i;
+
+	for (i = 0; i < 2; i++) {
+		a51_answer(reply, MACH_MSG_TYPE_MAKE_SEND);
+		mr = a51_rpc(dest, reply, 51);
+		if (mr != MACH_MSG_SUCCESS) {
+			printf("act_test: [51] an RPC with both rights answered "
+			       "0x%x — WRONG\n", (int) mr);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* The same RPC after the right is gone, with its answer waiting. */
+static int
+a51_refused(mach_port_t dest, mach_port_t reply, const char *route)
+{
+	mach_msg_return_t	mr;
+
+	a51_answer(reply, MACH_MSG_TYPE_MAKE_SEND);
+	mr = a51_rpc(dest, reply, 51);
+	printf("act_test: [51] %s: the RPC answered 0x%x\n", route, (int) mr);
+	a51_drain(reply);
+	if (mr != MACH_SEND_INVALID_DEST) {
+		printf("act_test: [51] %s: a right given up went on working — "
+		       "WRONG (#868)\n", route);
+		return 0;
+	}
+	return 1;
+}
+
+static void *
+a51_dealloc_thread(void *arg)
+{
+	unsigned	round;
+
+	(void) arg;
+	for (round = 1; round <= A51_ROUNDS; round++) {
+		while (a51_go != round)
+			(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE,
+					     0);
+		(void) mach_port_deallocate(mach_task_self(), a51_target);
+		a51_done = round;
+	}
+	return NULL;
+}
+
+/* The route that is not a matter of order: deallocated during the fill. */
+static int
+a51_during_the_fill(mach_port_t reply)
+{
+	pthread_t		other;
+	mach_msg_return_t	mr;
+	mach_port_t		dest;
+	unsigned		round;
+	int			ok = 1;
+
+	if (pthread_create(&other, NULL, a51_dealloc_thread, NULL) != 0) {
+		printf("act_test: [51] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	for (round = 1; round <= A51_ROUNDS; round++) {
+		dest = arm_own_port(51);
+		if (dest == MACH_PORT_NULL)
+			return 0;
+		a51_target = dest;
+		a51_answer(reply, MACH_MSG_TYPE_MAKE_SEND);
+		a51_go = round;
+		(void) a51_rpc(dest, reply, A51_ID);
+		while (a51_done != round)
+			(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE,
+					     0);
+		a51_answer(reply, MACH_MSG_TYPE_MAKE_SEND);
+		mr = a51_rpc(dest, reply, 51);
+		a51_drain(reply);
+		if (mr != MACH_SEND_INVALID_DEST) {
+			printf("act_test: [51] round %u: a right deallocated "
+			       "during the fill went on working, 0x%x — WRONG "
+			       "(#868)\n", round, (int) mr);
+			ok = 0;
+		}
+		(void) mach_port_destroy(mach_task_self(), dest);
+	}
+	(void) pthread_join(other, NULL);
+	return ok;
+}
+
+/* The name turns dead, the port's memory is a new port, and the name is used. */
+static int
+a51_dead_name(mach_port_t reply)
+{
+	mach_port_t		fresh[A51_NEW_PORTS];
+	mach_port_t		p, q;
+	mach_port_status_t	status;
+	mach_msg_type_number_t	n;
+	mach_port_type_t	type = 0;
+	unsigned		i, stray = 0;
+	int			ok;
+
+	p = arm_own_port(51);
+	q = arm_own_port(51);
+	if (p == MACH_PORT_NULL || q == MACH_PORT_NULL)
+		return 0;
+	if (a51_move(q, p, MACH_MSG_TYPE_MOVE_RECEIVE) != MACH_MSG_SUCCESS ||
+	    !a51_warm(p, reply)) {
+		printf("act_test: [51] the dead name could not be set up — "
+		       "WRONG\n");
+		return 0;
+	}
+	(void) mach_port_destroy(mach_task_self(), q);
+	(void) mach_port_type(mach_task_self(), p, &type);
+	for (i = 0; i < A51_NEW_PORTS; i++)
+		fresh[i] = arm_own_port(51);
+
+	ok = a51_refused(p, reply, "a name turned dead, its port's memory in use");
+	for (i = 0; i < A51_NEW_PORTS; i++) {
+		n = MACH_PORT_RECEIVE_STATUS_COUNT;
+		if (fresh[i] != MACH_PORT_NULL &&
+		    mach_port_get_attributes(mach_task_self(), fresh[i],
+					     MACH_PORT_RECEIVE_STATUS,
+					     (mach_port_info_t) &status,
+					     &n) == KERN_SUCCESS &&
+		    status.mps_msgcount != 0)
+			stray++;
+		if (fresh[i] != MACH_PORT_NULL)
+			(void) mach_port_destroy(mach_task_self(), fresh[i]);
+	}
+	(void) mach_port_deallocate(mach_task_self(), p);
+	if (stray != 0) {
+		printf("act_test: [51] a dead name sent to %u port(s) nobody "
+		       "named — WRONG (#868)\n", stray);
+		return 0;
+	}
+	return ok;
+}
+
+static int
+arm_fifty_one_rights_that_left(void)
+{
+	mach_port_t		task = mach_task_self();
+	mach_port_t		reply, q, d, r;
+	union a51_msg		m;
+	mach_msg_return_t	mr;
+	int			ok = 1;
+
+	reply = arm_own_port(51);
+	q = arm_own_port(51);
+	d = arm_own_port(51);
+	if (reply == MACH_PORT_NULL || q == MACH_PORT_NULL ||
+	    d == MACH_PORT_NULL)
+		return 0;
+
+	/* MOVE_SEND of the last uref leaves a receive right. */
+	if (!a51_warm(d, reply) ||
+	    a51_move(q, d, MACH_MSG_TYPE_MOVE_SEND) != MACH_MSG_SUCCESS ||
+	    !a51_refused(d, reply, "MOVE_SEND of the last uref"))
+		ok = 0;
+	a51_drain(d);
+
+	/* ipc_kmsg_copyin_header() frees the entry of a moved destination. */
+	r = arm_own_port(51);
+	if (r == MACH_PORT_NULL ||
+	    a51_move(q, r, MACH_MSG_TYPE_MOVE_RECEIVE) != MACH_MSG_SUCCESS ||
+	    !a51_warm(r, reply))
+		ok = 0;
+	else {
+		a51_zero(&m);
+		m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND, 0);
+		m.h.msgh_size = sizeof m.h;
+		m.h.msgh_remote_port = r;
+		m.h.msgh_id = 51;
+		mr = mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			      sizeof m.h, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS ||
+		    !a51_refused(r, reply, "a destination moved in a header"))
+			ok = 0;
+	}
+
+	ok = a51_dead_name(reply) && ok;
+	ok = a51_during_the_fill(reply) && ok;
+
+	/*
+	 * MOVE_RECEIVE on a send+receive entry leaves a send right.  What is
+	 * asked of here is the reply, so the name to answer is the one that is
+	 * left: on a kernel that took the hit it finds that message.
+	 */
+	r = arm_own_port(51);
+	(void) mach_port_insert_right(task, d, d, MACH_MSG_TYPE_MAKE_SEND);
+	if (r == MACH_PORT_NULL || !a51_warm(d, r) ||
+	    a51_move(q, r, MACH_MSG_TYPE_MOVE_RECEIVE) != MACH_MSG_SUCCESS) {
+		ok = 0;
+	} else {
+		a51_answer(r, MACH_MSG_TYPE_COPY_SEND);
+		mr = a51_rpc(d, r, 51);
+		printf("act_test: [51] MOVE_RECEIVE of the reply: the RPC "
+		       "answered 0x%x\n", (int) mr);
+		if (mr != MACH_SEND_INVALID_REPLY) {
+			printf("act_test: [51] a reply port given up went on "
+			       "working — WRONG (#868)\n");
+			ok = 0;
+		}
+	}
+
+	(void) mach_port_destroy(task, q);
+	(void) mach_port_destroy(task, d);
+	(void) mach_port_destroy(task, reply);
+	if (r != MACH_PORT_NULL)
+		(void) mach_port_deallocate(task, r);
+	if (ok)
+		printf("act_test: [51] a right given up by each route was "
+		       "refused on the next RPC — OK (#868)\n");
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8217,6 +8539,8 @@ main(int argc, char **argv)
 	passed += arm_forty_eight_hint_and_lock_order();
 	arms++;		/* arm forty-nine, #869 */
 	passed += arm_forty_nine_subsystem_released_once();
+	arms++;		/* arm fifty-one, #868 */
+	passed += arm_fifty_one_rights_that_left();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
