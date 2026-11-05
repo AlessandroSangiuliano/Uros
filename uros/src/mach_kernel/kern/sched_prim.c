@@ -2964,6 +2964,30 @@ unsigned int	sched_bound_displaced;
 int		sched_bound_displaced_slot = -1;
 
 /*
+ *	urmach_processor_dispatch:
+ *
+ *	Gives an idle processor its thread (#799).  The idle loop can leave its
+ *	wait for a count on a queue, and then it reads state and takes
+ *	PROCESSOR_DISPATCHING to mean that next_thread is there.  So next_thread
+ *	is written first, and the order is the compiler's to keep: neither field
+ *	is volatile, and i386's build wrote them the other way at two sites of
+ *	three.  Both targets are TSO, so a compiler barrier is all it takes here
+ *	and in the reader; a port to weak memory needs real ones in both.
+ *
+ *	Called with the locks that let this processor be taken off the idle
+ *	queue: the reader takes none of them.
+ */
+static __inline__ void
+urmach_processor_dispatch(
+	processor_t	processor,
+	thread_t	th)
+{
+	processor->next_thread = th;
+	urmach_rcu_barrier();
+	processor->state = PROCESSOR_DISPATCHING;
+}
+
+/*
  *	thread_setrun:
  *
  *	Make thread runnable; dispatch directly onto an idle processor
@@ -3119,8 +3143,7 @@ thread_setrun(
 			    queue_remove(&pset->idle_queue, processor,
 			        processor_t, processor_queue);
 			    pset->idle_count--;
-			    processor->next_thread = th;
-			    processor->state = PROCESSOR_DISPATCHING;
+			    urmach_processor_dispatch(processor, th);
 			    simple_unlock(&pset->idle_lock);
 			    simple_unlock(&processor->lock);
 #if	POWER_SAVE
@@ -3141,8 +3164,7 @@ thread_setrun(
 		    queue_remove(&(pset->idle_queue), processor, processor_t,
 				processor_queue);
 		    pset->idle_count--;
-		    processor->next_thread = th;
-		    processor->state = PROCESSOR_DISPATCHING;
+		    urmach_processor_dispatch(processor, th);
 		    simple_unlock(&pset->idle_lock);
 #if	POWER_SAVE
 		    machine_idle_wake(processor->slot_num);
@@ -3229,8 +3251,7 @@ thread_setrun(
 		    queue_remove(&pset->idle_queue, processor,
 			processor_t, processor_queue);
 		    pset->idle_count--;
-		    processor->next_thread = th;
-		    processor->state = PROCESSOR_DISPATCHING;
+		    urmach_processor_dispatch(processor, th);
 		    simple_unlock(&pset->idle_lock);
 		    simple_unlock(&processor->lock);
 #if	POWER_SAVE
@@ -3308,8 +3329,7 @@ thread_setrun(
 	    queue_remove(&default_pset.idle_queue, processor,
 		processor_t, processor_queue);
 	    default_pset.idle_count--;
-	    processor->next_thread = th;
-	    processor->state = PROCESSOR_DISPATCHING;
+	    urmach_processor_dispatch(processor, th);
 	    return;
 	}
 
@@ -3862,8 +3882,13 @@ idle_thread_continue(void)
 		if (state == PROCESSOR_DISPATCHING) {
 			/*
 			 *	Commmon case -- cpu dispatched.
+			 *	#799: state first, as it was written last.
 			 */
+			urmach_rcu_barrier();
 			new_thread = (thread_t) *threadp;
+			if (new_thread == THREAD_NULL)
+				panic("idle thread: processor %d is DISPATCHING "
+				      "with no next_thread (#799)", mycpu);
 			*threadp = (volatile thread_t) THREAD_NULL;
 			myprocessor->state = PROCESSOR_RUNNING;
 			/*
