@@ -1852,6 +1852,24 @@ ipc_kmsg_copyin_body(
      */
     for (sstart = saddr; sstart <  eaddr; sstart++) {
 
+	/*
+	 * #867: a disposition here is the sender's own byte, and
+	 * ipc_object_copyin_type() panics on one it does not know: that is
+	 * for the kernel's own messages.  Refused in this pass, with nothing
+	 * taken yet.  0 stays legal, for a descriptor with no right behind it.
+	 */
+	if (sstart->type.type == MACH_MSG_PORT_DESCRIPTOR ||
+	    sstart->type.type == MACH_MSG_OOL_PORTS_DESCRIPTOR) {
+		mach_msg_type_name_t disposition =
+		    sstart->type.type == MACH_MSG_PORT_DESCRIPTOR ?
+		    sstart->port.disposition : sstart->ool_ports.disposition;
+
+		if (disposition != 0 && !MACH_MSG_TYPE_PORT_ANY(disposition)) {
+		    ipc_kmsg_clean_partial(kmsg,0,0,0);
+		    return MACH_SEND_INVALID_TYPE;
+		}
+	}
+
 	if (sstart->type.type == MACH_MSG_OOL_DESCRIPTOR ||
 	    sstart->type.type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
 

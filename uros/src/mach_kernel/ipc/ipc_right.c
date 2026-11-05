@@ -1615,7 +1615,12 @@ ipc_right_copyin(
 	    }
 
 	    default:
-		panic("ipc_right_copyin: strange rights");
+		/*
+		 * #867: disposition 0 with a name behind it.  An out-of-line
+		 * array's names are still in user memory when the body's
+		 * dispositions are checked, so this is where it shows.
+		 */
+		return KERN_INVALID_RIGHT;
 	}
 
 	return KERN_SUCCESS;
