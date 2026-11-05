@@ -62,7 +62,9 @@ wakee_test_wakee(void)
 	thread_set_own_priority(WAKEE_TEST_LOW);
 	assert_wait((event_t) &wakee_test_wakee_event, FALSE);
 	thread_block((void (*)(void)) 0);
+	mp_disable_preemption();
 	wakee_test_wakee_on = cpu_number();
+	mp_enable_preemption();
 	wakee_test_wakee_ran = 1;
 	thread_terminate_self();
 }

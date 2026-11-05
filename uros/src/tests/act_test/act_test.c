@@ -5865,8 +5865,34 @@ arm_nineteen_last_page_unmapped(void)
 #define	A39_RPCS	300
 
 static mach_port_t	arm_thirty_nine_port;
-static volatile unsigned arm_thirty_nine_parked, arm_thirty_nine_got;
+static volatile unsigned arm_thirty_nine_got;
+static volatile mach_port_t arm_thirty_nine_thread;
 static volatile int	arm_thirty_nine_stop;
+
+/*
+ * A thread the kernel has in a wait.  A flag set before mach_msg() says only
+ * that it is on its way, and thread_switch() with nothing else to run comes
+ * back at once, so a message sent on that word reaches a queue with no receiver
+ * on it, and no hand-off is bet at all.  arm 39 and arm 40.
+ */
+static int
+arm_thread_waiting(volatile mach_port_t *thread)
+{
+	struct thread_basic_info	info;
+	mach_msg_type_number_t		n;
+	unsigned			i;
+
+	for (i = 0; i < 4000; i++) {
+		n = THREAD_BASIC_INFO_COUNT;
+		if (*thread != MACH_PORT_NULL &&
+		    thread_info(*thread, THREAD_BASIC_INFO, (thread_info_t) &info,
+				&n) == KERN_SUCCESS &&
+		    info.run_state == TH_STATE_WAITING)
+			return 1;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	}
+	return 0;
+}
 
 static unsigned long long
 arm_thirty_nine_tsc(void)
@@ -5899,8 +5925,8 @@ arm_thirty_nine_receiver(void *arg)
 	} m;
 
 	(void) arg;
+	arm_thirty_nine_thread = mach_thread_self();
 	for (;;) {
-		arm_thirty_nine_parked++;
 		if (mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
 			     arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
 			     MACH_PORT_NULL) != MACH_MSG_SUCCESS ||
@@ -5966,12 +5992,20 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 	unsigned long long start, took = 0;
 
 	for (try = 0; try < A39_TRIES; try++) {
-		/* The receiver blocked: it says so, then give it the time. */
-		for (i = 0; i < 2000 &&
-		     arm_thirty_nine_parked != arm_thirty_nine_got + 1; i++)
-			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_DEPRESS, 1);
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 2);
+		/*
+		 * One call more each try, in turn, so that no try lines up with
+		 * something periodic on the way: 622-widen-entry.patch yields
+		 * at every fourth mach_msg(), and a try of a multiple of four
+		 * gave this thread's processor to the wakee at the same call
+		 * twenty times of twenty, a bet won and nothing to undo.
+		 */
+		for (i = 0; i < try % 4; i++)
+			(void) arm_thirty_nine_counts(host, &reach, &r0, &t0);
+		if (!arm_thread_waiting(&arm_thirty_nine_thread)) {
+			printf("act_test: [39] the receiver never came to wait "
+			       "— WRONG\n");
+			return 0;
+		}
 
 		if (at_receive &&
 		    arm_thirty_nine_send(own, 0, A39_NOISE) != MACH_MSG_SUCCESS) {
@@ -6163,6 +6197,7 @@ arm_thirty_nine_asked(mach_port_t host)
 					 arm_thirty_nine_port);
 		return 0;
 	}
+	arm_thirty_nine_thread = MACH_PORT_NULL;
 	if (pthread_create(&receiver, NULL, arm_thirty_nine_receiver, NULL)
 	    != 0) {
 		printf("act_test: [39] pthread_create failed — WRONG\n");
@@ -6173,6 +6208,8 @@ arm_thirty_nine_asked(mach_port_t host)
 		not_asked = a < 0 || b < 0;
 		arm_thirty_nine_stop_it();
 		(void) pthread_join(receiver, NULL);
+		(void) mach_port_deallocate(mach_task_self(),
+					    arm_thirty_nine_thread);
 		if (cpus > 1 && arm_thirty_nine_window(host) == 0)
 			ok = 0;
 	}
@@ -6212,14 +6249,15 @@ arm_thirty_nine_lost_bet_undone(void)
 #define	A40_WAKE	4000
 #define	A40_RPC		4001
 #define	A40_REPLY	4002
-#define	A40_TRIES	3
+#define	A40_TRIES	20
 #define	A40_WARM	20
 #define	A40_SPIN	1000000000ULL	/* TSC ticks: tens of kernel ticks */
 
 static mach_port_t	arm_forty_port;		/* the woken thread's */
 static mach_port_t	arm_forty_service;	/* the server's */
 static mach_port_t	arm_forty_host;
-static volatile unsigned arm_forty_parked, arm_forty_got;
+static volatile unsigned arm_forty_got;
+static volatile mach_port_t arm_forty_thread;
 static volatile unsigned arm_forty_seen;	/* the server read this */
 
 static int
@@ -6245,8 +6283,8 @@ arm_forty_receiver(void *arg)
 	} m;
 
 	(void) arg;
+	arm_forty_thread = mach_thread_self();
 	for (;;) {
-		arm_forty_parked++;
 		if (mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m, arm_forty_port,
 			     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
 		    != MACH_MSG_SUCCESS || m.h.msgh_id != A40_WAKE)
@@ -6304,17 +6342,6 @@ arm_forty_rpc(mach_port_t reply)
 			reply, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 }
 
-/* The woken thread blocked: it says so, then give it the time. */
-static void
-arm_forty_wait_parked(void)
-{
-	unsigned	i;
-
-	for (i = 0; i < 2000 && arm_forty_parked != arm_forty_got + 1; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
-	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 2);
-}
-
 static int
 arm_forty_ran(unsigned before)
 {
@@ -6325,15 +6352,26 @@ arm_forty_ran(unsigned before)
 	return arm_forty_got != before;
 }
 
-/* 1 undone every time, 0 wrong, -1 a direct switch took every send. */
+/*
+ * Each of these stops at the first bet settled as it should be: this thread can
+ * lose its processor to the wakee first, on a tick or to a higher priority,
+ * and a bet won has nothing to undo.  So a kernel is wrong only where no try
+ * of twenty says otherwise.  1 settled, 0 wrong, -1 a direct switch took it.
+ */
 static int
 arm_forty_no_call(mach_port_t host)
 {
-	unsigned		try, before, r0, t0, r1, t1, direct = 0;
-	unsigned long long	start, took = 0;
+	unsigned		try, i, before, r0, t0, r1, t1, direct = 0;
+	unsigned long long	start, took;
 
 	for (try = 0; try < A40_TRIES; try++) {
-		arm_forty_wait_parked();
+		for (i = 0; i < try % 4; i++)	/* as arm 39 */
+			(void) arm_forty_counts(host, &r0, &t0);
+		if (!arm_thread_waiting(&arm_forty_thread)) {
+			printf("act_test: [40] the woken thread never came to "
+			       "wait — WRONG\n");
+			return 0;
+		}
 		if (!arm_forty_counts(host, &r0, &t0))
 			return 0;
 		before = arm_forty_got;
@@ -6353,25 +6391,24 @@ arm_forty_no_call(mach_port_t host)
 		}
 		if (!arm_forty_counts(host, &r1, &t1))
 			return 0;
-		if (arm_forty_got != before && direct == 0 && t1 == t0) {
-			printf("act_test: [40] a send alone, then only user code: "
-			       "the thread ran %llu TSC ticks later and no tick "
-			       "undid it — WRONG\n", took);
-			return 0;
+		if (t1 != t0) {
+			printf("act_test: [40] a tick undid the bet of a send "
+			       "alone, try %u; the thread ran %llu TSC ticks "
+			       "after it\n", try + 1, took);
+			return 1;
 		}
 	}
-	if (direct == A40_TRIES) {
-		printf("act_test: [40] every send alone was taken by a direct "
-		       "switch, with no bet to lose — NOT ASKED\n");
+	if (direct != 0) {
+		printf("act_test: [40] %u of %u sends alone were taken by a direct "
+		       "switch, with no bet to lose — NOT ASKED\n", direct,
+		       A40_TRIES);
 		return -1;
 	}
-	printf("act_test: [40] a tick undid the bet of a send alone, %u time(s) "
-	       "of %u; the thread ran %llu TSC ticks after the last send\n",
-	       A40_TRIES - direct, A40_TRIES, took);
-	return 1;
+	printf("act_test: [40] %u sends alone, then only user code, and no tick "
+	       "undid one — WRONG\n", A40_TRIES);
+	return 0;
 }
 
-/* 1 settled every time, 0 wrong, -1 a direct switch took every send. */
 static int
 arm_forty_combined(mach_port_t host, mach_port_t reply)
 {
@@ -6384,16 +6421,21 @@ arm_forty_combined(mach_port_t host, mach_port_t reply)
 			return 0;
 		}
 	for (try = 0; try < A40_TRIES; try++) {
-		arm_forty_wait_parked();
+		for (i = 0; i < try % 4; i++)	/* as arm 39 */
+			(void) arm_forty_counts(host, &r0, &t0);
+		if (!arm_thread_waiting(&arm_forty_thread)) {
+			printf("act_test: [40] the woken thread never came to "
+			       "wait — WRONG\n");
+			return 0;
+		}
 		if (!arm_forty_counts(host, &r0, &t0))
 			return 0;
 		before = arm_forty_got;
+		arm_forty_seen = r0 + t0;
 		(void) arm_thirty_nine_send(arm_forty_port, MACH_SEND_HANDOFF,
 					    A40_WAKE);
 		if (arm_forty_got != before)
 			direct++;
-		else
-			arm_forty_seen = r0 + t0;
 		if (arm_forty_rpc(reply) != MACH_MSG_SUCCESS) {
 			printf("act_test: [40] a call to the server failed — "
 			       "WRONG\n");
@@ -6405,21 +6447,22 @@ arm_forty_combined(mach_port_t host, mach_port_t reply)
 			       "call never ran — WRONG\n");
 			return 0;
 		}
-		if (direct == 0 && seen == r0 + t0) {
-			printf("act_test: [40] a combined call went to its server "
-			       "with a hand-off still pending, and left it behind "
-			       "— WRONG\n");
-			return 0;
+		if (seen != r0 + t0) {
+			printf("act_test: [40] a combined call settled the "
+			       "hand-off before its server ran, try %u\n",
+			       try + 1);
+			return 1;
 		}
 	}
-	if (direct == A40_TRIES) {
-		printf("act_test: [40] every send before a combined call was "
-		       "taken by a direct switch — NOT ASKED\n");
+	if (direct != 0) {
+		printf("act_test: [40] %u of %u sends before a combined call were "
+		       "taken by a direct switch — NOT ASKED\n", direct,
+		       A40_TRIES);
 		return -1;
 	}
-	printf("act_test: [40] a combined call settled the hand-off before its "
-	       "server ran, %u time(s) of %u\n", A40_TRIES - direct, A40_TRIES);
-	return 1;
+	printf("act_test: [40] %u combined calls went to their server with a "
+	       "hand-off still pending — WRONG\n", A40_TRIES);
+	return 0;
 }
 
 static int
@@ -6440,6 +6483,7 @@ arm_forty_asked(mach_port_t host)
 		return 1;
 	}
 	arm_forty_host = host;
+	arm_forty_thread = MACH_PORT_NULL;
 	arm_forty_port = arm_own_port(40);
 	arm_forty_service = arm_own_port(40);
 	reply = arm_own_port(40);
@@ -6458,6 +6502,7 @@ arm_forty_asked(mach_port_t host)
 	(void) arm_thirty_nine_send(arm_forty_service, 0, A40_REPLY);
 	(void) pthread_join(receiver, NULL);
 	(void) pthread_join(server, NULL);
+	(void) mach_port_deallocate(mach_task_self(), arm_forty_thread);
 	(void) mach_port_destroy(mach_task_self(), reply);
 	(void) mach_port_destroy(mach_task_self(), arm_forty_service);
 	(void) mach_port_destroy(mach_task_self(), arm_forty_port);
