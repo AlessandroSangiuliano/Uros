@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #869
+Takes out: the release at the death of the port, and puts back the one in ipc_right_destroy(), which comes before the backup -- act_test [49] reads a count too low when its port has gone to the backup, and the creator cannot allocate on its subsystem after.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[49\] (a port gone to its backup: the count answered|the creator can no longer allocate)
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_port.c b/uros/src/mach_kernel/ipc/ipc_port.c
+index 0b8b86cf..1049ba2c 100644
+--- a/uros/src/mach_kernel/ipc/ipc_port.c
++++ b/uros/src/mach_kernel/ipc/ipc_port.c
+@@ -901,7 +901,6 @@ ipc_port_destroy(
+ 	 * port's.
+ 	 */
+ 	if (port->ip_subsystem != RPC_SUBSYSTEM_NULL) {
+-		subsystem = port->ip_subsystem->subsystem;
+ 		port->ip_subsystem = RPC_SUBSYSTEM_NULL;
+ 	}
+ 	ip_unlock(port);
+diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
+index 8138b905..89889716 100644
+--- a/uros/src/mach_kernel/ipc/ipc_right.c
++++ b/uros/src/mach_kernel/ipc/ipc_right.c
+@@ -670,6 +670,9 @@ ipc_right_destroy(
+ 			assert(ip_active(port));
+ 			assert(port->ip_receiver == space);
+ 
++			if (port->ip_subsystem)
++				subsystem_deallocate(
++					port->ip_subsystem->subsystem);
+ 			ipc_port_clear_receiver(port);
+ 			ipc_port_destroy(port); /* consumes our ref, unlocks */
+ 		} else if (type & MACH_PORT_TYPE_SEND_ONCE) {

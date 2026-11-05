@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #869
+Takes out: the release altogether -- a port that dies leaves its reference behind, which is what mach_port_mod_refs() and a destroyed message did.  act_test [49] reads a count too high after the first death.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[49\] after the port died: the count answered
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_port.c b/uros/src/mach_kernel/ipc/ipc_port.c
+index 0b8b86cf..1049ba2c 100644
+--- a/uros/src/mach_kernel/ipc/ipc_port.c
++++ b/uros/src/mach_kernel/ipc/ipc_port.c
+@@ -901,7 +901,6 @@ ipc_port_destroy(
+ 	 * port's.
+ 	 */
+ 	if (port->ip_subsystem != RPC_SUBSYSTEM_NULL) {
+-		subsystem = port->ip_subsystem->subsystem;
+ 		port->ip_subsystem = RPC_SUBSYSTEM_NULL;
+ 	}
+ 	ip_unlock(port);
