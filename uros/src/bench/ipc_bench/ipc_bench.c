@@ -322,6 +322,30 @@ elapsed_ns(const tvalspec_t *before, const tvalspec_t *after)
     return ns;
 }
 
+/*
+ * A row times what its loop does, and its loop used to drop what mach_msg()
+ * answered, so a row timing an error read like any other.  Every call of a
+ * timed loop goes through BENCH_CALL(), and the row says how many failed, as
+ * WRONG, which the harness fails the boot on (#777).
+ */
+static volatile unsigned long bench_failed_calls;
+
+#define BENCH_CALL(call)						\
+    do {								\
+	if ((call) != MACH_MSG_SUCCESS)					\
+	    bench_failed_calls++;					\
+    } while (0)
+
+static void
+bench_report_failed(const char *label)
+{
+    if (bench_failed_calls != 0) {
+	printf("  %s: WRONG: %lu mach_msg() call(s) failed, this row timed "
+	       "an error path (#777)\n", label, bench_failed_calls);
+	bench_failed_calls = 0;
+    }
+}
+
 static void
 print_result(const char *label, unsigned long long total_ns, int iters)
 {
@@ -332,6 +356,7 @@ print_result(const char *label, unsigned long long total_ns, int iters)
 
     printf("  %-34s %5llu.%02llu us/op  (%d iters, %llu us total)\n",
 	   label, us_whole, us_frac, iters, total_us);
+    bench_report_failed(label);
 }
 
 /* ===================================================================
@@ -519,10 +544,10 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -538,10 +563,10 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
@@ -652,8 +677,8 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 	buf.head.msgh_remote_port = echo_port;
 	buf.head.msgh_local_port  = reply_port;
 	buf.head.msgh_id	  = 1;
-	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
-		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     ho_ok = handoff_snap(&ho_before);
@@ -666,8 +691,8 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 	buf.head.msgh_remote_port = echo_port;
 	buf.head.msgh_local_port  = reply_port;
 	buf.head.msgh_id	  = 1;
-	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
-		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
     ho_ok &= handoff_snap(&ho_after);
@@ -896,10 +921,10 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /*
@@ -916,10 +941,10 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
@@ -1567,10 +1592,10 @@ bench_slow_receive(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -1585,11 +1610,11 @@ bench_slow_receive(const char *label, int send_size, int iters)
 	send_buf.head.msgh_id	      = 1;
 
 	/* Send wakes the blocked echo thread — continuation fires here */
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
 
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -1868,10 +1893,10 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     get_time(&t0);
@@ -1884,10 +1909,10 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -1985,10 +2010,10 @@ bench_pp_inter(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     get_time(&t0);
@@ -2000,10 +2025,10 @@ bench_pp_inter(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -2155,10 +2180,10 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -2179,10 +2204,10 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -2384,19 +2409,19 @@ bench_ool_ports(unsigned int nports)
 
     for (i = 0; i < 20u; i++) {
 	OOLP_FILL();
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     get_time(&t0);
     for (i = 0; i < (unsigned int) iters; i++) {
 	OOLP_FILL();
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 #undef OOLP_FILL
@@ -2407,6 +2432,7 @@ bench_ool_ports(unsigned int nports)
 	   nports, nports == 1 ? "port" : "ports",
 	   per_op / 1000, (per_op % 1000) / 10,
 	   per_op / (unsigned long) nports, iters);
+    bench_report_failed("ool ports");
 
     for (i = 0; i < nports; i++)
 	mach_port_destroy(mach_task_self(), names[i]);
@@ -2575,10 +2601,10 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -2598,10 +2624,10 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -2884,10 +2910,10 @@ cc_worker_func(void *arg)
 	send_buf.head.msgh_local_port  = w->reply_port;
 	send_buf.head.msgh_id	       = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, w->send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 w->reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, w->send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 w->reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     return (void *)0;
 }
@@ -2955,6 +2981,7 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
 	   "(%llu ns/RPC aggregate)\n",
 	   nthreads, total_rpc, total_ns,
 	   total_ns / (total_rpc ? total_rpc : 1));
+    bench_report_failed("concurrent same-space");
 }
 
 /* ===================================================================
@@ -2998,10 +3025,10 @@ icc_round_trip(icc_worker_t *w)
     send_buf.head.msgh_local_port  = MACH_PORT_NULL;
     send_buf.head.msgh_id	   = 1;
 
-    mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(bench_null_msg_t), 0,
-	     MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-    mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-	     w->child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(bench_null_msg_t), 0,
+	     MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+    BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+	     w->child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
 }
 
 static void *
@@ -3085,6 +3112,7 @@ bench_concurrent_intertask(int n, int iters_per_thread)
     printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
 	   label, total_rpc, total_ns,
 	   total_ns / (total_rpc ? total_rpc : 1));
+    bench_report_failed(label);
     print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     for (i = 0; i < n; i++)
@@ -3432,8 +3460,8 @@ child_srvq_entry(void)
     unsigned long long	t;
 
     for (;;) {
-	mach_msg(&buf.head, opt, send_size, sizeof(buf), CHILD_RECV_NAME,
-		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&buf.head, opt, send_size, sizeof(buf), CHILD_RECV_NAME,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
 	t = bench_tsc();
 	while (bench_tsc() - t < SRVQ_WORK_US * g_tsc_per_us)
 	    ;
@@ -3482,9 +3510,9 @@ srvq_client_func(void *arg)
 	buf.head.msgh_local_port  = c->reply;
 	buf.head.msgh_id	  = 1;
 	t = bench_tsc();
-	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG,
+	BENCH_CALL(mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG,
 		 sizeof(bench_null_msg_t), sizeof(buf), c->reply,
-		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
 	if (i >= 0)
 	    wait_hist_add(&c->hist, t, bench_tsc());
     }
@@ -3541,6 +3569,7 @@ bench_server_queue(int k)
     total_rpc = (long)k * SRVQ_ITERS;
     printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
 	   label, total_rpc, total_ns, total_ns / (total_rpc ? total_rpc : 1));
+    bench_report_failed(label);
     wait_hist_print(label, &all);
     print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
