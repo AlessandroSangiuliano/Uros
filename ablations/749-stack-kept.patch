@@ -5,13 +5,13 @@ Run: --entry 15 1200 -smp 4
 Expect: quiet_census: kernel stacks taken [0-9]+, given back 0, so [0-9]+ held, by [0-9]+ thread shuttles and [0-9]+ threads alive -- WRONG, a kernel stack outlived its thread \(#749\)
 
 diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
-index bfe09295..d30bc2c6 100644
+index de2d29ab..89c44266 100644
 --- a/uros/src/mach_kernel/x86_64/thread/machine.c
 +++ b/uros/src/mach_kernel/x86_64/thread/machine.c
-@@ -404,31 +404,6 @@ void
+@@ -488,32 +488,6 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
+ void
  thread_machine_destroy(thread_t thread)
  {
- 	thread_act_t	thr_act = thread->top_act;
 -	spl_t		s;
 -
 -	/*
@@ -26,9 +26,9 @@ index bfe09295..d30bc2c6 100644
 -	 * stack_free() asks, and the machine-independent side calls this only
 -	 * once the thread is off its processor for good.
 -	 *
--	 * Owned by the shuttle and not the activation, so before the test
--	 * below and whatever it answers.  Counted before the shuttle goes back
--	 * to its zone, which is what lets the census hold the two side by side.
+-	 * The stack is the shuttle's, and the only thing this frees.  Counted
+-	 * before the shuttle goes back to its zone, which is what lets the
+-	 * census hold the two side by side.
 -	 */
 -	if (thread->kernel_stack != 0) {
 -		s = splsched();
@@ -37,6 +37,7 @@ index bfe09295..d30bc2c6 100644
 -		thread->kernel_stack = 0;
 -		atomic_inc64(&machine_stacks_given_back);
 -	}
- 
- 	if (thr_act == THR_ACT_NULL || thr_act->mact.pcb == PCB_NULL)
- 		return;
+-
+ 	/*
+ 	 * And nothing of the activation's (#749).  The floating-point area is
+ 	 * the pcb's, and act_machine_destroy() frees it with its activation:
