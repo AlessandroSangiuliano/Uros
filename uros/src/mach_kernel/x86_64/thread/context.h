@@ -177,6 +177,14 @@ extern unsigned long	context_fpu_exempted;
 void	thread_machine_stack_counts(uint64_t *taken, uint64_t *given_back);
 
 /*
+ * And how many floating-point areas thread_machine_create() has given
+ * activations and act_machine_destroy() has freed with them (#749), for the
+ * census beside the activations the zone counts: an area freed by anything
+ * but its own activation's teardown is one this count stops matching.
+ */
+void	thread_machine_fpu_area_counts(uint64_t *taken, uint64_t *given_back);
+
+/*
  * 🔴 AND HOW OFTEN THE EXEMPTION FIRES, WHICH IS OFF (#561).
  *
  *	cmake -DUROS_CONTEXT_FPU_COUNT=ON

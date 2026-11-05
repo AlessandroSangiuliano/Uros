@@ -694,6 +694,48 @@ quiet_stacks_so_far(void)
 }
 
 /*
+ * 🔴 NO FLOATING-POINT AREA OUTLIVES ITS ACTIVATION (#749).
+ *
+ * The area is the pcb's, and the pcb is the activation's:
+ * thread_machine_create() gives one to each activation it builds a thread on,
+ * and act_machine_destroy() frees it with the activation.  So the areas held
+ * can never be more than the activations that exist.  Before that, the
+ * shuttle's teardown freed the area through top_act, and when the shuttle
+ * outlived its activation it freed a live activation's area instead and left
+ * its own one held for good.
+ *
+ * ⚠️ Beside the activation zone's count, read under the zone's lock, as the
+ * stacks are beside the shuttles': an activation is counted by zalloc() before
+ * thread_machine_create() gives it an area, and uncounted by zfree() after
+ * act_machine_destroy() has freed it, so while the lock is held no creation or
+ * destruction can put an area outside the count.  The activation zone has no
+ * per-processor magazine (#330) either.  With each report as the machine goes
+ * idle, for the reason quiet_stacks_so_far() gives.
+ */
+extern struct zone	*thr_act_zone;	/* kern/thread_act.c */
+
+static void
+quiet_fpu_areas_so_far(void)
+{
+	uint64_t	taken, given_back, held;
+	int		activations;
+
+	simple_lock(&thr_act_zone->lock);
+	activations = thr_act_zone->count;
+	thread_machine_fpu_area_counts(&taken, &given_back);
+	simple_unlock(&thr_act_zone->lock);
+	held = taken - given_back;
+
+	printf("quiet_census: floating-point areas taken %llu, given back %llu, "
+	       "so %llu held, by %d activations%s (#749)\n",
+	       (unsigned long long) taken, (unsigned long long) given_back,
+	       (unsigned long long) held, activations,
+	       held > (uint64_t) activations ?
+	       " -- WRONG, a floating-point area outlived its activation" :
+	       " -- no floating-point area outlived its activation");
+}
+
+/*
  * #446: what -X did, said by every boot that has it on -- at zero too, so that
  * a boot whose hand-off never happened is told from one that was not asked.
  * On this target -X reaches a thread of any task, so none of another task may
@@ -806,6 +848,7 @@ quiet_census_pass(int mycpu)
 		       quiet_resets, quiet_all_passes);
 		cons_ring_so_far("quiet_census: ");
 		quiet_stacks_so_far();
+		quiet_fpu_areas_so_far();
 		quiet_frame_returns_so_far();
 		quiet_handoff_so_far();
 	}
@@ -845,6 +888,7 @@ quiet_census_pass(int mycpu)
 	       quiet_lock_busy);
 
 	quiet_stacks_so_far();
+	quiet_fpu_areas_so_far();
 	quiet_frame_returns_so_far();
 
 	/*

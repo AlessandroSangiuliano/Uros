@@ -199,7 +199,7 @@ void		act_ulock_release_all(thread_act_t thr_act);
 kern_return_t	terminate_empty_act(thread_act_t);
 void		install_special_handler_locked(thread_act_t);
 
-static zone_t	thr_act_zone;
+zone_t		thr_act_zone;	/* x86-64's census reads its count (#749) */
 
 /*
  * Thread interfaces accessed via a thread_activation:

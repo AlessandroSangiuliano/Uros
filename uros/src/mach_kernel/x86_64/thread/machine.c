@@ -90,6 +90,14 @@ act_machine_create(struct task *task, thread_act_t thr_act)
 	return KERN_SUCCESS;
 }
 
+/*
+ * The floating-point areas thread_machine_create() has given activations and
+ * act_machine_destroy() has freed with them, for the census (#749), as the
+ * kernel stacks are counted below.
+ */
+static volatile uint64_t	machine_fpu_areas_taken;
+static volatile uint64_t	machine_fpu_areas_given_back;
+
 void
 act_machine_destroy(thread_act_t thr_act)
 {
@@ -110,6 +118,7 @@ act_machine_destroy(thread_act_t thr_act)
 	if (pcb != PCB_NULL && pcb->ctx.fpu_area != (void *) 0) {
 		fpu_area_free(pcb->ctx.fpu_area);
 		pcb->ctx.fpu_area = (void *) 0;
+		atomic_inc64(&machine_fpu_areas_given_back);
 	}
 	thr_act->mact.pcb = PCB_NULL;
 }
@@ -388,6 +397,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		thread->kernel_stack = 0;
 		return KERN_RESOURCE_SHORTAGE;
 	}
+	atomic_inc64(&machine_fpu_areas_taken);
 
 	/*
 	 * 🔑 The frame in the pcb, the whole stack for the kernel (#770).  The
@@ -517,6 +527,13 @@ thread_machine_stack_counts(uint64_t *taken, uint64_t *given_back)
 {
 	*taken = atomic_load64(&machine_stacks_taken);
 	*given_back = atomic_load64(&machine_stacks_given_back);
+}
+
+void
+thread_machine_fpu_area_counts(uint64_t *taken, uint64_t *given_back)
+{
+	*taken = atomic_load64(&machine_fpu_areas_taken);
+	*given_back = atomic_load64(&machine_fpu_areas_given_back);
 }
 
 /*
