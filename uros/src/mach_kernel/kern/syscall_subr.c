@@ -311,18 +311,27 @@ syscall_thread_switch(
     if ((thread_name != 0) &&
 	(ipc_port_translate_send(cur_thread->top_act->task->itk_space,
 				 thread_name, &port) == KERN_SUCCESS)) {
-	    /* port is locked, but it might not be active */
+	    register thread_act_t thr_act;
 
 	    /*
 	     *	Get corresponding thread.
+	     *
+	     * #889: the port comes locked, and the order is act_lock(), then
+	     * ip_lock().  A thread that held the port here while it waited for
+	     * the activation, and one going the other way, in mach_thread_self()
+	     * or thread_terminate(), slept for ever.  convert_port_to_act()
+	     * asks whether the port is a live thread's, and leaves nothing
+	     * locked and a reference on the activation.
 	     */
-	    if (ip_active(port) && (ip_kotype(port) == IKOT_ACT)) {
+	    ip_reference(port);
+	    ip_unlock(port);
+	    thr_act = convert_port_to_act(port);
+	    ipc_port_release(port);
+
+	    if (thr_act != THR_ACT_NULL) {
 			register thread_t thread;
-			register thread_act_t thr_act;
 			register int s;
 
-			thr_act = (thread_act_t) port->ip_kobject;
-			assert(thr_act != THR_ACT_NULL);
 			/*
 			 *	Check if the thread is in the right pset. Then
 			 *	pull it off its run queue.  If it
@@ -352,8 +361,13 @@ syscall_thread_switch(
 					 */
 					thread_unlock(thread);
 					splx(s);
+					/*
+					 * With the lock held, so as not to sleep
+					 * on it with a thread off every queue.
+					 * Not the last: a thread holds its own.
+					 */
+					act_locked_act_deallocate(thr_act);
 					act_unlock_thread(thr_act);
-					ip_unlock(port);
 					/* XXX thread might disappear on us now? */
 					if ( (thread->policy == POLICY_FIFO) ||
 						 (thread->policy == POLICY_RR) ) {
@@ -375,11 +389,11 @@ syscall_thread_switch(
 				splx(s);
 				}
 			}
-			if (!did_handoff)
+			if (!did_handoff) {
 				act_unlock_thread(thr_act);
+				act_deallocate(thr_act);
+			}
 	    }
-	    if (!did_handoff)
-		ip_unlock(port);
     }
 
     /*
