@@ -316,6 +316,7 @@ extern void		sched_rpc_handoff_counts(
 				unsigned long	*same_task,
 				unsigned long	*other_task,
 				unsigned long	*other_task_fenced);
+#endif	/* NCPUS > 1 */
 
 /*
  * #777: a lost bet undone -- the woken thread taken back off its waker's run
@@ -323,12 +324,15 @@ extern void		sched_rpc_handoff_counts(
  */
 #define	SCHED_HANDOFF_UNDO_RECEIVE	0	/* the receive found a message */
 #define	SCHED_HANDOFF_UNDO_RETURN	1	/* back to user, unblocked */
-#define	SCHED_HANDOFF_UNDO_WHERE	2
+#define	URMACH_HANDOFF_UNDO_LEFT	2	/* it left, for another thread */
+#define	URMACH_HANDOFF_UNDO_TICK	3	/* a tick found it still pending */
+#define	SCHED_HANDOFF_UNDO_WHERE	4
+
+#if	NCPUS > 1
 extern boolean_t	thread_handoff_undo(
 				int		where);
 extern void		sched_rpc_handoff_undone(
-				unsigned long	*at_receive,
-				unsigned long	*at_return);
+				unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE]);
 #endif	/* NCPUS > 1 */
 
 /* Select a thread to run on a particular processor */

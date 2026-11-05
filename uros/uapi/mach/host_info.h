@@ -297,6 +297,8 @@ struct host_rpc_handoff_info {
 	 */
 	unsigned int	undone_receive;	/* a receive that found a message */
 	unsigned int	undone_return;	/* a return to user space unblocked */
+	unsigned int	undone_left;	/* the waker left, for another thread */
+	unsigned int	undone_tick;	/* a tick found it still pending */
 };
 
 typedef struct host_rpc_handoff_info	host_rpc_handoff_info_data_t;

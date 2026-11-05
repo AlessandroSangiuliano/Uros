@@ -207,9 +207,11 @@ typedef struct {
     unsigned int same_task;
     unsigned int other_task;
     unsigned int other_task_fenced;
-    int		 has_undo;	/* #777: the kernel answered the two below */
+    int		 has_undo;	/* #777: the kernel answered the four below */
     unsigned int undone_receive;
     unsigned int undone_return;
+    unsigned int undone_left;
+    unsigned int undone_tick;
 } handoff_snap_t;
 
 static int
@@ -231,6 +233,8 @@ handoff_snap(handoff_snap_t *s)
     s->has_undo = (count >= HOST_RPC_HANDOFF_INFO_COUNT);
     s->undone_receive = s->has_undo ? info.undone_receive : 0;
     s->undone_return  = s->has_undo ? info.undone_return : 0;
+    s->undone_left    = s->has_undo ? info.undone_left : 0;
+    s->undone_tick    = s->has_undo ? info.undone_tick : 0;
     return 1;
 }
 
@@ -287,11 +291,16 @@ print_handoff_stats(const char *label, int ok,
     if (before->has_undo && after->has_undo)
 	printf("  [undo] %-28s %u bet(s) lost and undone: %u at a receive "
 	       "that found a message, %u at a return to user space without a "
-	       "block\n", label,
+	       "block, %u when the waker left for another thread, %u at a "
+	       "tick\n", label,
 	       (after->undone_receive - before->undone_receive) +
-	       (after->undone_return - before->undone_return),
+	       (after->undone_return - before->undone_return) +
+	       (after->undone_left - before->undone_left) +
+	       (after->undone_tick - before->undone_tick),
 	       after->undone_receive - before->undone_receive,
-	       after->undone_return - before->undone_return);
+	       after->undone_return - before->undone_return,
+	       after->undone_left - before->undone_left,
+	       after->undone_tick - before->undone_tick);
 }
 
 /* ===================================================================

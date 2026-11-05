@@ -365,7 +365,7 @@ host_info(
 	case HOST_RPC_HANDOFF_INFO:
 		{ register host_rpc_handoff_info_t	handoff_info;
 		  unsigned long	same = 0, other = 0, fenced = 0;
-		  unsigned long	at_receive = 0, at_return = 0;
+		  unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE] = { 0 };
 
 		/*
 		 * #777: a caller built before the undo counts asks for the four
@@ -378,7 +378,7 @@ host_info(
 		handoff_info = (host_rpc_handoff_info_t) info;
 #if	NCPUS > 1
 		sched_rpc_handoff_counts(&same, &other, &fenced);
-		sched_rpc_handoff_undone(&at_receive, &at_return);
+		sched_rpc_handoff_undone(undone);
 		handoff_info->reach = (unsigned int) sched_rpc_handoff;
 #else	/* NCPUS > 1 */
 		handoff_info->reach = 0;	/* one processor: no hand-off */
@@ -391,8 +391,14 @@ host_info(
 			*count = HOST_RPC_HANDOFF_INFO_COUNT_446;
 			return(KERN_SUCCESS);
 		}
-		handoff_info->undone_receive = (unsigned int) at_receive;
-		handoff_info->undone_return  = (unsigned int) at_return;
+		handoff_info->undone_receive =
+		    (unsigned int) undone[SCHED_HANDOFF_UNDO_RECEIVE];
+		handoff_info->undone_return =
+		    (unsigned int) undone[SCHED_HANDOFF_UNDO_RETURN];
+		handoff_info->undone_left =
+		    (unsigned int) undone[URMACH_HANDOFF_UNDO_LEFT];
+		handoff_info->undone_tick =
+		    (unsigned int) undone[URMACH_HANDOFF_UNDO_TICK];
 		*count = HOST_RPC_HANDOFF_INFO_COUNT;
 		return(KERN_SUCCESS);
 		}

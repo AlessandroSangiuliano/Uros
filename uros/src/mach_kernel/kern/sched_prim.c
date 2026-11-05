@@ -2849,23 +2849,19 @@ sched_rpc_handoff_counts(
 }
 
 /*
- * #777: the bets lost and undone, by where it showed -- a receive that found a
- * message instead of blocking, or a return to user space without a block.
+ * #777: the bets lost and undone, by where it showed: SCHED_HANDOFF_UNDO_*
+ * and URMACH_HANDOFF_UNDO_*.
  */
 void
 sched_rpc_handoff_undone(
-	unsigned long	*at_receive,
-	unsigned long	*at_return)
+	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE])
 {
-	int	cpu;
+	int	cpu, where;
 
-	*at_receive = 0;
-	*at_return = 0;
-	for (cpu = 0; cpu < NCPUS; cpu++) {
-		*at_receive +=
-		    sched_handoff_count[cpu].undone[SCHED_HANDOFF_UNDO_RECEIVE];
-		*at_return +=
-		    sched_handoff_count[cpu].undone[SCHED_HANDOFF_UNDO_RETURN];
+	for (where = 0; where < SCHED_HANDOFF_UNDO_WHERE; where++) {
+		undone[where] = 0;
+		for (cpu = 0; cpu < NCPUS; cpu++)
+			undone[where] += sched_handoff_count[cpu].undone[where];
 	}
 }
 
