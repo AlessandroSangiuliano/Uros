@@ -66,7 +66,7 @@
 #define NAME_NOT_CHECKED_IN	(1001)
 #define NETNAME_NO_SUCH_HOST	(1002)
 #define NETNAME_HOST_NOT_FOUND	(1003)
-#define	NETNAME_INVALID_PORT	(1004)
+#define	NETNAME_INVALID_PORT	(1004)	/* a signature that cannot sign (#744) */
 #define NETNAME_NO_MOUNT	(1005)	/* no mount prefix matched (#220) */
 #define NETNAME_MOUNT_EXISTS	(1006)	/* prefix already registered (#220) */
 

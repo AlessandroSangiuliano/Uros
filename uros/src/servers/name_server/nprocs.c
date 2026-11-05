@@ -340,6 +340,27 @@ notify_watchers_for(netname_name_in_t key, mach_port_t service_port)
     }
 }
 
+/*
+ * Whether `sig' can sign for `port' (#744).
+ *
+ * A name is its server's because nobody else can present the signature it was
+ * checked in with, and this is the check of the half of that the name server
+ * can see.  MACH_PORT_NULL is what every task can present: four servers passed
+ * it, so their names were anyone's to check in again or out.  A dead name is
+ * the same for everyone too.  And the port being registered cannot sign for
+ * itself, since everyone who looks the name up holds a send right to it.
+ *
+ * ⚠️ The other half is the caller's: a port nobody else holds a send right to.
+ * The name server cannot tell one from a port the caller shares, and a task
+ * port signs as well as a private one while handing the name server the task --
+ * urmach_netname_signature() is that half.
+ */
+static boolean_t
+signature_can_sign(mach_port_t sig, mach_port_t port)
+{
+    return MACH_PORT_VALID(sig) && sig != port;
+}
+
 kern_return_t
 do_netname_check_in(mach_port_t server, netname_name_in_t key,
 		    mach_port_t sig, mach_port_t name)
@@ -349,6 +370,15 @@ do_netname_check_in(mach_port_t server, netname_name_in_t key,
     if (Debug)
 	printf("%s: netname_check_in(%.80s, name=%x, sig=%x)\n",
 	       program, key, name, sig);
+
+    /*
+     * Refused before the name is looked for, so that a name nobody holds yet
+     * cannot be taken without a signature either.  The rights in the request
+     * go back with it: mach_msg_server() destroys a request answered with an
+     * error.
+     */
+    if (!signature_can_sign(sig, name))
+	return NETNAME_INVALID_PORT;
 
     if (netname_find(key, &this, &prev)) {
 	if (this->sig == sig) {
@@ -431,6 +461,9 @@ do_netname_check_out(mach_port_t server, netname_name_in_t key, mach_port_t sig)
     if (Debug)
 	printf("%s: netname_check_out(%.80s, sig=%x)\n",
 	       program, key, sig);
+
+    if (!signature_can_sign(sig, MACH_PORT_NULL))
+	return NETNAME_INVALID_PORT;		/* #744 */
 
     if (netname_find(key, &this, &prev)) {
 	if (this->sig == sig) {
