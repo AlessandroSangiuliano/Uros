@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #880
+Takes out: ipc_entry_alloc_name()'s refusal of index 0 -- the name goes to the overflow, where no lookup can reach it
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[44\] mach_port_allocate_name\(\) for name 0x1, of index 0, answered 0x0, not KERN_INVALID_VALUE
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_entry.c b/uros/src/mach_kernel/ipc/ipc_entry.c
+index c97e078a..655728c2 100644
+--- a/uros/src/mach_kernel/ipc/ipc_entry.c
++++ b/uros/src/mach_kernel/ipc/ipc_entry.c
+@@ -431,9 +431,6 @@ ipc_entry_alloc_name(
+ 	 * left ipc_right_reverse() a null entry, and the next receive that
+ 	 * copied out a send right to that port stopped the kernel.
+ 	 */
+-	if (index == 0)
+-		return KERN_INVALID_VALUE;
+-
+ 	is_write_lock(space);
+ 
+ 	for (;;) {
+@@ -454,7 +451,7 @@ ipc_entry_alloc_name(
+ 		 *	A "fast" space disallows case 3 (ports can't be renamed).
+ 		 */
+ 
+-		if (index < space->is_table_size) {
++		if ((0 < index) && (index < space->is_table_size)) {
+ 			ipc_entry_t table = space->is_table;
+ 
+ 			entry = &table[index];
