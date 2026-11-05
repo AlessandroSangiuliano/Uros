@@ -12,7 +12,7 @@ index 24840f17..cdf2bac8 100644
  		mach_msg_header_t hdr;
  		(void)mach_port_allocate(bootstrap_self,
  					 MACH_PORT_RIGHT_RECEIVE, &park_port);
-+		*(volatile int *)8 = 0;
++		{ volatile int *volatile nowhere = (volatile int *)8; *nowhere = 0; }
  		for (;;)
  			(void)mach_msg(&hdr, MACH_RCV_MSG, 0, sizeof(hdr),
  				       park_port, MACH_MSG_TIMEOUT_NONE,
