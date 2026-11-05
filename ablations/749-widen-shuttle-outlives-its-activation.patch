@@ -1,13 +1,13 @@
 Kind: widen
 Issue: #749
-Holds open: a shuttle's last reference past act_free() -- the reaper takes a reference on the shuttle before the drops that free its activation and lets it go 50 ms later, the order a fired timer's reference in flight to thread_timeout() makes by chance; meanwhile the activation zone gives the freed activation to a new thread, and with the fix out thread_machine_destroy() then frees that live thread's floating-point area through the shuttle's top_act, and its next switch-in panics; the first 8 holds say so on the console, so that a fixed run that passes shows the window was open; at most 128 holds in a boot
+Holds open: a shuttle's last reference past act_free() -- the reaper takes a reference on the shuttle before the drops that free its activation and lets it go 50 ms later, the order a fired timer's reference in flight to thread_timeout() makes by chance; meanwhile the activation zone gives the freed activation to a new thread, and with the fix out thread_machine_destroy() then frees that live thread's floating-point area through the shuttle's top_act, and its next switch-in panics; each hold says so on the console, so that a fixed run that passes shows the window was open; at most 8 holds in a boot, because the reaper waits through each and 128 backed its queue up until act_test's arm 9 (#660) saw thousands of threads not yet freed
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
-index d3bfe176..dec5576e 100644
+index e14d740a..dfbf48d4 100644
 --- a/uros/src/mach_kernel/kern/thread.c
 +++ b/uros/src/mach_kernel/kern/thread.c
-@@ -1915,6 +1915,35 @@ Thread_info(
+@@ -1915,6 +1915,37 @@ Thread_info(
   *	The reaper thread will disappear in the next revision of thread
   *	control when it's function will be moved into thread_dispatch.
   */
@@ -17,11 +17,13 @@ index d3bfe176..dec5576e 100644
 + * shuttle's last reference goes after act_free() -- the order a fired timer's
 + * reference in flight to thread_timeout() makes by chance.  Meanwhile the
 + * activation zone may give the freed activation to a new thread.  At most
-+ * WIDEN_749_HOLDS times in a boot, said on the console the first 8.
++ * WIDEN_749_HOLDS times in a boot, each said on the console: the reaper
++ * waits through each hold, and 128 of them backed its queue up so far that
++ * act_test's arm 9 (#660) saw thousands of threads not yet freed.
 + */
 +#include <kern/time_out.h>
 +#define	WIDEN_749_MS	50
-+#define	WIDEN_749_HOLDS	128
++#define	WIDEN_749_HOLDS	8
 +static int	widen749_holds = WIDEN_749_HOLDS;
 +static int	widen749_said;
 +
@@ -43,7 +45,7 @@ index d3bfe176..dec5576e 100644
  void
  reaper_thread(void)
  {
-@@ -1923,6 +1952,7 @@ reaper_thread(void)
+@@ -1923,6 +1954,7 @@ reaper_thread(void)
  		thread_act_t		thr_act;
  		struct ipc_port		*pool_port;
  		spl_t			s;
@@ -51,7 +53,7 @@ index d3bfe176..dec5576e 100644
  
  		s = splsched();
  		simple_lock(&reaper_lock);
-@@ -1939,6 +1969,13 @@ reaper_thread(void)
+@@ -1939,6 +1971,13 @@ reaper_thread(void)
  			 */
  			(void) thread_wait(thread);
  
@@ -65,7 +67,7 @@ index d3bfe176..dec5576e 100644
  			thr_act = thread_lock_act(thread);
  			assert(thr_act && thr_act->thread == thread);
  
-@@ -1971,6 +2008,9 @@ reaper_thread(void)
+@@ -1989,6 +2028,9 @@ reaper_thread(void)
  			/* Remove the reference held by the thread: */
  			act_deallocate(thr_act);
  
