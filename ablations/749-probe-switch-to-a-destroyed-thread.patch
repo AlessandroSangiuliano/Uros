@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #749
-Takes out: nothing -- a probe: a fresh kernel thread's context loses its floating-point area, as thread_machine_destroy() leaves one, and the thread is put on a run queue, so that switch_context() meets what #749's two panics met and must name the thread
+Takes out: nothing -- a probe: a fresh kernel thread's context loses its floating-point area, as act_machine_destroy() leaves an activation's, and the thread is put on a run queue, so that switch_context() meets what #749's panics met and must name the thread
 Run: --entry 0 300 -smp 4
-Expect: switch_context: thread 0x[0-9a-f]+, activation 0x[0-9a-f]+, has no floating-point area -- a thread already destroyed: state 0x[0-9a-f]+, ref_count [0-9]+, active [0-9]+; the activation's ref_count [0-9]+, active [0-9]+, thread 0x[0-9a-f]+ \(#749\)
+Expect: switch_context: thread 0x[0-9a-f]+, activation 0x[0-9a-f]+, has no floating-point area: state 0x[0-9a-f]+, ref_count [0-9]+, active [0-9]+; the activation's ref_count [0-9]+, active [0-9]+, thread 0x[0-9a-f]+ \(#749\)
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/startup.c b/uros/src/mach_kernel/x86_64/cpu/startup.c
 index 3d62e84f..10331a43 100644

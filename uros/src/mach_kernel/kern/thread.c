@@ -1956,6 +1956,24 @@ reaper_thread(void)
 			pool_port = thr_act->pool_port;
 
 			/*
+			 * 🔴 THE SHUTTLE LETS GO OF ITS ACTIVATION HERE (#749).
+			 *
+			 * The second act_deallocate() below drops "the reference
+			 * held by the thread": the shuttle's, on its activation.
+			 * The shuttle's pointer goes with it.  Left set, top_act
+			 * outlived the activation whenever someone else held the
+			 * shuttle's last reference -- a fired timer's, in flight to
+			 * thread_timeout() -- and named whatever the activation
+			 * zone made of that memory next.  thread_machine_destroy()
+			 * freed a live thread's floating-point area through it,
+			 * which that thread met as #749's panic at its next switch;
+			 * processor_set_things() and the swapper walk shuttles and
+			 * follow the same pointer.  Unlinked under the two locks
+			 * thread_lock_act() took, as act_detach() unlinks one.
+			 */
+			thread->top_act = thr_act->lower;
+
+			/*
 			 * Replace `act_unlock_thread()' with individual
 			 * calls.  (`act_detach()' can change fields used
 			 * to determine which locks are held, confusing

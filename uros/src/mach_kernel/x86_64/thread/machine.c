@@ -90,9 +90,36 @@ act_machine_create(struct task *task, thread_act_t thr_act)
 	return KERN_SUCCESS;
 }
 
+/*
+ * The floating-point areas thread_machine_create() has given activations and
+ * act_machine_destroy() has freed with them, for the census (#749), as the
+ * kernel stacks are counted below.
+ */
+static volatile uint64_t	machine_fpu_areas_taken;
+static volatile uint64_t	machine_fpu_areas_given_back;
+
 void
 act_machine_destroy(thread_act_t thr_act)
 {
+	pcb_t	pcb = thr_act->mact.pcb;
+
+	/*
+	 * 🔴 THE FLOATING-POINT AREA GOES WITH ITS ACTIVATION (#749).
+	 *
+	 * The area lives in the pcb, and the pcb is the activation's.  It was
+	 * freed by thread_machine_destroy(), the shuttle's teardown, through
+	 * the shuttle's top_act -- which names the activation only until the
+	 * reaper drops it.  When the shuttle's last reference came after
+	 * that, top_act named whatever the activation zone had made of the
+	 * memory, and a live thread lost its area: #749's panic, at that
+	 * thread's next switch.  Freed here, by the teardown of what holds
+	 * it, the area cannot be reached through anything that does not.
+	 */
+	if (pcb != PCB_NULL && pcb->ctx.fpu_area != (void *) 0) {
+		fpu_area_free(pcb->ctx.fpu_area);
+		pcb->ctx.fpu_area = (void *) 0;
+		atomic_inc64(&machine_fpu_areas_given_back);
+	}
 	thr_act->mact.pcb = PCB_NULL;
 }
 
@@ -370,6 +397,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		thread->kernel_stack = 0;
 		return KERN_RESOURCE_SHORTAGE;
 	}
+	atomic_inc64(&machine_fpu_areas_taken);
 
 	/*
 	 * 🔑 The frame in the pcb, the whole stack for the kernel (#770).  The
@@ -460,7 +488,6 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 void
 thread_machine_destroy(thread_t thread)
 {
-	thread_act_t	thr_act = thread->top_act;
 	spl_t		s;
 
 	/*
@@ -475,9 +502,9 @@ thread_machine_destroy(thread_t thread)
 	 * stack_free() asks, and the machine-independent side calls this only
 	 * once the thread is off its processor for good.
 	 *
-	 * Owned by the shuttle and not the activation, so before the test
-	 * below and whatever it answers.  Counted before the shuttle goes back
-	 * to its zone, which is what lets the census hold the two side by side.
+	 * The stack is the shuttle's, and the only thing this frees.  Counted
+	 * before the shuttle goes back to its zone, which is what lets the
+	 * census hold the two side by side.
 	 */
 	if (thread->kernel_stack != 0) {
 		s = splsched();
@@ -487,11 +514,12 @@ thread_machine_destroy(thread_t thread)
 		atomic_inc64(&machine_stacks_given_back);
 	}
 
-	if (thr_act == THR_ACT_NULL || thr_act->mact.pcb == PCB_NULL)
-		return;
-
-	fpu_area_free(thr_act->mact.pcb->ctx.fpu_area);
-	thr_act->mact.pcb->ctx.fpu_area = (void *) 0;
+	/*
+	 * And nothing of the activation's (#749).  The floating-point area is
+	 * the pcb's, and act_machine_destroy() frees it with its activation:
+	 * reached from here, through top_act, it was freed under a live
+	 * thread whenever the shuttle outlived its activation.
+	 */
 }
 
 void
@@ -499,6 +527,13 @@ thread_machine_stack_counts(uint64_t *taken, uint64_t *given_back)
 {
 	*taken = atomic_load64(&machine_stacks_taken);
 	*given_back = atomic_load64(&machine_stacks_given_back);
+}
+
+void
+thread_machine_fpu_area_counts(uint64_t *taken, uint64_t *given_back)
+{
+	*taken = atomic_load64(&machine_fpu_areas_taken);
+	*given_back = atomic_load64(&machine_fpu_areas_given_back);
 }
 
 /*
@@ -1034,20 +1069,25 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	assert(new_act != THR_ACT_NULL && new_act->mact.pcb != PCB_NULL);
 
 	/*
-	 * 🔴 A THREAD ALREADY DESTROYED IS NAMED BEFORE IT IS SWITCHED TO (#749).
+	 * 🔴 A THREAD WITH NO FLOATING-POINT AREA IS NAMED BEFORE IT IS
+	 * SWITCHED TO (#749).
 	 *
 	 * context_switch() refuses an incoming context with no floating-point
 	 * area, and that is all it can say: it is handed two contexts, not the
-	 * threads.  Two places write that null -- thread_machine_destroy(),
-	 * after freeing the area when the shuttle's last reference goes, and
-	 * act_machine_create(), which zeroes a new activation's pcb before
-	 * thread_machine_create() gives it an area -- so a context with none
-	 * is a thread already destroyed, which a run queue still held.  Twice,
-	 * during act_test's arm 14, the panic said no more than that.
+	 * threads.  Two places write that null: act_machine_destroy(), which
+	 * frees the area with its activation, and act_machine_create(), which
+	 * zeroes a new activation's pcb before thread_machine_create() gives it
+	 * one.  Neither is a thread that can run.
+	 *
+	 * ⚠️ This said "a thread already destroyed", and #749 was read that way
+	 * for seven occurrences while the counts printed beside it said the
+	 * thread was alive.  It was: a thread that had ended left its shuttle
+	 * outliving its activation, and the shuttle's teardown freed the area
+	 * through a top_act the activation zone had meanwhile given to this
+	 * one.  So the panic says what it sees and supposes nothing.
 	 *
 	 * Here the thread is in hand.  Its last waker first: WAKER_TRACK keeps
-	 * it in the thread, and a freed shuttle still holds it until its memory
-	 * is given out again.  Then what the thread and its activation were.
+	 * it in the thread.  Then what the thread and its activation were.
 	 * Before the address space below, which reads the activation's map.
 	 */
 	if (new_act->mact.pcb->ctx.fpu_area == 0) {
@@ -1055,7 +1095,7 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 		waker_say(new);
 #endif	/* WAKER_TRACK */
 		panic("switch_context: thread %p, activation %p, has no "
-		      "floating-point area -- a thread already destroyed: "
+		      "floating-point area: "
 		      "state 0x%x%s, ref_count %ld, active %d; the activation's "
 		      "ref_count %d, active %d, thread %p (#749)",
 		      new, new_act, new->state,
