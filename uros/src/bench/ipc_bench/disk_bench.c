@@ -612,7 +612,8 @@ bench_ext2_write(const char *label, char *filename)
  * ext2 sync latency benchmark
  * =================================================================== */
 
-#define SYNC_BENCH_ITERS	20
+/* 500, and so WRITE_SYNC_ITERS: at 20 these rows changed sign between series. */
+#define SYNC_BENCH_ITERS	500
 
 static void
 bench_ext2_sync(const char *label)
@@ -731,7 +732,7 @@ bench_dirty_list_sync(void)
  * durable write: IPC + page cache + metadata writeback + disk flush.
  * =================================================================== */
 
-#define WRITE_SYNC_ITERS	20
+#define WRITE_SYNC_ITERS	500
 
 static void
 bench_ext2_write_sync(const char *label, char *filename)
@@ -928,7 +929,12 @@ bench_ext2_merge_sync(const char *label, char *filename)
  * the ext2 superblock/inode/directory lookup.
  * =================================================================== */
 
-#define OPEN_CLOSE_ITERS	100
+/*
+ * Long enough to read the pair settled, not where it was placed (#777): at 100
+ * this row read 2, 5 or 10 us from boot to boot, according to the processors
+ * client and server started on, and said nothing about either.
+ */
+#define OPEN_CLOSE_ITERS	10000
 
 static void
 bench_ext2_open_close(const char *label, char *filename)
@@ -1592,7 +1598,7 @@ test_negative_dcache(void)
 	tvalspec_t	t0, t1;
 	unsigned long long total_ns;
 	int		i, pass = 0, fail = 0;
-	const int	ITERS = 100;
+	const int	ITERS = 10000;
 
 	printf("  negative dcache test:\n");
 
@@ -1868,7 +1874,7 @@ test_batch_rpc(void)
 	tvalspec_t	t0, t1;
 	unsigned long long total_ns;
 	int		i, pass = 0, fail = 0;
-	const int	ITERS = 100;
+	const int	ITERS = 10000;
 
 	printf("  batch RPC test:\n");
 
