@@ -1914,6 +1914,14 @@ catch_exception_raise_state_identity(mach_port_t port,
 	thread_port_array_t	thread_list;
 	mach_msg_type_number_t	thread_count;
 
+	/*
+	 * #887: a server that faults is left to the kernel, which ends it and
+	 * says so.  What follows ends with a panic, and is for a fault of ours,
+	 * after which nothing can start or answer a server.
+	 */
+	if (task_port != bootstrap_self)
+		return KERN_FAILURE;
+
 	BOOTSTRAP_IO_LOCK();
 	printf("%s: task 0x%x exception %d codes",
 	       program_name, task_port, exc_type);
@@ -1965,7 +1973,7 @@ catch_exception_raise_state_identity(mach_port_t port,
 				kr = task_threads(task_port,
 						  &thread_list,
 						  &thread_count);
-				if (kr == KERN_SUCCESS) {
+				if (kr != KERN_SUCCESS) {
 					BOOTSTRAP_IO_LOCK();
 					printf("task_threads failed 0x%x %s\n",
 					       kr, mach_error_string(kr));
