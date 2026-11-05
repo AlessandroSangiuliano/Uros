@@ -719,6 +719,7 @@ int
 main(int argc, char **argv)
 {
     kern_return_t kr;
+    mach_port_t sig = MACH_PORT_NULL;
 
     kr = bootstrap_ports(bootstrap_port,
                          &host_port, &device_port,
@@ -785,8 +786,14 @@ main(int argc, char **argv)
         return 1;
     }
 
-    kr = netname_check_in(name_server_port, "cap_server",
-                          MACH_PORT_NULL, cap_port);
+    /*
+     * #744: signed with a port only this task holds.  It was MACH_PORT_NULL,
+     * so any task could check "cap_server" in again over this one, and every
+     * child bootstrap provisioned after that had its task port sent there.
+     */
+    kr = urmach_netname_signature(&sig);
+    if (kr == KERN_SUCCESS)
+        kr = netname_check_in(name_server_port, "cap_server", sig, cap_port);
     if (kr != KERN_SUCCESS)
         printf("cap: netname_check_in failed (%d)\n", kr);
     else
