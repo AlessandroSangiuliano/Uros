@@ -1671,6 +1671,7 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 		int blocking)
 {
 	kern_return_t kr;
+	mach_port_t sig = MACH_PORT_NULL;
 	struct blk_dev *bd;
 
 	strncpy(mnt->driver_name, driver_name, sizeof(mnt->driver_name) - 1);
@@ -1943,9 +1944,12 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 		return -1;
 	}
 
-	/* Register with name server */
-	kr = netname_check_in(name_server_port, service_name,
-			      MACH_PORT_NULL, mnt->port);
+	/* Register with name server, signed with a port only this task holds
+	 * (#744): with MACH_PORT_NULL any task could check the name in again. */
+	kr = urmach_netname_signature(&sig);
+	if (kr == KERN_SUCCESS)
+		kr = netname_check_in(name_server_port, service_name,
+				      sig, mnt->port);
 	if (kr != KERN_SUCCESS)
 		printf("ext2: netname_check_in(%s) failed (kr=%d)\n",
 		       service_name, kr);
