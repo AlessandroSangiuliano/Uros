@@ -54,6 +54,7 @@
 #include "device_master.h"	/* #432: a device has one driver */
 #include "ahci_batch.h"	/* #432: a disk reading into a page it does not own */
 #include <libcap.h>
+#include <servers/netname_defs.h>	/* #744: [33]'s refusals */
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
 
 /*
@@ -125,6 +126,15 @@ extern kern_return_t netname_look_up(mach_port_t server_port,
                                      char *host_name,
                                      char *service_name,
                                      mach_port_t *service_port);
+/* #744: [33] tries to take "cap_server" over, and puts it back if it can. */
+extern kern_return_t netname_check_in(mach_port_t server_port,
+                                      char *service_name,
+                                      mach_port_t signature,
+                                      mach_port_t port);
+extern kern_return_t netname_register_send_right(mach_port_t server_port,
+                                                 char *service_name,
+                                                 mach_port_t signature,
+                                                 mach_port_t port);
 
 extern void printf_init(mach_port_t device_server_port);
 
@@ -145,6 +155,80 @@ wait_for_cap_server(void)
             return port;
         thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 50);
     }
+}
+
+/*
+ * Test [33]: "cap_server" is cap_server's (#744).
+ *
+ * cap_server checked its name in with MACH_PORT_NULL, and the name server lets
+ * whoever presents a name's signature check it in again, so any task could put
+ * its own port under "cap_server".  Bootstrap sends every child it provisions
+ * to whoever holds that name -- the child's task port is cap_provision_task's
+ * first argument -- and every task that had not looked cap_server up yet would
+ * ask the new holder.
+ *
+ * This task tries both ways in, with no signature and with a signature of its
+ * own, and the name must answer afterwards with the port it answered with
+ * before.  The two refusals are two halves, and each is asserted by its whole
+ * value: the name server refusing a signature nobody holds alone
+ * (NETNAME_INVALID_PORT), and cap_server's signature refusing this task's
+ * (NETNAME_NOT_YOURS).
+ *
+ * ⚠️ A name that did change hands is put back before the arm says WRONG, under
+ * whichever signature took it and as a copied send right, since this task has
+ * no receive right for cap_server's port to make one from.  A boot that went on
+ * with this task holding "cap_server" would fail everywhere else, for this
+ * arm's reason and under other arms' names.
+ */
+static int
+cap_servers_name_is_its_own(mach_port_t cap)
+{
+    mach_port_t   mine = MACH_PORT_NULL, sig = MACH_PORT_NULL;
+    mach_port_t   now = MACH_PORT_NULL;
+    kern_return_t kr_null, kr_signed, kr;
+    int           ok;
+
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mine)
+            != KERN_SUCCESS
+        || urmach_netname_signature(&sig) != KERN_SUCCESS) {
+        printf("cap_test: [33] WRONG — no port or no signature to try "
+               "with\n");
+        return 0;
+    }
+
+    kr_null   = netname_check_in(name_server_port, (char *)"cap_server",
+                                 MACH_PORT_NULL, mine);
+    kr_signed = netname_check_in(name_server_port, (char *)"cap_server",
+                                 sig, mine);
+    kr = netname_look_up(name_server_port, "", (char *)"cap_server", &now);
+
+    ok = kr_null == NETNAME_INVALID_PORT && kr_signed == NETNAME_NOT_YOURS
+         && kr == KERN_SUCCESS && now == cap;
+    if (ok) {
+        printf("cap_test: [33] \"cap_server\" checked in again with no "
+               "signature: refused with NETNAME_INVALID_PORT; under this "
+               "task's: refused with NETNAME_NOT_YOURS; and it still answers "
+               "with 0x%x (#744)\n", (unsigned)now);
+    } else {
+        printf("cap_test: [33] WRONG — \"cap_server\" checked in again with "
+               "no signature: %d, not NETNAME_INVALID_PORT(%d); under this "
+               "task's: %d, not NETNAME_NOT_YOURS(%d); look-up %d, port 0x%x "
+               "where it was 0x%x and this task's is 0x%x (#744)\n",
+               (int)kr_null, NETNAME_INVALID_PORT, (int)kr_signed,
+               NETNAME_NOT_YOURS, (int)kr, (unsigned)now, (unsigned)cap,
+               (unsigned)mine);
+        if (now == mine) {
+            kr = netname_register_send_right(name_server_port,
+                         (char *)"cap_server",
+                         kr_signed == NETNAME_SUCCESS ? sig : MACH_PORT_NULL,
+                         cap);
+            printf("cap_test: [33] \"cap_server\" put back to 0x%x: %d\n",
+                   (unsigned)cap, (int)kr);
+        }
+    }
+
+    (void)mach_port_destroy(mach_task_self(), mine);
+    return ok;
 }
 
 /*
@@ -3407,7 +3491,7 @@ main(int argc, char **argv)
     }
 
     printf("cap_test: starting, waiting for cap_server netname\n");
-    (void)wait_for_cap_server();
+    mach_port_t cap_server = wait_for_cap_server();
     printf("cap_test: cap_server is up — running negative tests\n");
 
     /*
@@ -3435,6 +3519,10 @@ main(int argc, char **argv)
                CAP_ERR_UNAUTHORIZED, (int)kr);
         pass = 0;
     }
+
+    /* [33], #744: the name is the key's neighbour, and was as open. */
+    if (!cap_servers_name_is_its_own(cap_server))
+        pass = 0;
 
     /*
      * #395 probe.  Fill xmm0..7 with a known pattern, cross the kernel once,
