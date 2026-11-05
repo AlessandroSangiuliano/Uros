@@ -909,13 +909,14 @@ ipc_right_delta(
 	assert(right < MACH_PORT_RIGHT_NUMBER);
 
 	/*
-	 * #390: bump the generation like ipc_right_dealloc/destroy do.  The
-	 * mach_msg hot-path port cache (#321) and lock-free resolver (#331)
-	 * trust space->is_generation as the sole guard that a cached
-	 * name->port mapping is still live; the branches below that free a
-	 * name (mod_refs dropping the last ref) or retype it leave the port
-	 * active, so ip_active alone would not catch a stale cache entry.
-	 * Cold path — an unconditional head bump matches ipc_right_dealloc.
+	 * #390: bump the generation like ipc_right_dealloc/destroy do.  It is
+	 * the filter of the mach_msg hot-path port cache (#321): the branches
+	 * below that free a name (mod_refs dropping the last ref) or retype it
+	 * leave the port active, and a stale mapping is a miss at once.  It
+	 * is no guard: what guards a mapping is
+	 * urmach_msg_cached_rights_hold() (#868), and not every remover moves
+	 * this.  Cold path — an unconditional head bump matches
+	 * ipc_right_dealloc.
 	 */
 	space->is_generation++;		/* invalidate per-thread port caches */
 
