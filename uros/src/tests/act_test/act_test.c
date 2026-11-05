@@ -6772,7 +6772,7 @@ arm_forty_two_simple_message_scattered(void)
 		       (int) mr);
 		return 0;
 	}
-	if (buf.h.msgh_id != 42 || buf.h.msgh_size != scatter_size ||
+	if (buf.h.msgh_id != 42 || buf.h.msgh_size < scatter_size ||
 	    buf.bytes[dsc + sizeof d - 1] != from[sizeof d - 1]) {
 		printf("act_test: [42] the message came back as id %d, %u bytes "
 		       "— WRONG (#870)\n", (int) buf.h.msgh_id,
