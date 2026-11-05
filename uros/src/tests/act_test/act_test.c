@@ -6799,7 +6799,13 @@ arm_forty_two_simple_message_scattered(void)
  * asked again before it is believed.  Not asked where host_zone_info is not
  * compiled in.
  */
-#define	A43_ROUNDS	16
+/*
+ * More than the magazines can hide.  zi_count moves when a magazine is refilled
+ * or drained, and an element taken from one moves nothing: a magazine is 15 deep
+ * and there is one for each processor (kern/zalloc.c), so that 16 lost ports read
+ * as 0 in most boots.
+ */
+#define	A43_ROUNDS	128
 #define	A43_TRIES	3
 #define	A43_LIST	3000	/* kalloc.4096 */
 
