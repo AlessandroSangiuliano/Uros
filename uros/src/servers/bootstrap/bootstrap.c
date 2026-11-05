@@ -997,13 +997,21 @@ main(int argc, char **argv)
 
 	/*
 	 * Change our exception port.
+	 *
+	 * #887: the flavor has to be one the kernel can read, as for the
+	 * tasks we start.  This one was 0, so that no fault of ours ever
+	 * reached catch_exception_raise_state_identity().
 	 */
-	(void) task_set_exception_ports(bootstrap_self,
-					EXC_MASK_ALL &
-					~(EXC_MASK_SYSCALL |
-			  EXC_MASK_MACH_SYSCALL | EXC_MASK_RPC_ALERT),
-					bootstrap_exception_port,
-					EXCEPTION_STATE_IDENTITY, 0);
+	kr = task_set_exception_ports(bootstrap_self,
+				      EXC_MASK_ALL &
+				      ~(EXC_MASK_SYSCALL |
+					EXC_MASK_MACH_SYSCALL |
+					EXC_MASK_RPC_ALERT),
+				      bootstrap_exception_port,
+				      EXCEPTION_STATE_IDENTITY,
+				      MACHINE_THREAD_STATE);
+	if (kr != KERN_SUCCESS)
+	    panic("task_set_exception_ports %d", kr);
 
 	/*
 	 * Read our configuration file.

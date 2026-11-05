@@ -1123,6 +1123,38 @@ space_deallocate(
 }
 
 /*
+ *	Routine:	urmach_exception_action_valid
+ *	Purpose:
+ *		What the routines below accept for an exception action.
+ *		Only a valid port can ever be used, so a null port is
+ *		accepted with whatever comes with it.  EXCEPTION_DEFAULT
+ *		carries no state, so its flavor means nothing.  The other
+ *		two behaviors send a state, and the flavor has to name one
+ *		(#887).
+ *	Conditions:
+ *		Nothing locked.
+ */
+static boolean_t
+urmach_exception_action_valid(
+	ipc_port_t			port,
+	exception_behavior_t		behavior,
+	thread_state_flavor_t		flavor)
+{
+	if (!IP_VALID(port))
+		return TRUE;
+
+	switch (behavior) {
+	case EXCEPTION_DEFAULT:
+		return TRUE;
+	case EXCEPTION_STATE:
+	case EXCEPTION_STATE_IDENTITY:
+		return urmach_state_count(flavor) != 0;
+	default:
+		return FALSE;
+	}
+}
+
+/*
  *	Routine:	thread/task_set_exception_ports [kernel call]
  *	Purpose:
  *			Sets the thread/task exception port, flavor and
@@ -1137,6 +1169,8 @@ space_deallocate(
  *		KERN_INVALID_ARGUMENT	The thread is null,
  *					Illegal mask bit set.
  *					Illegal exception behavior
+ *					A behavior with state and a
+ *					flavor with none
  *		KERN_FAILURE		The thread is dead.
  */
 
@@ -1157,18 +1191,8 @@ thread_set_exception_ports(
 	if (exception_mask & ~EXC_MASK_ALL)
 		return KERN_INVALID_ARGUMENT;
 
-	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
-		case EXCEPTION_DEFAULT:
-		case EXCEPTION_STATE:
-		case EXCEPTION_STATE_IDENTITY:
-			break;
-		default:
-			return KERN_INVALID_ARGUMENT;
-		}
-	}
-	/* Cannot easily check "flavor", but that just means that the flavor
-	 * in the generated exception message might be garbage. GIGO */
+	if (!urmach_exception_action_valid(new_port, new_behavior, new_flavor))
+		return KERN_INVALID_ARGUMENT;
 
 	act_lock(thr_act);
 	if (!thr_act->active) {
@@ -1218,19 +1242,8 @@ task_set_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
-		case EXCEPTION_DEFAULT:
-		case EXCEPTION_STATE:
-		case EXCEPTION_STATE_IDENTITY:
-			break;
-		default:
-			return KERN_INVALID_ARGUMENT;
-		}
-	}
-	/* Cannot easily check "new_flavor", but that just means that
-	 * the flavor in the generated exception message might be garbage:
-	 * GIGO */
+	if (!urmach_exception_action_valid(new_port, new_behavior, new_flavor))
+		return KERN_INVALID_ARGUMENT;
 
         itk_lock(task);
         if (task->itk_self == IP_NULL) {
@@ -1314,19 +1327,8 @@ thread_swap_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
-		case EXCEPTION_DEFAULT:
-		case EXCEPTION_STATE:
-		case EXCEPTION_STATE_IDENTITY:
-			break;
-		default:
-			return KERN_INVALID_ARGUMENT;
-		}
-	}
-	/* Cannot easily check "new_flavor", but that just means that
-	 * the flavor in the generated exception message might be garbage:
-	 * GIGO */
+	if (!urmach_exception_action_valid(new_port, new_behavior, new_flavor))
+		return KERN_INVALID_ARGUMENT;
 
 	act_lock(thr_act);
 	if (!thr_act->active) {
@@ -1411,19 +1413,8 @@ task_swap_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
-		case EXCEPTION_DEFAULT:
-		case EXCEPTION_STATE:
-		case EXCEPTION_STATE_IDENTITY:
-			break;
-		default:
-			return KERN_INVALID_ARGUMENT;
-		}
-	}
-	/* Cannot easily check "new_flavor", but that just means that
-	 * the flavor in the generated exception message might be garbage:
-	 * GIGO */
+	if (!urmach_exception_action_valid(new_port, new_behavior, new_flavor))
+		return KERN_INVALID_ARGUMENT;
 
 	itk_lock(task);
 	if (task->itk_self == IP_NULL) {
