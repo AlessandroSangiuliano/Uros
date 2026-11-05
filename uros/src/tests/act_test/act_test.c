@@ -5828,6 +5828,359 @@ arm_nineteen_last_page_unmapped(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-nine (#777): a hand-off whose bet is lost is undone where it shows.
+ *
+ * A send with MACH_SEND_HANDOFF says "I block next", and queues the thread it
+ * wakes on the sender's own processor, whose queue no other processor takes
+ * from.  Two ways of not blocking next, each made certain here rather than
+ * raced for:
+ *
+ *  - another call that is not a receive: a plain send to a port of our own;
+ *  - a receive that finds a message: one put on that port before the send.
+ *
+ * Either way the woken thread must leave our queue and run.  The verdict is
+ * the kernel's count of bets undone, and that the thread ran at all.  How soon
+ * it ran is printed and not judged: without the undo it runs at the next tick
+ * anyway, and under TCG on a busy host a good kernel can take as long, so a
+ * limit here would fail good kernels in campaigns.
+ *
+ * The third thing is the window itself, which a boot does not hit on its own:
+ * a server's reply and receive look at an empty queue, and a request arrives
+ * before the receive.  That part counts and asks nothing, because it depends on
+ * a race: ablations/777-widen-queue-fills-in-the-window.patch holds it open.
+ *
+ * Not asked where the hand-off is off: i386 without -X or -P.
+ */
+#define	A39_WAKE	3900
+#define	A39_RPC		3901
+#define	A39_REPLY	3902	/* the widen holds this reply's window */
+#define	A39_NOISE	3903
+#define	A39_STOP	3904
+#define	A39_TRIES	20
+#define	A39_RPCS	300
+
+static mach_port_t	arm_thirty_nine_port;
+static volatile unsigned arm_thirty_nine_parked, arm_thirty_nine_got;
+static volatile int	arm_thirty_nine_stop;
+
+static unsigned long long
+arm_thirty_nine_tsc(void)
+{
+	return __builtin_ia32_rdtsc();
+}
+
+static int
+arm_thirty_nine_counts(mach_port_t host, unsigned *reach, unsigned *rcv,
+		       unsigned *ret)
+{
+	host_rpc_handoff_info_data_t	hi;
+	mach_msg_type_number_t		c = HOST_RPC_HANDOFF_INFO_COUNT;
+
+	if (host_info(host, HOST_RPC_HANDOFF_INFO, (host_info_t) &hi, &c)
+	    != KERN_SUCCESS || c != HOST_RPC_HANDOFF_INFO_COUNT)
+		return 0;
+	*reach = hi.reach;
+	*rcv = hi.undone_receive;
+	*ret = hi.undone_return;
+	return 1;
+}
+
+static void *
+arm_thirty_nine_receiver(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+
+	(void) arg;
+	for (;;) {
+		arm_thirty_nine_parked++;
+		if (mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
+			     arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
+			     MACH_PORT_NULL) != MACH_MSG_SUCCESS ||
+		    m.h.msgh_id != A39_WAKE)
+			return NULL;
+		arm_thirty_nine_got++;
+	}
+}
+
+/* A header-only message to `port', sent without waiting for room. */
+static mach_msg_return_t
+arm_thirty_nine_send(mach_port_t port, mach_msg_option_t option, int id)
+{
+	mach_msg_header_t	h;
+
+	h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	h.msgh_size = sizeof h;
+	h.msgh_remote_port = port;
+	h.msgh_local_port = MACH_PORT_NULL;
+	h.msgh_reserved = 0;
+	h.msgh_id = id;
+	return mach_msg(&h, MACH_SEND_MSG | MACH_SEND_TIMEOUT | option,
+			sizeof h, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/* The last message a server sees: the queue may be full, so until it is taken. */
+static void
+arm_thirty_nine_stop_it(void)
+{
+	unsigned	i;
+
+	for (i = 0; i < 2000; i++) {
+		if (arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP)
+		    == MACH_MSG_SUCCESS)
+			return;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	}
+}
+
+static mach_msg_return_t
+arm_thirty_nine_drain(mach_port_t port)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+
+	return mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof m,
+			port, 0, MACH_PORT_NULL);
+}
+
+/*
+ * One way of breaking the promise: `at_receive' or the plain send.  Answers
+ * whether the kernel counted a bet undone and the thread ran.
+ */
+static int
+arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
+		      unsigned cpus)
+{
+	const char	*where = at_receive ? "a receive that found a message" :
+					      "a call that was not a receive";
+	unsigned	try, i, before, r0, t0, r1, t1, reach;
+	unsigned long long start, took = 0;
+
+	for (try = 0; try < A39_TRIES; try++) {
+		/* The receiver blocked: it says so, then give it the time. */
+		for (i = 0; i < 2000 &&
+		     arm_thirty_nine_parked != arm_thirty_nine_got + 1; i++)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_DEPRESS, 1);
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 2);
+
+		if (at_receive &&
+		    arm_thirty_nine_send(own, 0, A39_NOISE) != MACH_MSG_SUCCESS) {
+			printf("act_test: [39] the message for the receive "
+			       "was refused — WRONG\n");
+			return 0;
+		}
+		if (!arm_thirty_nine_counts(host, &reach, &r0, &t0))
+			return 0;
+		before = arm_thirty_nine_got;
+		start = arm_thirty_nine_tsc();
+
+		/* The bet, then the promise broken with no call between. */
+		(void) arm_thirty_nine_send(arm_thirty_nine_port,
+					    MACH_SEND_HANDOFF, A39_WAKE);
+		if (at_receive)
+			(void) arm_thirty_nine_drain(own);
+		else
+			(void) arm_thirty_nine_send(own, 0, A39_NOISE);
+
+		if (cpus > 1)
+			while (arm_thirty_nine_got == before &&
+			       arm_thirty_nine_tsc() - start < 200000000ULL)
+				;
+		/* On one processor it can run only now. */
+		for (i = 0; i < 2000 && arm_thirty_nine_got == before; i++)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_DEPRESS, 1);
+		took = arm_thirty_nine_tsc() - start;
+		if (arm_thirty_nine_got == before) {
+			printf("act_test: [39] the thread woken before %s "
+			       "never ran — WRONG\n", where);
+			return 0;
+		}
+		if (!at_receive)
+			(void) arm_thirty_nine_drain(own);
+		if (!arm_thirty_nine_counts(host, &reach, &r1, &t1))
+			return 0;
+		if ((at_receive ? r1 - r0 : t1 - t0) != 0) {
+			printf("act_test: [39] the bet lost at %s was undone, "
+			       "try %u; the thread ran %llu TSC ticks after the "
+			       "send\n", where, try + 1, took);
+			return 1;
+		}
+	}
+	printf("act_test: [39] %u bets lost at %s, none undone — WRONG\n",
+	       A39_TRIES, where);
+	return 0;
+}
+
+/* The server of the window: a reply and a receive in one call, or a receive. */
+static void *
+arm_thirty_nine_server(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+	mach_msg_return_t	mr;
+
+	(void) arg;
+	mr = mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof m,
+		      arm_thirty_nine_port, 10000, MACH_PORT_NULL);
+	while (mr == MACH_MSG_SUCCESS && m.h.msgh_id != A39_STOP) {
+		if (m.h.msgh_id == A39_RPC) {
+			m.h.msgh_bits = MACH_MSGH_BITS(
+			    MACH_MSGH_BITS_REMOTE(m.h.msgh_bits), 0);
+			m.h.msgh_size = sizeof m.h;
+			m.h.msgh_local_port = MACH_PORT_NULL;
+			m.h.msgh_id = A39_REPLY;
+			mr = mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG |
+				      MACH_RCV_TIMEOUT, sizeof m.h, sizeof m,
+				      arm_thirty_nine_port, 10000,
+				      MACH_PORT_NULL);
+		} else
+			mr = mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+				      sizeof m, arm_thirty_nine_port, 10000,
+				      MACH_PORT_NULL);
+	}
+	return NULL;
+}
+
+/* A request now and then, for one to land in the window. */
+static void *
+arm_thirty_nine_noise(void *arg)
+{
+	unsigned long long	t;
+
+	(void) arg;
+	while (!arm_thirty_nine_stop) {
+		(void) arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_NOISE);
+		t = arm_thirty_nine_tsc();
+		while (arm_thirty_nine_tsc() - t < 100000ULL &&
+		       !arm_thirty_nine_stop)
+			;
+	}
+	return NULL;
+}
+
+/* Says how often the window closed on a request.  Asks nothing of the count. */
+static int
+arm_thirty_nine_window(mach_port_t host)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+	pthread_t		server, noise;
+	mach_port_t		reply;
+	mach_msg_return_t	mr = MACH_MSG_SUCCESS;
+	unsigned		i, reach, r0, t0, r1, t1;
+
+	reply = arm_own_port(39);
+	if (reply == MACH_PORT_NULL)
+		return 0;
+	if (!arm_thirty_nine_counts(host, &reach, &r0, &t0) ||
+	    pthread_create(&server, NULL, arm_thirty_nine_server, NULL) != 0) {
+		(void) mach_port_destroy(mach_task_self(), reply);
+		return 0;
+	}
+	arm_thirty_nine_stop = 0;
+	if (pthread_create(&noise, NULL, arm_thirty_nine_noise, NULL) != 0) {
+		arm_thirty_nine_stop = 1;
+		arm_thirty_nine_stop_it();
+		(void) pthread_join(server, NULL);
+		(void) mach_port_destroy(mach_task_self(), reply);
+		return 0;
+	}
+	for (i = 0; i < A39_RPCS && mr == MACH_MSG_SUCCESS; i++) {
+		m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+					       MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		m.h.msgh_size = sizeof m.h;
+		m.h.msgh_remote_port = arm_thirty_nine_port;
+		m.h.msgh_local_port = reply;
+		m.h.msgh_reserved = 0;
+		m.h.msgh_id = A39_RPC;
+		mr = mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG |
+			      MACH_RCV_TIMEOUT, sizeof m.h, sizeof m, reply,
+			      10000, MACH_PORT_NULL);
+	}
+	arm_thirty_nine_stop = 1;
+	(void) pthread_join(noise, NULL);
+	arm_thirty_nine_stop_it();
+	(void) pthread_join(server, NULL);
+	(void) mach_port_destroy(mach_task_self(), reply);
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [39] RPC %u of the window answered 0x%x — "
+		       "WRONG\n", i, (int) mr);
+		return 0;
+	}
+	if (!arm_thirty_nine_counts(host, &reach, &r1, &t1))
+		return 0;
+	printf("act_test: [39] the queue filled in the window %u time(s) in %u "
+	       "RPCs\n", r1 - r0, A39_RPCS);
+	return 1;
+}
+
+static int
+arm_thirty_nine_asked(mach_port_t host)
+{
+	mach_port_t	own;
+	pthread_t	receiver;
+	unsigned	reach, r0, t0, cpus = processors();
+	int		ok = 0;
+
+	if (!arm_thirty_nine_counts(host, &reach, &r0, &t0)) {
+		printf("act_test: [39] host_info refused the hand-off's counts "
+		       "— WRONG\n");
+		return 0;
+	}
+	if (reach == 0) {
+		printf("act_test: [39] no hand-off on this kernel — NOT ASKED\n");
+		return 1;
+	}
+	arm_thirty_nine_port = arm_own_port(39);
+	if (arm_thirty_nine_port == MACH_PORT_NULL)
+		return 0;
+	own = arm_own_port(39);
+	if (own == MACH_PORT_NULL) {
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_nine_port);
+		return 0;
+	}
+	if (pthread_create(&receiver, NULL, arm_thirty_nine_receiver, NULL)
+	    != 0) {
+		printf("act_test: [39] pthread_create failed — WRONG\n");
+	} else {
+		ok = arm_thirty_nine_break(host, own, 0, cpus);
+		if (arm_thirty_nine_break(host, own, 1, cpus) == 0)
+			ok = 0;
+		arm_thirty_nine_stop_it();
+		(void) pthread_join(receiver, NULL);
+		if (cpus > 1 && arm_thirty_nine_window(host) == 0)
+			ok = 0;
+	}
+	(void) mach_port_destroy(mach_task_self(), own);
+	(void) mach_port_destroy(mach_task_self(), arm_thirty_nine_port);
+	if (ok)
+		printf("act_test: [39] a lost bet is undone, at a receive and "
+		       "at a return — OK\n");
+	return ok;
+}
+
+static int
+arm_thirty_nine_lost_bet_undone(void)
+{
+	mach_port_t	host = mach_host_self();
+	int		ok = arm_thirty_nine_asked(host);
+
+	(void) mach_port_deallocate(mach_task_self(), host);
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -5948,6 +6301,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_seven_snapshot_of_untouched_memory();
 	arms++;		/* arm thirty-eight, #813 */
 	passed += arm_thirty_eight_task_wire_unprivileged();
+	arms++;		/* arm thirty-nine, #777 */
+	passed += arm_thirty_nine_lost_bet_undone();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
