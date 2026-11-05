@@ -1885,13 +1885,18 @@ thread_invoke(
 
 #if	NCPUS > 1
 	/*
-	 * #777: the old thread leaves the processor, so a hand-off it bet on was
-	 * won -- the thread it queued here gets the processor in its turn, and
-	 * nothing is left to undo.  Forgetting the name now spares the next
-	 * undo point a look at the run queue.
+	 * #777: the old thread leaves the processor.  If the thread it queued
+	 * here is the one that gets it, the bet was won.  If another does, one
+	 * of higher priority or a processor's action thread, the bet was lost
+	 * here: the wakee would wait behind that thread on a queue no other
+	 * processor takes from, for as long as it runs and with others idle.
 	 */
-	old_thread->handoff_wakee = THREAD_NULL;
-	old_thread->handoff_spare = FALSE;
+	if (old_thread->handoff_wakee != THREAD_NULL) {
+		if (old_thread->handoff_wakee != new_thread)
+			(void) thread_handoff_undo(URMACH_HANDOFF_UNDO_LEFT);
+		old_thread->handoff_wakee = THREAD_NULL;
+		old_thread->handoff_spare = FALSE;
+	}
 #endif	/* NCPUS > 1 */
 
 	ETAP_DATA_LOAD(probe_data[0], new_thread);
