@@ -352,6 +352,30 @@ bootstrap_service_thread(void *arg)
 }
 
 /*
+ * #887: exceptions have a thread of their own, for two reasons.
+ *
+ * A thread that faults waits for the answer, so a fault in the only thread
+ * that serves a port would wait for itself, in silence.  With its own thread
+ * that is left to the code below, which does little.
+ *
+ * And bootstrap_msg_size is what a bootstrap request needs.  An exception
+ * carries a thread state, which does not fit: the kernel would destroy the
+ * message, MACH_RCV_TOO_LARGE, and the handler would never see it.
+ */
+static void *
+bootstrap_exception_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		(void)mach_msg_server(exc_server,
+				      catch_exc_subsystem.maxsize,
+				      bootstrap_exception_port,
+				      MACH_MSG_OPTION_NONE);
+	}
+	return NULL;
+}
+
+/*
  * bootstrap_enter_stage2 — block until BDS publishes the boot partition,
  * then acquire a long-lived capability-authenticated handle on it and
  * switch boot_open_file() over to the BDS path.  Called once, right
@@ -931,12 +955,6 @@ main(int argc, char **argv)
 	if (kr != KERN_SUCCESS)
 	    panic(my_name);
 
-	kr = mach_port_move_member(bootstrap_self,
-				   bootstrap_exception_port,
-				   bootstrap_set);
-	if (kr != KERN_SUCCESS)
-	    panic(my_name);
-
 	/*
 	 * Initialize the security token for device operations
 	 */
@@ -1012,6 +1030,12 @@ main(int argc, char **argv)
 				      MACHINE_THREAD_STATE);
 	if (kr != KERN_SUCCESS)
 	    panic("task_set_exception_ports %d", kr);
+	{
+		pthread_t exc_th;
+		pthread_create(&exc_th, NULL,
+			       bootstrap_exception_thread, NULL);
+		pthread_detach(exc_th);
+	}
 
 	/*
 	 * Read our configuration file.
@@ -1840,8 +1864,6 @@ bootstrap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
 	if (server_by_bootstrap_port(in->msgh_local_port) != 0)
 		return bootstrap_server(in, out);
-	if (in->msgh_local_port == bootstrap_exception_port)
-		return exc_server(in, out);
 	return service_demux(in, out);
 }
 
