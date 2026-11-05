@@ -1,0 +1,36 @@
+Kind: ablation
+Issue: #749
+Over: 749-widen-shuttle-outlives-its-activation.patch
+Takes out: the reaper's unlinking of the shuttle's top_act -- the shuttle names its activation after the reaper has dropped its reference on it, as before 51832cb0, and act_free() meets the activation still named when it frees it
+Run: --entry 14 600 -smp 4
+Expect: act_free: activation 0x[0-9a-f]+ is freed while shuttle 0x[0-9a-f]+ still names it as its top_act \(#749\)
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index e14d740a..d3bfe176 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1955,24 +1955,6 @@ reaper_thread(void)
+ 			act_locked_act_reference(thr_act);
+ 			pool_port = thr_act->pool_port;
+ 
+-			/*
+-			 * 🔴 THE SHUTTLE LETS GO OF ITS ACTIVATION HERE (#749).
+-			 *
+-			 * The second act_deallocate() below drops "the reference
+-			 * held by the thread": the shuttle's, on its activation.
+-			 * The shuttle's pointer goes with it.  Left set, top_act
+-			 * outlived the activation whenever someone else held the
+-			 * shuttle's last reference -- a fired timer's, in flight to
+-			 * thread_timeout() -- and named whatever the activation
+-			 * zone made of that memory next.  thread_machine_destroy()
+-			 * freed a live thread's floating-point area through it,
+-			 * which that thread met as #749's panic at its next switch;
+-			 * processor_set_things() and the swapper walk shuttles and
+-			 * follow the same pointer.  Unlinked under the two locks
+-			 * thread_lock_act() took, as act_detach() unlinks one.
+-			 */
+-			thread->top_act = thr_act->lower;
+-
+ 			/*
+ 			 * Replace `act_unlock_thread()' with individual
+ 			 * calls.  (`act_detach()' can change fields used
