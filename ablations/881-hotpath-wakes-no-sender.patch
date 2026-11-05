@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #881
+Over: 881-widen-receiver-held.patch
+Takes out: the hot path's wakeup of a sender -- its parked receiver lowers the count as it always did and wakes no one, so a sender stays parked on a port with room until its timeout
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[45\] the second send answered 0x[0-9a-f]+: the sender stayed parked on a port with room
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 47be94b4..b8ae0df6 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -2561,7 +2561,7 @@ urmach_msg_overwrite_trap_call(
+ 		if (dest_port->ip_qlimit == 1)
+ 			delay(20000);
+ 		ip_lock(dest_port);
+-		urmach_port_message_taken(dest_port);
++		dest_port->ip_msgcount--;
+ 		ip_unlock(dest_port);
+ 
+ 		hdr = &kmsg->ikm_header;
