@@ -517,7 +517,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     tvalspec_t		t0, t1;
     int			i;
     bench_recv_buf_t	send_buf;
-    bench_null_msg_t	recv_buf;
+    bench_recv_buf_t	recv_buf;
 
     /* Create echo port and reply port */
     kr = mach_port_allocate(mach_task_self(),
@@ -899,7 +899,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     tvalspec_t			t0, t1;
     int				i;
     bench_recv_buf_t		send_buf;
-    bench_null_msg_t		recv_buf;
+    bench_recv_buf_t		recv_buf;
 
     /*
      * Steps 1 to 6: the child, its ports and its running thread.
@@ -2144,7 +2144,7 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
     tvalspec_t		t0, t1;
     int			i;
     bench_ool_send_msg_t send_buf;
-    bench_null_msg_t	recv_buf;
+    bench_recv_buf_t	recv_buf;
     vm_offset_t		data_buf;
 
     /* Allocate OOL data buffer */
@@ -2533,7 +2533,7 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
     tvalspec_t			t0, t1;
     int				i;
     bench_ool_send_msg_t	send_buf;
-    bench_null_msg_t		recv_buf;
+    bench_recv_buf_t		recv_buf;
     vm_offset_t			data_buf;
 
     /* Allocate OOL data buffer */
