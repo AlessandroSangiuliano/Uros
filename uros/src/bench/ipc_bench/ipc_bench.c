@@ -193,7 +193,7 @@ print_cache_stats(const char *label,
 }
 
 /* ===================================================================
- * What -X did during a measurement (#446)
+ * What the hand-off did during a measurement (#446)
  *
  * The hand-off on block (#356) queues a woken thread on its waker's processor
  * instead of an idle one's.  Which arm a row was taken in, and whether the
@@ -235,7 +235,7 @@ handoff_snap(handoff_snap_t *s)
 }
 
 /*
- * A line whether -X is on or not, and one when the kernel did not answer: a
+ * A line whether the hand-off is on or not, and one when the kernel did not answer: a
  * row without it would be read as one of an arm it was not taken in.  A row of
  * N round trips wakes at most 2N threads, one per message.
  */
@@ -246,42 +246,42 @@ print_handoff_stats(const char *label, int ok,
     unsigned int same, other, fenced;
 
     if (!ok) {
-	printf("  [-X] %-30s not answered: host_info refused "
+	printf("  [hand-off] %-30s not answered: host_info refused "
 	       "HOST_RPC_HANDOFF_INFO\n", label);
 	return;
     }
     if (after->reach == 0) {
-	printf("  [-X] %-30s off\n", label);
+	printf("  [hand-off] %-30s off\n", label);
 	return;
     }
     same   = after->same_task  - before->same_task;
     other  = after->other_task - before->other_task;
     fenced = after->other_task_fenced - before->other_task_fenced;
     /*
-     * #446: where -X reaches any task, a woken thread of another task sent to
-     * an idle processor is the same-task fence come back -- WRONG, which the
-     * harness fails the boot on.  Where -X is same-task only (i386) it is the
+     * #446: where the hand-off reaches any task, a woken thread of another
+     * task sent to an idle processor is the same-task fence come back --
+     * WRONG, which the harness fails the boot on.  Where it is same-task only (i386) it is the
      * fence doing its job, and only counted.
      */
     if (after->reach == 1)
-	printf("  [-X] %-30s same task: %u woken on their waker's "
+	printf("  [hand-off] %-30s same task: %u woken on their waker's "
 	       "processor, %u of another task; %u of another task kept out\n",
 	       label, same + other, other, fenced);
     else if (after->reach == 2 && fenced == 0)
-	printf("  [-X] %-30s any task: %u woken on their waker's "
+	printf("  [hand-off] %-30s any task: %u woken on their waker's "
 	       "processor, %u of another task\n", label, same + other, other);
     else if (after->reach == 2)
-	printf("  [-X] %-30s any task: %u woken on their waker's "
+	printf("  [hand-off] %-30s any task: %u woken on their waker's "
 	       "processor, %u of another task; %u of another task kept out by "
 	       "the fence -- WRONG (#446)\n", label, same + other, other, fenced);
     else
-	printf("  [-X] %-30s reach %u: %u woken on their waker's "
+	printf("  [hand-off] %-30s reach %u: %u woken on their waker's "
 	       "processor, %u of another task\n",
 	       label, after->reach, same + other, other);
 
     /*
      * #777: the bets of this row that were lost and undone, on a line of its
-     * own so the [-X] line keeps the form the analyses read.  A kernel from
+     * own so the [hand-off] line keeps the form the analyses read.  A kernel from
      * before the undo has nothing to say here, and says nothing.
      */
     if (before->has_undo && after->has_undo)
@@ -3095,7 +3095,7 @@ bench_concurrent_intertask(int n, int iters_per_thread)
  * Senders that do not block (#777)
  *
  * Every sender in the suites above blocks right after it sends, which is the
- * case the hand-off on block (-X) was made for.  #777 makes the hand-off happen
+ * case the hand-off on block was made for.  #777 makes the hand-off happen
  * only where the kernel knows the sender blocks, and these two suites are the
  * cases that change makes a difference to -- a sender that does NOT block next:
  *
