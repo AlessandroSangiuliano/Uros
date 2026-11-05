@@ -4,7 +4,7 @@ Holds open: an aborted RPC's window between its reply being written and the wake
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index 80c2c459..f8e6f1cb 100644
+index 37620827..5fea599c 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
 @@ -557,6 +557,60 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
@@ -68,17 +68,17 @@ index 80c2c459..f8e6f1cb 100644
  mach_msg_return_t
  ipc_mqueue_deliver(
  	register ipc_port_t	port,
-@@ -719,6 +773,8 @@ ipc_mqueue_deliver(
+@@ -716,6 +770,8 @@ ipc_mqueue_deliver(
  		if (!direct)
  			splx(s);
  	}
 +	if (!direct && thread_context)
 +		widen_687_deliverer(receiver);
- 	if (!direct)
- 		thread_go(receiver);
- 	imq_unlock(mqueue);
+ 	if (!direct) {
+ #if	NCPUS > 1
+ 		/*
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index a297e486..5b6a6318 100644
+index 6879c781..5d507a71 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
 @@ -214,6 +214,8 @@ unsigned int	c_route_msg_continue = 0;
@@ -90,7 +90,7 @@ index a297e486..5b6a6318 100644
  
  /*
   * Forward declarations
-@@ -2185,6 +2187,7 @@ mach_msg_overwrite_trap(
+@@ -2435,6 +2437,7 @@ urmach_msg_overwrite_trap_call(
  		 * until its wakeup is spent (#700), so taking it waits for that,
  		 * and makes ith_kmsg, written after ith_state, safe to read.
  		 */

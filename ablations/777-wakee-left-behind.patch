@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #777
+Takes out: thread_invoke()'s look at who gets the processor -- it forgets the wakee whenever the waker leaves, so a wakee a thread of higher priority came in front of waits behind it on a queue no other processor reads, with others idle
+Run: --entry 67 300 -smp 4
+Expect: wakee_test: WRONG .* the wakee waited behind a thread of higher priority
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index cac857e7..be1f1f7e 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1892,8 +1892,6 @@ thread_invoke(
+ 	 * processor takes from, for as long as it runs and with others idle.
+ 	 */
+ 	if (old_thread->handoff_wakee != THREAD_NULL) {
+-		if (old_thread->handoff_wakee != new_thread)
+-			(void) thread_handoff_undo(URMACH_HANDOFF_UNDO_LEFT);
+ 		old_thread->handoff_wakee = THREAD_NULL;
+ 		old_thread->handoff_spare = FALSE;
+ 	}

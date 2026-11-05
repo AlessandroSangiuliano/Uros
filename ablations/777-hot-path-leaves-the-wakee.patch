@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #777
+Takes out: the hot path's undo before its own switch -- a combined call after a send alone switches to its receiver past thread_invoke(), and the first wakeup's thread waits behind that receiver on a queue no other processor reads, until the call comes back
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[40\] 20 combined calls went to their server with a hand-off still pending
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 6879c781..bec2c301 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1303,8 +1303,6 @@ urmach_msg_overwrite_trap_call(
+ 		 * thread_invoke(), which is what would have seen the wakee left
+ 		 * behind.
+ 		 */
+-		if (self->handoff_wakee != THREAD_NULL)
+-			(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RETURN);
+ #endif	/* NCPUS > 1 */
+ 
+ 		/*

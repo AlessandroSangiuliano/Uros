@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #777
+Takes out: the tick's look at a hand-off still pending -- a send alone with MACH_SEND_HANDOFF and then only user code holds the woken thread on the sender's processor, for as long as the sender outranks it, with no call to undo it
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[40\] 20 sends alone, then only user code, and no tick undid one
+
+diff --git a/uros/src/mach_kernel/kern/priority.c b/uros/src/mach_kernel/kern/priority.c
+index fb3235ed..887dfa00 100644
+--- a/uros/src/mach_kernel/kern/priority.c
++++ b/uros/src/mach_kernel/kern/priority.c
+@@ -160,8 +160,6 @@ thread_quantum_update(
+ 	 * thread locks, which a tick must not (#317).  Not one of AST_PREEMPT,
+ 	 * so a return to the kernel leaves it for the return to user space.
+ 	 */
+-	if (thread->handoff_wakee != THREAD_NULL)
+-		ast_on(mycpu, URMACH_AST_HANDOFF);
+ #endif	/* NCPUS > 1 */
+ 
+ 	/*

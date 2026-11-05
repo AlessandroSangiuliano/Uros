@@ -10,10 +10,10 @@ Expect: mach_msg_receive_continue: bad wait_result
 Expect: thread_go: thread 0x[0-9a-f]+ was taken off an IPC queue at its park [0-9]+ and is in park [0-9]+
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index 9f7f6c12..3b1fac51 100644
+index 90e9b68e..d35c4258 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-@@ -887,6 +887,7 @@ ipc_mqueue_deliver(
+@@ -656,6 +656,7 @@ ipc_mqueue_deliver(
  	receiver->ith_state = MACH_MSG_SUCCESS;
  	receiver->ith_kmsg = kmsg;
  	receiver->ith_seqno = port->ip_seqno++;
@@ -21,10 +21,10 @@ index 9f7f6c12..3b1fac51 100644
  
  	/*
  	 * 🔴 WOKEN BEFORE imq_unlock(), NOT AFTER IT (#700).
-@@ -976,7 +977,6 @@ ipc_mqueue_deliver(
- 	    "a reply holds its receiver off the queue, not yet woken, for");
- 	if (!direct)
- 		thread_go(receiver);
+@@ -765,7 +766,6 @@ ipc_mqueue_deliver(
+ 		self->handoff_target = THREAD_NULL;
+ #endif	/* NCPUS > 1 */
+ 	}
 -	imq_unlock(mqueue);
  
  	/*

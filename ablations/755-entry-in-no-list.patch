@@ -8,13 +8,13 @@ Expect: merge-test: lists: entry [0-9]+ is in grub.cfg and in neither list .*a p
 Note: -L boots nothing, so one accelerator says all of it; under KVM ablate.sh would give the script --kvm, which it does not take. The Expect names the entry by its title, not its number: an entry appended to grub.cfg after this one moves the number, not the title -- and stops the patch applying, which is when to look at it again.
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/grub.cfg b/uros/src/mach_kernel/x86_64/boot/grub.cfg
-index 5a1f3ebb..da8c2375 100644
+index b74a6d1a..88c6eafe 100644
 --- a/uros/src/mach_kernel/x86_64/boot/grub.cfg
 +++ b/uros/src/mach_kernel/x86_64/boot/grub.cfg
-@@ -938,3 +938,12 @@ menuentry "UrMach x86-64 (bootstrap as init, -z: thread_doassign's retry)" {
+@@ -929,3 +929,12 @@ menuentry "UrMach x86-64 (bootstrap as init, -w: the hand-off's wakee)" {
+ 	module2 /boot/bootstrap.bundle bootstrap.bundle
  	boot
  }
- 
 +
 +# A probe of #755, not an entry to keep: appended with no line in either list
 +# of scripts/merge-test-x86_64.sh, which must then refuse to run and name it.
