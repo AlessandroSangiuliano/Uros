@@ -27,7 +27,7 @@
  * kern/exception.c delivers an exception with state like this:
  *
  *	natural_t		state[THREAD_MACHINE_STATE_MAX];
- *	state_cnt = state_count[flavor];
+ *	state_cnt = urmach_state_count(flavor);
  *	kr = thread_getstatus(a_self, flavor, state, &state_cnt);
  *
  * — a buffer sized by one constant, a count taken from a table in
@@ -422,20 +422,31 @@ test_exception_state(void)
  * ── E: flavours that do not exist ─────────────────────────────────────
  *
  * The number arrives from outside and is used as a switch subject here and as
- * an ARRAY INDEX in kern/exception.c.  Zero is the hole at the bottom of
- * state_count[], THREAD_STATE_NONE is a real flavour name with no state
- * behind it, and 99 is past the end of everything.  All three have to be
- * refused by both directions, with the buffer untouched.
+ * an ARRAY INDEX in urmach_state_count().  Zero is the hole at the bottom of
+ * the table, THREAD_STATE_NONE is a real flavour name with no state behind it,
+ * and 99 is past the end of everything.  All three have to be refused by both
+ * directions, with the buffer untouched, and the table must answer that they
+ * have no state, as it must for the numbers that lie outside it on either
+ * side, where a read would land on whatever lives there (#887).
  */
 static void
 test_unknown_flavors(void)
 {
 	static const int	nonsense[] = { 0, THREAD_STATE_NONE, 99 };
+	static const int	outside[] = {
+		-1, THREAD_STATE_NONE + 1, 99, 0x7fffffff, -0x7fffffff - 1
+	};
 	mach_msg_type_number_t	count;
 
 	probe_act.mact.pcb->user = &probe_frame;
 
+	for (unsigned i = 0; i < sizeof outside / sizeof outside[0]; i++)
+		claim(urmach_state_count(outside[i]) == 0,
+		      "a flavour outside the table was given a size");
+
 	for (unsigned i = 0; i < sizeof nonsense / sizeof nonsense[0]; i++) {
+		claim(urmach_state_count(nonsense[i]) == 0,
+		      "a flavour with no state was given a size");
 		buf_fill();
 		count = THREAD_STATE_MAX;
 		claim(act_machine_get_state(&probe_act, nonsense[i],
@@ -459,7 +470,7 @@ test_unknown_flavors(void)
 /*
  * ── F: the table and the dispatch have to agree ───────────────────────
  *
- * state_count[] is what kern/exception.c passes as the count, and this
+ * urmach_state_count() is what kern/exception.c passes as the count, and this
  * machine's dispatch is what decides whether that count is enough.  They are
  * written in two files, compared by nothing, and if they disagree the symptom
  * is that exception delivery with state fails for that flavour and says
@@ -482,11 +493,11 @@ test_table_agrees(void)
 	probe_act.mact.pcb->user = &probe_frame;
 
 	for (int flavor = 1; flavor <= THREAD_STATE_NONE; flavor++) {
-		if (state_count[flavor] == 0)
+		if (urmach_state_count(flavor) == 0)
 			continue;
 
 		buf_fill();
-		count = state_count[flavor];
+		count = urmach_state_count(flavor);
 		if (act_machine_get_state(&probe_act, flavor,
 					  (thread_state_t) buf, &count)
 		    == KERN_SUCCESS) {
@@ -497,9 +508,9 @@ test_table_agrees(void)
 		checks++;
 		bad++;
 		printf("state_test: WRONG — flavour %d is %u words in "
-		       "state_count[] and the dispatch refuses that count, so "
+		       "the table and the dispatch refuses that count, so "
 		       "kern/exception.c can never deliver it (#408)\n",
-		       flavor, state_count[flavor]);
+		       flavor, urmach_state_count(flavor));
 	}
 }
 

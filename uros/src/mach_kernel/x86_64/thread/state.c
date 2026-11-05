@@ -241,7 +241,7 @@ void exception_state_from_frame(const struct trap_frame *frame,
  * its size here would otherwise read one past the end and return whatever
  * followed, as a word count, to code about to copy that many words.
  */
-unsigned int state_count[] = {
+static unsigned int state_count[] = {
 	/* no flavor 0 */		0,
 	/* x86_64_THREAD_STATE */	x86_64_THREAD_STATE_COUNT,
 	/* x86_64_FLOAT_STATE */	x86_64_FLOAT_STATE_COUNT,
@@ -255,15 +255,32 @@ _Static_assert(sizeof(state_count) / sizeof(state_count[0])
 	       "<mach/x86_64/thread_status.h> have drifted apart");
 
 /*
+ * The only way to the table, because its size is known only here (#887).  A
+ * flavor comes from whoever registered an exception port, so the bound is
+ * here, in the one place every reader goes through.  0 means no state, for a
+ * flavor outside the table as for THREAD_STATE_NONE, and a negative number
+ * leaves through the unsigned comparison.
+ */
+unsigned int
+urmach_state_count(int flavor)
+{
+	if ((unsigned int) flavor >= sizeof(state_count) / sizeof(state_count[0]))
+		return 0;
+	return state_count[flavor];
+}
+
+/*
  * And that every size in it fits the buffer the exception path puts on its
  * stack (#408).
  *
  * <kern/exception.c> declares `natural_t state[THREAD_MACHINE_STATE_MAX]',
- * reads state_count[flavor] into the count, and hands both to
+ * asks urmach_state_count() for the count, and hands both to
  * act_machine_get_state().  Nothing between those three lines compares the
  * table against the buffer, so a flavor whose size exceeded the maximum would
- * be written past the end of a kernel stack array — by a flavor number that
- * arrives from whoever registered the exception port.
+ * be written past the end of a kernel stack array, by a flavor that was a
+ * legal one.  urmach_state_count() bounds the index and these bound the
+ * entries: a flavor outside the table is answered 0 and never reaches a
+ * buffer (#887).
  *
  * The assertion in <thread/state.h> does not cover this: it ties
  * THREAD_MACHINE_STATE_MAX to what a *message* can carry, and

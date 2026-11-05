@@ -168,9 +168,10 @@ typedef struct pcb {
 } *pcb_t;
 
 /*
- * Maps state flavor to number of words in the state:
+ * Maps state flavor to number of words in the state, 0 for a flavor with
+ * none:
  */
-extern unsigned int state_count[];
+extern unsigned int urmach_state_count(int flavor);
 
 
 #define USER_REGS(ThrAct)	(&(ThrAct)->mact.pcb->iss)

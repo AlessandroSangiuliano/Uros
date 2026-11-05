@@ -199,9 +199,9 @@ typedef struct MachineThrAct {
 #define	syscall_emulation_sync(task)	((void)(task))
 
 /*
- * Flavor to size in words, indexed by flavor number.  Defined in
+ * Flavor to size in words, 0 for a flavor with no state.  Defined in
  * x86_64/thread/state.c, next to the flavors it measures.
  */
-extern unsigned int	state_count[];
+extern unsigned int	urmach_state_count(int flavor);
 
 #endif /* _X86_64_THREAD_ACT_H_ */
