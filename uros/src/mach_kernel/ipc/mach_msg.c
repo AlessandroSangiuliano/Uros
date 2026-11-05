@@ -1238,7 +1238,7 @@ urmach_msg(
  */
 
 static mach_msg_return_t
-mach_msg_overwrite_trap_call(
+urmach_msg_overwrite_trap_call(
 	mach_msg_header_t	*msg,
 	mach_msg_option_t	option,
 	mach_msg_size_t		send_size,
@@ -3281,9 +3281,9 @@ mach_msg_overwrite_trap(
 {
 	mach_msg_return_t	mr;
 
-	mr = mach_msg_overwrite_trap_call(msg, option, send_size, rcv_size,
-					  rcv_name, timeout, notify, rcv_msg,
-					  scatter_list_size);
+	mr = urmach_msg_overwrite_trap_call(msg, option, send_size, rcv_size,
+					    rcv_name, timeout, notify, rcv_msg,
+					    scatter_list_size);
 #if	NCPUS > 1
 	{
 		thread_t	self = current_thread();
