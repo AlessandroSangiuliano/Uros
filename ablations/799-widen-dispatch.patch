@@ -1,0 +1,18 @@
+Kind: widen
+Issue: #799
+Takes out: nothing -- 200 us between the two stores, which the kernel's own order makes harmless: the idle loop finds no state to act on.  799-state-before-thread, over this, swaps them.
+Run: --entry 14 600 -smp 4
+Expect: act_test: [0-9]+ of [0-9]+ arms passed
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index c7fba8f2..5a02d55e 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -2984,6 +2984,7 @@ urmach_processor_dispatch(
+ {
+ 	processor->next_thread = th;
+ 	urmach_rcu_barrier();
++	delay(200);
+ 	processor->state = PROCESSOR_DISPATCHING;
+ }
+ 
