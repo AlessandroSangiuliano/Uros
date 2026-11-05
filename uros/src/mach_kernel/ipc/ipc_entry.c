@@ -406,6 +406,7 @@ ipc_entry_name_prealloc_free(
  *		KERN_SUCCESS		Allocated a new entry.
  *		KERN_NAME_EXISTS	#331: the index is already in use by a
  *					different generation (no overflow displace).
+ *		KERN_INVALID_VALUE	#880: the name has index 0.
  *		KERN_INVALID_TASK	The space is dead.
  *		KERN_RESOURCE_SHORTAGE	Couldn't allocate memory.
  */
@@ -423,6 +424,15 @@ ipc_entry_alloc_name(
 
 	assert(MACH_PORT_VALID(name));
 
+	/*
+	 * #880: index 0 of a table is the free list's head and holds no right,
+	 * and every lookup sends the index there.  A name with it went to the
+	 * overflow, where nothing could reach it again: a right moved to one
+	 * left ipc_right_reverse() a null entry, and the next receive that
+	 * copied out a send right to that port stopped the kernel.
+	 */
+	if (index == 0)
+		return KERN_INVALID_VALUE;
 
 	is_write_lock(space);
 
@@ -444,7 +454,7 @@ ipc_entry_alloc_name(
 		 *	A "fast" space disallows case 3 (ports can't be renamed).
 		 */
 
-		if ((0 < index) && (index < space->is_table_size)) {
+		if (index < space->is_table_size) {
 			ipc_entry_t table = space->is_table;
 
 			entry = &table[index];
