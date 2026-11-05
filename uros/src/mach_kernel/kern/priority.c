@@ -149,6 +149,19 @@ thread_quantum_update(
 	myprocessor = cpu_to_processor(mycpu);
 #if	NCPUS > 1
 	pset = myprocessor->processor_set;
+
+	/*
+	 * #777: a hand-off its waker did not follow with a block: a send alone
+	 * with MACH_SEND_HANDOFF, then user code.  Every other undo sits in
+	 * mach_msg() or thread_invoke(), and a thread that computes enters
+	 * neither, so the wakee would wait here for as long as the waker
+	 * outranks it, on a queue no other processor takes from, with others
+	 * idle.  An AST rather than the undo: that spins on run queue and
+	 * thread locks, which a tick must not (#317).  Not one of AST_PREEMPT,
+	 * so a return to the kernel leaves it for the return to user space.
+	 */
+	if (thread->handoff_wakee != THREAD_NULL)
+		ast_on(mycpu, URMACH_AST_HANDOFF);
 #endif	/* NCPUS > 1 */
 
 	/*

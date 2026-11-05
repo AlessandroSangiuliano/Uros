@@ -247,6 +247,12 @@ extern void	log_thread_action(thread_t, char *);
 		return;
 #endif	/* FAST_IDLE */
 
+#if	NCPUS > 1
+	/* #777: what thread_quantum_update() could not do from a tick */
+	if (reasons & URMACH_AST_HANDOFF)
+		(void) thread_handoff_undo(URMACH_HANDOFF_UNDO_TICK);
+#endif	/* NCPUS > 1 */
+
 #if	TASK_SWAPPER
 	/* must be before AST_APC */
 	if (reasons & AST_SWAPOUT) {

@@ -445,7 +445,8 @@ mach_msg_send(
 	 * MACH_SEND_HANDOFF on a send alone says the block comes in the NEXT
 	 * call: this call's return to user space is part of the promise, so
 	 * it may pass once (mach_msg_overwrite_trap()); the next return that
-	 * finds the hand-off still pending undoes it.
+	 * finds the hand-off still pending undoes it, and a tick if no call
+	 * comes (thread_quantum_update()).
 	 */
 	if ((option & MACH_SEND_HANDOFF) && !(option & MACH_RCV_MSG) &&
 	    current_thread()->handoff_wakee != THREAD_NULL)

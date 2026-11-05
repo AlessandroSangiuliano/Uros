@@ -134,6 +134,7 @@
 #define AST_QUANTUM     0x10
 #define AST_APC		0x20	/* migration APC hook */
 #define	AST_URGENT	0x40
+#define	URMACH_AST_HANDOFF 0x80	/* #777: a tick found a hand-off pending */
 
 
 #define AST_SWAPOUT	0x20000
