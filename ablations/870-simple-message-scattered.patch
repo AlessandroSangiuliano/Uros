@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #870
+Takes out: ipc_kmsg_check_scatter()'s look at the complex bit -- a simple message's payload is read as a gather list
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[42\] a simple message whose payload does not match the scatter list answered
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+index bf0e3c63..c260656e 100644
+--- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
++++ b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+@@ -3614,9 +3614,6 @@ ipc_kmsg_check_scatter(
+ 	 * as a body, its first word was a descriptor count nothing had
+ 	 * bounded, and the walk went on past the message.
+ 	 */
+-	if (!(kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX))
+-		return MACH_MSG_SUCCESS;
+-
+     	body = (mach_msg_body_t *) (&kmsg->ikm_header + 1);
+     	gstart = (mach_msg_descriptor_t *) (body + 1);
+     	gend = gstart + body->msgh_descriptor_count;
