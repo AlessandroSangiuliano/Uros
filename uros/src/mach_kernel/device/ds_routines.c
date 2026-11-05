@@ -1788,6 +1788,12 @@ ds_device_get_status(
 	      default:
 		if (!*device->dev_ops->d_getstat)
 			return (D_INVALID_OPERATION);
+		/*
+		 * #851: this is the reply, from kalloc() and not cleared, and
+		 * the count is what the caller asked for.  A driver that says
+		 * success and writes less hands back zeros and not heap.
+		 */
+		bzero((char *) status, *status_count * sizeof (*status));
 		return ((*device->dev_ops->d_getstat)(device->dev_number,
 						      flavor,
 						      status,
