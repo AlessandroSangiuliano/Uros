@@ -6980,6 +6980,70 @@ arm_forty_three_receive_gives_back(void)
 	return ok;
 }
 
+/*
+ * Arm forty-four (#880): a name with index 0 is refused by every route that
+ * lets a task choose one.  No lookup can reach such a name: index 0 of a table
+ * is the free list's head.  The arm stops at the first answer that is not the
+ * refusal, because a right moved to such a name can stop the kernel at the next
+ * receive, and the answer is what is being judged.
+ */
+static int
+a44_refused(const char *route, mach_port_t name, kern_return_t kr)
+{
+	if (kr == KERN_INVALID_VALUE)
+		return 1;
+	printf("act_test: [44] %s for name 0x%x, of index 0, answered 0x%x, not "
+	       "KERN_INVALID_VALUE — WRONG (#880)\n", route, (unsigned) name,
+	       (int) kr);
+	return 0;
+}
+
+static int
+arm_forty_four_index_zero_name(void)
+{
+	mach_port_t	names[2], port, valid;
+	mach_port_t	task = mach_task_self();
+	kern_return_t	kr;
+	unsigned	i;
+
+	names[0] = 1;					/* the lowest */
+	names[1] = (1U << MACH_PORT_GEN_BITS) - 1;	/* the highest */
+	port = arm_own_port(44);
+	if (port == MACH_PORT_NULL)
+		return 0;
+	for (i = 0; i < 2; i++) {
+		if (!a44_refused("mach_port_allocate_name()", names[i],
+				 mach_port_allocate_name(task,
+							 MACH_PORT_RIGHT_RECEIVE,
+							 names[i])))
+			return 0;
+		if (!a44_refused("mach_port_insert_right()", names[i],
+				 mach_port_insert_right(task, names[i], port,
+							MACH_MSG_TYPE_MAKE_SEND)))
+			return 0;
+		if (!a44_refused("mach_port_rename()", names[i],
+				 mach_port_rename(task, port, names[i])))
+			return 0;
+	}
+
+	/* The lowest index that can be reached is still a name to ask for. */
+	valid = 1U << MACH_PORT_GEN_BITS;
+	kr = mach_port_allocate_name(task, MACH_PORT_RIGHT_RECEIVE, valid);
+	if (kr == KERN_SUCCESS)
+		(void) mach_port_destroy(task, valid);
+	else if (kr != KERN_NAME_EXISTS) {
+		printf("act_test: [44] the lowest index that can be reached, name "
+		       "0x%x, answered 0x%x — WRONG (#880)\n", (unsigned) valid,
+		       (int) kr);
+		return 0;
+	}
+	(void) mach_port_destroy(task, port);
+	printf("act_test: [44] names 0x%x and 0x%x refused by all three routes, "
+	       "and index 1 still a name to ask for — OK\n", (unsigned) names[0],
+	       (unsigned) names[1]);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7110,6 +7174,8 @@ main(int argc, char **argv)
 	passed += arm_forty_two_simple_message_scattered();
 	arms++;		/* arm forty-three, #871 */
 	passed += arm_forty_three_receive_gives_back();
+	arms++;		/* arm forty-four, #880 */
+	passed += arm_forty_four_index_zero_name();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
