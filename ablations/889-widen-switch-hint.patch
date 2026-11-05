@@ -1,0 +1,19 @@
+Kind: widen
+Issue: #889
+Takes out: nothing -- it holds the window before the activation is locked open for 2 ms, in the fixed tree with nothing held.  act_test [48] has to end all the same, and 889-switch-hint-port-first, over this, holds the port through it.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[48\] [0-9]+ hints against
+
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index 2b943ea6..b6ce4c1e 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -327,6 +327,8 @@ syscall_thread_switch(
+ 	    ip_unlock(port);
+ 	    thr_act = convert_port_to_act(port);
+ 	    ipc_port_release(port);
++	    if (thr_act != THR_ACT_NULL)
++		    delay(2000);
+ 
+ 	    if (thr_act != THR_ACT_NULL) {
+ 			register thread_t thread;
