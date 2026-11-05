@@ -65,7 +65,8 @@
  * below both expect the console first.
  *
  * WRITE-ONLY.  NO_READ and not NULL_READ, deliberately -- see console_cdev.c
- * for the null-buffer path that a "successful" read walks into.
+ * for the null-buffer path that a "successful" read walks into.  NO_GETS and
+ * not NULL_GETS for the same reason: a success with no status behind it (#851).
  */
 struct dev_ops	dev_name_list[] =
 {
@@ -74,7 +75,7 @@ struct dev_ops	dev_name_list[] =
 	   async_in,	reset,		port_death,	subdev,
 	   dev_info */
 	{ "console",	consoleopen,	consoleclose,	NO_READ,
-	  consolewrite,	NULL_GETS,	NULL_SETS,	NO_MMAP,
+	  consolewrite,	NO_GETS,	NULL_SETS,	NO_MMAP,
 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },
 };
