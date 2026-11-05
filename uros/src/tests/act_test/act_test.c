@@ -7214,7 +7214,7 @@ arm_forty_five_parked_sender(void)
 			parked = 1;
 		else
 			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_DEPRESS, 1);
+					     SWITCH_OPTION_WAIT, 1);
 	}
 	if (parked && !a45_done) {
 		/* A reply to this port, with the sender parked on it. */
@@ -7225,8 +7225,13 @@ arm_forty_five_parked_sender(void)
 			ok = 0;
 		}
 	}
+	/*
+	 * In time, and not in polls: a depressed thread_switch() comes back at
+	 * once with nothing else to run, and 4000 of those are over before the
+	 * sender has got anywhere under the widen.
+	 */
 	for (i = 0; i < 4000 && !a45_done; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 
 	if (a45_second != MACH_MSG_SUCCESS) {
 		printf("act_test: [45] the second send answered 0x%x: the sender "
