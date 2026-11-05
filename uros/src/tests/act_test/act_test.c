@@ -7702,15 +7702,30 @@ arm_fifty_holes_come_back_zero(void)
  * it ends, and it is this thread, in neither of them, that says so.  At one
  * processor a tick between the two locks is enough, which is why the others
  * yield: a hint hands over the rest of the quantum.
+ *
+ * Every thread is made before anything starts, because this one could not make
+ * another once it has stopped.  The stop does not stay with the two: libpthreads
+ * calls task_threads() every two seconds for a thread waiting to be joined, that
+ * takes the task's lock and then each activation's, and it sleeps behind them
+ * holding the first.  thread_create() then asks for that lock for ever, in
+ * ref_task_port_locked().  What is left here, thread_switch() with no hint and
+ * printf(), needs neither.
  */
 #define	A48_MS_SELF	2000
 #define	A48_KILLS	32
 #define	A48_MS_LIMIT	60000
 
 static volatile mach_port_t	a48_hint;
-static volatile int		a48_stop;
+static volatile int		a48_go, a48_kill_go, a48_stop;
 static volatile int		a48_self_done, a48_switch_done, a48_kill_done;
 static volatile unsigned	a48_selfs, a48_switches, a48_kills;
+
+static void
+a48_wait_for(volatile int *flag)
+{
+	while (!*flag)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+}
 
 static void *
 a48_self_loop(void *arg)
@@ -7719,6 +7734,7 @@ a48_self_loop(void *arg)
 
 	(void) arg;
 	a48_hint = mach_thread_self();
+	a48_wait_for(&a48_go);
 	while (!a48_stop) {
 		t = mach_thread_self();
 		(void) mach_port_deallocate(mach_task_self(), t);
@@ -7733,6 +7749,7 @@ static void *
 a48_switch_loop(void *arg)
 {
 	(void) arg;
+	a48_wait_for(&a48_go);
 	while (!a48_stop) {
 		(void) thread_switch(a48_hint, SWITCH_OPTION_NONE, 0);
 		a48_switches++;
@@ -7758,6 +7775,7 @@ a48_kill_loop(void *arg)
 	unsigned			i, round;
 
 	(void) arg;
+	a48_wait_for(&a48_kill_go);
 	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE)
 	    != KERN_SUCCESS)
 		return NULL;
@@ -7809,18 +7827,16 @@ arm_forty_eight_hint_and_lock_order(void)
 	}
 	while (a48_hint == MACH_PORT_NULL)
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
-	if (pthread_create(&sw, NULL, a48_switch_loop, NULL) != 0) {
+	if (pthread_create(&sw, NULL, a48_switch_loop, NULL) != 0 ||
+	    pthread_create(&kill, NULL, a48_kill_loop, NULL) != 0) {
 		printf("act_test: [48] pthread_create failed — WRONG\n");
-		a48_stop = 1;
+		a48_stop = a48_go = a48_kill_go = 1;
 		return 0;
 	}
 
+	a48_go = 1;
 	a48_wait(NULL, A48_MS_SELF);
-	if (pthread_create(&kill, NULL, a48_kill_loop, NULL) != 0) {
-		printf("act_test: [48] pthread_create failed — WRONG\n");
-		a48_stop = 1;
-		return 0;
-	}
+	a48_kill_go = 1;
 	a48_wait(&a48_kill_done, A48_MS_LIMIT);
 	a48_stop = 1;
 	a48_wait(&a48_switch_done, A48_MS_LIMIT / 4);
