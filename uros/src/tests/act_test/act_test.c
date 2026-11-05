@@ -65,6 +65,7 @@
 #include <mach/thread_info.h>	/* #603: arm seven's yardstick call */
 #include <mach/processor_info.h> /* #660: arm nine's thread count */
 #include <mach/thread_switch.h>	/* #687: arm eleven's yield */
+#include <mach_debug/mach_debug.h>	/* #871: arm forty-three's zone counts */
 #include <mach/bootstrap.h>	/* #660: the privileged host port it needs */
 #include <mach/task_info.h>	/* #688: arm fourteen's question */
 #include <mach/mach_syscalls.h>	/* #688: syscall_task_info() */
@@ -6787,6 +6788,192 @@ arm_forty_two_simple_message_scattered(void)
 	return 1;
 }
 
+/*
+ * Arm forty-three (#871): a receive that blocks and ends with no message gives
+ * back what it held.  Three ways out of it did not, and nothing failed: a port
+ * stayed allocated for good, one for every nanosleep().  So the zone is what is
+ * read.  Rounds of a fresh port, a receive that blocks until its timeout, and
+ * the port destroyed; the same with a scatter list, whose size picks a kalloc
+ * zone little else uses; and the same with the port destroyed under a thread
+ * blocked on it.  Other tasks allocate as this runs, so a count that grew is
+ * asked again before it is believed.  Not asked where host_zone_info is not
+ * compiled in.
+ */
+#define	A43_ROUNDS	16
+#define	A43_TRIES	3
+#define	A43_LIST	3000	/* kalloc.4096 */
+
+static volatile mach_port_t	a43_thread, a43_port;
+static volatile unsigned	a43_ended;
+static volatile int		a43_stop;
+
+static int
+a43_same(const char *a, const char *b)
+{
+	while (*a != '\0' && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == *b;
+}
+
+static int
+a43_zone(mach_port_t host, const char *name, int *count)
+{
+	zone_name_t		*names = 0;
+	zone_info_t		*info = 0;
+	mach_msg_type_number_t	n = 0, m = 0, i;
+	int			found = 0;
+
+	if (host_zone_info(host, &names, &n, &info, &m) != KERN_SUCCESS)
+		return 0;
+	for (i = 0; i < n && i < m; i++)
+		if (a43_same(names[i].zn_name, name)) {
+			*count = info[i].zi_count;
+			found = 1;
+		}
+	(void) vm_deallocate(mach_task_self(), (vm_address_t) names,
+			     n * sizeof *names);
+	(void) vm_deallocate(mach_task_self(), (vm_address_t) info,
+			     m * sizeof *info);
+	return found;
+}
+
+static void *
+a43_blocked(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+
+	(void) arg;
+	a43_thread = mach_thread_self();
+	while (!a43_stop) {
+		mach_port_t	p = a43_port;
+
+		if (p == MACH_PORT_NULL) {
+			(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS,
+					     1);
+			continue;
+		}
+		(void) mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m, p,
+				MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		a43_port = MACH_PORT_NULL;
+		a43_ended++;
+	}
+	return NULL;
+}
+
+/* How far `zone' moved over one round of `what'; 0 where it cannot be read. */
+static int
+a43_round(mach_port_t host, const char *zone, int what, int *grew)
+{
+	static unsigned char	list[sizeof (mach_msg_header_t) + A43_LIST];
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+	int		before, after;
+	unsigned	i, j;
+
+	if (!a43_zone(host, zone, &before))
+		return 0;
+	for (i = 0; i < A43_ROUNDS; i++) {
+		mach_port_t port = arm_own_port(43);
+
+		if (port == MACH_PORT_NULL)
+			return 0;
+		if (what == 0)
+			(void) mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+					sizeof m, port, 1, MACH_PORT_NULL);
+		else if (what == 1)
+			(void) mach_msg_overwrite((mach_msg_header_t *) list,
+						  MACH_RCV_MSG | MACH_RCV_OVERWRITE |
+						  MACH_RCV_TIMEOUT, 0, sizeof list,
+						  port, 1, MACH_PORT_NULL,
+						  (mach_msg_header_t *) list,
+						  sizeof list);
+		else {
+			unsigned	ended = a43_ended;
+
+			a43_port = port;
+			(void) arm_thread_waiting(&a43_thread);
+			(void) mach_port_destroy(mach_task_self(), port);
+			for (j = 0; j < 2000 && a43_ended == ended; j++)
+				(void) thread_switch(MACH_PORT_NULL,
+						     SWITCH_OPTION_DEPRESS, 1);
+			continue;
+		}
+		(void) mach_port_destroy(mach_task_self(), port);
+	}
+	if (!a43_zone(host, zone, &after))
+		return 0;
+	*grew = after - before;
+	return 1;
+}
+
+static int
+a43_asked(mach_port_t host, const char *zone, int what, const char *how)
+{
+	int		grew = 0;
+	unsigned	try;
+
+	for (try = 0; try < A43_TRIES; try++) {
+		if (!a43_round(host, zone, what, &grew)) {
+			printf("act_test: [43] %s could not be read — WRONG\n",
+			       zone);
+			return 0;
+		}
+		if (grew < A43_ROUNDS / 2) {
+			printf("act_test: [43] %d receive(s) %s moved %s by %d\n",
+			       A43_ROUNDS, how, zone, grew);
+			return 1;
+		}
+	}
+	printf("act_test: [43] %d receive(s) %s grew %s by %d, %u time(s) out of "
+	       "%u — WRONG (#871)\n", A43_ROUNDS, how, zone, grew, A43_TRIES,
+	       A43_TRIES);
+	return 0;
+}
+
+static int
+arm_forty_three_receive_gives_back(void)
+{
+	mach_port_t	host = mach_host_self();
+	pthread_t	blocked;
+	int		count, ok = 1;
+
+	if (!a43_zone(host, "ipc ports", &count)) {
+		printf("act_test: [43] host_zone_info does not answer here — NOT "
+		       "ASKED\n");
+		(void) mach_port_deallocate(mach_task_self(), host);
+		return 1;
+	}
+	a43_thread = MACH_PORT_NULL;
+	a43_port = MACH_PORT_NULL;
+	a43_stop = 0;
+	if (pthread_create(&blocked, NULL, a43_blocked, NULL) != 0) {
+		printf("act_test: [43] pthread_create failed — WRONG\n");
+		(void) mach_port_deallocate(mach_task_self(), host);
+		return 0;
+	}
+	if (!a43_asked(host, "ipc ports", 0, "timed out"))
+		ok = 0;
+	if (!a43_asked(host, "kalloc.4096", 1, "timed out with a scatter list"))
+		ok = 0;
+	if (!a43_asked(host, "ipc ports", 2, "ended by their port's death"))
+		ok = 0;
+	a43_stop = 1;
+	(void) pthread_join(blocked, NULL);
+	(void) mach_port_deallocate(mach_task_self(), a43_thread);
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (ok)
+		printf("act_test: [43] a blocked receive that ends with no message "
+		       "gives back its port and its scatter list — OK\n");
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6915,6 +7102,8 @@ main(int argc, char **argv)
 	passed += arm_forty_one_body_disposition();
 	arms++;		/* arm forty-two, #870 */
 	passed += arm_forty_two_simple_message_scattered();
+	arms++;		/* arm forty-three, #871 */
+	passed += arm_forty_three_receive_gives_back();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
