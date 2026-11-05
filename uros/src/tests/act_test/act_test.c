@@ -6720,7 +6720,7 @@ arm_forty_two_simple_message_scattered(void)
 	mach_msg_size_t		scatter_size;
 	mach_msg_return_t	mr;
 	mach_port_t		port;
-	unsigned		i, count = 1;
+	unsigned		i, count = 1, same = 0;
 	const unsigned		pay = sizeof (mach_msg_header_t);
 	const unsigned		dsc = pay + sizeof (mach_msg_body_t);
 	unsigned char		*from;
@@ -6772,11 +6772,14 @@ arm_forty_two_simple_message_scattered(void)
 		       (int) mr);
 		return 0;
 	}
+	for (i = 0; i < sizeof d; i++)
+		same += buf.bytes[dsc + i] == m.bytes[dsc + i];
 	if (buf.h.msgh_id != 42 || buf.h.msgh_size < scatter_size ||
-	    buf.bytes[dsc + sizeof d - 1] != from[sizeof d - 1]) {
-		printf("act_test: [42] the message came back as id %d, %u bytes "
-		       "— WRONG (#870)\n", (int) buf.h.msgh_id,
-		       (unsigned) buf.h.msgh_size);
+	    same != sizeof d) {
+		printf("act_test: [42] the message came back as id %d, %u bytes, "
+		       "%u of %u payload bytes as sent — WRONG (#870)\n",
+		       (int) buf.h.msgh_id, (unsigned) buf.h.msgh_size, same,
+		       (unsigned) sizeof d);
 		return 0;
 	}
 	printf("act_test: [42] a simple message passed a scatter list its "
