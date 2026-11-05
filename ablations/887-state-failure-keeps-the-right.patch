@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #887
+Takes out: the release of the send right when the state cannot be read, with the refusal, which 887-flavor-not-refused takes out alone: the path cannot be reached with it in place.  It is one patch and not one over the other because a base is in the fixed arm too, and there [46] says WRONG.  act_test [47] takes its fault, and the notification never comes.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[47\] no no-senders notification in 5 s
+
+diff --git a/uros/src/mach_kernel/kern/exception.c b/uros/src/mach_kernel/kern/exception.c
+index 7b1e0815..f2f8edc6 100644
+--- a/uros/src/mach_kernel/kern/exception.c
++++ b/uros/src/mach_kernel/kern/exception.c
+@@ -245,8 +245,6 @@ urmach_exception_get_state(
+ 
+ 	*state_cnt = urmach_state_count(flavor);
+ 	kr = thread_getstatus(act, flavor, (thread_state_t) state, state_cnt);
+-	if (kr != KERN_SUCCESS)
+-		ipc_port_release_send(exc_port);
+ 	return kr;
+ }
+ 
+diff --git a/uros/src/mach_kernel/kern/ipc_tt.c b/uros/src/mach_kernel/kern/ipc_tt.c
+index f7d7fdcc..01d7727b 100644
+--- a/uros/src/mach_kernel/kern/ipc_tt.c
++++ b/uros/src/mach_kernel/kern/ipc_tt.c
+@@ -1148,7 +1148,7 @@ urmach_exception_action_valid(
+ 		return TRUE;
+ 	case EXCEPTION_STATE:
+ 	case EXCEPTION_STATE_IDENTITY:
+-		return urmach_state_count(flavor) != 0;
++		return TRUE;
+ 	default:
+ 		return FALSE;
+ 	}

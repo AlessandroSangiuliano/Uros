@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #887
+Takes out: the refusal of the four registration routines -- a behavior that sends a state takes any flavor, as it did.  The exception path stays bounded, so that nothing faults: act_test [46] reads the answers and says WRONG, and [47], which a healthy kernel does not let run, runs and says its notification came.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[46\] [0-9]+ answer\(s\) of the four routines are not what the flavor asks for
+
+diff --git a/uros/src/mach_kernel/kern/ipc_tt.c b/uros/src/mach_kernel/kern/ipc_tt.c
+index f7d7fdcc..01d7727b 100644
+--- a/uros/src/mach_kernel/kern/ipc_tt.c
++++ b/uros/src/mach_kernel/kern/ipc_tt.c
+@@ -1148,7 +1148,7 @@ urmach_exception_action_valid(
+ 		return TRUE;
+ 	case EXCEPTION_STATE:
+ 	case EXCEPTION_STATE_IDENTITY:
+-		return urmach_state_count(flavor) != 0;
++		return TRUE;
+ 	default:
+ 		return FALSE;
+ 	}
