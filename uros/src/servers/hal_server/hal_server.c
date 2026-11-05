@@ -285,6 +285,7 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t kr;
+	mach_port_t sig = MACH_PORT_NULL;
 
 	kr = bootstrap_ports(bootstrap_port,
 			     &host_port, &device_port,
@@ -357,8 +358,12 @@ main(int argc, char **argv)
 	}
 
 	/* Publish in name_server so driver servers can find us. */
-	kr = netname_check_in(name_server_port, "hal",
-			      mach_task_self(), hal_service_port);
+	/* #744: signed with a port only this task holds -- mach_task_self()
+	 * gave the name server a send right to this task's port. */
+	kr = urmach_netname_signature(&sig);
+	if (kr == KERN_SUCCESS)
+		kr = netname_check_in(name_server_port, "hal",
+				      sig, hal_service_port);
 	if (kr != KERN_SUCCESS)
 		printf("hal: netname_check_in(\"hal\") failed (kr=%d)\n", kr);
 	else
