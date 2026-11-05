@@ -7056,9 +7056,11 @@ arm_forty_four_index_zero_name(void)
  * Two rounds, because the two questions get in each other's way.  In the second,
  * while the sender is parked, a kernel RPC with this port as its reply port: the
  * queue is empty and a sender is parked, which the hot path once asserted could
- * not be.  But a server that has come back to the port by then takes that reply
- * as it would any message, the slow way, and that wakes the sender, which then
- * says nothing of the hot path's wakeup.  So the first round makes no such call.
+ * not be.  That reply makes no room, and a sender still parked after it is let go
+ * by destroying the port.  But a server that has come back to the port by then
+ * takes that reply as it would any message, the slow way, and that wakes the
+ * sender, which then says nothing of the hot path's wakeup.  So the first round
+ * makes no such call.
  * A limit of 0, which mach_port.defs rules out, is refused.
  */
 #define	A45_RPC		4500
@@ -7169,7 +7171,7 @@ a45_round(int with_rpc)
 	pthread_t		server, sender;
 	kern_return_t		kr;
 	unsigned		i;
-	int			parked = 0, ok = 1;
+	int			parked = 0, gone = 0, ok = 1;
 
 	a45_port = arm_own_port(45);
 	reply = arm_own_port(45);
@@ -7234,6 +7236,13 @@ a45_round(int with_rpc)
 			       "answered 0x%x — WRONG (#881)\n", (int) mr);
 			ok = 0;
 		}
+		n = THREAD_BASIC_INFO_COUNT;
+		if (thread_info(a45_sender_thread, THREAD_BASIC_INFO,
+				(thread_info_t) &info, &n) == KERN_SUCCESS &&
+		    info.run_state == TH_STATE_WAITING) {
+			(void) mach_port_destroy(task, a45_port);
+			gone = 1;
+		}
 	}
 	/*
 	 * In time, and not in polls: a depressed thread_switch() comes back at
@@ -7243,14 +7252,16 @@ a45_round(int with_rpc)
 	for (i = 0; i < 4000 && !a45_done; i++)
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 
-	if (a45_second != MACH_MSG_SUCCESS) {
+	if (a45_second != MACH_MSG_SUCCESS &&
+	    !(gone && a45_second == MACH_SEND_INVALID_DEST)) {
 		printf("act_test: [45] the second send answered 0x%x: the sender "
 		       "stayed parked on a port with room — WRONG (#881)\n",
 		       (int) a45_second);
 		ok = 0;
 	}
 	(void) pthread_join(sender, NULL);
-	(void) mach_port_destroy(task, a45_port);
+	if (!gone)
+		(void) mach_port_destroy(task, a45_port);
 	(void) mach_port_destroy(task, reply);
 	(void) pthread_join(server, NULL);
 	(void) mach_port_deallocate(task, a45_sender_thread);
@@ -7262,8 +7273,13 @@ a45_round(int with_rpc)
 		       "the second was sent%s — NOT ASKED\n", round);
 		return -1;
 	}
-	printf("act_test: [45] a sender parked by a message the hot path held "
-	       "went on when it was taken%s — OK\n", round);
+	if (gone && a45_second == MACH_SEND_INVALID_DEST)
+		printf("act_test: [45] a sender stayed parked through a kernel "
+		       "reply on its port, and the port's death let it go, "
+		       "0x%x — OK\n", (int) a45_second);
+	else
+		printf("act_test: [45] a sender parked by a message the hot path "
+		       "held went on when it was taken%s — OK\n", round);
 	return 1;
 }
 
