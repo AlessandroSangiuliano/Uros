@@ -1787,6 +1787,7 @@ memory_object_get_attributes(
 		}
 
 		perf = (memory_object_perf_info_t) attributes;
+		bzero((char *) perf, sizeof (*perf));	/* #851: its holes */
 		perf->cluster_size = object->cluster_size;
 		perf->may_cache = object->can_persist;
 
@@ -1804,6 +1805,7 @@ memory_object_get_attributes(
                 }
 
                 attr = (old_memory_object_attr_info_t) attributes;
+		bzero((char *) attr, sizeof (*attr));	/* #851: object_ready */
         	attr->may_cache = object->can_persist;
         	attr->copy_strategy = object->copy_strategy;
 
@@ -1821,6 +1823,7 @@ memory_object_get_attributes(
                 }
 
                 attr = (memory_object_attr_info_t) attributes;
+		bzero((char *) attr, sizeof (*attr));	/* #851: its holes */
         	attr->copy_strategy = object->copy_strategy;
 		attr->cluster_size = object->cluster_size;
         	attr->may_cache_object = object->can_persist;
