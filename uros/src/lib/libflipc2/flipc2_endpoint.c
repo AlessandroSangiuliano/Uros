@@ -480,6 +480,7 @@ flipc2_endpoint_create(
     flipc2_endpoint_t  *ep_out)
 {
     kern_return_t       kr;
+    mach_port_t         sig = MACH_PORT_NULL;
     struct flipc2_endpoint *ep;
     vm_address_t        addr;
     uint32_t            i;
@@ -588,9 +589,14 @@ flipc2_endpoint_create(
         return FLIPC2_ERR_KERNEL;
     }
 
-    /* Register with the Mach name server */
-    kr = netname_check_in(name_server_port, (char *)name,
-                          mach_task_self(), ep->recv_port);
+    /* Register with the Mach name server, signed with a port only this task
+     * holds (#744): mach_task_self() gave the name server a send right to this
+     * task's port.  Without a signature the name was never asked for, so that
+     * failure is the kernel's and not a name already taken. */
+    kr = urmach_netname_signature(&sig);
+    if (kr == KERN_SUCCESS)
+        kr = netname_check_in(name_server_port, (char *)name,
+                              sig, ep->recv_port);
     if (kr != KERN_SUCCESS) {
         flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->port_set,
@@ -599,7 +605,8 @@ flipc2_endpoint_create(
                            MACH_PORT_RIGHT_RECEIVE, -1);
         vm_deallocate(mach_task_self(), addr,
                       sizeof(struct flipc2_endpoint));
-        return FLIPC2_ERR_NAME_EXISTS;
+        return (sig == MACH_PORT_NULL) ? FLIPC2_ERR_KERNEL
+                                       : FLIPC2_ERR_NAME_EXISTS;
     }
 
     *ep_out = ep;
@@ -698,6 +705,7 @@ flipc2_endpoint_destroy(
     flipc2_endpoint_t   ep)
 {
     uint32_t i;
+    mach_port_t sig = MACH_PORT_NULL;
 
     if (!ep)
         return FLIPC2_ERR_INVALID_ARGUMENT;
@@ -717,8 +725,10 @@ flipc2_endpoint_destroy(
         ep->conns[i].active = 0;
     }
 
-    /* Unregister from name server */
-    netname_check_out(name_server_port, ep->name, mach_task_self());
+    /* Unregister from name server, under the signature the name was checked
+     * in with (#744). */
+    if (urmach_netname_signature(&sig) == KERN_SUCCESS)
+        netname_check_out(name_server_port, ep->name, sig);
 
     /* Destroy ports */
     mach_port_mod_refs(mach_task_self(), ep->recv_port,
