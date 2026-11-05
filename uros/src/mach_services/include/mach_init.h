@@ -106,6 +106,16 @@ extern	mach_port_t	service_port;
 extern	mach_port_t	mach_cap_port;
 
 /*
+ *	The port this task signs its names with at the name server: the
+ *	signature argument of netname_check_in(), netname_check_out() and their
+ *	mount forms (#744, netname_signature.c).  A port of the task's own,
+ *	made on the first call and the same on every later one.  Not
+ *	MACH_PORT_NULL, which the name server refuses, and not mach_task_self(),
+ *	which hands the name server the task.
+ */
+extern	kern_return_t	urmach_netname_signature(mach_port_t *sig);
+
+/*
  *	Where these ports occur in the "mach_ports_register"
  *	collection... only servers or the runtime library need know.
  */

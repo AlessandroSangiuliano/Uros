@@ -158,6 +158,12 @@ mig_put_reply_port(
  * Port registration, the page size and the RPC glue are inherited and left
  * alone.
  *
+ * ⚠️ So is the parent's name signature, which is NOT inherited and is forgotten
+ * here (#744): its receive right stayed in the parent, and the name the child
+ * inherited names nothing in the child's space, or names one of the child's own
+ * rights -- which the child would then sign with, and whoever can send to that
+ * right could take the child's names.
+ *
  * It lives here and not in mach_init.c, where it was.  A caller outside libmach
  * that names a function in mach_init.c pulls that file into libc.so beside
  * mach_init_sa.c, which defines the same globals, and the link fails.
@@ -176,4 +182,5 @@ mach_task_self_init(void)
 {
 	mach_task_self_ = mach_task_self();
 	mig_init(0);
+	urmach_netname_signature_forget();
 }
