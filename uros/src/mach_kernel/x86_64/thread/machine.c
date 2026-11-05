@@ -93,6 +93,24 @@ act_machine_create(struct task *task, thread_act_t thr_act)
 void
 act_machine_destroy(thread_act_t thr_act)
 {
+	pcb_t	pcb = thr_act->mact.pcb;
+
+	/*
+	 * 🔴 THE FLOATING-POINT AREA GOES WITH ITS ACTIVATION (#749).
+	 *
+	 * The area lives in the pcb, and the pcb is the activation's.  It was
+	 * freed by thread_machine_destroy(), the shuttle's teardown, through
+	 * the shuttle's top_act -- which names the activation only until the
+	 * reaper drops it.  When the shuttle's last reference came after
+	 * that, top_act named whatever the activation zone had made of the
+	 * memory, and a live thread lost its area: #749's panic, at that
+	 * thread's next switch.  Freed here, by the teardown of what holds
+	 * it, the area cannot be reached through anything that does not.
+	 */
+	if (pcb != PCB_NULL && pcb->ctx.fpu_area != (void *) 0) {
+		fpu_area_free(pcb->ctx.fpu_area);
+		pcb->ctx.fpu_area = (void *) 0;
+	}
 	thr_act->mact.pcb = PCB_NULL;
 }
 
@@ -460,7 +478,6 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 void
 thread_machine_destroy(thread_t thread)
 {
-	thread_act_t	thr_act = thread->top_act;
 	spl_t		s;
 
 	/*
@@ -475,9 +492,9 @@ thread_machine_destroy(thread_t thread)
 	 * stack_free() asks, and the machine-independent side calls this only
 	 * once the thread is off its processor for good.
 	 *
-	 * Owned by the shuttle and not the activation, so before the test
-	 * below and whatever it answers.  Counted before the shuttle goes back
-	 * to its zone, which is what lets the census hold the two side by side.
+	 * The stack is the shuttle's, and the only thing this frees.  Counted
+	 * before the shuttle goes back to its zone, which is what lets the
+	 * census hold the two side by side.
 	 */
 	if (thread->kernel_stack != 0) {
 		s = splsched();
@@ -487,11 +504,12 @@ thread_machine_destroy(thread_t thread)
 		atomic_inc64(&machine_stacks_given_back);
 	}
 
-	if (thr_act == THR_ACT_NULL || thr_act->mact.pcb == PCB_NULL)
-		return;
-
-	fpu_area_free(thr_act->mact.pcb->ctx.fpu_area);
-	thr_act->mact.pcb->ctx.fpu_area = (void *) 0;
+	/*
+	 * And nothing of the activation's (#749).  The floating-point area is
+	 * the pcb's, and act_machine_destroy() frees it with its activation:
+	 * reached from here, through top_act, it was freed under a live
+	 * thread whenever the shuttle outlived its activation.
+	 */
 }
 
 void
