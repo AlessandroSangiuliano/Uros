@@ -1,0 +1,50 @@
+Kind: ablation
+Issue: #744
+Takes out: both halves -- the name server's refusal of a signature that cannot sign (cb27c9c9) and cap_server's own signature (4f550522), so "cap_server" is checked in with MACH_PORT_NULL and any task presenting MACH_PORT_NULL can check it in again over cap_server's, as before; [33] takes the name, says so, and puts it back
+Run: --entry 14 1200 -smp 1
+Expect: cap_test: \[33\] WRONG .*no signature: 0, not NETNAME_INVALID_PORT\(1004\)
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index d76ff8ef..ed12f519 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -793,7 +793,8 @@ main(int argc, char **argv)
+      */
+     kr = urmach_netname_signature(&sig);
+     if (kr == KERN_SUCCESS)
+-        kr = netname_check_in(name_server_port, "cap_server", sig, cap_port);
++        kr = netname_check_in(name_server_port, "cap_server", MACH_PORT_NULL,
++                              cap_port);
+     if (kr != KERN_SUCCESS)
+         printf("cap: netname_check_in failed (%d)\n", kr);
+     else
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+index 46932265..9f6aa7e5 100644
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -371,15 +371,6 @@ do_netname_check_in(mach_port_t server, netname_name_in_t key,
+ 	printf("%s: netname_check_in(%.80s, name=%x, sig=%x)\n",
+ 	       program, key, name, sig);
+ 
+-    /*
+-     * Refused before the name is looked for, so that a name nobody holds yet
+-     * cannot be taken without a signature either.  The rights in the request
+-     * go back with it: mach_msg_server() destroys a request answered with an
+-     * error.
+-     */
+-    if (!signature_can_sign(sig, name))
+-	return NETNAME_INVALID_PORT;
+-
+     if (netname_find(key, &this, &prev)) {
+ 	if (this->sig == sig) {
+ 	    this->name = name;
+@@ -462,9 +453,6 @@ do_netname_check_out(mach_port_t server, netname_name_in_t key, mach_port_t sig)
+ 	printf("%s: netname_check_out(%.80s, sig=%x)\n",
+ 	       program, key, sig);
+ 
+-    if (!signature_can_sign(sig, MACH_PORT_NULL))
+-	return NETNAME_INVALID_PORT;		/* #744 */
+-
+     if (netname_find(key, &this, &prev)) {
+ 	if (this->sig == sig) {
+ 	    *prev = this->next;
