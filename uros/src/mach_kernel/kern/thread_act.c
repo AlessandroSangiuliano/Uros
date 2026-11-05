@@ -1199,6 +1199,21 @@ act_free(thread_act_t thr_act)
 			thr_act->active ? " " : " !");
 #endif	/* MACH_ASSERT */
 
+	/*
+	 * 🔴 NO SHUTTLE NAMES A FREED ACTIVATION (#749).
+	 *
+	 * The reaper unlinks the shuttle's top_act where it drops the
+	 * shuttle's reference on this activation (kern/thread.c), so when
+	 * the last reference goes, as here, nothing names it any more.  A
+	 * shuttle that still did would keep a pointer to memory the zone is
+	 * about to hand to a new activation: the pointer through which #749
+	 * freed a live thread's floating-point area.
+	 */
+	thr = thr_act->thread;
+	if (thr != THREAD_NULL && thr->top_act == thr_act)
+		panic("act_free: activation %p is freed while shuttle %p "
+		      "still names it as its top_act (#749)", thr_act, thr);
+
 	/* Drop final ref to shuttle (not really ours, but we're
 	 * allowed to handle it). */
 	if (thr = thr_act->thread) {
