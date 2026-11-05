@@ -15,9 +15,9 @@
  * do.  This thread, bound where it is, stands for the sender, and names the
  * wakee as ipc_mqueue_deliver() does.  A thread bound to the same processor at
  * a higher priority is what thread_select() takes instead of the wakee; it
- * runs until the wakee has run or two seconds are up, so a good kernel spends
- * microseconds in it and a bad one comes out saying so.  The wakee has to run
- * somewhere else meanwhile, which takes a second processor.
+ * runs until the wakee has run or two seconds are up, so a good kernel is out
+ * of it as soon as the wakee runs and a bad one comes out saying so.  The wakee
+ * has to run somewhere else meanwhile, which takes a second processor.
  */
 
 #include <stdint.h>

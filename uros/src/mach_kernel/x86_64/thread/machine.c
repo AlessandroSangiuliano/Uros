@@ -553,11 +553,11 @@ thread_machine_flush(thread_act_t thr_act)
  * Point a kernel stack at `continuation' -- the thread will resume there
  * rather than where it was interrupted.
  *
- * The machine-independent scheduler uses this to discard a stack's contents
- * on purpose: a thread that blocks with a continuation does not need its
- * stack kept, so the stack is reset and the thread costs nothing while it
- * waits.  That is the whole point of continuations and it is why this is
- * initialisation rather than a jump.
+ * For a thread with nothing on its stack to come back to: one being started,
+ * or sent back up an RPC whose server ended (kern/thread.c).  A thread that
+ * blocks with a continuation does not come through here: the switch saves
+ * nothing for it and jumps to its restart (context_switch_continuation(),
+ * #771, #777), and what is on its stack is left as it was.
  */
 void
 machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
@@ -572,10 +572,8 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	/*
 	 * Through the trampoline, exactly as thread_machine_create does (#459).
 	 *
-	 * This is the OTHER way a thread comes to start on a fresh stack, and
-	 * it is the one the scheduler uses most: every thread that blocks with
-	 * a continuation has its stack reset here and resumes through this
-	 * context.  Naming the continuation as the entry point sends it
+	 * This is the OTHER way a thread comes to start on a fresh stack.
+	 * Naming the continuation as the entry point sends it
 	 * straight into its own code, skipping thread_dispatch(), the balanced
 	 * enable_preemption(), spllo() -- and the STI, so it resumes with
 	 * interrupts disabled and is never interrupted again.
@@ -592,20 +590,19 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	 * everything owed to a thread arriving on a fresh stack.
 	 */
 	/*
-	 * 🔴 AND THE VECTOR-STATE DECISION SURVIVES THE RESTART (#561).
+	 * 🔴 AND THE VECTOR-STATE DECISION SURVIVES THIS (#561).
 	 *
-	 * This is a RE-initialisation: the context already exists and its
-	 * thread already has a history, which is why the call below carries
-	 * pcb->ctx.fpu_area across rather than asking for a new one.  The
-	 * flag belongs to the same history -- it says what this THREAD needs,
-	 * not what the stack it is being restarted on needs -- so it is
-	 * carried the same way.
+	 * The context already exists here, and the call below gives it back
+	 * its own area, pcb->ctx.fpu_area, which context_init() zeroes for a
+	 * thread that has nothing in it yet.  The flag is another matter: it
+	 * says what this THREAD needs, not what the stack it starts on needs,
+	 * and it was decided before this runs, so it is kept across.
 	 *
 	 * ❌ Without this the exemption was granted at creation and thrown away
 	 * here, and the counters said so: 14 contexts exempted, 8.8 MILLION
 	 * switches, and not one save or restore skipped.  context_init() sets
 	 * the safe default, which is correct for a context being built and
-	 * wrong for one being rebuilt.
+	 * wrong for one built already.
 	 */
 	int	keep_fpu_switch = pcb->ctx.fpu_switch;
 

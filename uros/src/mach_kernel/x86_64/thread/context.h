@@ -139,10 +139,11 @@ struct context {
  * `entry(arg)`.
  *
  * The stack is written to look exactly as though the thread had been
- * switched out — six saved registers and a return address — because that is
- * the only shape the switch knows how to resume.  A thread that has never
- * run and one that was interrupted must be indistinguishable to it, or
- * there would be two ways to resume and one of them would be rare.
+ * switched out — seven saved words and a return address — because that is
+ * the shape the switch pops.  A thread that has never run and one that was
+ * interrupted must be indistinguishable to it, or a rare way to resume would
+ * hide among the common one.  The other way, for a thread that blocked with
+ * a continuation, has no frame at all: the switch jumps to its restart (#777).
  *
  * `stack_top` is the high end; stacks grow down.
  *

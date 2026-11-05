@@ -1028,13 +1028,12 @@ static void ddb_release_others(void)
  *
  * ⚠️ A THREAD BLOCKED WITH A CONTINUATION HAS NO STACK TO WALK, and that is
  * the whole reason this prints rather than traces.  A continuation is the
- * thread declaring it does not need its stack kept; machine_kernel_stack_init()
- * then RESETS that stack to point at the trampoline.  The memory is still
- * mapped and still walkable, which is what makes it dangerous: a walk does not
- * come back empty, it comes back with two or three frames of
- * context_thread_start and thread_begin_trampoline -- confident, well-formed,
- * and silent about why the thread blocked.  The same failure as a
- * disassembler that guesses, one level up.
+ * thread declaring it does not need its stack kept, and the switch saves
+ * nothing for it (#771, #777): there is no frame to start a walk from.  What
+ * its last call left on the stack is still mapped, which is what would make a
+ * walk from anywhere else dangerous: it would not come back empty, it would
+ * come back confident, well-formed, and silent about why the thread blocked.
+ * The same failure as a disassembler that guesses, one level up.
  *
  * What is left instead is better than a stack, and is what the operator
  * actually wants: where it will RESUME (a function pointer, so a symbol) and
@@ -1152,9 +1151,9 @@ static void describe_thread(uint64_t addr)
 	 * nothing.
 	 */
 	if ((t->state & TH_RUN) == 0 && t->continuation != 0)
-		cons_puts("    its stack was reset when it blocked: a "
-			  "backtrace would show the trampoline and not why "
-			  "it stopped\r\n");
+		cons_puts("    it saved no frames when it blocked: its "
+			  "continuation is all there is to say why it "
+			  "stopped\r\n");
 
 	/*
 	 * And for a thread that KEPT its stack, walk it (#425).
