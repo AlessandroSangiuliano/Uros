@@ -6194,6 +6194,289 @@ arm_thirty_nine_lost_bet_undone(void)
 	return ok;
 }
 
+/*
+ * Arm forty (#777): a hand-off that no call comes back to.  Arm thirty-nine's
+ * undo sits in mach_msg(), so two ways past it are asked here:
+ *
+ *  - no call at all: a send alone with MACH_SEND_HANDOFF, then user code.  Only
+ *    a tick looks.  This thread computes until the woken thread has run, and
+ *    the verdict is the kernel's count of bets undone at a tick;
+ *  - a combined call, whose hot path switches to its own receiver past
+ *    thread_invoke(), and must settle the hand-off before it does.  The server
+ *    reads the count while it serves, with the caller not back yet, so that
+ *    the undo at the caller's return cannot stand in for it.
+ *
+ * Neither is timed, so neither depends on the host.  Not asked where the
+ * hand-off is off, or where -N's direct switch takes the wakeup (arm 39).
+ */
+#define	A40_WAKE	4000
+#define	A40_RPC		4001
+#define	A40_REPLY	4002
+#define	A40_TRIES	3
+#define	A40_WARM	20
+#define	A40_SPIN	1000000000ULL	/* TSC ticks: tens of kernel ticks */
+
+static mach_port_t	arm_forty_port;		/* the woken thread's */
+static mach_port_t	arm_forty_service;	/* the server's */
+static mach_port_t	arm_forty_host;
+static volatile unsigned arm_forty_parked, arm_forty_got;
+static volatile unsigned arm_forty_seen;	/* the server read this */
+
+static int
+arm_forty_counts(mach_port_t host, unsigned *at_return, unsigned *at_tick)
+{
+	host_rpc_handoff_info_data_t	hi;
+	mach_msg_type_number_t		c = HOST_RPC_HANDOFF_INFO_COUNT;
+
+	if (host_info(host, HOST_RPC_HANDOFF_INFO, (host_info_t) &hi, &c)
+	    != KERN_SUCCESS || c != HOST_RPC_HANDOFF_INFO_COUNT)
+		return 0;
+	*at_return = hi.undone_return;
+	*at_tick = hi.undone_tick;
+	return 1;
+}
+
+static void *
+arm_forty_receiver(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+
+	(void) arg;
+	for (;;) {
+		arm_forty_parked++;
+		if (mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m, arm_forty_port,
+			     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
+		    != MACH_MSG_SUCCESS || m.h.msgh_id != A40_WAKE)
+			return NULL;
+		arm_forty_got++;
+	}
+}
+
+static void *
+arm_forty_server(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+	mach_msg_option_t	opt = MACH_RCV_MSG;
+	mach_msg_size_t		size = 0;
+	unsigned		ret, tick;
+
+	(void) arg;
+	for (;;) {
+		if (mach_msg(&m.h, opt, size, sizeof m, arm_forty_service,
+			     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
+		    != MACH_MSG_SUCCESS || m.h.msgh_id != A40_RPC)
+			return NULL;
+		if (arm_forty_counts(arm_forty_host, &ret, &tick))
+			arm_forty_seen = ret + tick;
+		m.h.msgh_bits = MACH_MSGH_BITS(
+		    MACH_MSGH_BITS_REMOTE(m.h.msgh_bits), 0);
+		m.h.msgh_size = sizeof m.h;
+		m.h.msgh_local_port = MACH_PORT_NULL;
+		m.h.msgh_id = A40_REPLY;
+		size = sizeof m.h;
+		opt = MACH_SEND_MSG | MACH_RCV_MSG;
+	}
+}
+
+/* Exactly the options the hot path takes: no timeout, nothing else. */
+static mach_msg_return_t
+arm_forty_rpc(mach_port_t reply)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+
+	m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+				       MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	m.h.msgh_size = sizeof m.h;
+	m.h.msgh_remote_port = arm_forty_service;
+	m.h.msgh_local_port = reply;
+	m.h.msgh_reserved = 0;
+	m.h.msgh_id = A40_RPC;
+	return mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG, sizeof m.h, sizeof m,
+			reply, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+/* The woken thread blocked: it says so, then give it the time. */
+static void
+arm_forty_wait_parked(void)
+{
+	unsigned	i;
+
+	for (i = 0; i < 2000 && arm_forty_parked != arm_forty_got + 1; i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 2);
+}
+
+static int
+arm_forty_ran(unsigned before)
+{
+	unsigned	i;
+
+	for (i = 0; i < 2000 && arm_forty_got == before; i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	return arm_forty_got != before;
+}
+
+/* 1 undone every time, 0 wrong, -1 a direct switch took every send. */
+static int
+arm_forty_no_call(mach_port_t host)
+{
+	unsigned		try, before, r0, t0, r1, t1, direct = 0;
+	unsigned long long	start, took = 0;
+
+	for (try = 0; try < A40_TRIES; try++) {
+		arm_forty_wait_parked();
+		if (!arm_forty_counts(host, &r0, &t0))
+			return 0;
+		before = arm_forty_got;
+		start = arm_thirty_nine_tsc();
+		(void) arm_thirty_nine_send(arm_forty_port, MACH_SEND_HANDOFF,
+					    A40_WAKE);
+		if (arm_forty_got != before)
+			direct++;
+		while (arm_forty_got == before &&
+		       arm_thirty_nine_tsc() - start < A40_SPIN)
+			;
+		took = arm_thirty_nine_tsc() - start;
+		if (!arm_forty_ran(before)) {
+			printf("act_test: [40] the thread woken by a send alone "
+			       "never ran — WRONG\n");
+			return 0;
+		}
+		if (!arm_forty_counts(host, &r1, &t1))
+			return 0;
+		if (arm_forty_got != before && direct == 0 && t1 == t0) {
+			printf("act_test: [40] a send alone, then only user code: "
+			       "the thread ran %llu TSC ticks later and no tick "
+			       "undid it — WRONG\n", took);
+			return 0;
+		}
+	}
+	if (direct == A40_TRIES) {
+		printf("act_test: [40] every send alone was taken by a direct "
+		       "switch, with no bet to lose — NOT ASKED\n");
+		return -1;
+	}
+	printf("act_test: [40] a tick undid the bet of a send alone, %u time(s) "
+	       "of %u; the thread ran %llu TSC ticks after the last send\n",
+	       A40_TRIES - direct, A40_TRIES, took);
+	return 1;
+}
+
+/* 1 settled every time, 0 wrong, -1 a direct switch took every send. */
+static int
+arm_forty_combined(mach_port_t host, mach_port_t reply)
+{
+	unsigned	i, try, before, r0, t0, seen, direct = 0;
+
+	for (i = 0; i < A40_WARM; i++)
+		if (arm_forty_rpc(reply) != MACH_MSG_SUCCESS) {
+			printf("act_test: [40] a call to the server failed — "
+			       "WRONG\n");
+			return 0;
+		}
+	for (try = 0; try < A40_TRIES; try++) {
+		arm_forty_wait_parked();
+		if (!arm_forty_counts(host, &r0, &t0))
+			return 0;
+		before = arm_forty_got;
+		(void) arm_thirty_nine_send(arm_forty_port, MACH_SEND_HANDOFF,
+					    A40_WAKE);
+		if (arm_forty_got != before)
+			direct++;
+		else
+			arm_forty_seen = r0 + t0;
+		if (arm_forty_rpc(reply) != MACH_MSG_SUCCESS) {
+			printf("act_test: [40] a call to the server failed — "
+			       "WRONG\n");
+			return 0;
+		}
+		seen = arm_forty_seen;
+		if (!arm_forty_ran(before)) {
+			printf("act_test: [40] the thread woken before a combined "
+			       "call never ran — WRONG\n");
+			return 0;
+		}
+		if (direct == 0 && seen == r0 + t0) {
+			printf("act_test: [40] a combined call went to its server "
+			       "with a hand-off still pending, and left it behind "
+			       "— WRONG\n");
+			return 0;
+		}
+	}
+	if (direct == A40_TRIES) {
+		printf("act_test: [40] every send before a combined call was "
+		       "taken by a direct switch — NOT ASKED\n");
+		return -1;
+	}
+	printf("act_test: [40] a combined call settled the hand-off before its "
+	       "server ran, %u time(s) of %u\n", A40_TRIES - direct, A40_TRIES);
+	return 1;
+}
+
+static int
+arm_forty_asked(mach_port_t host)
+{
+	pthread_t	receiver, server;
+	mach_port_t	reply;
+	unsigned	reach, r0, t0;
+	int		a = 0, b = 0;
+
+	if (!arm_thirty_nine_counts(host, &reach, &r0, &t0)) {
+		printf("act_test: [40] host_info refused the hand-off's counts "
+		       "— WRONG\n");
+		return 0;
+	}
+	if (reach == 0) {
+		printf("act_test: [40] no hand-off on this kernel — NOT ASKED\n");
+		return 1;
+	}
+	arm_forty_host = host;
+	arm_forty_port = arm_own_port(40);
+	arm_forty_service = arm_own_port(40);
+	reply = arm_own_port(40);
+	if (arm_forty_port == MACH_PORT_NULL ||
+	    arm_forty_service == MACH_PORT_NULL || reply == MACH_PORT_NULL)
+		return 0;
+	if (pthread_create(&receiver, NULL, arm_forty_receiver, NULL) != 0 ||
+	    pthread_create(&server, NULL, arm_forty_server, NULL) != 0) {
+		printf("act_test: [40] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	a = arm_forty_no_call(host);
+	if (a != 0)
+		b = arm_forty_combined(host, reply);
+	(void) arm_thirty_nine_send(arm_forty_port, 0, A40_REPLY);
+	(void) arm_thirty_nine_send(arm_forty_service, 0, A40_REPLY);
+	(void) pthread_join(receiver, NULL);
+	(void) pthread_join(server, NULL);
+	(void) mach_port_destroy(mach_task_self(), reply);
+	(void) mach_port_destroy(mach_task_self(), arm_forty_service);
+	(void) mach_port_destroy(mach_task_self(), arm_forty_port);
+	if (a > 0 && b > 0)
+		printf("act_test: [40] a hand-off no call comes back to is undone "
+		       "at a tick, and before a combined call's switch — OK\n");
+	return a != 0 && b != 0;
+}
+
+static int
+arm_forty_nothing_after_the_hand_off(void)
+{
+	mach_port_t	host = mach_host_self();
+	int		ok = arm_forty_asked(host);
+
+	(void) mach_port_deallocate(mach_task_self(), host);
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6316,6 +6599,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_eight_task_wire_unprivileged();
 	arms++;		/* arm thirty-nine, #777 */
 	passed += arm_thirty_nine_lost_bet_undone();
+	arms++;		/* arm forty, #777 */
+	passed += arm_forty_nothing_after_the_hand_off();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
