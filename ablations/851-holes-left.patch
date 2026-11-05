@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #851
+Takes out: the clear in task_info() and vm_region() -- the holes bring back what was on the kernel stack, and act_test [50] names the bytes.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[50\] [0-9]+ byte\(s\) of holes came back from the kernel not zero
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+index 9ae0e0e4..4d6ac01e 100644
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1632,7 +1632,6 @@ task_info(
+ 		 * #851: the structure has holes on x86-64, 8 bytes, and what
+ 		 * it is written into is a kalloc() reply or the kernel stack.
+ 		 */
+-		bzero((char *) basic_info, sizeof (*basic_info));
+ 
+ 		map = (task == kernel_task) ? kernel_map : task->map;
+ 
+diff --git a/uros/src/mach_kernel/vm/vm_map.c b/uros/src/mach_kernel/vm/vm_map.c
+index c3c818f8..67311c81 100644
+--- a/uros/src/mach_kernel/vm/vm_map.c
++++ b/uros/src/mach_kernel/vm/vm_map.c
+@@ -6821,7 +6821,6 @@ vm_region(
+ 	 * #851: the structure has holes, 6 bytes on x86-64, and what it is
+ 	 * written into is a kalloc() reply or the kernel stack.
+ 	 */
+-	bzero((char *) basic, sizeof (*basic));
+ 
+ 	vm_map_lock_read(map);
+ 
