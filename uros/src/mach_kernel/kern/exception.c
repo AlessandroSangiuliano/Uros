@@ -216,10 +216,22 @@ unsigned long c_tsk_exc_raise_state_id = 0;
 /*
  *	Routine:	urmach_exception_get_state
  *	Purpose:
- *		Reads the state an exception message is to carry, with a
- *		count that cannot come from outside the table (#887).
+ *		Reads the state an exception message is to carry, for
+ *		exception() and exception_try_task(), which took a send
+ *		right and a reference for that message.  Only the message
+ *		consumes those, so when there is no state to send, and so
+ *		no message, they go back here (#887).
+ *
+ *		The registration routines refuse a flavor with no state,
+ *		but a flavor can still get here with none: the behavior is
+ *		read after the flavor and outside the lock, so one that
+ *		was registered with EXCEPTION_DEFAULT, whose flavor means
+ *		nothing, can meet a behavior that carries state.
  *	Conditions:
  *		Nothing locked.
+ *	Returns:
+ *		KERN_SUCCESS		The state and *state_cnt are valid.
+ *		Anything else		The send right has been released.
  */
 static kern_return_t
 urmach_exception_get_state(
@@ -229,9 +241,13 @@ urmach_exception_get_state(
 	natural_t		*state,
 	mach_msg_type_number_t	*state_cnt)
 {
-	(void) exc_port;
+	kern_return_t		kr;
+
 	*state_cnt = urmach_state_count(flavor);
-	return thread_getstatus(act, flavor, (thread_state_t) state, state_cnt);
+	kr = thread_getstatus(act, flavor, (thread_state_t) state, state_cnt);
+	if (kr != KERN_SUCCESS)
+		ipc_port_release_send(exc_port);
+	return kr;
 }
 
 
