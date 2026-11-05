@@ -1295,6 +1295,17 @@ urmach_msg_overwrite_trap_call(
 		c_mmot_combined_S_R++;
 		self->ith_scatter_list = MACH_MSG_BODY_NULL;
 
+#if	NCPUS > 1
+		/*
+		 * #777: an earlier call's promise, broken: see mach_msg_send().
+		 * This path's switch below goes to its own receiver, and past
+		 * thread_invoke(), which is what would have seen the wakee left
+		 * behind.
+		 */
+		if (self->handoff_wakee != THREAD_NULL)
+			(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RETURN);
+#endif	/* NCPUS > 1 */
+
 		/*
 		 *	This case is divided into ten sections, each
 		 *	with a label.  There are five optimized

@@ -2886,9 +2886,10 @@ sched_rpc_handoff_undone(
  * so handoff_wakee is never followed.  It is looked for on this processor's
  * queue, under the queue's lock, by comparing pointers; a thread found there
  * is alive, since a thread on a run queue has not run.  Not found, it already
- * ran, and there is nothing to undo.  If the waker moved to another
- * processor meanwhile, it looks at the wrong queue and finds nothing: the
- * woken thread runs when its own processor next chooses.
+ * ran, and there is nothing to undo.  The queue is this processor's because the
+ * waker cannot have moved with a hand-off pending: it leaves a processor through
+ * thread_invoke(), which settles it, or through the hot path's switch, which
+ * settles it first.
  *
  * Called at splsched or lower, with no lock held; returns whether it undid one.
  */
