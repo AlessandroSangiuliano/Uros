@@ -130,26 +130,24 @@ machine_init(void)
 	fbcons_init();
 
 	/*
-	 * #356/#446: the synchronous-RPC hand-off on block, and the ONE place
-	 * this target sets it.
+	 * #356/#446/#777: the synchronous-RPC hand-off on block, and the ONE
+	 * place this target sets it.  On, for a thread of any task.
 	 *
 	 * The machine-independent scheduler has read `sched_rpc_handoff' since
-	 * #356 and nothing on x86-64 has ever written it: the flag was set only
-	 * in i386/AT386/model_dep.c, so the experiment was unreachable here --
+	 * #356 and nothing on x86-64 wrote it: the flag was set only in
+	 * i386/AT386/model_dep.c, so the experiment was unreachable here --
 	 * code consumed by two call sites and produced by none.  #559 found it
-	 * while trying to make -smp 4 readable, because #446 measured on i386
-	 * that this is what collapses intra-task RPC's spread across boots from
-	 * +-30-43% to +-1% (part of which may be the clock, #737).
+	 * while trying to make -smp 4 readable.
 	 *
-	 * 🔴 THE LETTER IS -X AND NOT -P, and the difference is deliberate: on
-	 * this machine `P' is already the preemption test (thread/machine.c and
-	 * a few lines below).  Every letter with a mnemonic was taken or worse
-	 * than taken -- `R' pairs with `-r', which arms the debugger, and `p'
-	 * pairs with `-P' itself, so one mistyped key would select a different
-	 * experiment and produce a plausible measurement of it.  An arbitrary
-	 * letter that cannot be confused beats a memorable one that can.
-	 * i386 learns -X too, keeping -P as its old name, so the experiment has
-	 * one name on both targets rather than two.
+	 * 🔑 ON BY DEFAULT (#777).  It waited behind -X because the bet was a
+	 * guess: every send assumed its sender blocked next, and a sender that
+	 * did not kept the thread it woke queued behind it for a tick or a
+	 * quantum.  Now a hint is set only where the kernel knows the sender
+	 * blocks, ipc/mach_msg.c says how, and a bet lost is undone where it
+	 * shows.  On omen's metal a producer's waits of a millisecond or more
+	 * went from 92% to the few #849 explains, inter-task RPC cost 11-27%
+	 * less, and under KVM file I/O through ext_server worsened nowhere.  -X
+	 * is gone: ablations/777-hand-off-off.patch is the arm without it.
 	 *
 	 * 🔑 FOR A THREAD OF ANY TASK (#446).  #356 stopped it at the waker's
 	 * task, a fence put up on i386, where a switch between tasks on one
@@ -163,19 +161,14 @@ machine_init(void)
 	 * split's.  The fence stays on i386, where its measurement was taken;
 	 * here ablations/446-fence-back.patch is how it comes back.
 	 *
-	 * ⚠️ Read once, here, and not at the call sites: the scheduler reads it
-	 * inside thread_setrun(), and asking the command line there would scan
-	 * a string on every wakeup in the system.  machine_init() runs after
-	 * the timers and before any thread does, so nothing has been placed yet
-	 * when the answer is written down.
+	 * ⚠️ An IBPB at every change of user space would undo this on a
+	 * processor like omen's (#800, whose step 4 has the figures): two
+	 * barriers a round trip, 2.55 us each there.  Nothing issues one today.
+	 *
+	 * ⚠️ Written once, here: machine_init() runs after the timers and before
+	 * any thread does, so nothing has been placed yet.
 	 */
-	{
-		sched_rpc_handoff = boot_flag('X') ?
-		    SCHED_RPC_HANDOFF_ANY_TASK : SCHED_RPC_HANDOFF_OFF;
-		if (sched_rpc_handoff != SCHED_RPC_HANDOFF_OFF)
-			printf("sched: -X, the #356 synchronous-RPC hand-off "
-			       "on block is ON, for a thread of any task (#446)\n");
-	}
+	sched_rpc_handoff = SCHED_RPC_HANDOFF_ANY_TASK;
 
 	/*
 	 * Configure the clock devices (#425).
