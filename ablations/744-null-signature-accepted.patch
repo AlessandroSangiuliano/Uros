@@ -6,32 +6,17 @@ Expect: netname_test: \[6\] WRONG .*"netname_test_unsigned" checked in with no s
 Expect: cap_test: \[33\] WRONG .*no signature: 1000, not NETNAME_INVALID_PORT\(1004\)
 
 diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
-index 46932265..9f6aa7e5 100644
+index 46932265..eb29262d 100644
 --- a/uros/src/servers/name_server/nprocs.c
 +++ b/uros/src/servers/name_server/nprocs.c
-@@ -371,15 +371,6 @@ do_netname_check_in(mach_port_t server, netname_name_in_t key,
- 	printf("%s: netname_check_in(%.80s, name=%x, sig=%x)\n",
- 	       program, key, name, sig);
+@@ -358,7 +358,9 @@ notify_watchers_for(netname_name_in_t key, mach_port_t service_port)
+ static boolean_t
+ signature_can_sign(mach_port_t sig, mach_port_t port)
+ {
+-    return MACH_PORT_VALID(sig) && sig != port;
++    (void)sig;
++    (void)port;
++    return TRUE;
+ }
  
--    /*
--     * Refused before the name is looked for, so that a name nobody holds yet
--     * cannot be taken without a signature either.  The rights in the request
--     * go back with it: mach_msg_server() destroys a request answered with an
--     * error.
--     */
--    if (!signature_can_sign(sig, name))
--	return NETNAME_INVALID_PORT;
--
-     if (netname_find(key, &this, &prev)) {
- 	if (this->sig == sig) {
- 	    this->name = name;
-@@ -462,9 +453,6 @@ do_netname_check_out(mach_port_t server, netname_name_in_t key, mach_port_t sig)
- 	printf("%s: netname_check_out(%.80s, sig=%x)\n",
- 	       program, key, sig);
- 
--    if (!signature_can_sign(sig, MACH_PORT_NULL))
--	return NETNAME_INVALID_PORT;		/* #744 */
--
-     if (netname_find(key, &this, &prev)) {
- 	if (this->sig == sig) {
- 	    *prev = this->next;
+ kern_return_t
