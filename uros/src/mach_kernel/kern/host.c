@@ -359,7 +359,7 @@ host_info(
 		}
 
 		/*
-		 * #446: what -X has done, for a benchmark to read around what
+		 * #446: what the hand-off has done, for a benchmark to read around what
 		 * it measures (kern/sched_prim.c).
 		 */
 	case HOST_RPC_HANDOFF_INFO:
@@ -381,7 +381,7 @@ host_info(
 		sched_rpc_handoff_undone(&at_receive, &at_return);
 		handoff_info->reach = (unsigned int) sched_rpc_handoff;
 #else	/* NCPUS > 1 */
-		handoff_info->reach = 0;	/* one processor: no -X */
+		handoff_info->reach = 0;	/* one processor: no hand-off */
 #endif	/* NCPUS > 1 */
 		handoff_info->same_task  = (unsigned int) same;
 		handoff_info->other_task = (unsigned int) other;

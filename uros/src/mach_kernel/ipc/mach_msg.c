@@ -3215,7 +3215,7 @@ urmach_msg_overwrite_trap_call(
 
 	if (option & MACH_SEND_MSG) {
 		/*
-		 * #777: the hand-off on block (-X) is decided inside, between the
+		 * #777: the hand-off on block is decided inside, between the
 		 * copyin and the enqueue, where the message's reply port is still
 		 * a name: only for a send whose receive will block, or whose
 		 * caller says it blocks next (MACH_SEND_HANDOFF).  Until #777 every

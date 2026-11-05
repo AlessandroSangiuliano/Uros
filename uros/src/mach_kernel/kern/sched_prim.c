@@ -2786,10 +2786,10 @@ run_queue_enqueue(
 #if	NCPUS > 1
 /*
  * #356: run-time gate for the synchronous-RPC hand-off-on-block placement
- * (see the hint consumption in thread_setrun).  Off by default, for
- * same-binary A/B on hardware: -X turns it on -- on i386, where -P is its old
- * name, for a thread of the waker's task; on x86-64 for a thread of any task
- * (#446).
+ * (see the hint consumption in thread_setrun).  On x86-64 it is on, for a
+ * thread of any task (#446, #777: x86_64/cpu/startup.c).  On i386 it is off by
+ * default, for same-binary A/B on hardware: -X turns it on, or -P, its old
+ * name, for a thread of the waker's task.
  *
  * The hand-off also stays dormant until EVERY CPU has passed cpu_up()
  * (machine_info.avail_cpus reaches real_ncpus -- guaranteed on any boot
@@ -2807,14 +2807,14 @@ int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
 extern int	real_ncpus;
 
 /*
- * #446: what -X did.  Each processor counts the woken threads it queued on
+ * #446: what the hand-off did.  Each processor counts the woken threads it queued on
  * itself, split by whether the thread was of its waker's task, and the census
  * says the sums (x86_64/cpu/quiet_census.c).  A line of its own for each
- * processor because this is the hand-off's own path, taken on every RPC while
- * -X is on: one shared counter would be a cache line passed between the very
- * processors whose placement is being measured.  Each counter has one writer,
- * its processor, so none is lost; a sum read while they move is a little
- * behind, which a count of what happened can afford.
+ * processor because this is the hand-off's own path, taken on every RPC: one
+ * shared counter would be a cache line passed between the very processors whose
+ * placement is being measured.  Each counter has one writer, its processor, so
+ * none is lost; a sum read while they move is a little behind, which a count of
+ * what happened can afford.
  */
 static struct sched_handoff_count {
 	unsigned long	same_task;
@@ -2826,9 +2826,9 @@ static struct sched_handoff_count {
 /*
  * The third count is the check (#446): a woken thread of another task, its
  * waker about to block, that the same-task fence sent to an idle processor
- * instead.  Where -X reaches any task it has to stay at zero, and the census
- * says WRONG when it does not -- which is how the fence, put back by a patch
- * or by a mistake, is seen in the first boot that has -X on.
+ * instead.  Where the hand-off reaches any task it has to stay at zero, and the
+ * census says WRONG when it does not -- which is how the fence, put back by a
+ * patch or by a mistake, is seen in the first boot after it.
  */
 void
 sched_rpc_handoff_counts(
@@ -3051,14 +3051,14 @@ thread_setrun(
 	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
 	     * runq: thread_select picks it up the moment the waker blocks, on
 	     * the one CPU where its data is warm.  One-shot: consumed by the
-	     * first wakeup of the send.  Runtime-gated by -X (-P on i386).
+	     * first wakeup of the send.  Always on x86-64; by -X or -P on i386.
 	     *
 	     * Same-task only on i386.  The fence was put up there, where a
 	     * switch between tasks on one CPU reloads cr3 and throws the whole
 	     * TLB away, and the split was measured cheaper.  On x86-64 the
 	     * hand-off is cheaper across tasks too, with PCID and without
 	     * (#446, measured on 29/10; x86_64/cpu/startup.c has the numbers),
-	     * so -X there reaches a thread of any task.
+	     * so there it reaches a thread of any task.
 	     */
 	    if (sched_rpc_handoff &&
 		machine_info.avail_cpus >= real_ncpus) {

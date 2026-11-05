@@ -142,7 +142,7 @@ typedef	integer_t	host_flavor_t;
 #define HOST_PRIORITY_INFO	5	/* priority information */
 #define HOST_PAGING_INFO	6	/* VM/paging info */
 #define HOST_IPC_CACHE_INFO	7	/* kmsg pool cache statistics */
-#define HOST_RPC_HANDOFF_INFO	8	/* -X hand-offs, by task (#446) */
+#define HOST_RPC_HANDOFF_INFO	8	/* hand-offs on block, by task (#446) */
 
 struct host_basic_info {
 	integer_t	max_cpus;	/* max number of cpus possible */
@@ -278,7 +278,7 @@ typedef struct host_ipc_cache_info	*host_ipc_cache_info_t;
 		(sizeof(host_ipc_cache_info_data_t)/sizeof(integer_t))
 
 /*
- * #446: what the hand-off on block (-X, #356) has done since boot -- the woken
+ * #446: what the hand-off on block (#356) has done since boot -- the woken
  * threads it queued on their waker's processor, of the waker's task and of
  * another, and those of another task the same-task fence sent to an idle
  * processor instead -- and how far it reaches.  The counts are the boot's, so a caller

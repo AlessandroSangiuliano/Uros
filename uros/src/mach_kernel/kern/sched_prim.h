@@ -303,14 +303,14 @@ extern int		sched_bound_displaced_slot;
 
 #if	NCPUS > 1
 /*
- * #356/#446: the hand-off on block, -X.  sched_rpc_handoff says whether it is
+ * #356/#446/#777: the hand-off on block.  sched_rpc_handoff says whether it is
  * on, and sched_rpc_handoff_counts() what it did: the woken threads queued on
  * their waker's processor, of the waker's task and of another, and those of
  * another task the same-task fence sent to an idle processor instead.
  */
 #define	SCHED_RPC_HANDOFF_OFF		0
 #define	SCHED_RPC_HANDOFF_SAME_TASK	1	/* -X on i386: #356's fence */
-#define	SCHED_RPC_HANDOFF_ANY_TASK	2	/* -X on x86-64 (#446) */
+#define	SCHED_RPC_HANDOFF_ANY_TASK	2	/* x86-64, always (#446, #777) */
 extern int		sched_rpc_handoff;
 extern void		sched_rpc_handoff_counts(
 				unsigned long	*same_task,
