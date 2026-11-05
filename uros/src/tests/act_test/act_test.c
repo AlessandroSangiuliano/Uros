@@ -5850,7 +5850,11 @@ arm_nineteen_last_page_unmapped(void)
  * before the receive.  That part counts and asks nothing, because it depends on
  * a race: ablations/777-widen-queue-fills-in-the-window.patch holds it open.
  *
- * Not asked where the hand-off is off: i386 without -X or -P.
+ * Not asked where the hand-off is off: i386 without -X or -P.  Nor where -N
+ * has the wakeup: a direct switch runs the receiver from inside the send, with
+ * no run queue and no bet.  A thread the hand-off queued sits on this thread's
+ * processor until this thread leaves it, so one that has run by the time the
+ * send comes back was not bet on.
  */
 #define	A39_WAKE	3900
 #define	A39_RPC		3901
@@ -5958,7 +5962,7 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 {
 	const char	*where = at_receive ? "a receive that found a message" :
 					      "a call that was not a receive";
-	unsigned	try, i, before, r0, t0, r1, t1, reach;
+	unsigned	try, i, before, r0, t0, r1, t1, reach, ran_first = 0;
 	unsigned long long start, took = 0;
 
 	for (try = 0; try < A39_TRIES; try++) {
@@ -5983,6 +5987,8 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 		/* The bet, then the promise broken with no call between. */
 		(void) arm_thirty_nine_send(arm_thirty_nine_port,
 					    MACH_SEND_HANDOFF, A39_WAKE);
+		if (arm_thirty_nine_got != before)
+			ran_first++;
 		if (at_receive)
 			(void) arm_thirty_nine_drain(own);
 		else
@@ -6012,6 +6018,12 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 			       "send\n", where, try + 1, took);
 			return 1;
 		}
+	}
+	if (ran_first != 0) {
+		printf("act_test: [39] %u of %u sends before %s were taken by a "
+		       "direct switch, with no bet to lose — NOT ASKED\n",
+		       ran_first, A39_TRIES, where);
+		return -1;
 	}
 	printf("act_test: [39] %u bets lost at %s, none undone — WRONG\n",
 	       A39_TRIES, where);
@@ -6131,7 +6143,7 @@ arm_thirty_nine_asked(mach_port_t host)
 	mach_port_t	own;
 	pthread_t	receiver;
 	unsigned	reach, r0, t0, cpus = processors();
-	int		ok = 0;
+	int		ok = 0, not_asked = 0, a, b;
 
 	if (!arm_thirty_nine_counts(host, &reach, &r0, &t0)) {
 		printf("act_test: [39] host_info refused the hand-off's counts "
@@ -6155,9 +6167,10 @@ arm_thirty_nine_asked(mach_port_t host)
 	    != 0) {
 		printf("act_test: [39] pthread_create failed — WRONG\n");
 	} else {
-		ok = arm_thirty_nine_break(host, own, 0, cpus);
-		if (arm_thirty_nine_break(host, own, 1, cpus) == 0)
-			ok = 0;
+		a = arm_thirty_nine_break(host, own, 0, cpus);
+		b = arm_thirty_nine_break(host, own, 1, cpus);
+		ok = a != 0 && b != 0;
+		not_asked = a < 0 || b < 0;
 		arm_thirty_nine_stop_it();
 		(void) pthread_join(receiver, NULL);
 		if (cpus > 1 && arm_thirty_nine_window(host) == 0)
@@ -6165,7 +6178,7 @@ arm_thirty_nine_asked(mach_port_t host)
 	}
 	(void) mach_port_destroy(mach_task_self(), own);
 	(void) mach_port_destroy(mach_task_self(), arm_thirty_nine_port);
-	if (ok)
+	if (ok && !not_asked)
 		printf("act_test: [39] a lost bet is undone, at a receive and "
 		       "at a return — OK\n");
 	return ok;
