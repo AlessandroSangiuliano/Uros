@@ -734,6 +734,65 @@ arm_parked_program(int arm, const char *path)
 		path, (unsigned)status);
 }
 
+/*
+ * ── [17], [18] What waitpid says about a task that did not exit ─────────
+ *
+ * The address is the one the harness knows to be asked for.  A program with
+ * this library under it catches the exception and says what it was; hello_exec
+ * has nothing, and proc_server sees only that it has gone.  Either way the
+ * status must not read as an exit.
+ */
+#define FAULT_ADDRESS	0x5300000
+
+static void
+arm_fault(void)
+{
+	pid_t	pid, got;
+	int	status = 0;
+
+	pid = fork();
+	if (pid < 0) {
+		not_asked(17, "fork refused: no process server on this boot");
+		return;
+	}
+	if (pid == 0) {
+		*(volatile int *)FAULT_ADDRESS = 1;
+		_exit(0);
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(17, got == pid && WIFSIGNALED(status)
+		&& WTERMSIG(status) == SIGSEGV, "a child that wrote to a page "
+		"nobody mapped left status %#x", (unsigned)status);
+}
+
+static void
+arm_fault_with_no_libc(void)
+{
+	char	*argv[3];
+	char	*envp[1];
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (!program_is_there(18, "/hello_exec"))
+		return;
+	argv[0] = (char *)"/hello_exec";
+	argv[1] = (char *)"fault";
+	argv[2] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid < 0) {
+		not_asked(18, "fork refused: no process server on this boot");
+		return;
+	}
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(127);
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(18, got == pid && WIFSIGNALED(status), "a program with no "
+		"library that faulted left status %#x", (unsigned)status);
+}
+
 int
 main(void)
 {
@@ -756,6 +815,8 @@ main(void)
 	arm_program(14, "/hello_world");
 	arm_parked_program(15, "/hello_exec");
 	arm_program(16, "/hello_dyn_world");
+	arm_fault();
+	arm_fault_with_no_libc();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
