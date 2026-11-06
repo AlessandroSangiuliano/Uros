@@ -321,25 +321,30 @@ detached_thread(void *arg)
 	return NULL;
 }
 
-/* A thread that has counted itself still has its way to go: give it the time. */
+/*
+ * A thread that has counted itself still has its way to go, so the answer may
+ * take a moment.  The moments are one budget for the whole arm: it was one per
+ * thread, and on a kernel where no stack ever comes back that is eighty seconds,
+ * by which time the boot had ended with the verdict unsaid.
+ */
 static int
-address_is_free(uintptr_t where)
+address_is_free(uintptr_t where, int *steps_left)
 {
 	uintptr_t	page = where & ~(uintptr_t)(PAGE - 1);
-	void		*p = NULL;
-	int		i;
+	void		*p;
 
-	for (i = 0; i < WAIT_STEPS; i++) {
+	for (;;) {
 		p = mmap((void *)page, PAGE, PROT_READ | PROT_WRITE,
 			 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-		if (p == (void *)page)
-			break;
+		if (p == (void *)page) {
+			(void)munmap(p, PAGE);
+			return 1;
+		}
+		if (*steps_left <= 0)
+			return 0;
+		(*steps_left)--;
 		pause_a_little();
 	}
-	if (p != (void *)page)
-		return 0;
-	(void)munmap(p, PAGE);
-	return 1;
 }
 
 static void
@@ -347,7 +352,7 @@ arm_detached(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, rc, freed = 0;
+	int		i, rc, freed = 0, steps = WAIT_STEPS;
 
 	(void)pthread_attr_init(&attr);
 	(void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -369,7 +374,7 @@ arm_detached(void)
 		return;
 	}
 	for (i = 0; i < D_THREADS; i++)
-		freed += address_is_free(d_stack[i]);
+		freed += address_is_free(d_stack[i], &steps);
 	verdict(6, freed == D_THREADS, "%d detached threads ended and %d of "
 		"their stacks were given back", D_THREADS, freed);
 }
