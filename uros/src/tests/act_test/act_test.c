@@ -8401,10 +8401,12 @@ arm_fifty_one_rights_that_left(void)
  * faults at ring 0 on a non-canonical address, and a kernel address is one no
  * thread may have (#440).
  *
- * Page zero is mapped for the arm.  A processor no thread here has set a base
- * on holds 0, and a thread that lands there without its base would fault on
- * %fs:0 and take the task with it, on a kernel where every other arm is right.
- * With the page there it reads a word that is not its own and says so.
+ * A base here is an offset into a52_tls[], read as %fs:(the table), and not the
+ * address of a word.  A processor no thread here has set a base on holds 0, and
+ * a thread that lands there without its base would fault on %fs:0 and take the
+ * task with it, on a kernel where every other arm is right.  This way a base of
+ * 0 reads the table's first word, which is mapped and nobody's, and the arm says
+ * so.  Base i reads word i.
  */
 #define	A52_THREADS	8
 #define	A52_ROUNDS	20000
@@ -8412,38 +8414,42 @@ arm_fifty_one_rights_that_left(void)
 static struct {
 	unsigned long	word;
 	unsigned long	pad[7];		/* a line each */
-} a52_tls[A52_THREADS + 2];
+} a52_tls[A52_THREADS + 3];
 static volatile int		a52_bad;
 static volatile unsigned long	a52_read_word, a52_own_word;
 static volatile mach_port_t	a52_stopped;
 static volatile int		a52_go;
 static volatile unsigned long	a52_after;
 
+#define	A52_BASE(i)	((i) * sizeof a52_tls[0])
+
 static inline unsigned long
 a52_through_fs(void)
 {
 	unsigned long	v;
 
-	__asm__ volatile("movq %%fs:0, %0" : "=r" (v));
+	__asm__ volatile("movq %%fs:(%1), %0" : "=r" (v)
+			 : "r" (&a52_tls[0].word));
 	return v;
 }
 
 static void *
 a52_reader(void *arg)
 {
-	unsigned long	*mine = arg;
+	unsigned long	n = (unsigned long) arg;
+	unsigned long	mine = a52_tls[n].word;
 	unsigned long	v;
 	unsigned	i;
 
-	if (urmach_thread_set_fs_base((vm_offset_t) mine) != KERN_SUCCESS) {
+	if (urmach_thread_set_fs_base(A52_BASE(n)) != KERN_SUCCESS) {
 		a52_bad = 1;
 		return NULL;
 	}
 	for (i = 0; i < A52_ROUNDS && !a52_bad; i++) {
 		v = a52_through_fs();
-		if (v != *mine) {
+		if (v != mine) {
 			a52_read_word = v;
-			a52_own_word = *mine;
+			a52_own_word = mine;
 			a52_bad = 2;
 			break;
 		}
@@ -8460,7 +8466,9 @@ a52_reader(void *arg)
 static void *
 a52_given(void *arg)
 {
-	if (urmach_thread_set_fs_base((vm_offset_t) arg) != KERN_SUCCESS) {
+	(void) arg;
+	if (urmach_thread_set_fs_base(A52_BASE(A52_THREADS + 1)) !=
+	    KERN_SUCCESS) {
 		a52_bad = 1;
 		return NULL;
 	}
@@ -8472,7 +8480,7 @@ a52_given(void *arg)
 }
 
 static int
-a52_asked(void)
+arm_fifty_two_fs_base_goes_with_the_thread(void)
 {
 	pthread_t			th[A52_THREADS], given;
 	struct x86_64_thread_state	state;
@@ -8481,11 +8489,11 @@ a52_asked(void)
 	kern_return_t			k, nc;
 	unsigned			i, started = 0;
 
-	for (i = 0; i < A52_THREADS + 2; i++)
-		a52_tls[i].word = 0x5a5a000000000000UL + i + 1;
+	for (i = 0; i < A52_THREADS + 3; i++)
+		a52_tls[i].word = 0x5a5a000000000000UL + i;
 	for (i = 0; i < A52_THREADS; i++)
 		if (pthread_create(&th[i], NULL, a52_reader,
-				   &a52_tls[i].word) == 0)
+				   (void *) (unsigned long) (i + 1)) == 0)
 			started++;
 		else
 			break;
@@ -8507,8 +8515,7 @@ a52_asked(void)
 		return 0;
 	}
 
-	if (pthread_create(&given, NULL, a52_given,
-			   &a52_tls[A52_THREADS].word) != 0) {
+	if (pthread_create(&given, NULL, a52_given, NULL) != 0) {
 		printf("act_test: [52] pthread_create failed — WRONG\n");
 		return 0;
 	}
@@ -8524,28 +8531,28 @@ a52_asked(void)
 		(void) pthread_join(given, NULL);
 		return 0;
 	}
-	if (state.fs_base != (unsigned long) &a52_tls[A52_THREADS].word) {
+	if (state.fs_base != A52_BASE(A52_THREADS + 1)) {
 		printf("act_test: [52] thread_get_state read a base of 0x%lx "
 		       "where the trap set 0x%lx — WRONG\n",
 		       (unsigned long) state.fs_base,
-		       (unsigned long) &a52_tls[A52_THREADS].word);
+		       (unsigned long) A52_BASE(A52_THREADS + 1));
 		a52_go = 1;
 		(void) thread_resume(t);
 		(void) pthread_join(given, NULL);
 		return 0;
 	}
-	state.fs_base = (unsigned long) &a52_tls[A52_THREADS + 1].word;
+	state.fs_base = A52_BASE(A52_THREADS + 2);
 	k = thread_set_state(t, x86_64_THREAD_STATE, (thread_state_t) &state,
 			     x86_64_THREAD_STATE_COUNT);
 	a52_go = 1;
 	(void) thread_resume(t);
 	(void) pthread_join(given, NULL);
 	(void) mach_port_deallocate(mach_task_self(), t);
-	if (k != KERN_SUCCESS || a52_after != a52_tls[A52_THREADS + 1].word) {
+	if (k != KERN_SUCCESS || a52_after != a52_tls[A52_THREADS + 2].word) {
 		printf("act_test: [52] a base given to a stopped thread: "
 		       "thread_set_state answered 0x%x and the thread read "
 		       "0x%lx, not 0x%lx — WRONG\n", (int) k, a52_after,
-		       a52_tls[A52_THREADS + 1].word);
+		       a52_tls[A52_THREADS + 2].word);
 		return 0;
 	}
 
@@ -8567,24 +8574,6 @@ a52_asked(void)
 	       "non-canonical one were refused with 0x%x and 0x%x (#414)\n",
 	       A52_THREADS, A52_ROUNDS, (int) k, (int) nc);
 	return 1;
-}
-
-static int
-arm_fifty_two_fs_base_goes_with_the_thread(void)
-{
-	vm_address_t	zero = 0;
-	kern_return_t	k;
-	int		ok;
-
-	k = vm_allocate(mach_task_self(), &zero, vm_page_size, FALSE);
-	if (k != KERN_SUCCESS || zero != 0) {
-		printf("act_test: [52] page zero could not be mapped: 0x%x, at "
-		       "0x%lx — WRONG\n", (int) k, (unsigned long) zero);
-		return 0;
-	}
-	ok = a52_asked();
-	(void) vm_deallocate(mach_task_self(), zero, vm_page_size);
-	return ok;
 }
 
 /*
