@@ -124,6 +124,21 @@ act_machine_destroy(thread_act_t thr_act)
 }
 
 /*
+ * Put this thread's FS base in the register, if it is not there.  On a
+ * processor that cannot be left: the caller is switching, or holds splsched.
+ */
+static inline void
+fs_base_load(pcb_t pcb)
+{
+	struct percpu	*p = percpu();
+
+	if (p->fs_base != pcb->fs_base) {
+		wrmsr(MSR_FS_BASE, pcb->fs_base);
+		p->fs_base = pcb->fs_base;
+	}
+}
+
+/*
  * Make this activation's state the one the processor will use.
  *
  * Two things, and neither is the register file: the registers are switched
@@ -214,14 +229,8 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * that lets ring 3 write its own GS base, which the entry's test of
 	 * who owns GS cannot stand: deny_user_segment_bases() in cpu/percpu.c.
 	 */
-	if (thr_act->task != kernel_task) {
-		struct percpu	*p = percpu();
-
-		if (p->fs_base != pcb->fs_base) {
-			wrmsr(MSR_FS_BASE, pcb->fs_base);
-			p->fs_base = pcb->fs_base;
-		}
-	}
+	if (thr_act->task != kernel_task)
+		fs_base_load(pcb);
 }
 
 /*
@@ -252,8 +261,7 @@ urmach_thread_set_fs_base(
 
 	s = splsched();
 	pcb->fs_base = base;
-	wrmsr(MSR_FS_BASE, base);
-	percpu()->fs_base = base;
+	fs_base_load(pcb);
 	splx(s);
 	return KERN_SUCCESS;
 }
@@ -858,6 +866,26 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 		 */
 		pcb->fs_base = ((const struct x86_64_thread_state *) state)->fs_base;
 		pcb->gs_base = ((const struct x86_64_thread_state *) state)->gs_base;
+		/*
+		 * 🔴 THE THREAD THIS IS ABOUT MAY BE THE ONE RUNNING IT (#414).
+		 *
+		 * A frame is memory and a base is a register, and the register
+		 * is loaded when a thread comes onto a processor.  This call
+		 * does not always come from somewhere else: thread_create_running()
+		 * sets the state through get_set_state(), which has the new
+		 * thread do it for itself in a return handler, and an exception
+		 * reply does the same with thread_setstatus().  The thread has
+		 * been on this processor since before the store, with the base
+		 * the old state had, and if thread_resume() gets in ahead of
+		 * its suspension it goes back to ring 3 with no further switch.
+		 * One forked child in a hundred read %fs:0 at address 0.
+		 */
+		if (thr_act == current_act()) {
+			spl_t	s = splsched();
+
+			fs_base_load(pcb);
+			splx(s);
+		}
 		return KERN_SUCCESS;
 
 	case x86_64_FLOAT_STATE:
