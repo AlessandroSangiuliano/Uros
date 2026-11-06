@@ -96,6 +96,18 @@ cap_server_port(void)
         return cached_cap_port;
     }
 
+    /*
+     * #744: the cap_server bootstrap started, from the registered port every
+     * task inherits, before any name.  The name was whoever checked it in
+     * first, and the first port found was kept for the task's life.  The name
+     * is still asked by a task outside bootstrap's lineage, which has no slot;
+     * the name server publishes it for the same port before anyone can ask.
+     */
+    if (MACH_PORT_VALID(urmach_cap_server_port)) {
+        cached_cap_port = urmach_cap_server_port;
+        return cached_cap_port;
+    }
+
     kr = netname_look_up(name_server_port, "",
                          (char *)CAP_SERVER_NETNAME, &port);
     if (kr != KERN_SUCCESS)
