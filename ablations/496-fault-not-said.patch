@@ -8,8 +8,8 @@ Expect: musl_test: \[17\] WRONG -- a child that wrote to a page nobody mapped le
 diff --git a/uros/src/lib/libposix-uros/exceptions.c b/uros/src/lib/libposix-uros/exceptions.c
 --- a/uros/src/lib/libposix-uros/exceptions.c
 +++ b/uros/src/lib/libposix-uros/exceptions.c
-@@ -103,7 +103,6 @@
-            (int)exception, name, (unsigned)thread, sub0, subcode);
+@@ -119,7 +119,6 @@
+ #endif
  
      /* So that waitpid says what ended this task (#496). */
 -    __uros_record_exit_code(128 + signo);

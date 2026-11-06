@@ -1,0 +1,20 @@
+Kind: widen
+Issue: #414
+Holds open: holds a thread 2 ms after it has set its own state and woken the creator, which on more than one processor lets thread_resume() in ahead of the thread's suspension, every time
+Run: --entry 14 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
+--- a/uros/src/mach_kernel/kern/thread_act.c
++++ b/uros/src/mach_kernel/kern/thread_act.c
+@@ -2337,6 +2337,11 @@
+ 	gss->result = act_machine_set_state(thr_act, gss->flavor,
+ 						gss->state, *gss->pcount);
+ 	thread_wakeup((event_t)gss);
++	{
++		extern void delay(int);
++
++		delay(2000);	/* the creator gets to thread_resume() first */
++	}
+ }
+ 
+ void
