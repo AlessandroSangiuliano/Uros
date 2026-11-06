@@ -1958,11 +1958,13 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 
 	/* #220: also register the mount path so libvfs can route
 	 * fs_open(path) to this partition without per-client knowledge
-	 * of which ext_server instance owns which subtree. */
+	 * of which ext_server instance owns which subtree.  Signed with the
+	 * same port as the name (#716): under MACH_PORT_NULL any task could
+	 * check the mount out, "/" included, and check its own port in. */
 	if (mount_path) {
 		kr = netname_check_in_mount(name_server_port,
 					    (char *)mount_path,
-					    MACH_PORT_NULL, mnt->port);
+					    sig, mnt->port);
 		if (kr != KERN_SUCCESS)
 			printf("ext2: netname_check_in_mount(%s) "
 			       "failed (kr=%d)\n", mount_path, kr);

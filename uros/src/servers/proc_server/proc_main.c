@@ -2123,10 +2123,11 @@ main(int argc, char **argv)
     }
 
     /* Register /proc as a vfs mount point — libvfs in any task will
-     * route open("/proc/...") to mount_port. */
+     * route open("/proc/...") to mount_port.  Signed with the name's
+     * port (#716): under MACH_PORT_NULL any task could check it out. */
     kr = netname_check_in_mount(name_server_port,
                                 (char *)PROC_MOUNT_PATH,
-                                MACH_PORT_NULL, mount_port);
+                                sig, mount_port);
     if (kr != NETNAME_SUCCESS) {
         printf("proc: netname_check_in_mount(/proc) failed kr=%d\n",
                kr);
