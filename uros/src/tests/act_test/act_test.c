@@ -215,6 +215,8 @@ static volatile int		arm_eighteen_named_the_victim = -2;
 static volatile int		arm_eighteen_exception, arm_eighteen_code;
 
 static volatile int		arm_thirty_two_armed;
+static volatile int		arm_forty_seven_armed;
+static volatile int		arm_forty_seven_task_seen;
 static volatile mach_port_t	arm_thirty_two_thread;
 static volatile int		arm_thirty_two_task_seen;
 static volatile int		arm_thirty_two_named_the_victim = -2;
@@ -266,6 +268,17 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 		arm_eighteen_exception = exception;
 		arm_eighteen_code = (codeCnt > 0) ? (int) code[0] : 0;
 		arm_eighteen_named_the_victim = (thread == arm_eighteen_thread);
+		(void) thread_terminate(thread);
+		(void) mach_port_deallocate(mach_task_self(), thread);
+		(void) mach_port_deallocate(mach_task_self(), task);
+		return KERN_SUCCESS;
+	}
+	if (arm_forty_seven_armed) {
+		/*
+		 * The task's port, where the kernel goes when it could not
+		 * read the state for the thread's port (#887).
+		 */
+		arm_forty_seven_task_seen = 1;
 		(void) thread_terminate(thread);
 		(void) mach_port_deallocate(mach_task_self(), thread);
 		(void) mach_port_deallocate(mach_task_self(), task);
@@ -7308,6 +7321,297 @@ arm_forty_five_parked_sender(void)
 	return (alone > 0 || around > 0) ? 1 : -1;
 }
 
+/*
+ * Arm forty-six (#887): the flavor of an exception action.  It used to be
+ * stored as given, and a state exception indexed a table with it.
+ *
+ * The four routines are asked for flavors below, inside and above the table,
+ * with each behavior that carries state, and every answer is printed as read.
+ * EXCEPTION_DEFAULT and a null port are asked too, since neither ever uses the
+ * flavor and callers pass 0, THREAD_STATE_NONE and worse.  No exception is
+ * raised here: with the refusal gone these answers change and nothing faults.
+ */
+#define	A46_MASK	EXC_MASK_SOFTWARE
+#define	A46_ROUTINES	4
+
+static const char *const a46_routine[A46_ROUTINES] = {
+	"thread_set", "task_set", "thread_swap", "task_swap"
+};
+static const int	a46_outside[] = {
+	-1, 0, THREAD_STATE_NONE, THREAD_STATE_NONE + 1, 99,
+	0x7fffffff, -0x7fffffff - 1
+};
+static const int	a46_inside[] = {
+	x86_64_THREAD_STATE, x86_64_FLOAT_STATE, x86_64_EXCEPTION_STATE
+};
+
+#define	A46_N(a)	(sizeof (a) / sizeof ((a)[0]))
+
+static kern_return_t
+a46_ask(unsigned routine, mach_port_t thread, mach_port_t port,
+	exception_behavior_t behavior, thread_state_flavor_t flavor)
+{
+	exception_mask_t	masks[EXC_TYPES_COUNT];
+	mach_port_t		ports[EXC_TYPES_COUNT];
+	exception_behavior_t	behaviors[EXC_TYPES_COUNT];
+	thread_state_flavor_t	flavors[EXC_TYPES_COUNT];
+	mach_msg_type_number_t	n = EXC_TYPES_COUNT, i;
+	kern_return_t		kr;
+
+	switch (routine) {
+	case 0:
+		return thread_set_exception_ports(thread, A46_MASK, port,
+						  behavior, flavor);
+	case 1:
+		return task_set_exception_ports(mach_task_self(), A46_MASK,
+						port, behavior, flavor);
+	case 2:
+		kr = thread_swap_exception_ports(thread, A46_MASK, port,
+						 behavior, flavor, masks, &n,
+						 ports, behaviors, flavors);
+		break;
+	default:
+		kr = task_swap_exception_ports(mach_task_self(), A46_MASK,
+					       port, behavior, flavor, masks,
+					       &n, ports, behaviors, flavors);
+		break;
+	}
+	if (kr == KERN_SUCCESS)
+		for (i = 0; i < n; i++)
+			if (MACH_PORT_VALID(ports[i]))
+				(void) mach_port_deallocate(mach_task_self(),
+							    ports[i]);
+	return kr;
+}
+
+/* One routine and one behavior: the numbers on one line, as they were read. */
+static unsigned
+a46_one_behavior(unsigned routine, mach_port_t thread, mach_port_t port,
+		 exception_behavior_t behavior, const char *name)
+{
+	kern_return_t	kr;
+	unsigned	i, bad = 0;
+
+	printf("act_test: [46] %s, %s, outside:", a46_routine[routine], name);
+	for (i = 0; i < A46_N(a46_outside); i++) {
+		kr = a46_ask(routine, thread, port, behavior, a46_outside[i]);
+		printf(" %d=0x%x", a46_outside[i], kr);
+		bad += kr != KERN_INVALID_ARGUMENT;
+	}
+	printf(", inside:");
+	for (i = 0; i < A46_N(a46_inside); i++) {
+		kr = a46_ask(routine, thread, port, behavior, a46_inside[i]);
+		printf(" %d=0x%x", a46_inside[i], kr);
+		bad += kr != KERN_SUCCESS;
+	}
+	printf("\n");
+	return bad;
+}
+
+/* What never uses the flavor takes any flavor. */
+static unsigned
+a46_flavor_unused(unsigned routine, mach_port_t thread, mach_port_t port)
+{
+	kern_return_t	kr;
+	unsigned	i, bad = 0;
+
+	for (i = 0; i < A46_N(a46_outside); i++) {
+		kr = a46_ask(routine, thread, port, EXCEPTION_DEFAULT,
+			     a46_outside[i]);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [46] %s, EXCEPTION_DEFAULT with "
+			       "flavor %d answered 0x%x\n",
+			       a46_routine[routine], a46_outside[i], kr);
+			bad++;
+		}
+		kr = a46_ask(routine, thread, MACH_PORT_NULL, EXCEPTION_STATE,
+			     a46_outside[i]);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [46] %s, a null port with flavor %d "
+			       "answered 0x%x\n",
+			       a46_routine[routine], a46_outside[i], kr);
+			bad++;
+		}
+	}
+	return bad;
+}
+
+static int
+arm_forty_six_exception_flavor(void)
+{
+	mach_port_t	port, thread = mach_thread_self();
+	unsigned	r, bad = 0;
+
+	port = arm_own_port(46);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (r = 0; r < A46_ROUTINES; r++) {
+		bad += a46_one_behavior(r, thread, port, EXCEPTION_STATE,
+					"EXCEPTION_STATE");
+		bad += a46_one_behavior(r, thread, port,
+					EXCEPTION_STATE_IDENTITY,
+					"EXCEPTION_STATE_IDENTITY");
+		bad += a46_flavor_unused(r, thread, port);
+	}
+
+	(void) thread_set_exception_ports(thread, A46_MASK, MACH_PORT_NULL,
+					  EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+	(void) task_set_exception_ports(mach_task_self(), A46_MASK,
+					MACH_PORT_NULL, EXCEPTION_DEFAULT,
+					THREAD_STATE_NONE);
+	(void) mach_port_deallocate(mach_task_self(), thread);
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (bad != 0) {
+		printf("act_test: [46] %u answer(s) of the four routines are "
+		       "not what the flavor asks for, a flavor outside the "
+		       "table can reach an exception — WRONG (#887)\n", bad);
+		return 0;
+	}
+	printf("act_test: [46] the four routines refuse a flavor with no state "
+	       "for a behavior that sends one, and take any flavor where none "
+	       "is used — OK\n");
+	return 1;
+}
+
+/*
+ * Arm forty-seven (#887): an exception whose state cannot be read gives back
+ * the send right it took for the message.
+ *
+ * Only the message consumes that right.  When there is no state there is no
+ * message, and each such exception used to leave one right behind, so that the
+ * port's no-senders notification could never fire.  A thread registers flavor
+ * 0 and faults, the exception goes on to the task's port, where the thread is
+ * ended, and then every right this arm knows of goes.
+ *
+ * A healthy kernel refuses the flavor, so here the arm has nothing to ask:
+ * ablations/887-flavor-not-refused.patch is what lets it run, and
+ * 887-state-failure-keeps-the-right.patch, which goes further, what makes it
+ * say WRONG.
+ */
+static mach_port_t		a47_port;
+static mach_port_t		a47_thread;
+static volatile kern_return_t	a47_set_kr = -1;
+static volatile int		a47_set_done;
+
+static void *
+a47_victim(void *arg)
+{
+	(void) arg;
+	a47_thread = mach_thread_self();
+	a47_set_kr = thread_set_exception_ports(a47_thread,
+						EXC_MASK_BAD_ACCESS, a47_port,
+						EXCEPTION_STATE, 0);
+	a47_set_done = 1;
+	if (a47_set_kr == KERN_SUCCESS)
+		(void) *(volatile unsigned long *) A32_PROBE;
+	return NULL;
+}
+
+static int
+arm_forty_seven_failed_state_gives_back(void)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[1024];
+	} req, ans;
+	mach_port_t		kport, old;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+	pthread_t		victim;
+	int			ok = 1;
+
+	a47_port = arm_own_port(47);
+	kport = arm_own_port(47);
+	if (a47_port == MACH_PORT_NULL || kport == MACH_PORT_NULL)
+		return 0;
+	kr = task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+				      kport, EXCEPTION_DEFAULT,
+				      THREAD_STATE_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [47] task_set_exception_ports answered 0x%x "
+		       "— WRONG\n", kr);
+		return 0;
+	}
+
+	arm_forty_seven_armed = 1;
+	if (pthread_create(&victim, NULL, a47_victim, NULL) != 0) {
+		printf("act_test: [47] pthread_create failed — WRONG\n");
+		ok = 0;
+	}
+	while (ok && !a47_set_done)
+		(void) thread_switch(MACH_PORT_NULL,
+				     SWITCH_OPTION_DEPRESS, 1);
+
+	if (ok && a47_set_kr == KERN_SUCCESS) {
+		mr = mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof req, kport, 5000, MACH_PORT_NULL);
+		if (mr == MACH_MSG_SUCCESS) {
+			(void) exc_server(&req.h, &ans.h);
+			(void) mach_msg(&ans.h,
+					MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+					ans.h.msgh_size, 0, MACH_PORT_NULL, 0,
+					MACH_PORT_NULL);
+		}
+		if (mr != MACH_MSG_SUCCESS || !arm_forty_seven_task_seen) {
+			printf("act_test: [47] the fault did not reach the "
+			       "task's port: 0x%x, seen %d — WRONG\n",
+			       (int) mr, arm_forty_seven_task_seen);
+			ok = 0;
+		}
+	}
+	arm_forty_seven_armed = 0;
+	(void) task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+					MACH_PORT_NULL, EXCEPTION_DEFAULT,
+					THREAD_STATE_NONE);
+	(void) mach_port_destroy(mach_task_self(), kport);
+	if (a47_thread != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), a47_thread);
+
+	if (ok && a47_set_kr != KERN_SUCCESS) {
+		printf("act_test: [47] flavor 0 was refused, 0x%x, so no "
+		       "exception can fail to read its state — NOT ASKED\n",
+		       a47_set_kr);
+		(void) mach_port_destroy(mach_task_self(), a47_port);
+		return -1;
+	}
+	if (!ok) {
+		(void) mach_port_destroy(mach_task_self(), a47_port);
+		return 0;
+	}
+
+	/*
+	 * The thread is gone, and its exception port with it, once it has
+	 * been reaped: the one right left is this arm's, and when that goes
+	 * the notification comes.  Until the thread is reaped the kernel holds
+	 * a right of its own, so the wait is a long one and only its end says
+	 * anything.
+	 */
+	kr = mach_port_request_notification(mach_task_self(), a47_port,
+					    MACH_NOTIFY_NO_SENDERS, 0, a47_port,
+					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &old);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [47] the request answered 0x%x — WRONG\n",
+		       kr);
+		(void) mach_port_destroy(mach_task_self(), a47_port);
+		return 0;
+	}
+	(void) mach_port_deallocate(mach_task_self(), a47_port);
+	mr = mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof req,
+		      a47_port, 5000, MACH_PORT_NULL);
+	(void) mach_port_destroy(mach_task_self(), a47_port);
+	if (mr != MACH_MSG_SUCCESS || req.h.msgh_id != MACH_NOTIFY_NO_SENDERS) {
+		printf("act_test: [47] no no-senders notification in 5 s, 0x%x: "
+		       "the failed exception kept a send right nobody can "
+		       "give back — WRONG (#887)\n", (int) mr);
+		return 0;
+	}
+	printf("act_test: [47] an exception that could not read its state gave "
+	       "its send right back: the notification came — OK\n");
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7442,6 +7746,14 @@ main(int argc, char **argv)
 	passed += arm_forty_four_index_zero_name();
 	arms++;		/* arm forty-five, #881 */
 	r = arm_forty_five_parked_sender();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm forty-six, #887 */
+	passed += arm_forty_six_exception_flavor();
+	arms++;		/* arm forty-seven, #887 */
+	r = arm_forty_seven_failed_state_gives_back();
 	if (r < 0)
 		arms--;
 	else

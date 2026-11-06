@@ -213,6 +213,43 @@ unsigned long c_tsk_exc_raise = 0;
 unsigned long c_tsk_exc_raise_state = 0;
 unsigned long c_tsk_exc_raise_state_id = 0;
 
+/*
+ *	Routine:	urmach_exception_get_state
+ *	Purpose:
+ *		Reads the state an exception message is to carry, for
+ *		exception() and exception_try_task(), which took a send
+ *		right and a reference for that message.  Only the message
+ *		consumes those, so when there is no state to send, and so
+ *		no message, they go back here (#887).
+ *
+ *		The registration routines refuse a flavor with no state,
+ *		but a flavor can still get here with none: the behavior is
+ *		read after the flavor and outside the lock, so one that
+ *		was registered with EXCEPTION_DEFAULT, whose flavor means
+ *		nothing, can meet a behavior that carries state.
+ *	Conditions:
+ *		Nothing locked.
+ *	Returns:
+ *		KERN_SUCCESS		The state and *state_cnt are valid.
+ *		Anything else		The send right has been released.
+ */
+static kern_return_t
+urmach_exception_get_state(
+	thread_act_t		act,
+	ipc_port_t		exc_port,
+	int			flavor,
+	natural_t		*state,
+	mach_msg_type_number_t	*state_cnt)
+{
+	kern_return_t		kr;
+
+	*state_cnt = urmach_state_count(flavor);
+	kr = thread_getstatus(act, flavor, (thread_state_t) state, state_cnt);
+	if (kr != KERN_SUCCESS)
+		ipc_port_release_send(exc_port);
+	return kr;
+}
+
 
 #ifdef MACHINE_FAST_EXCEPTION	/* from <machine/thread.h> if at all */
 /*
@@ -480,8 +517,8 @@ exception(
 	    } else {
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
-		state_cnt = state_count[flavor];
-		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
+		kr = urmach_exception_get_state(a_self, exc_port, flavor, state,
+							&state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state(exc_port, exception,
 				code, codeCnt,
@@ -524,8 +561,8 @@ exception(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_thr_exc_raise_state_id++;
-		state_cnt = state_count[flavor];
-		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
+		kr = urmach_exception_get_state(a_self, exc_port, flavor, state,
+							&state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state_identity(exc_port,
 				retrieve_act_self_fast(a_self),
@@ -672,10 +709,8 @@ exception(
 		} else {
 			natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
-			state_cnt = state_count[flavor];
-			kr = thread_getstatus(a_self, flavor, 
-					      (thread_state_t)state,
-					      &state_cnt);
+			kr = urmach_exception_get_state(a_self, exc_port, flavor, state,
+								&state_cnt);
 			if (kr == KERN_SUCCESS) {
 			    kr = exception_raise_state(exc_port, exception,
 					code, codeCnt,
@@ -718,10 +753,8 @@ exception(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_thr_exc_raise_state_id++;
-		state_cnt = state_count[flavor];
-		kr = thread_getstatus(a_self, flavor,
-				      (thread_state_t)state,
-				      &state_cnt);
+		kr = urmach_exception_get_state(a_self, exc_port, flavor, state,
+							&state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state_identity(exc_port,
 				retrieve_act_self_fast(a_self),
@@ -996,8 +1029,8 @@ exception_try_task(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_tsk_exc_raise_state++;
-		state_cnt = state_count[flavor];
-		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
+		kr = urmach_exception_get_state(a_self, exc_port, flavor, state,
+							&state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state(exc_port, exception,
 				code, codeCnt,
@@ -1040,8 +1073,8 @@ exception_try_task(
 	} else {
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
-		state_cnt = state_count[flavor];
-		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
+		kr = urmach_exception_get_state(a_self, exc_port, flavor, state,
+							&state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state(exc_port, exception,
 				code, codeCnt,
@@ -1083,8 +1116,8 @@ exception_try_task(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_tsk_exc_raise_state_id++;
-		state_cnt = state_count[flavor];
-		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
+		kr = urmach_exception_get_state(a_self, exc_port, flavor, state,
+							&state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state_identity(exc_port,
 				retrieve_act_self_fast(a_self),
@@ -1453,7 +1486,7 @@ alert_exception(
 	    } else {
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
-		state_cnt = state_count[flavor];
+		state_cnt = urmach_state_count(flavor);
 		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state(exc_port, exception,
@@ -1497,7 +1530,7 @@ alert_exception(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_thr_exc_raise_state_id++;
-		state_cnt = state_count[flavor];
+		state_cnt = urmach_state_count(flavor);
 		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state_identity(exc_port,
@@ -1624,7 +1657,7 @@ alert_exception(
 		} else {
 			natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
-			state_cnt = state_count[flavor];
+			state_cnt = urmach_state_count(flavor);
 			kr = thread_getstatus(a_self, flavor,
 					      (thread_state_t)state,
 					      &state_cnt);
@@ -1672,7 +1705,7 @@ alert_exception(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_thr_exc_raise_state_id++;
-		state_cnt = state_count[flavor];
+		state_cnt = urmach_state_count(flavor);
 		kr = thread_getstatus(a_self, flavor,
 				      (thread_state_t)state,
 				      &state_cnt);
@@ -1781,7 +1814,7 @@ alert_exception_try_task(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_tsk_exc_raise_state++;
-		state_cnt = state_count[flavor];
+		state_cnt = urmach_state_count(flavor);
 		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state(exc_port, exception,
@@ -1821,7 +1854,7 @@ alert_exception_try_task(
 		natural_t state[ THREAD_MACHINE_STATE_MAX ];
 
 		c_tsk_exc_raise_state_id++;
-		state_cnt = state_count[flavor];
+		state_cnt = urmach_state_count(flavor);
 		kr = thread_getstatus(a_self, flavor, state, &state_cnt);
 		if (kr == KERN_SUCCESS) {
 		    kr = exception_raise_state_identity(exc_port,

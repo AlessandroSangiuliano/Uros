@@ -177,7 +177,7 @@
 /*
  * Maps state flavor to number of words in the state:
  */
-unsigned int state_count[] = {
+static unsigned int state_count[] = {
 	/* FLAVOR_LIST */ 0,
 	i386_THREAD_STATE_COUNT,
 	i386_FLOAT_STATE_COUNT,
@@ -188,6 +188,20 @@ unsigned int state_count[] = {
 	/* THREAD_STATE_NONE */ 0,
 	i386_SAVED_STATE_COUNT,
 };
+
+/*
+ * The only way to the table, because its size is known only here (#887).  0
+ * means no state, for a flavor outside the table as for THREAD_STATE_NONE.
+ * It is the table and not a range: i386_SAVED_STATE lies above
+ * THREAD_STATE_NONE.
+ */
+unsigned int
+urmach_state_count(int flavor)
+{
+	if ((unsigned int) flavor >= sizeof(state_count) / sizeof(state_count[0]))
+		return 0;
+	return state_count[flavor];
+}
 
 /* Forward */
 
