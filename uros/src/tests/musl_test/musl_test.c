@@ -65,6 +65,14 @@ not_asked(int arm, const char *why)
 /* The longest a thread is given to do what an arm waits for, in 10 ms steps. */
 #define WAIT_STEPS	500
 
+static int
+access_by_stat(const char *path)
+{
+	struct stat	st;
+
+	return stat(path, &st);
+}
+
 static void
 pause_a_little(void)
 {
@@ -644,6 +652,75 @@ arm_file_map(void)
 		"%s", same ? "the same" : "not the same");
 }
 
+/*
+ * ── [14], [15], [16] Another program, through exec_server ───────────────
+ *
+ * A static C program and a dynamic one, each of which returns from main, and
+ * hello_exec, which has nothing under it and waits to be killed.  The status
+ * waitpid reads back is the whole of what the parent can see here: what each
+ * of them printed on its way is the harness's to read.
+ */
+static pid_t
+start_program(const char *path)
+{
+	char	*argv[2];
+	char	*envp[1];
+	pid_t	pid;
+
+	argv[0] = (char *)path;
+	argv[1] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid == 0) {
+		(void)execve(path, argv, envp);
+		_exit(127);
+	}
+	return pid;
+}
+
+static void
+arm_program(int arm, const char *path)
+{
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (access_by_stat(path) != 0) {
+		not_asked(arm, "the program is not on this boot's disk");
+		return;
+	}
+	pid = start_program(path);
+	if (pid < 0) {
+		not_asked(arm, "fork refused: no process server on this boot");
+		return;
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(arm, got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		"%s ended with status %#x", path, (unsigned)status);
+}
+
+static void
+arm_parked_program(int arm, const char *path)
+{
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (access_by_stat(path) != 0) {
+		not_asked(arm, "the program is not on this boot's disk");
+		return;
+	}
+	pid = start_program(path);
+	if (pid < 0) {
+		not_asked(arm, "fork refused: no process server on this boot");
+		return;
+	}
+	(void)sleep(1);
+	(void)kill(pid, SIGKILL);
+	got = waitpid(pid, &status, 0);
+	verdict(arm, got == pid && WIFSIGNALED(status)
+		&& WTERMSIG(status) == SIGKILL, "%s was killed, status %#x",
+		path, (unsigned)status);
+}
+
 int
 main(void)
 {
@@ -663,6 +740,9 @@ main(void)
 	arm_jump();
 	arm_fork();
 	arm_file_map();
+	arm_program(14, "/hello_world");
+	arm_parked_program(15, "/hello_exec");
+	arm_program(16, "/hello_dyn_world");
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;

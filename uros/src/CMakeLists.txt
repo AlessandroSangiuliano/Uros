@@ -616,10 +616,18 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/sig_test)
 endif()
 
+# exec_server and the images it is asked for (#421).  hello_exec has no library
+# of any kind and exercises the stack layout and nothing else.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/exec_server)
+  add_subdirectory(tests/hello_exec)
+endif()
+
 # The textbook program, static against musl, the first of the kind on this
-# target (#414).
+# target (#414), and its dynamic twin.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
   add_subdirectory(tests/hello_world)
+  add_subdirectory(tests/hello_dyn_world)
   add_subdirectory(tests/musl_test)
 endif()
 

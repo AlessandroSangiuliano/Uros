@@ -627,6 +627,10 @@ must_report '=== sig_test (' '=== sig_test: [0-9]* PASS, 0 FAIL ===' \
 	'It sends signals through proc_server, and the line that ends it has a count of failures in it.  The pattern asks for none: this program predates WRONG, and a FAIL of its own is not a line the unexplained scan reads (#496).' \
 	sig_test
 
+must_report 'hello_exec: hello from exec_server' 'hello_exec: AUXV AT_PAGESZ (tag=6) = 0x0000000000001000' \
+	'exec_server started it and the initial stack did not say what a page is, in words of this target: a layout of the wrong width reads the tag from one place and the value from another (#421).' \
+	hello_exec
+
 must_report 'musl_test: started' 'musl_test: [0-9]* of [0-9]* arms passed' \
 	'A static C program with musl under it, asking for threads, memory, signals and files through the system calls of this target (#414).  It started and did not reach its last line, which is a stop inside the personality or a thread that never came back.'
 

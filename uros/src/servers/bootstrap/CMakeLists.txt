@@ -627,7 +627,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # machine ends a boot sooner than any host under TCG, so without it -t would
   # ask there even less.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nexec_server exec_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -728,6 +728,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # ⚠️ One entry for two configuration lines, like dma_reclaim_test:
             # the roles differ by argv, not by image.
             xfile_test:${_SBIN}/xfile_test
+            exec_server:${_SBIN}/exec_server
             proc_server:${_SBIN}/proc_server
             sig_test:${_SBIN}/sig_test
             taskpanic_load:${_SBIN}/taskpanic_load
@@ -774,7 +775,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             taskpanic_load_bin
             ${_CHAR_DEP}
             ${_MUSL_DEP}
-            proc_server_bin sig_test_bin
+            exec_server_bin proc_server_bin sig_test_bin
             ${_IPC_BENCH_DEP}
             ${_CONF}
     COMMENT "Bundle: bootstrap.conf + 14 tasks + hal_server + block_device_server + ext_server"
@@ -796,7 +797,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_NODISK_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap-nodisk.bundle)
   set(_NODISK_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-nodisk.conf)
   file(GENERATE OUTPUT ${_NODISK_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\nexec_server exec_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}")
   add_custom_command(
     OUTPUT ${_NODISK_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_NODISK_BUNDLE}
@@ -816,6 +817,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             cow_test:${_SBIN}/cow_test
             hal_server:${_SBIN}/hal_server
             modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
+            exec_server:${_SBIN}/exec_server
             proc_server:${_SBIN}/proc_server
             sig_test:${_SBIN}/sig_test
             taskpanic_load:${_SBIN}/taskpanic_load
@@ -828,7 +830,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             taskpanic_load_bin
             ${_CHAR_DEP}
             ${_MUSL_DEP}
-            proc_server_bin sig_test_bin
+            exec_server_bin proc_server_bin sig_test_bin
             ${_NODISK_CONF}
     COMMENT "Bundle for a real machine: nothing in it reaches a disk (#595)"
     VERBATIM)
