@@ -8385,6 +8385,185 @@ arm_fifty_one_rights_that_left(void)
 	return ok;
 }
 
+/*
+ * Arm fifty-two (#414): a thread's FS base goes with it.
+ *
+ * thread_set_state() stored the base and nothing loaded it, so a thread pointer
+ * set that way had no effect, and every thread ran with whatever the processor
+ * held.  So: more threads than processors, each with a base of its own set by
+ * the trap and a word of its own there, reading it through %fs across yields
+ * and sleeps.  A thread that finds another's word has been given the processor
+ * without its base.  One processor shows that as well as four.
+ *
+ * Then the same for thread_set_state(): a base given to a stopped thread is
+ * read back, and is what the thread finds when it goes on, which is how a new
+ * pthread gets its thread pointer.  And what the trap must refuse: `wrmsr'
+ * faults at ring 0 on a non-canonical address, and a kernel address is one no
+ * thread may have (#440).
+ */
+#define	A52_THREADS	8
+#define	A52_ROUNDS	20000
+
+static struct {
+	unsigned long	word;
+	unsigned long	pad[7];		/* a line each */
+} a52_tls[A52_THREADS + 2];
+static volatile int		a52_bad;
+static volatile unsigned long	a52_read_word, a52_own_word;
+static volatile mach_port_t	a52_stopped;
+static volatile int		a52_go;
+static volatile unsigned long	a52_after;
+
+static inline unsigned long
+a52_through_fs(void)
+{
+	unsigned long	v;
+
+	__asm__ volatile("movq %%fs:0, %0" : "=r" (v));
+	return v;
+}
+
+static void *
+a52_reader(void *arg)
+{
+	unsigned long	*mine = arg;
+	unsigned long	v;
+	unsigned	i;
+
+	if (urmach_thread_set_fs_base((vm_offset_t) mine) != KERN_SUCCESS) {
+		a52_bad = 1;
+		return NULL;
+	}
+	for (i = 0; i < A52_ROUNDS && !a52_bad; i++) {
+		v = a52_through_fs();
+		if (v != *mine) {
+			a52_read_word = v;
+			a52_own_word = *mine;
+			a52_bad = 2;
+			break;
+		}
+		if ((i & 15) == 0)
+			(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE,
+					     0);
+		if ((i & 1023) == 0)
+			(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+					     1);
+	}
+	return NULL;
+}
+
+static void *
+a52_given(void *arg)
+{
+	if (urmach_thread_set_fs_base((vm_offset_t) arg) != KERN_SUCCESS) {
+		a52_bad = 1;
+		return NULL;
+	}
+	a52_stopped = mach_thread_self();
+	while (!a52_go)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+	a52_after = a52_through_fs();
+	return NULL;
+}
+
+static int
+arm_fifty_two_fs_base_goes_with_the_thread(void)
+{
+	pthread_t			th[A52_THREADS], given;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	mach_port_t			t;
+	kern_return_t			k, nc;
+	unsigned			i, started = 0;
+
+	for (i = 0; i < A52_THREADS + 2; i++)
+		a52_tls[i].word = 0x5a5a000000000000UL + i + 1;
+	for (i = 0; i < A52_THREADS; i++)
+		if (pthread_create(&th[i], NULL, a52_reader,
+				   &a52_tls[i].word) == 0)
+			started++;
+		else
+			break;
+	for (i = 0; i < started; i++)
+		(void) pthread_join(th[i], NULL);
+	if (started != A52_THREADS) {
+		printf("act_test: [52] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	if (a52_bad == 1) {
+		printf("act_test: [52] the trap refused an address of this "
+		       "task — WRONG\n");
+		return 0;
+	}
+	if (a52_bad == 2) {
+		printf("act_test: [52] a thread read 0x%lx through %%fs where "
+		       "its own word is 0x%lx — WRONG\n", a52_read_word,
+		       a52_own_word);
+		return 0;
+	}
+
+	if (pthread_create(&given, NULL, a52_given,
+			   &a52_tls[A52_THREADS].word) != 0) {
+		printf("act_test: [52] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	for (i = 0; i < 4000 && a52_stopped == MACH_PORT_NULL; i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	t = a52_stopped;
+	if (t == MACH_PORT_NULL || thread_suspend(t) != KERN_SUCCESS ||
+	    thread_get_state(t, x86_64_THREAD_STATE, (thread_state_t) &state,
+			     &count) != KERN_SUCCESS) {
+		printf("act_test: [52] the thread could not be stopped and "
+		       "read — WRONG\n");
+		a52_go = 1;
+		(void) pthread_join(given, NULL);
+		return 0;
+	}
+	if (state.fs_base != (unsigned long) &a52_tls[A52_THREADS].word) {
+		printf("act_test: [52] thread_get_state read a base of 0x%lx "
+		       "where the trap set 0x%lx — WRONG\n",
+		       (unsigned long) state.fs_base,
+		       (unsigned long) &a52_tls[A52_THREADS].word);
+		a52_go = 1;
+		(void) thread_resume(t);
+		(void) pthread_join(given, NULL);
+		return 0;
+	}
+	state.fs_base = (unsigned long) &a52_tls[A52_THREADS + 1].word;
+	k = thread_set_state(t, x86_64_THREAD_STATE, (thread_state_t) &state,
+			     x86_64_THREAD_STATE_COUNT);
+	a52_go = 1;
+	(void) thread_resume(t);
+	(void) pthread_join(given, NULL);
+	(void) mach_port_deallocate(mach_task_self(), t);
+	if (k != KERN_SUCCESS || a52_after != a52_tls[A52_THREADS + 1].word) {
+		printf("act_test: [52] a base given to a stopped thread: "
+		       "thread_set_state answered 0x%x and the thread read "
+		       "0x%lx, not 0x%lx — WRONG\n", (int) k, a52_after,
+		       a52_tls[A52_THREADS + 1].word);
+		return 0;
+	}
+
+	k = urmach_thread_set_fs_base((vm_offset_t) 0xffff800000000000UL);
+	if (k != KERN_INVALID_ARGUMENT) {
+		printf("act_test: [52] a base in the kernel half answered 0x%x "
+		       "— WRONG\n", (int) k);
+		return 0;
+	}
+	nc = urmach_thread_set_fs_base((vm_offset_t) 0x0000800000000000UL);
+	if (nc != KERN_INVALID_ARGUMENT) {
+		printf("act_test: [52] a non-canonical base answered 0x%x — "
+		       "WRONG\n", (int) nc);
+		return 0;
+	}
+	printf("act_test: [52] %u threads read their own word through %%fs "
+	       "%u times each, across yields and sleeps; a base given to a "
+	       "stopped thread was there when it went on; a kernel base and a "
+	       "non-canonical one were refused with 0x%x and 0x%x (#414)\n",
+	       A52_THREADS, A52_ROUNDS, (int) k, (int) nc);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8539,6 +8718,8 @@ main(int argc, char **argv)
 	passed += arm_forty_nine_subsystem_released_once();
 	arms++;		/* arm fifty-one, #868 */
 	passed += arm_fifty_one_rights_that_left();
+	arms++;		/* arm fifty-two, #414 */
+	passed += arm_fifty_two_fs_base_goes_with_the_thread();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
