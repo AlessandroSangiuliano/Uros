@@ -39,7 +39,7 @@ add_custom_command(
             -L${MUSL_PREFIX}/lib -lc
             ${HELLO_DYN_WORLD_LIBGCC}
             ${MUSL_PREFIX}/lib/crtn.o
-            -Wl,-dynamic-linker,/lib/ld-musl-i386.so.1
+            -Wl,-dynamic-linker,/lib/ld-musl-${UROS_TARGET_ARCH}.so.1
             -Wl,--build-id=none
             -o ${HELLO_DYN_WORLD}
   # Embed the .uros_manifest section (same convention as hello_dyn).
