@@ -554,6 +554,14 @@ vfs_write(vfs_fd_t fd, const void *buf, size_t count)
     }
     if (kr != KERN_SUCCESS)
         return -1;
+    /*
+     * #716: and no more written than was sent.  The count is the server's to
+     * say, and the caller's offset moved by it: a server that answered more
+     * put the next write past bytes nobody wrote, and told the caller they
+     * were written.
+     */
+    if (written > count)
+        return -1;
 
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
