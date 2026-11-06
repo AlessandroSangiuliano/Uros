@@ -6289,7 +6289,8 @@ static volatile mach_port_t arm_forty_thread;
 static volatile unsigned arm_forty_seen;	/* the server read this */
 
 static int
-arm_forty_counts(mach_port_t host, unsigned *at_return, unsigned *at_tick)
+arm_forty_counts(mach_port_t host, unsigned *at_return, unsigned *at_tick,
+		 unsigned *left)
 {
 	host_rpc_handoff_info_data_t	hi;
 	mach_msg_type_number_t		c = HOST_RPC_HANDOFF_INFO_COUNT;
@@ -6299,6 +6300,7 @@ arm_forty_counts(mach_port_t host, unsigned *at_return, unsigned *at_tick)
 		return 0;
 	*at_return = hi.undone_return;
 	*at_tick = hi.undone_tick;
+	*left = hi.undone_left;
 	return 1;
 }
 
@@ -6330,7 +6332,7 @@ arm_forty_server(void *arg)
 	} m;
 	mach_msg_option_t	opt = MACH_RCV_MSG;
 	mach_msg_size_t		size = 0;
-	unsigned		ret, tick;
+	unsigned		ret, tick, left;
 
 	(void) arg;
 	for (;;) {
@@ -6338,7 +6340,7 @@ arm_forty_server(void *arg)
 			     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
 		    != MACH_MSG_SUCCESS || m.h.msgh_id != A40_RPC)
 			return NULL;
-		if (arm_forty_counts(arm_forty_host, &ret, &tick))
+		if (arm_forty_counts(arm_forty_host, &ret, &tick, &left))
 			arm_forty_seen = ret + tick;
 		m.h.msgh_bits = MACH_MSGH_BITS(
 		    MACH_MSGH_BITS_REMOTE(m.h.msgh_bits), 0);
@@ -6389,18 +6391,18 @@ arm_forty_ran(unsigned before)
 static int
 arm_forty_no_call(mach_port_t host)
 {
-	unsigned		try, i, before, r0, t0, r1, t1;
+	unsigned		try, i, before, r0, t0, l0, r1, t1, l1, left = 0;
 	unsigned long long	start, took;
 
 	for (try = 0; try < A40_TRIES; try++) {
 		for (i = 0; i < try % 4; i++)	/* as arm 39 */
-			(void) arm_forty_counts(host, &r0, &t0);
+			(void) arm_forty_counts(host, &r0, &t0, &l0);
 		if (!arm_thread_waiting(&arm_forty_thread)) {
 			printf("act_test: [40] the woken thread never came to "
 			       "wait — WRONG\n");
 			return 0;
 		}
-		if (!arm_forty_counts(host, &r0, &t0))
+		if (!arm_forty_counts(host, &r0, &t0, &l0))
 			return 0;
 		before = arm_forty_got;
 		start = arm_thirty_nine_tsc();
@@ -6415,7 +6417,7 @@ arm_forty_no_call(mach_port_t host)
 			       "never ran — WRONG\n");
 			return 0;
 		}
-		if (!arm_forty_counts(host, &r1, &t1))
+		if (!arm_forty_counts(host, &r1, &t1, &l1))
 			return 0;
 		if (t1 != t0) {
 			printf("act_test: [40] a tick undid the bet of a send "
@@ -6423,6 +6425,22 @@ arm_forty_no_call(mach_port_t host)
 			       "after it\n", try + 1, took);
 			return 1;
 		}
+		if (l1 != l0)
+			left++;
+	}
+	/*
+	 * A thread that leaves its processor settles the bet in the switch,
+	 * before any tick can look.  With two processors and a disk at work
+	 * beside this arm it can do that every time: 26 and 21 undone that way
+	 * and none at a tick in the two boots of 1262 that said WRONG here, on
+	 * a kernel that had done right.  So the kernel is wrong only where the
+	 * bets stayed for a tick to find, and this one's tries mostly did not.
+	 */
+	if (left >= A40_TRIES / 2) {
+		printf("act_test: [40] %u sends alone, and in %u of them this "
+		       "thread left for another before a tick looked — NOT "
+		       "ASKED\n", A40_TRIES, left);
+		return 1;
 	}
 	printf("act_test: [40] %u sends alone, then only user code, and no tick "
 	       "undid one — WRONG\n", A40_TRIES);
@@ -6432,7 +6450,7 @@ arm_forty_no_call(mach_port_t host)
 static int
 arm_forty_combined(mach_port_t host, mach_port_t reply)
 {
-	unsigned	i, try, before, r0, t0, seen;
+	unsigned	i, try, before, r0, t0, l0, seen;
 
 	for (i = 0; i < A40_WARM; i++)
 		if (arm_forty_rpc(reply) != MACH_MSG_SUCCESS) {
@@ -6442,13 +6460,13 @@ arm_forty_combined(mach_port_t host, mach_port_t reply)
 		}
 	for (try = 0; try < A40_TRIES; try++) {
 		for (i = 0; i < try % 4; i++)	/* as arm 39 */
-			(void) arm_forty_counts(host, &r0, &t0);
+			(void) arm_forty_counts(host, &r0, &t0, &l0);
 		if (!arm_thread_waiting(&arm_forty_thread)) {
 			printf("act_test: [40] the woken thread never came to "
 			       "wait — WRONG\n");
 			return 0;
 		}
-		if (!arm_forty_counts(host, &r0, &t0))
+		if (!arm_forty_counts(host, &r0, &t0, &l0))
 			return 0;
 		before = arm_forty_got;
 		arm_forty_seen = r0 + t0;
