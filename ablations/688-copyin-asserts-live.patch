@@ -5,18 +5,18 @@ Takes out: fcfc9cf9 -- mach_msg()'s request copyin asserts again, under the read
 Run: --entry 14 1200 -smp 4
 Expect: Assertion failed: file "[^"]*/ipc/mach_msg\.c", line [0-9]+: space->is_active
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index 3ac8c1f3..4ccd1655 100644
+index 95488932..0c4eecee 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -1334,6 +1334,7 @@ mach_msg_overwrite_trap(
+@@ -1633,6 +1633,7 @@ urmach_msg_overwrite_trap_call(
  		    }
  
  			is_read_lock(space);
 +			assert(space->is_active);
  
- 			size = space->is_table_size;
- 			table = space->is_table;
-@@ -1342,14 +1343,7 @@ mach_msg_overwrite_trap(
+ 			/*
+ 			 * #868: for the cache below, read before the names
+@@ -1647,14 +1648,7 @@ urmach_msg_overwrite_trap_call(
  			register ipc_entry_t entry;
  			register ipc_entry_bits_t bits;
  
@@ -32,7 +32,7 @@ index 3ac8c1f3..4ccd1655 100644
  				entry = &table[index];
  				bits = entry->ie_bits;
  				if (IE_BITS_GEN(bits) != gen ||
-@@ -1360,8 +1354,7 @@ mach_msg_overwrite_trap(
+@@ -1665,8 +1659,7 @@ urmach_msg_overwrite_trap_call(
  				entry = IE_NULL;
  			}
  			if (entry == IE_NULL) {
