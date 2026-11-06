@@ -280,6 +280,18 @@ cap_acquire(mach_port_t             server,
      */
     if (resource_type < RESOURCE_TYPE_MAX) {
 
+    /*
+     * #744: a permission, not a capability.  The manifest that grants
+     * revocation notices says a task may be told of revocations; no token of
+     * this type stands for anything any server checks, and issuing one would
+     * hand out a signed claim to an authority that does not exist.
+     */
+    if (resource_type == RESOURCE_REVOKE_NOTICES) {
+        printf("cap: DENY rtype=%u -- revocation notices are a permission, "
+               "not a capability (#744)\n", resource_type);
+        return CAP_ERR_POLICY_DENIED;
+    }
+
     if (g_request_local_port == MACH_PORT_NULL ||
         g_request_local_port == cap_port) {
         printf("cap: DENY (well-known port issues no capabilities) rtype=%u "
@@ -574,6 +586,20 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
  * cap_subscribe_revoke (Issue #183) — register a notify port.  We
  * keep the send right; subsequent cap_revoke calls fan out
  * cap_revoke_notify(notify_port, cap_id) on each subscriber.
+ *
+ * 🔴 ONLY A TASK WHOSE MANIFEST SAYS SO, ON ITS OWN PORT (#744).  It took
+ * anyone, into one of eight slots: a task could hear of every revocation, and
+ * one that filled the slots first left the block, char and gpu servers
+ * hearing of none.  The permission is RESOURCE_REVOKE_NOTICES with
+ * CAP_OP_REVOKE_SUBSCRIBE, which their manifests grant, and the request must
+ * arrive on the per-task port bootstrap provisioned -- the well-known port
+ * subscribes nobody, as it issues nothing.
+ *
+ * ⚠️ A refusal returns an error and leaves the send right alone, because
+ * mach_msg_server() destroys a request answered with an error, rights and
+ * all.  The table-full refusal used to deallocate it too, which dropped two
+ * references for the one received -- the second one the subscriber's, when
+ * this server already held a right to the port.
  */
 kern_return_t
 cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
@@ -582,6 +608,16 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
 
     if (notify_port == MACH_PORT_NULL)
         return CAP_ERR_INVALID_TOKEN;
+
+    if (g_request_local_port == MACH_PORT_NULL ||
+        g_request_local_port == cap_port ||
+        !cap_manifest_allows(cap_manifest_table_get(g_request_local_port),
+                             RESOURCE_REVOKE_NOTICES, CAP_MANIFEST_ANY_ID,
+                             CAP_OP_REVOKE_SUBSCRIBE)) {
+        printf("cap: DENY subscribe_revoke on port 0x%x -- no manifest grants "
+               "it (#744)\n", (unsigned)g_request_local_port);
+        return CAP_ERR_NOT_IN_MANIFEST;
+    }
 
     if (revoke_subscribers_contains(notify_port)) {
         /* Idempotent: already subscribed.  Drop the extra send right
@@ -593,7 +629,6 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
     if (n_revoke_subscribers >= CAP_MAX_REVOKE_SUBSCRIBERS) {
         printf("cap: subscribe_revoke FAIL — table full (%d)\n",
                n_revoke_subscribers);
-        (void)mach_port_deallocate(mach_task_self(), notify_port);
         return CAP_ERR_NO_MEMORY;
     }
 
