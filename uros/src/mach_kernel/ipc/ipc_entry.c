@@ -193,8 +193,8 @@ ipc_entry_lookup(
  *		The pointer is into type-stable storage (is_table or an ite), so
  *		it is ALWAYS safe to dereference, but its CONTENTS may be stale.
  *		A caller that acts on entry->ie_object (e.g. locks the port) MUST
- *		revalidate: snapshot space->is_generation and space->is_seq before
- *		calling, lock the resolved object, then re-check both unchanged.
+ *		revalidate: lock the resolved object, and read the entry again
+ *		with it locked, as urmach_msg_rights_hold() does (#868).
  *		A read-only caller that only wants ie_bits gets a racy-but-whole
  *		value (the generation / ite_name check rejects a reused slot).
  *	Why it is safe without a lock:

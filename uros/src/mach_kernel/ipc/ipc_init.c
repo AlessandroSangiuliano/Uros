@@ -232,9 +232,7 @@ ipc_bootstrap(void)
 	 * without the space lock; the port must therefore be safe to lock even
 	 * if another CPU concurrently freed it.  Non-collectable storage keeps
 	 * the page valid (the caller re-validates ip_active + identity after
-	 * locking), so the lock never faults.  This also closes the pre-existing
-	 * race in the per-thread port cache (#55, mach_msg.c), which already
-	 * ip_lock()s an unlocked cached port and only then checks ip_active.
+	 * locking), so the lock never faults.
 	 * Trade-off: freed ports are reused from the zone free list but their
 	 * pages are never returned to the system (bounded by peak port count);
 	 * reclaiming them would need call_rcu-style deferral (a #330 follow-up).

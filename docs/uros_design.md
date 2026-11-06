@@ -85,7 +85,9 @@ Standard Mach IPC with ports, rights, and messages. Used for:
 - Per-CPU kmsg pool (#52) — O(1) lockless alloc for msg <= 256 bytes
 - IPC continuations (#53) — zero kernel stack consumption while waiting
 - Direct Thread Switch (#54) — `thread_run(receiver)` in mqueue deliver
-- Per-thread port lookup cache (#55) — 100% hit rate on hot paths
+- Lock-free name resolution (#331) — a fast RPC resolves its two names with no
+  space lock and confirms the rights with the ports locked (#868); the
+  per-thread port lookup cache of #55 it replaced is gone
 - Zero-copy OOL (#56) — COW from sender map, ~2 us constant 4-64 KB
 - SYSENTER/SYSEXIT (#44) — fast path system call entry/exit
 - Protected payloads — receiver-side O(1) dispatch, no port lookup

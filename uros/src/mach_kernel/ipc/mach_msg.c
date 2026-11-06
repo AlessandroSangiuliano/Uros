@@ -1109,6 +1109,65 @@ boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
 #endif	/* HOTPATH_ENABLE */
 
 /*
+ *	Routine:	urmach_msg_rights_hold
+ *	Purpose:
+ *		#868: asks of a name->port mapping read with nothing locked,
+ *		with both ports locked, whether it is still true.  Rights
+ *		leave a space by more routes than the ones that move
+ *		is_generation.  That rule, that every remover must remember
+ *		the bump, was broken twice, and a freed port's memory can hold
+ *		a new port that is active, so neither the generation nor
+ *		ip_active says anything about the name.  This needs nothing
+ *		from any other file.
+ *
+ *		A receive right is written in the port, and the port is
+ *		locked.  A send right is written nowhere in the port, so the
+ *		entry is read, as urmach_msg_lockfree_resolve() reads it.  A
+ *		remover clears the entry before it takes the port's lock to
+ *		drop the right, so an entry seen here means the right is still
+ *		counted in the port this holds.
+ *
+ *		`gen' is a generation read before the mapping was: it is a
+ *		filter, and one that is no longer current is a miss.  is_seq
+ *		because the table can move, and is_active because the table is
+ *		freed with the space: on TSO, what was read came from the live
+ *		table if is_active is still set after it (#688).
+ *	Conditions:
+ *		Both ports locked.
+ *	Returns:
+ *		TRUE		The mapping holds at this moment.
+ *		FALSE		It does not, or that cannot be told here.
+ */
+static boolean_t
+urmach_msg_rights_hold(
+	ipc_space_t	space,
+	natural_t	gen,
+	mach_port_t	reply_name,
+	ipc_port_t	reply_port,
+	mach_port_t	dest_name,
+	ipc_port_t	dest_port)
+{
+	natural_t	seq0 = space->is_seq;
+	ipc_entry_t	de;
+
+	if (!ip_active(reply_port) ||
+	    reply_port->ip_receiver_name != reply_name ||
+	    reply_port->ip_receiver != space)
+		return FALSE;
+
+	urmach_rcu_barrier();
+
+	de = ipc_entry_lookup_lockfree(space, dest_name);
+	if (de == IE_NULL || !(de->ie_bits & MACH_PORT_TYPE_SEND) ||
+	    (ipc_port_t) de->ie_object != dest_port)
+		return FALSE;
+
+	urmach_rcu_barrier();
+	return space->is_generation == gen && space->is_seq == seq0 &&
+	       space->is_active;
+}
+
+/*
  *	Routine:	urmach_msg_lockfree_resolve
  *	Purpose:
  *		#331 step 2 part 3b: resolve the RPC copyin's reply_name (a
@@ -1124,14 +1183,10 @@ boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
  *	Why it is safe without the lock:
  *		ipc_entry_lookup_lockfree reads the entry from type-stable storage
  *		under the per-space seqlock (no fault, table-consistent); the ports
- *		are type-stable too, so ip_lock never faults.  We snapshot
- *		(is_generation, is_seq) around both lookups, lock the ports, then
- *		re-check the snapshot: a concurrent table grow (is_seq) or any
- *		right removal/modification (is_generation, bumped at the head of
- *		ipc_right_destroy before the entry is cleared, under ip_lock of the
- *		very port we hold) makes us return FALSE rather than act on a stale
- *		mapping.  So it never misdelivers: it confirms name->port at a
- *		valid linearization point or gives up.
+ *		are type-stable too, so ip_lock never faults.  What that gives is
+ *		only a guess: with the ports locked urmach_msg_rights_hold()
+ *		asks whether it is true.  So it never misdelivers: it confirms
+ *		name->port at a valid linearization point or gives up.
  */
 static boolean_t
 urmach_msg_lockfree_resolve(
@@ -1142,7 +1197,6 @@ urmach_msg_lockfree_resolve(
 	ipc_port_t	*dest_portp)
 {
 	natural_t	gen0 = space->is_generation;
-	natural_t	seq0 = space->is_seq;
 	ipc_entry_t	re, de;
 	ipc_port_t	rp, dp;
 
@@ -1168,15 +1222,12 @@ urmach_msg_lockfree_resolve(
 	}
 
 	/*
-	 * Re-check the snapshot now that both ports are locked.  #688: and
-	 * whether the space is still alive.  ipc_space_destroy() moves
-	 * is_generation, but a snapshot taken after that would match it, and
-	 * the table is freed once is_active is clear: on TSO, the entries
-	 * read above came from the live table if is_active is still set here.
+	 * Asked again now that both ports are locked, and with them whether
+	 * the space is still alive (#688).
 	 */
 	urmach_rcu_barrier();
-	if (space->is_generation != gen0 || space->is_seq != seq0 ||
-	    !space->is_active) {
+	if (!urmach_msg_rights_hold(space, gen0, reply_name, rp, dest_name,
+				    dp)) {
 		ip_unlock(rp);
 		ip_unlock(dp);
 		return FALSE;
@@ -1484,70 +1535,12 @@ urmach_msg_overwrite_trap_call(
 			index = MACH_PORT_INDEX(reply_name);
 			gen = MACH_PORT_GEN(reply_name);
 
-			/* --- port name cache fast path --- */
-			{
-				natural_t _cgen = space->is_generation;
-				mach_port_t _dn = hdr->msgh_remote_port;
-				ipc_port_t _cr = IP_NULL, _cd = IP_NULL;
-				int _j;
-
-				for (_j = 0; _j < IPC_PORT_CACHE_N; _j++) {
-					if (self->ith_port_cache[_j].ipc_gen == _cgen &&
-					    self->ith_port_cache[_j].ipc_space == space) {
-						mach_port_t _cn =
-							self->ith_port_cache[_j].ipc_name;
-						if (_cn == reply_name)
-							_cr = self->ith_port_cache[_j].ipc_port;
-						else if (_cn == _dn)
-							_cd = self->ith_port_cache[_j].ipc_port;
-					}
-				}
-				if (_cr != IP_NULL && _cd != IP_NULL) {
-					reply_port = _cr;
-					dest_port  = _cd;
-					ip_lock(dest_port);
-					if (!ip_active(dest_port) ||
-					    !ip_lock_try(reply_port)) {
-						ip_unlock(dest_port);
-						/* Invalidate stale cache entries */
-						for (_j = 0; _j < IPC_PORT_CACHE_N; _j++)
-							self->ith_port_cache[_j].ipc_name =
-								MACH_PORT_NULL;
-						HOT(c_mmot_cold_010++);
-						goto slow_copyin;
-					}
-					/*
-					 * #688: the generation was compared before
-					 * the ports were locked, and a space can die
-					 * in between: this thread's task terminated
-					 * while it was in here.  Asked again under
-					 * the ports' locks, as the lock-free resolve
-					 * asks it, and the space's death asked with it.
-					 * A hit no longer current is a miss: the ports
-					 * are let go, the cache is forgotten, and the
-					 * lookups below answer, each asking whether
-					 * the space is alive.
-					 */
-					urmach_rcu_barrier();
-					if (space->is_generation == _cgen &&
-					    space->is_active) {
-						counter(c_ipc_port_cache_hit++);
-						goto fast_copyin_cached;
-					}
-					ip_unlock(reply_port);
-					ip_unlock(dest_port);
-					for (_j = 0; _j < IPC_PORT_CACHE_N; _j++)
-						self->ith_port_cache[_j].ipc_name =
-							MACH_PORT_NULL;
-				}
-			}
-
 			/*
-			 * #331 step 2 part 3b: on a cache miss, try resolving both
-			 * names WITHOUT the space lock.  On success both ports are
-			 * locked and validated -- populate the per-thread cache and
-			 * take the existing fast path.  On failure fall through to the
-			 * locked lookup below (it also covers sparse/radix names).
+			 * #331 step 2 part 3b: try resolving both names WITHOUT
+			 * the space lock.  On success both ports are locked and
+			 * validated, and the existing fast path is taken.  On
+			 * failure fall through to the locked lookup below (it
+			 * also covers sparse/radix names).
 			 */
 		    {
 			ipc_port_t lf_reply, lf_dest;
@@ -1555,19 +1548,9 @@ urmach_msg_overwrite_trap_call(
 			if (urmach_msg_lockfree_resolve(space, reply_name,
 							hdr->msgh_remote_port,
 							&lf_reply, &lf_dest)) {
-				natural_t _sgen = space->is_generation;
-
 				reply_port = lf_reply;
 				dest_port  = lf_dest;
-				self->ith_port_cache[0].ipc_name  = reply_name;
-				self->ith_port_cache[0].ipc_port  = reply_port;
-				self->ith_port_cache[0].ipc_space = space;
-				self->ith_port_cache[0].ipc_gen   = _sgen;
-				self->ith_port_cache[1].ipc_name  = hdr->msgh_remote_port;
-				self->ith_port_cache[1].ipc_port  = dest_port;
-				self->ith_port_cache[1].ipc_space = space;
-				self->ith_port_cache[1].ipc_gen   = _sgen;
-				goto fast_copyin_cached;
+				goto fast_copyin_resolved;
 			}
 		    }
 
@@ -1688,28 +1671,15 @@ urmach_msg_overwrite_trap_call(
 			}
 			is_read_unlock(space);
 
-			/* Store resolved ports in thread cache (names still intact) */
-			{
-				natural_t _sgen = space->is_generation;
-				self->ith_port_cache[0].ipc_name  = hdr->msgh_local_port;
-				self->ith_port_cache[0].ipc_port  = reply_port;
-				self->ith_port_cache[0].ipc_space = space;
-				self->ith_port_cache[0].ipc_gen   = _sgen;
-				self->ith_port_cache[1].ipc_name  = hdr->msgh_remote_port;
-				self->ith_port_cache[1].ipc_port  = dest_port;
-				self->ith_port_cache[1].ipc_space = space;
-				self->ith_port_cache[1].ipc_gen   = _sgen;
-			}
-
-		    fast_copyin_cached:
+		    fast_copyin_resolved:
 			/*
 			 * #392: two names turned into two locked ports, by
-			 * whichever of the three routes got there -- the
-			 * per-thread cache, the lock-free resolve (#331), or
-			 * the table under the space lock.  One column for all
-			 * three, because what the issue asks is what resolution
-			 * COSTS, and a breakdown by route would need the routes
-			 * counted to be read at all.
+			 * whichever of the two routes got there -- the
+			 * lock-free resolve (#331), or the table under the
+			 * space lock.  One column for both, because what the
+			 * issue asks is what resolution COSTS, and a breakdown
+			 * by route would need the routes counted to be read at
+			 * all.
 			 */
 			SP_MARK(SP_RESOLVE);
 

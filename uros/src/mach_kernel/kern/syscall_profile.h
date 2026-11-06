@@ -128,7 +128,7 @@
  * hand-off never touches a run queue.
  */
 #define	SP_KMSGGET	3	/* ipc_kmsg_get: buffer AND copy, inseparable */
-#define	SP_RESOLVE	4	/* name -> port: cache, lock-free, or table  */
+#define	SP_RESOLVE	4	/* name -> port: lock-free, or table         */
 #define	SP_QUEUE	5	/* rights, queue limits, the two mqueue locks */
 /*
  * The hand-off in three, because the issue's "receiver claim + handoff

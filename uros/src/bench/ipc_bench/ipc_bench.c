@@ -2786,11 +2786,12 @@ bench_mach_print(int iters)
 #define SUITE_ICC	(1u << 18)	/* concurrent inter-task RPC (#446) */
 #define SUITE_PROD	(1u << 19)	/* a producer that does not wait (#777) */
 #define SUITE_SRVQ	(1u << 20)	/* a server with requests queued (#777) */
+#define SUITE_CCOMB	(1u << 21)	/* combined RPC, several clients (#868) */
 
 /*
  *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME, and so is
  *	`icc' (#446), which creates child tasks per run for the same reason,
- *	and so are #777's `prod' and `srvq', which do too.
+ *	and so are #777's `prod' and `srvq', and #868's `ccomb', which do too.
  *
  *	It answers one question, it creates a child task per measurement, and
  *	it prints a block that is read as a picture rather than as a row in
@@ -2800,7 +2801,7 @@ bench_mach_print(int iters)
  *	honest form: it says the suite exists and did not run.
  */
 #define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC \
-			 & ~SUITE_PROD & ~SUITE_SRVQ)
+			 & ~SUITE_PROD & ~SUITE_SRVQ & ~SUITE_CCOMB)
 
 static int
 streq(const char *a, const char *b)
@@ -2836,6 +2837,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "icc"))	    mask |= SUITE_ICC;
 	else if (streq(argv[i], "prod"))    mask |= SUITE_PROD;
 	else if (streq(argv[i], "srvq"))    mask |= SUITE_SRVQ;
+	else if (streq(argv[i], "ccomb"))   mask |= SUITE_CCOMB;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
 	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
@@ -3126,6 +3128,197 @@ bench_concurrent_intertask(int n, int iters_per_thread)
 
     for (i = 0; i < n; i++)
 	echo_child_stop(&w[i].child);
+}
+
+/* ===================================================================
+ * Combined SEND|RCV RPC, several clients (#868)
+ *
+ * The client of every row above but `comb' makes two calls, a send and a
+ * receive.  An RPC as MIG's stubs make it sends and receives in one call on its
+ * reply port, and only that reaches the request side of mach_msg's hot path, so
+ * `comb' was the one row of that shape, with one client and its server, in one
+ * task.  These have n clients, each with a port pair of its own:
+ *
+ *   same-space  each server is a thread of this task, so n threads use one
+ *		 ipc_space at once;
+ *   inter-task  each server is a task of its own, answering as
+ *		 mach_msg_server() does: an RPC as the system makes it.
+ *
+ * Each client warms its pair up before the others are released.  As with
+ * `icc', a run is a draw of where its threads land, so it is repeated in the
+ * boot and asked for by name.
+ * =================================================================== */
+
+typedef struct {
+    mach_port_t		echo_port;
+    mach_port_t		reply_port;
+    echo_child_t	child;		/* inter-task only */
+    int			iters;
+    pthread_t		th;
+} ccomb_worker_t;
+
+static volatile int	g_ccomb_ready;	/* workers whose warmup is done */
+
+/* The reply and the next request in one call, as mach_msg_server() makes them. */
+static void __attribute__((noreturn, used))
+child_combined_entry(void)
+{
+    bench_recv_buf_t	buf;
+    mach_msg_option_t	opt = MACH_RCV_MSG;
+    mach_msg_size_t	send_size = 0;
+
+    for (;;) {
+	BENCH_CALL(mach_msg(&buf.head, opt, send_size, sizeof(buf), CHILD_RECV_NAME,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	buf.head.msgh_bits	 = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	buf.head.msgh_size	 = sizeof(bench_null_msg_t);
+	buf.head.msgh_local_port = MACH_PORT_NULL;
+	buf.head.msgh_id	+= 100;
+	opt	  = MACH_SEND_MSG | MACH_RCV_MSG;
+	send_size = sizeof(bench_null_msg_t);
+    }
+}
+
+static void
+ccomb_round_trip(ccomb_worker_t *w)
+{
+    bench_recv_buf_t	buf;	/* one buffer: send from it, receive into it */
+
+    buf.head.msgh_bits =
+	MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    buf.head.msgh_size	      = sizeof(bench_null_msg_t);
+    buf.head.msgh_remote_port = w->echo_port;
+    buf.head.msgh_local_port  = w->reply_port;
+    buf.head.msgh_id	      = 1;
+
+    BENCH_CALL(mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG,
+	     sizeof(bench_null_msg_t), sizeof(buf), w->reply_port,
+	     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+}
+
+static void *
+ccomb_worker_func(void *arg)
+{
+    ccomb_worker_t	*w = (ccomb_worker_t *)arg;
+    int			i;
+
+    for (i = 0; i < WARMUP_ITERS; i++)
+	ccomb_round_trip(w);
+    __sync_fetch_and_add(&g_ccomb_ready, 1);
+
+    /* Released with the others, yielding while it waits: cc_worker_func(). */
+    while (!g_cc_go)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    for (i = 0; i < w->iters; i++)
+	ccomb_round_trip(w);
+    return (void *)0;
+}
+
+static const char *
+ccomb_label(int n, int intertask)
+{
+    switch (n) {
+    case 1:  return intertask ? "combined inter-task x1" : "combined same-space x1";
+    case 2:  return intertask ? "combined inter-task x2" : "combined same-space x2";
+    case 4:  return intertask ? "combined inter-task x4" : "combined same-space x4";
+    default: return "combined";
+    }
+}
+
+/* Answers 0, or -1 with what it set up for this client taken down. */
+static int
+ccomb_pair_start(ccomb_worker_t *w, const char *label, int intertask)
+{
+    kern_return_t	kr;
+
+    if (intertask) {
+	if (child_start(label, &w->child, child_combined_entry) != 0)
+	    return -1;
+	w->echo_port = w->child.to_child;
+    } else {
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &w->echo_port);
+	if (kr) { printf("  %s: port alloc failed %d\n", label, kr); return -1; }
+	kr = mach_port_insert_right(mach_task_self(), w->echo_port,
+				    w->echo_port, MACH_MSG_TYPE_MAKE_SEND);
+	if (kr) {
+	    printf("  %s: insert right failed %d\n", label, kr);
+	    mach_port_destroy(mach_task_self(), w->echo_port);
+	    return -1;
+	}
+	spawn_echo(label, combined_echo_thread_func, w->echo_port);
+    }
+    w->reply_port = mach_reply_port();
+    return 0;
+}
+
+static void
+ccomb_pair_stop(ccomb_worker_t *w, int intertask)
+{
+    if (intertask)
+	echo_child_stop(&w->child);
+    else
+	mach_port_destroy(mach_task_self(), w->echo_port);
+    mach_port_destroy(mach_task_self(), w->reply_port);
+}
+
+static void
+bench_concurrent_combined(int n, int intertask, int iters_per_thread)
+{
+    ccomb_worker_t	w[MAX_CC_THREADS];
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok, i, started;
+    tvalspec_t		t0, t1;
+    unsigned long long	total_ns;
+    long		total_rpc;
+    const char		*label;
+
+    if (n > MAX_CC_THREADS)
+	n = MAX_CC_THREADS;
+    label = ccomb_label(n, intertask);
+
+    g_cc_go = 0;
+    g_ccomb_ready = 0;
+    for (started = 0; started < n; started++) {
+	w[started].iters = iters_per_thread;
+	if (ccomb_pair_start(&w[started], label, intertask) != 0)
+	    break;
+    }
+    if (started < n) {
+	printf("  %s: %d of %d servers started -- not measured\n",
+	       label, started, n);
+	for (i = 0; i < started; i++)
+	    ccomb_pair_stop(&w[i], intertask);
+	return;
+    }
+
+    /* Let the children settle, as bench_inter_rpc() does for one. */
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    for (i = 0; i < n; i++)
+	pthread_create(&w[i].th, NULL, ccomb_worker_func, &w[i]);
+    while (g_ccomb_ready < n)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    ho_ok = handoff_snap(&ho_before);
+    get_time(&t0);
+    g_cc_go = 1;
+    for (i = 0; i < n; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+    ho_ok &= handoff_snap(&ho_after);
+
+    total_ns  = elapsed_ns(&t0, &t1);
+    total_rpc = (long)n * iters_per_thread;
+    printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
+	   label, total_rpc, total_ns,
+	   total_ns / (total_rpc ? total_rpc : 1));
+    bench_report_failed(label);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
+
+    for (i = 0; i < n; i++)
+	ccomb_pair_stop(&w[i], intertask);
 }
 
 /* ===================================================================
@@ -3928,7 +4121,7 @@ main(int argc, char **argv)
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
 	    { SUITE_ISWEEP,  "isweep" }, { SUITE_FORKRACE, "forkrace" },
 	    { SUITE_ICC,     "icc" },     { SUITE_PROD,    "prod" },
-	    { SUITE_SRVQ,    "srvq" },
+	    { SUITE_SRVQ,    "srvq" },    { SUITE_CCOMB,   "ccomb" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -4131,6 +4324,28 @@ main(int argc, char **argv)
 	    bench_concurrent_intertask(1, BENCH_ITERS);
 	    bench_concurrent_intertask(2, BENCH_ITERS);
 	    bench_concurrent_intertask(4, BENCH_ITERS);
+	}
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Combined SEND|RCV RPC, n clients: in one space, then across tasks,
+     * repeated within this boot [#868]
+     * --------------------------------------------------------- */
+    if (suites & SUITE_CCOMB) {
+	int	rep;
+
+	printf("--- Combined SEND|RCV, several clients (#868), %d repeats in "
+	       "this boot ---\n", ICC_REPS);
+	for (rep = 1; rep <= ICC_REPS; rep++) {
+	    printf("  -- repeat %d of %d --\n", rep, ICC_REPS);
+	    bench_concurrent_combined(1, 0, BENCH_ITERS);
+	    bench_concurrent_combined(2, 0, BENCH_ITERS);
+	    bench_concurrent_combined(4, 0, BENCH_ITERS);
+	    bench_concurrent_combined(1, 1, BENCH_ITERS);
+	    bench_concurrent_combined(2, 1, BENCH_ITERS);
+	    bench_concurrent_combined(4, 1, BENCH_ITERS);
 	}
 
 	printf("\n");

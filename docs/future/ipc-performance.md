@@ -223,6 +223,13 @@ else
 
 ## 4. Per-Thread Port Lookup Cache
 
+**Built, and removed.** This cache went in with #55 in March 2026 and came out
+with #868 in November. By then the lock-free resolve of #331 had stopped taking
+the space's lock, and the check the last risk below asks for had to read the
+entry on every hit, so nothing was left for it to save: on one kernel, with the
+cache switched off at boot, `comb` moved by +0.7 ns (p 0.65). The measure is in
+`docs/bench/micro-optimizations.md`. The section stays for its reasoning.
+
 ### What it is
 `ipc_port_translate_send(space, name)` does a hash table lookup + `ip_lock`
 on every operation. A per-thread cache of the last N (name → ipc_port_t*).
@@ -309,7 +316,7 @@ This check is the natural hook for the direct switch.
 | 1 | kmsg pool | high | low | none |
 | 2 | Continuations (re-enable) | very high | medium-high | safe-point analysis |
 | 3 | Direct thread switch | high | medium | benefits from continuations |
-| 4 | Port lookup cache | medium | medium | none |
+| 4 | Port lookup cache (removed by #868, see section 4) | none measured | medium | none |
 | 5 | Zero-copy OOL | medium | high | stable vm_map_copy |
 
 **Suggested sequence**: kmsg pool → continuations → direct switch.
@@ -327,7 +334,7 @@ it requires attention to the details of the activation-shuttle model.
 | + kmsg pool | ~600k |
 | + continuations | ~1.2M |
 | + direct switch | ~2M |
-| + port cache | ~2.2M |
+| + port cache (removed by #868: no gain measured) | ~2.2M |
 
 Conservative estimates, based on CMU Mach 3.0 / Mach 4 data on comparable
 hardware (i486/Pentium). Modern hardware with large caches and branch
