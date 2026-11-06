@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #889
+Over: 889-widen-switch-hint.patch
+Takes out: the order -- the port stays locked while the activation is locked, as it did, for the 2 ms of the widen, and at the two paths that go the other way act_test [48] stops.
+Run: --entry 14 150 -smp 4
+Expect: act_test: \[48\] hint against the lock order stopped
+
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index b6ce4c1e..cfcb4044 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -323,12 +323,13 @@ syscall_thread_switch(
+ 	     * asks whether the port is a live thread's, and leaves nothing
+ 	     * locked and a reference on the activation.
+ 	     */
+-	    ip_reference(port);
+-	    ip_unlock(port);
+-	    thr_act = convert_port_to_act(port);
+-	    ipc_port_release(port);
+-	    if (thr_act != THR_ACT_NULL)
++	    thr_act = THR_ACT_NULL;
++	    if (ip_active(port) && (ip_kotype(port) == IKOT_ACT)) {
++		    thr_act = (thread_act_t) port->ip_kobject;
+ 		    delay(2000);
++		    act_reference(thr_act);
++	    }
++	    ip_unlock(port);
+ 
+ 	    if (thr_act != THR_ACT_NULL) {
+ 			register thread_t thread;

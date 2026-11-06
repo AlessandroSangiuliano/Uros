@@ -7693,6 +7693,176 @@ arm_fifty_holes_come_back_zero(void)
 	return 1;
 }
 
+/*
+ * Arm forty-eight (#889): thread_switch() with a hint, against the two paths
+ * that take a thread's activation and then its port.  One thread asks for its
+ * own port in a loop, and is the hint.  Then another thread makes thread after
+ * thread and ends each, and each is the hint while it lives.  Both orders of
+ * those two locks together sleep for ever, so what is asked is only that all of
+ * it ends, and it is this thread, in neither of them, that says so.  At one
+ * processor a tick between the two locks is enough, which is why the others
+ * yield: a hint hands over the rest of the quantum.
+ *
+ * Every thread is made before anything starts, because this one could not make
+ * another once it has stopped.  The stop does not stay with the two: libpthreads
+ * calls task_threads() every two seconds for a thread waiting to be joined, that
+ * takes the task's lock and then each activation's, and it sleeps behind them
+ * holding the first.  thread_create() then asks for that lock for ever, in
+ * ref_task_port_locked().  What is left here, thread_switch() with no hint and
+ * printf(), needs neither.
+ */
+#define	A48_MS_SELF	2000
+#define	A48_KILLS	32
+#define	A48_MS_LIMIT	60000
+
+static volatile mach_port_t	a48_hint;
+static volatile int		a48_go, a48_kill_go, a48_stop;
+static volatile int		a48_self_done, a48_switch_done, a48_kill_done;
+static volatile unsigned	a48_selfs, a48_switches, a48_kills;
+
+static void
+a48_wait_for(volatile int *flag)
+{
+	while (!*flag)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+}
+
+static void *
+a48_self_loop(void *arg)
+{
+	mach_port_t	t;
+
+	(void) arg;
+	a48_hint = mach_thread_self();
+	a48_wait_for(&a48_go);
+	while (!a48_stop) {
+		t = mach_thread_self();
+		(void) mach_port_deallocate(mach_task_self(), t);
+		a48_selfs++;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+	}
+	a48_self_done = 1;
+	return NULL;
+}
+
+static void *
+a48_switch_loop(void *arg)
+{
+	(void) arg;
+	a48_wait_for(&a48_go);
+	while (!a48_stop) {
+		(void) thread_switch(a48_hint, SWITCH_OPTION_NONE, 0);
+		a48_switches++;
+	}
+	a48_switch_done = 1;
+	return NULL;
+}
+
+static void
+a48_spin(void)
+{
+	for (;;)
+		__asm__ volatile ("pause");
+}
+
+static void *
+a48_kill_loop(void *arg)
+{
+	struct x86_64_thread_state	state;
+	thread_act_t			t;
+	vm_address_t			stack = 0;
+	mach_port_t			self = a48_hint;
+	unsigned			i, round;
+
+	(void) arg;
+	a48_wait_for(&a48_kill_go);
+	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE)
+	    != KERN_SUCCESS)
+		return NULL;
+	for (i = 0; i < sizeof state; i++)
+		((volatile char *) &state)[i] = 0;
+	state.rip = (unsigned long) a48_spin;
+	state.rsp = stack + vm_page_size - 24;
+	state.rflags = 0x202;
+	for (round = 0; round < A48_KILLS; round++) {
+		if (thread_create(mach_task_self(), &t) != KERN_SUCCESS)
+			break;
+		if (thread_set_state(t, x86_64_THREAD_STATE,
+				     (thread_state_t) &state,
+				     x86_64_THREAD_STATE_COUNT) != KERN_SUCCESS ||
+		    thread_resume(t) != KERN_SUCCESS) {
+			(void) thread_terminate(t);
+			(void) mach_port_deallocate(mach_task_self(), t);
+			break;
+		}
+		a48_hint = t;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+		(void) thread_terminate(t);
+		a48_hint = self;
+		(void) mach_port_deallocate(mach_task_self(), t);
+		a48_kills++;
+	}
+	(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+	a48_kill_done = 1;
+	return NULL;
+}
+
+static void
+a48_wait(volatile int *done, unsigned ms)
+{
+	unsigned	i;
+
+	for (i = 0; i < ms / 10 && (done == NULL || !*done); i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+}
+
+static int
+arm_forty_eight_hint_and_lock_order(void)
+{
+	pthread_t	self, sw, kill;
+
+	if (pthread_create(&self, NULL, a48_self_loop, NULL) != 0) {
+		printf("act_test: [48] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	while (a48_hint == MACH_PORT_NULL)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	if (pthread_create(&sw, NULL, a48_switch_loop, NULL) != 0 ||
+	    pthread_create(&kill, NULL, a48_kill_loop, NULL) != 0) {
+		printf("act_test: [48] pthread_create failed — WRONG\n");
+		a48_stop = a48_go = a48_kill_go = 1;
+		return 0;
+	}
+
+	a48_go = 1;
+	a48_wait(NULL, A48_MS_SELF);
+	a48_kill_go = 1;
+	a48_wait(&a48_kill_done, A48_MS_LIMIT);
+	a48_stop = 1;
+	a48_wait(&a48_switch_done, A48_MS_LIMIT / 4);
+	a48_wait(&a48_self_done, A48_MS_LIMIT / 4);
+
+	if (!a48_kill_done || !a48_switch_done || !a48_self_done) {
+		printf("act_test: [48] hint against the lock order stopped: "
+		       "after %u hints, %u mach_thread_self() and %u of %d "
+		       "thread_terminate(), ended: killer %d, hint %d, self %d "
+		       "— WRONG (#889)\n", a48_switches, a48_selfs, a48_kills,
+		       A48_KILLS, a48_kill_done, a48_switch_done,
+		       a48_self_done);
+		return 0;
+	}
+	if (a48_kills != A48_KILLS || a48_switches == 0 || a48_selfs == 0) {
+		printf("act_test: [48] %u hints, %u mach_thread_self() and %u of "
+		       "%d thread_terminate(): the race was not run — WRONG\n",
+		       a48_switches, a48_selfs, a48_kills, A48_KILLS);
+		return 0;
+	}
+	printf("act_test: [48] %u hints against %u mach_thread_self() and %u "
+	       "thread_terminate(), and all of it ended — OK (#889)\n",
+	       a48_switches, a48_selfs, a48_kills);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7841,6 +8011,8 @@ main(int argc, char **argv)
 		passed += r;
 	arms++;		/* arm fifty, #851 */
 	passed += arm_fifty_holes_come_back_zero();
+	arms++;		/* arm forty-eight, #889 */
+	passed += arm_forty_eight_hint_and_lock_order();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

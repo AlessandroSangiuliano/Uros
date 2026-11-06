@@ -42,7 +42,8 @@
 # What a thread says: state (W=1 S=2 R=4 U=8 I=0x80), wait_event (a kernel
 # symbol names the queue; a large hash is a futex, and futex_uaddr names the
 # word), ith_state 0x10004001 = a receive in progress on saved.receive.mqueue,
-# continuation, user_timer/system_timer in 10 ms ticks.
+# continuation, user_timer/system_timer in 10 ms ticks.  One asleep on a mutex
+# has a line of its own with the holder, from own_thr.
 import gdb, os, bisect
 
 PORT = os.environ.get("WALK_PORT", "1234")
@@ -162,6 +163,14 @@ while q != head and nt < 64:
                       int(th["saved"]["receive"]["mqueue"]), int(th["futex_uaddr"]), int(th["timer"]["set"]),
                       int(th["user_timer"]["low_bits"]), int(th["system_timer"]["low_bits"]),
                       ksym(th["continuation"]) if int(th["continuation"]) else "0", rip, symb(rip), rsp))
+            # A thread asleep on a mutex: who holds it, from own_thr, as
+            # quiet_census does.  That census cannot speak while another
+            # task polls, and this one asks no one (#889).
+            if int(th["wait_from"]) and "_mutex_lock" in ksym(th["wait_from"]):
+                lock = int(th["wait_event"]) - int(ev("(long) &((mutex_t *) 0)->locked"))
+                mx = gdb.Value(lock).cast(gdb.lookup_type("mutex_t").pointer())
+                print("      mutex %#x held-by=%#x taken-at=%s locked=%d" % (
+                    lock, int(mx["own_thr"]), ksym(mx["own_pc"]), int(mx["locked"])))
             for k in range(kst - 8 * 120, kst, 8):
                 s = ksym(int(ev("*(unsigned long *)%d" % k)))
                 if "+" in s and "usimple_lock" not in s:
