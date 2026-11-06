@@ -48,11 +48,21 @@ table on the checking path.
 
 | actor | holds | does |
 |---|---|---|
-| **kernel** (`kern/cap.c`) | the HMAC key, a revocation table, the facts about resources it created | verifies tokens; answers ownership questions; tears down materialised authority on revocation |
-| **cap_server** | the issuance table (by id / by owner / by parent), the per-task manifests | applies policy and mints tokens; cascades revocation |
-| **bootstrap** | the boot bundle | installs each task's manifest before the task runs |
-| **resource servers** (block, device master, …) | nothing special | check tokens presented to them |
+| **kernel** (`kern/cap.c`) | the HMAC key, which task may install it, a revocation table and its epoch, the facts about resources it created | verifies tokens; answers ownership questions; tears down materialised authority on revocation |
+| **cap_server** | the issuance table (by id / by owner / by parent), the per-task manifests | draws the key; applies policy and mints tokens; cascades revocation |
+| **bootstrap** | the boot bundle, cap_server's port | makes cap_server's port and names its task to the kernel; installs each task's manifest before the task runs |
+| **name server** | the names, the mount registry | publishes "cap_server" for bootstrap's port; checks a mount in only on a capability for its prefix |
+| **resource servers** (block, device master, name server, …) | nothing special | check tokens presented to them |
 | **client tasks** | their own tokens | request, delegate, present |
+
+🔑 **Who cap_server is, is bootstrap's to say (#744).** Bootstrap creates the
+port cap_server serves and hands it over through `service_checkin` to that
+task alone; the name server publishes "cap_server" for it before any task can
+ask, so the name cannot be taken first; and bootstrap names cap_server's task
+to the kernel (`urmach_cap_server_set`, on the privileged host port), which
+takes the key from that task and from no other. Before, the name went to
+whichever task checked it in first, with a null signature, and the key to
+whichever task sent one first.
 
 🔑 **Identity is a port.** cap_server knows a requester as the port its message
 arrived on, not as a task id or a name. `cap_provision_task` returns a fresh
@@ -88,11 +98,24 @@ every stub.
 
 | type | `resource_id` is | checked by |
 |---|---|---|
-| `RESOURCE_FILE`, `DIRECTORY`, `MOUNT_POINT` | reserved | a filesystem server |
+| `RESOURCE_FILE`, `DIRECTORY` | reserved | a filesystem server |
+| `RESOURCE_MOUNT_POINT` (3) | `cap_name_hash()` of the prefix, exactly as it is checked in | the name server, at `netname_check_in_mount` |
 | `RESOURCE_BLK_DEVICE` (4) | the partition | block_device_server |
 | `RESOURCE_PCI_DEVICE` (5) | **the device CLASS**, not the bus address | the device master |
 | `RESOURCE_DMA_BUFFER` (10) | the kernel's region id | the device master |
+| `RESOURCE_REVOKE_NOTICES` (11) | — a permission, not a capability: no token is issued | cap_server, at `cap_subscribe_revoke` |
 | `RESOURCE_BUDGET` (9) | reserved | — |
+
+🔑 **A mount is put on a capability and taken out on a signature (#716).** The
+name server checks a mount in only when the caller shows a
+`RESOURCE_MOUNT_POINT` token for that prefix, which it verifies with the trap;
+a prefix that already has a mount is refused whoever holds one. Taking a mount
+out asks for the signature it was checked in with, and
+`MACH_PORT_NULL` signs for nobody. Before, every mount was checked in
+unsigned and anyone's to check out, "/" included, and a longer prefix needed
+nobody's leave: a task that registered "/etc" answered every open under it.
+The capability is asked at check-in only — one revoked later does not take
+the mount out; its server's signature or its death does.
 
 🔑 **`RESOURCE_PCI_DEVICE` names a class and not a bus address**, and that is a
 decision worth understanding. A bus/device/function is a property of the
@@ -143,6 +166,11 @@ required 10   any   0x3      # DMA buffers, device read|write
 Compiled entries are `{type, resource_id, ops}` — 24 bytes,
 `CAP_MANIFEST_VERSION 2`.
 
+The id is a number, `any`, or `name:<string>` — `cap_name_hash()` of the string
+(#716), for a resource named by one: `required 3 name:/proc 0x1` is the mount
+point `/proc`. mkmanifest and the servers that verify compute the hash with
+the one function, from `<mach/cap_name_hash.h>`.
+
 🔴 **`resource_id` is the v2 addition and it is what makes a manifest a
 policy.** Version 1 entries were `{type, ops}`: they could say "this task may
 acquire block-device capabilities with READ" and could *not* say which block
@@ -174,9 +202,10 @@ bootstrap creates the child task
 The manifest comes from the **bundle**, from a source the task cannot alter,
 and is handed to cap_server directly — the child never sees it pass.
 
-⚠️ A task with **no** manifest falls back to the well-known cap_server port and
-the permissive path. So *enforcement is per-task*, and a task nobody wrote a
-policy for is a task with no policy.
+⚠️ A task with **no** manifest has no per-task port and is refused every
+capability it asks for (`cap_manifest_allows()`, #511) — and every permission:
+`cap_subscribe_revoke` asks the manifest too (#744). A server that needs either
+needs a manifest.
 
 ⚠️ Every `.cmf` must be shipped in the bundle **and** the build rule must depend
 on the compiled **file**, not on the target that produces it. In Ninja a target
@@ -196,7 +225,7 @@ it looks like one.
 | `cap_derive(parent, reduced_ops) → token` | a holder | delegate a weaker child |
 | `cap_revoke(cap_id)` | a holder / an authority | revoke it and its whole subtree |
 | `cap_verify(token, op, id)` | anyone | slow path; the trap is the fast one |
-| `cap_subscribe_revoke(port)` | a resource server | receive `cap_revoke_notify` |
+| `cap_subscribe_revoke(port)` | a task whose manifest grants `RESOURCE_REVOKE_NOTICES`, on its per-task port (#744) | receive `cap_revoke_notify`, sent without blocking |
 | `cap_provision_task(task_port, manifest) → cap_port` | bootstrap only (by convention) | install a policy, return the principal port |
 
 ### Traps — `syscall_sw.h`
@@ -211,8 +240,19 @@ itself.
 | `urmach_cap_verify(token, op, id)` | 37 | any resource server | is this token good for this? |
 | `urmach_cap_use(token, op, id)` | 38 | ditto | …and consume one use |
 | `urmach_cap_revoke(cap_id)` | 39 | cap_server only | mark it dead in the kernel |
-| `urmach_cap_register(setup)` | 40 | cap_server once | hand the kernel the HMAC key |
+| `urmach_cap_register(setup)` | 40 | the task bootstrap named, once | hand the kernel the HMAC key |
 | `urmach_dma_region_owner(id, task)` | 43 | cap_server | does that task own this DMA buffer? |
+| `urmach_cap_epoch()` | 45 | a server that keeps verified handles | has anything been revoked since I last looked? |
+
+And one routine on the privileged host port, `urmach_cap_server_set(host_priv,
+task)` (`mach_host.defs`), by which bootstrap names cap_server's task: the
+kernel takes the key from that task alone, and naming another forgets the key
+(#744).
+
+🔑 **The key is the processor's to draw, and it says where it came from.**
+cap_server takes it from RDSEED, then RDRAND (Intel SDM Vol. 1, 253665-093US,
+§7.3.17), and
+only when neither answers from the TSC, which it prints as guessable (#744).
 
 ---
 
@@ -304,6 +344,14 @@ kernel is where that can happen immediately.
 🔴 **Blocked, not pass-through.** Restoring the entry the device started in
 would make the revocation *give* it all of memory: a widening dressed as a
 withdrawal, and one somebody trusted.
+
+🔑 **And the notice is not what stops a mediated use (#744).** A server that
+keeps a handle opened on a token — the block server does — reads
+`urmach_cap_epoch()` on each use and asks the token again whenever the epoch
+has moved, so a revocation reaches the handle whether or not a notice does.
+cap_server sends `cap_revoke_notify` without blocking (`MACH_SEND_TIMEOUT` 0)
+and says when one was not delivered: a subscriber that does not read cannot
+hold the revocation up, and a notice is an early word, not the guard.
 
 ---
 
@@ -476,11 +524,17 @@ Stated so nobody reads this document as a description of a finished system.
 - **`cap_provision_task` is not gated to bootstrap.** Any caller can invoke it;
   the setup-port pattern that would restrict it is a follow-up.
 - **Most resource types have no server checking them.** Only
-  `RESOURCE_BLK_DEVICE`, `RESOURCE_PCI_DEVICE` and `RESOURCE_DMA_BUFFER` are
-  verified anywhere today. `FILE`, `DIRECTORY`, `MOUNT_POINT`, `PRINTER`,
-  `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values with no enforcement
-  behind them — the browser example above is therefore *architecture*, not a
-  transcript.
+  `RESOURCE_BLK_DEVICE`, `RESOURCE_PCI_DEVICE`, `RESOURCE_DMA_BUFFER` and
+  `RESOURCE_MOUNT_POINT` are verified anywhere today, and
+  `RESOURCE_REVOKE_NOTICES` is a permission cap_server asks for. `FILE`,
+  `DIRECTORY`, `PRINTER`, `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values
+  with no enforcement behind them — the browser example above is therefore
+  *architecture*, not a transcript.
+- **A filesystem server holds its clients' task ports.** `fs_open` carries the
+  client's task port, and FLIPC's connect hands it to the endpoint's server;
+  each needs only to learn of the client's death (#911). So the capability
+  that decides who may serve a mount is, today, also deciding who may reach
+  every reader's memory.
 - **A manifest decides every capability.** A task that ships none is refused
   all of them (`cap_manifest_allows()`, #511). Eighteen programs ship one: the
   drivers, the tests that claim devices, `cap_test` and a few commands.
@@ -499,6 +553,13 @@ this is where to look, and what to break to confirm it still works.
 | revocation tears the mapping down | `blk: gave 0:31.2 back …` | removing `urmach_cap_revoke` from cap_server's `cap_revoke` |
 | a claim's operations are its own | `irq_claim_test [14]`, `[15]`, `[16]` | `ablations/621-dma-unchecked`, `621-irq-unchecked`, `621-mmio-unchecked` |
 | a second claim only narrows | `irq_claim_test [14]`, `[17]` | `ablations/621-claim-not-narrowed`, `621-claim-widened` |
+| the kernel takes the key from bootstrap's cap_server only | `netname_test [9]`; `cap: urmach_cap_register (setup) failed` | `ablations/744-key-from-the-first-task`, `744-cap-server-never-named` |
+| "cap_server" is held before cap_server starts | `netname_test [10]`, `cap_test [33]` | `ablations/744-cap-server-name-unpublished`, `744-cap-server-taken-over` |
+| a slot's port is its own server's | `cap_test [34]` | `ablations/744-service-checkin-to-anyone` |
+| subscribing to revocations is a permission | `cap_test [35]` | `ablations/744-subscribe-from-anyone` |
+| a revoked handle stops with no notice | `cap_test [5]` | `ablations/744-handle-not-reverified`, over `744-widen-no-revoke-notices` |
+| a mount is put on a capability for its prefix | `mount_test [4]`, `[6]` | `ablations/716-mount-without-capability` |
+| a mount is checked in and out on a signature | `mount_test [2]`, `[7]`, `[11]` | `ablations/716-null-mount-signature-accepted` |
 
 ⚠️ `[11]` asks `device_dma_owned` *before* trying, because a test written as
 "try it and see" would claim any device nobody had claimed yet — a self-test
