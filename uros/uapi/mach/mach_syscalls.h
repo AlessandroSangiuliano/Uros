@@ -414,6 +414,9 @@ extern kern_return_t syscall_thread_terminate(
  * Linux's CLONE_CHILD_CLEARTID, used by libposix-uros to wake a
  * pthread joiner that's polling __thread_list_lock.  Pass 0 to clear.
  */
+extern kern_return_t urmach_thread_set_fs_base(
+	vm_offset_t		base);
+
 extern kern_return_t urmach_thread_set_cleartid(
 				vm_offset_t	cleartid_addr);
 				

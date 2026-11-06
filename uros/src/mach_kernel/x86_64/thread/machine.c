@@ -225,6 +225,40 @@ act_machine_switch_pcb(thread_act_t thr_act)
 }
 
 /*
+ *	Routine:	urmach_thread_set_fs_base [mach trap]
+ *	Purpose:
+ *		#414: this thread's FS base.  thread_set_state() does it for a
+ *		thread that is stopped and refuses the caller, and musl's main
+ *		thread has nobody else to set it: __init_tp() calls for it from
+ *		the thread itself, as i386 installs its LDT entry.
+ *	Conditions:
+ *		Nothing locked.  At splsched, so that a switch between the two
+ *		writes cannot leave the pcb and the processor disagreeing.
+ *	Returns:
+ *		KERN_SUCCESS
+ *		KERN_INVALID_ARGUMENT	The base is not an address a thread may
+ *					have, which `wrmsr' would fault on or
+ *					hand ring 3 the kernel's half (#440).
+ */
+kern_return_t
+urmach_thread_set_fs_base(
+	vm_offset_t	base)
+{
+	pcb_t		pcb = current_act()->mact.pcb;
+	spl_t		s;
+
+	if (!va_is_canonical(base) || !va_is_user(base))
+		return KERN_INVALID_ARGUMENT;
+
+	s = splsched();
+	pcb->fs_base = base;
+	wrmsr(MSR_FS_BASE, base);
+	percpu()->fs_base = base;
+	splx(s);
+	return KERN_SUCCESS;
+}
+
+/*
  * Prepare a thread that has never run so that switching to it arrives at
  * `start_pos'.
  *
