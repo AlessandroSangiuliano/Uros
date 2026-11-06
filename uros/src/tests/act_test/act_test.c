@@ -8400,6 +8400,11 @@ arm_fifty_one_rights_that_left(void)
  * pthread gets its thread pointer.  And what the trap must refuse: `wrmsr'
  * faults at ring 0 on a non-canonical address, and a kernel address is one no
  * thread may have (#440).
+ *
+ * Page zero is mapped for the arm.  A processor no thread here has set a base
+ * on holds 0, and a thread that lands there without its base would fault on
+ * %fs:0 and take the task with it, on a kernel where every other arm is right.
+ * With the page there it reads a word that is not its own and says so.
  */
 #define	A52_THREADS	8
 #define	A52_ROUNDS	20000
@@ -8467,7 +8472,7 @@ a52_given(void *arg)
 }
 
 static int
-arm_fifty_two_fs_base_goes_with_the_thread(void)
+a52_asked(void)
 {
 	pthread_t			th[A52_THREADS], given;
 	struct x86_64_thread_state	state;
@@ -8562,6 +8567,24 @@ arm_fifty_two_fs_base_goes_with_the_thread(void)
 	       "non-canonical one were refused with 0x%x and 0x%x (#414)\n",
 	       A52_THREADS, A52_ROUNDS, (int) k, (int) nc);
 	return 1;
+}
+
+static int
+arm_fifty_two_fs_base_goes_with_the_thread(void)
+{
+	vm_address_t	zero = 0;
+	kern_return_t	k;
+	int		ok;
+
+	k = vm_allocate(mach_task_self(), &zero, vm_page_size, FALSE);
+	if (k != KERN_SUCCESS || zero != 0) {
+		printf("act_test: [52] page zero could not be mapped: 0x%x, at "
+		       "0x%lx — WRONG\n", (int) k, (unsigned long) zero);
+		return 0;
+	}
+	ok = a52_asked();
+	(void) vm_deallocate(mach_task_self(), zero, vm_page_size);
+	return ok;
 }
 
 int
