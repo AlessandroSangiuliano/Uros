@@ -71,8 +71,7 @@ wait_for(const char *name)
  * number: a timing of refusals would be a timing of something else.
  */
 static void
-bench_query_stats(mach_port_t host_port, mach_port_t gpu_port,
-		  struct uros_cap *cap, int iters)
+bench_query_stats(mach_port_t gpu_port, struct uros_cap *cap, int iters)
 {
 	char			blob[GPU_STATS_BLOB_MAX];
 	mach_msg_type_number_t	blob_len;
@@ -82,7 +81,12 @@ bench_query_stats(mach_port_t host_port, mach_port_t gpu_port,
 	kern_return_t		kr;
 	int			i;
 
-	if (host_get_clock_service(host_port, REALTIME_CLOCK, &clk)
+	/*
+	 * By the host NAME port, which every task has: bootstrap hands the
+	 * privileged one only to a line with -H (#620), and a clock asks for no
+	 * privilege.
+	 */
+	if (host_get_clock_service(mach_host_self(), REALTIME_CLOCK, &clk)
 	    != KERN_SUCCESS) {
 		printf("gpustat: bench NOT ASKED -- no clock to time it with\n");
 		return;
@@ -186,7 +190,7 @@ main(int argc, char **argv)
 	       (unsigned long long)stats.scroll_count);
 
 	if (bench_iters > 0)
-		bench_query_stats(host_port, gpu_port, &cap, bench_iters);
+		bench_query_stats(gpu_port, &cap, bench_iters);
 
 	return 0;
 }
