@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #414
+Takes out: the entry stack pointer at argc: eight below it, every crt reads its frame one word off
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[16\] WRONG -- /hello_dyn_world ended with status 0x9
+
+diff --git a/uros/src/servers/exec_server/exec_load.c b/uros/src/servers/exec_server/exec_load.c
+--- a/uros/src/servers/exec_server/exec_load.c
++++ b/uros/src/servers/exec_server/exec_load.c
+@@ -308,7 +308,7 @@
+      * below it put argc in a word that was not there, and the next word
+      * where argv[0] should be.
+      */
+-    regs.rsp = (uint64_t)stack_top;
++    regs.rsp = (uint64_t)stack_top - 0x8;
+ 
+     kr = thread_set_state(th, x86_64_THREAD_STATE,
+                           (thread_state_t)&regs, reg_count);

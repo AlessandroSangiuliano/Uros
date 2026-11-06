@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #414
+Takes out: the sections of an ELF64 image, so that exec_server finds no capability manifest in it
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: exec: /hello_exec -> TASK_CAP_PORT=0x[0-9a-f]+ \(manifest 60 bytes, default\)
+
+diff --git a/uros/src/lib/libelf/libelf.c b/uros/src/lib/libelf/libelf.c
+--- a/uros/src/lib/libelf/libelf.c
++++ b/uros/src/lib/libelf/libelf.c
+@@ -173,7 +173,6 @@
+         if (!range_ok(img, shdr_off, shdr_span))
+             return ELF_ERR_TRUNCATED;
+         img->_shdr  = img->_buf + shdr_off;
+-        img->_shnum = (int)e->e_shnum;
+ 
+         if (e->e_shstrndx != SHN_UNDEF && e->e_shstrndx < e->e_shnum) {
+             const Elf64_Shdr *s = (const Elf64_Shdr *)img->_shdr + e->e_shstrndx;

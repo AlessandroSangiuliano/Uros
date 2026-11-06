@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #414
+Takes out: PT_INTERP on an ELF64 image, so that a dynamic program starts at its own entry with nothing relocated
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[16\] WRONG -- /hello_dyn_world ended with status 0x9
+
+diff --git a/uros/src/lib/libelf/libelf.c b/uros/src/lib/libelf/libelf.c
+--- a/uros/src/lib/libelf/libelf.c
++++ b/uros/src/lib/libelf/libelf.c
+@@ -772,7 +772,8 @@
+         elf_phdr_view_t ph;
+         const char *path;
+ 
+-        if (elf_phdr_get(img, i, &ph) != ELF_OK || ph.type != PT_INTERP)
++        if (elf_phdr_get(img, i, &ph) != ELF_OK || ph.type != PT_INTERP
++            || img->_is_64)
+             continue;
+         if (!ph.data || ph.filesz == 0)
+             return NULL;

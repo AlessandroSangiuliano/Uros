@@ -3,7 +3,7 @@ Issue: #414
 Takes out: libc.auxv, so that mallocng's first look for AT_RANDOM reads address 0
 Accel: tcg,kvm
 Run: --entry 14 300 -smp 4
-Expect: exception_no_server: terminating task 0x[0-9a-f]+ . exception 1, code\[0\]=0x2 code\[1\]=0x0[^0-9a-f]*$
+Expect: \(libposix-uros\): hw exception 1 \(SIGSEGV\) thread=0x[0-9a-f]+ code=[12] subcode=0x0 
 
 diff --git a/uros/src/contrib/musl/src/internal/uros_main_thread.c b/uros/src/contrib/musl/src/internal/uros_main_thread.c
 --- a/uros/src/contrib/musl/src/internal/uros_main_thread.c
