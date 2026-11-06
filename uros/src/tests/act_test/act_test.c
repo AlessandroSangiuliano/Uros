@@ -6287,6 +6287,7 @@ static mach_port_t	arm_forty_host;
 static volatile unsigned arm_forty_got;
 static volatile mach_port_t arm_forty_thread;
 static volatile unsigned arm_forty_seen;	/* the server read this */
+static int		arm_forty_tick_asked;	/* a tick was seen to undo one */
 
 static int
 arm_forty_counts(mach_port_t host, unsigned *at_return, unsigned *at_tick,
@@ -6423,6 +6424,7 @@ arm_forty_no_call(mach_port_t host)
 			printf("act_test: [40] a tick undid the bet of a send "
 			       "alone, try %u; the thread ran %llu TSC ticks "
 			       "after it\n", try + 1, took);
+			arm_forty_tick_asked = 1;
 			return 1;
 		}
 		if (l1 != l0)
@@ -6539,9 +6541,12 @@ arm_forty_asked(mach_port_t host)
 	(void) mach_port_destroy(mach_task_self(), reply);
 	(void) mach_port_destroy(mach_task_self(), arm_forty_service);
 	(void) mach_port_destroy(mach_task_self(), arm_forty_port);
-	if (ok)
+	if (ok && arm_forty_tick_asked)
 		printf("act_test: [40] a hand-off no call comes back to is undone "
 		       "at a tick, and before a combined call's switch — OK\n");
+	else if (ok)
+		printf("act_test: [40] a hand-off is undone before a combined "
+		       "call's switch, and the tick was not asked — OK\n");
 	return ok;
 }
 
