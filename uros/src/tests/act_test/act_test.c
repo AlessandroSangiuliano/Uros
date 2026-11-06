@@ -8587,6 +8587,97 @@ arm_fifty_two_fs_base_goes_with_the_thread(void)
 	return ok;
 }
 
+/*
+ * Arm fifty-three (#414): a task whose threads all fault at once.
+ *
+ * A child with nothing mapped and no exception port, and threads that fault on
+ * their first instruction, resumed together.  One terminates the task and the
+ * others find it being terminated and end themselves, and the first must not
+ * trip over an activation on its way out: that stopped the kernel, from a task
+ * with no privilege.  The verdict is that each child goes and the machine is
+ * there to say so.  The window is narrow, so a boot asks a few and the merge
+ * test asks many boots, and a widen holds it open on demand.
+ */
+#define	A53_TASKS	16
+#define	A53_THREADS	4
+#define	A53_WAIT_MS	5000
+
+static int
+a53_round(mach_port_t me)
+{
+	mach_port_t			child = MACH_PORT_NULL;
+	mach_port_t			th[A53_THREADS];
+	struct x86_64_thread_state	state;
+	task_basic_info_data_t		info;
+	mach_msg_type_number_t		n;
+	kern_return_t			kr;
+	unsigned			i, made = 0;
+	int				waited = 0, gone = 0;
+
+	kr = task_create(me, NULL, 0, FALSE, &child);
+	if (kr == KERN_SUCCESS)
+		kr = task_set_exception_ports(child, EXC_MASK_ALL,
+					      MACH_PORT_NULL, EXCEPTION_DEFAULT,
+					      0);
+	for (i = 0; kr == KERN_SUCCESS && i < A53_THREADS; i++) {
+		kr = thread_create(child, &th[i]);
+		if (kr != KERN_SUCCESS)
+			break;
+		made++;
+		__builtin_memset(&state, 0, sizeof state);
+		state.rip = 0x1000;	/* nothing is mapped */
+		state.rsp = 0x2000;
+		kr = thread_set_state(th[i], x86_64_THREAD_STATE,
+				      (thread_state_t) &state,
+				      x86_64_THREAD_STATE_COUNT);
+	}
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [53] the child could not be built: 0x%x — "
+		       "WRONG\n", (int) kr);
+		if (child != MACH_PORT_NULL) {
+			(void) task_terminate(child);
+			(void) mach_port_deallocate(me, child);
+		}
+		return 0;
+	}
+	for (i = 0; i < made; i++)
+		(void) thread_resume(th[i]);
+	while (waited < A53_WAIT_MS) {
+		n = TASK_BASIC_INFO_COUNT;
+		if (task_info(child, TASK_BASIC_INFO, (task_info_t) &info, &n)
+		    != KERN_SUCCESS) {
+			gone = 1;
+			break;
+		}
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+		waited++;
+	}
+	for (i = 0; i < made; i++)
+		(void) mach_port_deallocate(me, th[i]);
+	if (!gone) {
+		printf("act_test: [53] a task whose threads all faulted was "
+		       "still there after %d waits — WRONG\n", waited);
+		(void) task_terminate(child);
+	}
+	(void) mach_port_deallocate(me, child);
+	return gone;
+}
+
+static int
+arm_fifty_three_threads_fault_together(void)
+{
+	mach_port_t	me = mach_task_self();
+	unsigned	i;
+
+	for (i = 0; i < A53_TASKS; i++)
+		if (!a53_round(me))
+			return 0;
+	printf("act_test: [53] %u tasks of %u threads faulted together, no "
+	       "exception port, and each went, with the machine still here to "
+	       "say so (#414)\n", A53_TASKS, A53_THREADS);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8743,6 +8834,8 @@ main(int argc, char **argv)
 	passed += arm_fifty_one_rights_that_left();
 	arms++;		/* arm fifty-two, #414 */
 	passed += arm_fifty_two_fs_base_goes_with_the_thread();
+	arms++;		/* arm fifty-three, #414 */
+	passed += arm_fifty_three_threads_fault_together();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
