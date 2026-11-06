@@ -2975,7 +2975,7 @@ int		sched_bound_displaced_slot = -1;
  *	and in the reader; a port to weak memory needs real ones in both.
  *
  *	Called with the locks that let this processor be taken off the idle
- *	queue: the reader takes none of them.
+ *	queue: the readers take none of them.
  */
 static __inline__ void
 urmach_processor_dispatch(
@@ -2985,6 +2985,30 @@ urmach_processor_dispatch(
 	processor->next_thread = th;
 	urmach_rcu_barrier();
 	processor->state = PROCESSOR_DISPATCHING;
+}
+
+/*
+ *	urmach_processor_dispatched_thread:
+ *
+ *	The readers' half of urmach_processor_dispatch(): the thread given to a
+ *	processor the caller has just found PROCESSOR_DISPATCHING.  There are
+ *	two readers on the processor itself: the idle loop, and thread_setrun()
+ *	in an interrupt that comes while the idle loop waits and another
+ *	processor is writing.  With no other processor to write,
+ *	thread_setrun()'s NCPUS == 1 branch reads the field as it is.
+ */
+static __inline__ thread_t
+urmach_processor_dispatched_thread(
+	processor_t	processor)
+{
+	thread_t	th;
+
+	urmach_rcu_barrier();
+	th = processor->next_thread;
+	if (th == THREAD_NULL)
+		panic("processor %d is DISPATCHING with no next_thread (#799)",
+		      processor->slot_num);
+	return (th);
 }
 
 /*
@@ -3210,8 +3234,8 @@ thread_setrun(
 		     * first, inverted them every time.  The NCPUS == 1 branch
 		     * below, which no build compiles, always compared.
 		     */
-		    if (processor->next_thread->sched_pri > th->sched_pri) {
-			cur_th = processor->next_thread;
+		    cur_th = urmach_processor_dispatched_thread(processor);
+		    if (cur_th->sched_pri > th->sched_pri) {
 			processor->next_thread = th;
 			th = cur_th;
 		    }
@@ -3285,8 +3309,8 @@ thread_setrun(
 		     current_thread()->sched_pri > th->sched_pri)) {
 		    if (processor->state == PROCESSOR_DISPATCHING) {
 			/* #787: as in the unbound branch, only if better */
-			if (processor->next_thread->sched_pri > th->sched_pri) {
-			    cur_th = processor->next_thread;
+			cur_th = urmach_processor_dispatched_thread(processor);
+			if (cur_th->sched_pri > th->sched_pri) {
 			    processor->next_thread = th;
 			    th = cur_th;
 			}
@@ -3884,11 +3908,8 @@ idle_thread_continue(void)
 			 *	Commmon case -- cpu dispatched.
 			 *	#799: state first, as it was written last.
 			 */
-			urmach_rcu_barrier();
-			new_thread = (thread_t) *threadp;
-			if (new_thread == THREAD_NULL)
-				panic("idle thread: processor %d is DISPATCHING "
-				      "with no next_thread (#799)", mycpu);
+			new_thread =
+			    urmach_processor_dispatched_thread(myprocessor);
 			*threadp = (volatile thread_t) THREAD_NULL;
 			myprocessor->state = PROCESSOR_RUNNING;
 			/*
