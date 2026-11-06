@@ -359,27 +359,46 @@ host_info(
 		}
 
 		/*
-		 * #446: what -X has done, for a benchmark to read around what
+		 * #446: what the hand-off has done, for a benchmark to read around what
 		 * it measures (kern/sched_prim.c).
 		 */
 	case HOST_RPC_HANDOFF_INFO:
 		{ register host_rpc_handoff_info_t	handoff_info;
 		  unsigned long	same = 0, other = 0, fenced = 0;
+		  unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE] = { 0 };
 
-		if (*count < HOST_RPC_HANDOFF_INFO_COUNT)
+		/*
+		 * #777: a caller built before the undo counts asks for the four
+		 * fields of #446 and gets them; one that asks for more gets the
+		 * two counts too, and the count handed back says which it got.
+		 */
+		if (*count < HOST_RPC_HANDOFF_INFO_COUNT_446)
 			return(KERN_FAILURE);
 
 		handoff_info = (host_rpc_handoff_info_t) info;
 #if	NCPUS > 1
 		sched_rpc_handoff_counts(&same, &other, &fenced);
+		sched_rpc_handoff_undone(undone);
 		handoff_info->reach = (unsigned int) sched_rpc_handoff;
 #else	/* NCPUS > 1 */
-		handoff_info->reach = 0;	/* one processor: no -X */
+		handoff_info->reach = 0;	/* one processor: no hand-off */
 #endif	/* NCPUS > 1 */
 		handoff_info->same_task  = (unsigned int) same;
 		handoff_info->other_task = (unsigned int) other;
 		handoff_info->other_task_fenced = (unsigned int) fenced;
 
+		if (*count < HOST_RPC_HANDOFF_INFO_COUNT) {
+			*count = HOST_RPC_HANDOFF_INFO_COUNT_446;
+			return(KERN_SUCCESS);
+		}
+		handoff_info->undone_receive =
+		    (unsigned int) undone[SCHED_HANDOFF_UNDO_RECEIVE];
+		handoff_info->undone_return =
+		    (unsigned int) undone[SCHED_HANDOFF_UNDO_RETURN];
+		handoff_info->undone_left =
+		    (unsigned int) undone[URMACH_HANDOFF_UNDO_LEFT];
+		handoff_info->undone_tick =
+		    (unsigned int) undone[URMACH_HANDOFF_UNDO_TICK];
 		*count = HOST_RPC_HANDOFF_INFO_COUNT;
 		return(KERN_SUCCESS);
 		}

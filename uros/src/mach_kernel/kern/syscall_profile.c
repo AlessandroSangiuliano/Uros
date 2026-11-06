@@ -517,8 +517,8 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 void
 syscall_profile_dump(struct syscall_profile_thread *p)
 {
-	uint64_t	ret_cyc, ret_n;
-	uint32_t	ret_mean = 0;
+	uint64_t	ret_cyc, ret_n, frame_cyc, frame_n;
+	uint32_t	ret_mean = 0, frame_mean = 0;
 	int		ret_known = 0;
 	int		count[SP_SHAPES];
 	int		i, ph, shape;
@@ -546,6 +546,16 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	}
 
 	/*
+	 * #777: and the calls that slept, which since #771 leave through their
+	 * frame and not by the tail above -- printed beside it, so that a
+	 * return read from this line covers both halves of the traps, and a
+	 * zero count says that half was not timed rather than that it was free.
+	 */
+	syscall_profile_frame_return_cycles(&frame_cyc, &frame_n);
+	if (frame_n != 0)
+		frame_mean = (uint32_t) (frame_cyc / frame_n);
+
+	/*
 	 * #757: the dump is ONE BLOCK on the console, from its header to its
 	 * last line.  The two threads of a ping-pong dump at the same moment,
 	 * and their lines used to alternate: on omen's metal 43 of intra's 52
@@ -559,8 +569,8 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       "%u..%u of %u this thread made (%u dropped, %u not sampled: "
 	       "taken off the processor before the entry was read); shapes: %d "
 	       "hand-off, %d blocked, %d awake; %u marks x %u cyc = %u of "
-	       "instrument; return %u (mean of %u); "
-	       "kernel-wide %u candidates, %u hand-offs\n",
+	       "instrument; return %u (mean of %u), through the frame %u (mean "
+	       "of %u); kernel-wide %u candidates, %u hand-offs\n",
 	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
 	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen, p->ndropped,
 	       p->npreempted,
@@ -569,6 +579,7 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       (unsigned int) SP_MARKS, pair.cost,
 	       (unsigned int) SP_MARKS * pair.cost,
 	       ret_mean, (unsigned int) ret_n,
+	       frame_mean, (unsigned int) frame_n,
 	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
 	printf("syscall_profile   routes kernel-wide: %u combined (%u handed "
 	       "off), %u send-only, %u receive-only (%u of them resumed in the "

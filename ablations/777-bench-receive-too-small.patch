@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #777
+Takes out: the client's room for the reply in the intra rows -- 24 bytes for a reply of 24 and a trailer of 8, so every receive ends in MACH_RCV_TOO_LARGE, and the row must say so; the rows are in the bench-only bundle, so UROS_ABLATE_REF_BUILD names a build configured with -DUROS_BUNDLE_BENCH_ONLY=ON and -DUROS_BENCH_SUITES=intra
+Accel: kvm
+Run: --entry 14 900 -smp 4
+Expect: WRONG: [0-9]+ mach_msg\(\) call\(s\) failed
+
+diff --git a/uros/src/bench/ipc_bench/ipc_bench.c b/uros/src/bench/ipc_bench/ipc_bench.c
+index c85acf4d..4a46928d 100644
+--- a/uros/src/bench/ipc_bench/ipc_bench.c
++++ b/uros/src/bench/ipc_bench/ipc_bench.c
+@@ -526,7 +526,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
+     tvalspec_t		t0, t1;
+     int			i;
+     bench_recv_buf_t	send_buf;
+-    bench_recv_buf_t	recv_buf;
++    bench_null_msg_t	recv_buf;
+ 
+     /* Create echo port and reply port */
+     kr = mach_port_allocate(mach_task_self(),

@@ -591,6 +591,13 @@ typedef integer_t mach_msg_option_t;
 #define	MACH_RCV_MSG		0x00000002
 
 #define MACH_SEND_TIMEOUT	0x00000010
+/*
+ * #777: "I block next" -- set on a send that its caller follows with a receive
+ * in a separate call, so that the kernel may run the thread the send wakes on
+ * this processor, where it runs as soon as the caller blocks.  A combined send
+ * and receive needs no bit: the kernel sees whether its receive will block.
+ */
+#define MACH_SEND_HANDOFF	0x00000020
 #define MACH_SEND_INTERRUPT	0x00000040	/* libmach implements */
 #define MACH_SEND_CANCEL	0x00000080
 #define MACH_SEND_ALWAYS	0x00010000	/* internal use only */

@@ -184,7 +184,6 @@ ENTRIES="
 45 harness --iommu_intel
 45 harness --iommu_amd
 17 harness
-18 harness
 21 halted
 22 harness
 22 hpetgaps - 6,sockets=2,cores=3
@@ -252,6 +251,8 @@ ENTRIES="
 64 harness - 1
 65 harness
 65 harness - 1
+67 harness
+67 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -260,6 +261,7 @@ SKIPPED="
 10: -rB opens the debugger's prompt and waits for someone to type
 11: -rL opens the debugger's prompt on a thread with a continuation and waits
 12: -rS stays up for the console door and never ends
+18: the same boot as entry 14 since the hand-off went on by default (#777); it stays so that the numbers after it do
 19: -B panics on purpose; it needs a verdict of its own
 54: -e asks only of a build with UROS_SYSCALL_PROFILE, which a merge build is not; ablate.sh runs it with the widen patch, which compiles the profile in (#622)
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)

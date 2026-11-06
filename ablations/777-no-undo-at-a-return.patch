@@ -1,0 +1,39 @@
+Kind: ablation
+Issue: #777
+Takes out: the undo at a call that is not the receive MACH_SEND_HANDOFF promised, and at a return with the hand-off still pending -- the woken thread stays queued behind a waker that goes on running
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[39\] 20 bets lost at a call that was not a receive, none undone
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index dcf0da25..a9a38638 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -431,8 +431,6 @@ mach_msg_send(
+ 		 * not a receive.  Undone first, so that the name below is this
+ 		 * send's.
+ 		 */
+-		if (self->handoff_wakee != THREAD_NULL)
+-			(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RETURN);
+ 		if ((option & MACH_SEND_HANDOFF) ||
+ 		    urmach_msg_rcv_will_block(space, reply_name, rcv_name))
+ 			self->handoff_hint = TRUE;
+@@ -3070,9 +3068,6 @@ urmach_msg_overwrite_trap_call(
+ 		 */
+ 		if (sched_rpc_handoff) {
+ 			/* an earlier call's promise, broken: see mach_msg_send() */
+-			if (self->handoff_wakee != THREAD_NULL)
+-				(void) thread_handoff_undo(
+-				    SCHED_HANDOFF_UNDO_RETURN);
+ 			if ((option & MACH_SEND_HANDOFF) ||
+ 			    urmach_msg_rcv_will_block(space, reply_name,
+ 						      rcv_name))
+@@ -3291,9 +3286,6 @@ mach_msg_overwrite_trap(
+ 		if (self->handoff_wakee != THREAD_NULL) {
+ 			if (self->handoff_spare)
+ 				self->handoff_spare = FALSE;
+-			else
+-				(void) thread_handoff_undo(
+-				    SCHED_HANDOFF_UNDO_RETURN);
+ 		}
+ 	}
+ #endif	/* NCPUS > 1 */

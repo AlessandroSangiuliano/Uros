@@ -212,8 +212,8 @@ act_machine_switch_pcb(thread_act_t thr_act)
  */
 /*
  * Where a thread that has never run begins -- and, since #771, where a thread
- * switched to with a continuation begins again, from the frame
- * context_reset_to_continuation() built at the top of its stack.
+ * switched to with a continuation begins again, at the top of its stack: since
+ * #777 by context_switch_to()'s jump, with no frame built for it (context.S).
  *
  * context_init() can only place a function and one argument, and the argument
  * a new thread needs -- which thread it took the processor from -- is not
@@ -242,8 +242,9 @@ thread_begin_trampoline(void *unused)
 	 * new thread starts from carries CTX_RFLAGS_INITIAL, IF set.  From then
 	 * on every thread arrived here with interrupts on, before the dispatch,
 	 * and the sti had nothing left to do; since #771 so does every thread
-	 * resumed in its continuation, whose frame is built the same way, once
-	 * per receive that slept.  The dispatch runs with interrupts on, as it
+	 * resumed in its continuation, once per receive that slept -- since
+	 * #777 with no frame, the start loading the same constant (context.S's
+	 * context_switch_to()).  The dispatch runs with interrupts on, as it
 	 * does after every other switch: a thread resumed in place returns into
 	 * thread_invoke() with the flag it blocked with and dispatches there.
 	 *
@@ -256,9 +257,9 @@ thread_begin_trampoline(void *unused)
 #if	MACH_ASSERT
 	if (!interrupts_enabled())
 		panic("thread %p arrived in the trampoline with interrupts off: the "
-		      "frame the switch popped did not carry IF, which "
-		      "CTX_RFLAGS_INITIAL sets for a thread that has never run and "
-		      "for one reset to its continuation (#455, #771)",
+		      "switch did not set IF, which CTX_RFLAGS_INITIAL carries for "
+		      "a thread that has never run and for one resumed in its "
+		      "continuation (#455, #771, #777)",
 		      current_thread());
 #endif	/* MACH_ASSERT */
 
@@ -552,11 +553,11 @@ thread_machine_flush(thread_act_t thr_act)
  * Point a kernel stack at `continuation' -- the thread will resume there
  * rather than where it was interrupted.
  *
- * The machine-independent scheduler uses this to discard a stack's contents
- * on purpose: a thread that blocks with a continuation does not need its
- * stack kept, so the stack is reset and the thread costs nothing while it
- * waits.  That is the whole point of continuations and it is why this is
- * initialisation rather than a jump.
+ * For a thread with nothing on its stack to come back to: one being started,
+ * or sent back up an RPC whose server ended (kern/thread.c).  A thread that
+ * blocks with a continuation does not come through here: the switch saves
+ * nothing for it and jumps to its restart (context_switch_continuation(),
+ * #771, #777), and what is on its stack is left as it was.
  */
 void
 machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
@@ -571,10 +572,8 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	/*
 	 * Through the trampoline, exactly as thread_machine_create does (#459).
 	 *
-	 * This is the OTHER way a thread comes to start on a fresh stack, and
-	 * it is the one the scheduler uses most: every thread that blocks with
-	 * a continuation has its stack reset here and resumes through this
-	 * context.  Naming the continuation as the entry point sends it
+	 * This is the OTHER way a thread comes to start on a fresh stack.
+	 * Naming the continuation as the entry point sends it
 	 * straight into its own code, skipping thread_dispatch(), the balanced
 	 * enable_preemption(), spllo() -- and the STI, so it resumes with
 	 * interrupts disabled and is never interrupted again.
@@ -591,20 +590,19 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	 * everything owed to a thread arriving on a fresh stack.
 	 */
 	/*
-	 * 🔴 AND THE VECTOR-STATE DECISION SURVIVES THE RESTART (#561).
+	 * 🔴 AND THE VECTOR-STATE DECISION SURVIVES THIS (#561).
 	 *
-	 * This is a RE-initialisation: the context already exists and its
-	 * thread already has a history, which is why the call below carries
-	 * pcb->ctx.fpu_area across rather than asking for a new one.  The
-	 * flag belongs to the same history -- it says what this THREAD needs,
-	 * not what the stack it is being restarted on needs -- so it is
-	 * carried the same way.
+	 * The context already exists here, and the call below gives it back
+	 * its own area, pcb->ctx.fpu_area, which context_init() zeroes for a
+	 * thread that has nothing in it yet.  The flag is another matter: it
+	 * says what this THREAD needs, not what the stack it starts on needs,
+	 * and it was decided before this runs, so it is kept across.
 	 *
 	 * ❌ Without this the exemption was granted at creation and thrown away
 	 * here, and the counters said so: 14 contexts exempted, 8.8 MILLION
 	 * switches, and not one save or restore skipped.  context_init() sets
 	 * the safe default, which is correct for a context being built and
-	 * wrong for one being rebuilt.
+	 * wrong for one built already.
 	 */
 	int	keep_fpu_switch = pcb->ctx.fpu_switch;
 
@@ -1051,13 +1049,14 @@ void fpu_area_free(void *area)
  *
  * 🔴 `continuation' is honoured now (#771).  A non-null one means the
  * outgoing thread blocked declaring it does not need its kernel stack kept:
- * its resume point is reset to the top of its stack, in thread_continue, and
- * the frames it is running in now are abandoned.  It used to be `(void)'d,
- * and the thread resumed by returning through those frames, on the stack it
- * blocked on -- so the continuation was never run and no stack could ever be
- * given up, which #772 (stack hand-off) needs.  The reset keeps the thread's
- * floating-point area, which still holds its live user state (its save is
- * below, before the switch); only the kernel register-save frame is rebuilt.
+ * it resumes at the top of its stack, in thread_continue, and the frames it is
+ * running in now are abandoned.  It used to be `(void)'d, and the thread
+ * resumed by returning through those frames, on the stack it blocked on -- so
+ * the continuation was never run and no stack could ever be given up, which
+ * #772 (stack hand-off) needed.  Its floating-point area is kept, since it
+ * still holds the live user state (its save is below, before the switch);
+ * since #777 nothing else of the thread is written -- no registers, no frame
+ * -- as i386's Switch_context writes nothing for one (cswitch.S).
  */
 thread_t
 switch_context(thread_t old, void (*continuation)(void), thread_t new)
@@ -1189,15 +1188,15 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	if (continuation != 0) {
 		/*
 		 * The outgoing thread needs none of the frames it blocked in:
-		 * reset its resume point to the top of its stack, then switch
-		 * away abandoning them (#771).  It keeps the stack itself --
-		 * giving that up is #772's.  thread_begin_trampoline ends in
-		 * thread_continue(), which runs the continuation.
+		 * switch away abandoning them, with nothing saved, and it
+		 * starts again at the top of its stack (#771, #777).  It keeps
+		 * the stack itself -- giving that up was #772's.
+		 * thread_begin_trampoline ends in thread_continue(), which runs
+		 * the continuation.
 		 */
-		context_reset_to_continuation(&old_act->mact.pcb->ctx,
-					      thread_begin_trampoline);
 		context_switch_continuation(&old_act->mact.pcb->ctx,
-					    &new_act->mact.pcb->ctx);
+					    &new_act->mact.pcb->ctx,
+					    thread_begin_trampoline);
 	} else
 		context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
 

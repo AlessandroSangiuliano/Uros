@@ -1,0 +1,25 @@
+Kind: widen
+Issue: #777
+Holds open: the window between urmach_msg_rcv_will_block()'s look at an empty queue and the receive -- 300 us after the send of act_test arm 39's replies, when the send handed off, for a request to land in it
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index dcf0da25..24a87df4 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -438,7 +438,14 @@ mach_msg_send(
+ 			self->handoff_hint = TRUE;
+ 	}
+ #endif	/* NCPUS > 1 */
+-	mr = ipc_mqueue_send(kmsg, option & MACH_SEND_TIMEOUT, timeout);
++	{
++		mach_msg_id_t	widen_id = kmsg->ikm_header.msgh_id;
++
++		mr = ipc_mqueue_send(kmsg, option & MACH_SEND_TIMEOUT, timeout);
++		if (widen_id == 3902 &&
++		    current_thread()->handoff_wakee != THREAD_NULL)
++			delay(300);
++	}
+ #if	NCPUS > 1
+ 	current_thread()->handoff_hint = FALSE;
+ 	/*

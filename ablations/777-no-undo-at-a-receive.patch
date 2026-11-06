@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #777
+Over: 777-widen-queue-fills-in-the-window.patch
+Takes out: the undo at a receive that did not block -- a bet lost there leaves the woken thread queued behind its waker for a tick or a quantum
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[39\] 20 bets lost at a receive that found a message, none undone
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index dcf0da25..ca4f6129 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -631,8 +631,6 @@ mach_msg_receive(
+ 	 * woken thread run and forgotten it (thread_invoke()).  The bet is lost
+ 	 * here, and the thread it queued must not wait behind this one.
+ 	 */
+-	if (self->handoff_wakee != THREAD_NULL)
+-		(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RECEIVE);
+ #endif	/* NCPUS > 1 */
+ 
+ 	if (mr != MACH_MSG_SUCCESS) {
+@@ -3128,8 +3126,6 @@ urmach_msg_overwrite_trap_call(
+ 		ipc_object_release(rcv_object);
+ #if	NCPUS > 1
+ 		/* #777: the receive did not block, so slow_send's bet is lost */
+-		if (self->handoff_wakee != THREAD_NULL)
+-			(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RECEIVE);
+ #endif	/* NCPUS > 1 */
+ 
+ 

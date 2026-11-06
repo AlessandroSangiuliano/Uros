@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #777
+Takes out: the hand-off's name for its receiver -- thread_setrun() gives the hint to the first thread it sees again, whichever wakeup that is, so the thread that waits on this processor need not be the one the send was for
+Run: --entry 67 300 -smp 4
+Expect: wakee_test: WRONG .* a wakeup of another thread took the hand-off
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index cac857e7..98304389 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -3070,8 +3070,8 @@ thread_setrun(
+ 
+ 		/* #370: self is THREAD_NULL on an early-AP that has not yet
+ 		 * installed its current thread; nothing to hand off then. */
+-		if (self != THREAD_NULL && self->handoff_target == th) {
+-			self->handoff_target = THREAD_NULL;
++		if (self != THREAD_NULL && self->handoff_hint) {
++			self->handoff_hint = FALSE;
+ 			if (
+ #if	MACH_HOST
+ 			    pset == current_processor()->processor_set &&

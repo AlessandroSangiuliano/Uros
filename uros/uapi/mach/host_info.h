@@ -142,7 +142,7 @@ typedef	integer_t	host_flavor_t;
 #define HOST_PRIORITY_INFO	5	/* priority information */
 #define HOST_PAGING_INFO	6	/* VM/paging info */
 #define HOST_IPC_CACHE_INFO	7	/* kmsg pool cache statistics */
-#define HOST_RPC_HANDOFF_INFO	8	/* -X hand-offs, by task (#446) */
+#define HOST_RPC_HANDOFF_INFO	8	/* hand-offs on block, by task (#446) */
 
 struct host_basic_info {
 	integer_t	max_cpus;	/* max number of cpus possible */
@@ -278,7 +278,7 @@ typedef struct host_ipc_cache_info	*host_ipc_cache_info_t;
 		(sizeof(host_ipc_cache_info_data_t)/sizeof(integer_t))
 
 /*
- * #446: what the hand-off on block (-X, #356) has done since boot -- the woken
+ * #446: what the hand-off on block (#356) has done since boot -- the woken
  * threads it queued on their waker's processor, of the waker's task and of
  * another, and those of another task the same-task fence sent to an idle
  * processor instead -- and how far it reaches.  The counts are the boot's, so a caller
@@ -290,11 +290,21 @@ struct host_rpc_handoff_info {
 	unsigned int	same_task;	/* woken threads of the waker's task */
 	unsigned int	other_task;	/* woken threads of another task */
 	unsigned int	other_task_fenced; /* of another task, kept out */
+	/*
+	 * #777: the bets lost and undone, by where it showed.  Appended, so a
+	 * caller that asks for the four above (HOST_RPC_HANDOFF_INFO_COUNT_446)
+	 * still gets them, and the count it is handed back says which it got.
+	 */
+	unsigned int	undone_receive;	/* a receive that found a message */
+	unsigned int	undone_return;	/* a return to user space unblocked */
+	unsigned int	undone_left;	/* the waker left, for another thread */
+	unsigned int	undone_tick;	/* a tick found it still pending */
 };
 
 typedef struct host_rpc_handoff_info	host_rpc_handoff_info_data_t;
 typedef struct host_rpc_handoff_info	*host_rpc_handoff_info_t;
 #define HOST_RPC_HANDOFF_INFO_COUNT \
 		(sizeof(host_rpc_handoff_info_data_t)/sizeof(integer_t))
+#define HOST_RPC_HANDOFF_INFO_COUNT_446	4	/* the fields before #777 */
 
 #endif	/* _MACH_HOST_INFO_H_ */

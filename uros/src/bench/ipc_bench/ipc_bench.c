@@ -193,7 +193,7 @@ print_cache_stats(const char *label,
 }
 
 /* ===================================================================
- * What -X did during a measurement (#446)
+ * What the hand-off did during a measurement (#446)
  *
  * The hand-off on block (#356) queues a woken thread on its waker's processor
  * instead of an idle one's.  Which arm a row was taken in, and whether the
@@ -207,6 +207,11 @@ typedef struct {
     unsigned int same_task;
     unsigned int other_task;
     unsigned int other_task_fenced;
+    int		 has_undo;	/* #777: the kernel answered the four below */
+    unsigned int undone_receive;
+    unsigned int undone_return;
+    unsigned int undone_left;
+    unsigned int undone_tick;
 } handoff_snap_t;
 
 static int
@@ -224,11 +229,17 @@ handoff_snap(handoff_snap_t *s)
     s->same_task  = info.same_task;
     s->other_task = info.other_task;
     s->other_task_fenced = info.other_task_fenced;
+    /* #777: a kernel from before the undo answers four fields, and says so. */
+    s->has_undo = (count >= HOST_RPC_HANDOFF_INFO_COUNT);
+    s->undone_receive = s->has_undo ? info.undone_receive : 0;
+    s->undone_return  = s->has_undo ? info.undone_return : 0;
+    s->undone_left    = s->has_undo ? info.undone_left : 0;
+    s->undone_tick    = s->has_undo ? info.undone_tick : 0;
     return 1;
 }
 
 /*
- * A line whether -X is on or not, and one when the kernel did not answer: a
+ * A line whether the hand-off is on or not, and one when the kernel did not answer: a
  * row without it would be read as one of an arm it was not taken in.  A row of
  * N round trips wakes at most 2N threads, one per message.
  */
@@ -239,38 +250,57 @@ print_handoff_stats(const char *label, int ok,
     unsigned int same, other, fenced;
 
     if (!ok) {
-	printf("  [-X] %-30s not answered: host_info refused "
+	printf("  [hand-off] %-30s not answered: host_info refused "
 	       "HOST_RPC_HANDOFF_INFO\n", label);
 	return;
     }
     if (after->reach == 0) {
-	printf("  [-X] %-30s off\n", label);
+	printf("  [hand-off] %-30s off\n", label);
 	return;
     }
     same   = after->same_task  - before->same_task;
     other  = after->other_task - before->other_task;
     fenced = after->other_task_fenced - before->other_task_fenced;
     /*
-     * #446: where -X reaches any task, a woken thread of another task sent to
-     * an idle processor is the same-task fence come back -- WRONG, which the
-     * harness fails the boot on.  Where -X is same-task only (i386) it is the
+     * #446: where the hand-off reaches any task, a woken thread of another
+     * task sent to an idle processor is the same-task fence come back --
+     * WRONG, which the harness fails the boot on.  Where it is same-task only (i386) it is the
      * fence doing its job, and only counted.
      */
     if (after->reach == 1)
-	printf("  [-X] %-30s same task: %u woken on their waker's "
+	printf("  [hand-off] %-30s same task: %u woken on their waker's "
 	       "processor, %u of another task; %u of another task kept out\n",
 	       label, same + other, other, fenced);
     else if (after->reach == 2 && fenced == 0)
-	printf("  [-X] %-30s any task: %u woken on their waker's "
+	printf("  [hand-off] %-30s any task: %u woken on their waker's "
 	       "processor, %u of another task\n", label, same + other, other);
     else if (after->reach == 2)
-	printf("  [-X] %-30s any task: %u woken on their waker's "
+	printf("  [hand-off] %-30s any task: %u woken on their waker's "
 	       "processor, %u of another task; %u of another task kept out by "
 	       "the fence -- WRONG (#446)\n", label, same + other, other, fenced);
     else
-	printf("  [-X] %-30s reach %u: %u woken on their waker's "
+	printf("  [hand-off] %-30s reach %u: %u woken on their waker's "
 	       "processor, %u of another task\n",
 	       label, after->reach, same + other, other);
+
+    /*
+     * #777: the bets of this row that were lost and undone, on a line of its
+     * own so the [hand-off] line keeps the form the analyses read.  A kernel from
+     * before the undo has nothing to say here, and says nothing.
+     */
+    if (before->has_undo && after->has_undo)
+	printf("  [undo] %-28s %u bet(s) lost and undone: %u at a receive "
+	       "that found a message, %u at a return to user space without a "
+	       "block, %u when the waker left for another thread, %u at a "
+	       "tick\n", label,
+	       (after->undone_receive - before->undone_receive) +
+	       (after->undone_return - before->undone_return) +
+	       (after->undone_left - before->undone_left) +
+	       (after->undone_tick - before->undone_tick),
+	       after->undone_receive - before->undone_receive,
+	       after->undone_return - before->undone_return,
+	       after->undone_left - before->undone_left,
+	       after->undone_tick - before->undone_tick);
 }
 
 /* ===================================================================
@@ -301,6 +331,30 @@ elapsed_ns(const tvalspec_t *before, const tvalspec_t *after)
     return ns;
 }
 
+/*
+ * A row times what its loop does, and its loop used to drop what mach_msg()
+ * answered, so a row timing an error read like any other.  Every call of a
+ * timed loop goes through BENCH_CALL(), and the row says how many failed, as
+ * WRONG, which the harness fails the boot on (#777).
+ */
+static volatile unsigned long bench_failed_calls;
+
+#define BENCH_CALL(call)						\
+    do {								\
+	if ((call) != MACH_MSG_SUCCESS)					\
+	    bench_failed_calls++;					\
+    } while (0)
+
+static void
+bench_report_failed(const char *label)
+{
+    if (bench_failed_calls != 0) {
+	printf("  %s: WRONG: %lu mach_msg() call(s) failed, this row timed "
+	       "an error path (#777)\n", label, bench_failed_calls);
+	bench_failed_calls = 0;
+    }
+}
+
 static void
 print_result(const char *label, unsigned long long total_ns, int iters)
 {
@@ -311,6 +365,7 @@ print_result(const char *label, unsigned long long total_ns, int iters)
 
     printf("  %-34s %5llu.%02llu us/op  (%d iters, %llu us total)\n",
 	   label, us_whole, us_frac, iters, total_us);
+    bench_report_failed(label);
 }
 
 /* ===================================================================
@@ -441,7 +496,7 @@ echo_thread_func(void *arg)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -471,7 +526,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     tvalspec_t		t0, t1;
     int			i;
     bench_recv_buf_t	send_buf;
-    bench_null_msg_t	recv_buf;
+    bench_recv_buf_t	recv_buf;
 
     /* Create echo port and reply port */
     kr = mach_port_allocate(mach_task_self(),
@@ -498,10 +553,10 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -517,10 +572,10 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
@@ -631,8 +686,8 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 	buf.head.msgh_remote_port = echo_port;
 	buf.head.msgh_local_port  = reply_port;
 	buf.head.msgh_id	  = 1;
-	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
-		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     ho_ok = handoff_snap(&ho_before);
@@ -645,8 +700,8 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 	buf.head.msgh_remote_port = echo_port;
 	buf.head.msgh_local_port  = reply_port;
 	buf.head.msgh_id	  = 1;
-	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
-		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
     ho_ok &= handoff_snap(&ho_after);
@@ -692,7 +747,7 @@ child_echo_entry(void)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -720,12 +775,13 @@ typedef struct {
 } echo_child_t;
 
 /*
- * 0 when the child's thread is running.  On a failure, says which step under
- * `label' and returns -1, leaving what it took, as bench_inter_rpc() always
- * has.
+ * 0 when the child's thread is running in `entry'.  On a failure, says which
+ * step under `label' and returns -1, leaving what it took, as
+ * bench_inter_rpc() always has.  #777's suites start children of their own
+ * kinds the same way: a consumer, and a server for several clients.
  */
 static int
-echo_child_start(const char *label, echo_child_t *c)
+child_start(const char *label, echo_child_t *c, void (*entry)(void))
 {
     kern_return_t		kr;
     vm_offset_t			child_stack;
@@ -802,7 +858,7 @@ echo_child_start(const char *label, echo_child_t *c)
     kr = thread_create(c->task, &c->thread);
     if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return -1; }
 
-    kr = bench_child_thread_start(c->thread, child_echo_entry,
+    kr = bench_child_thread_start(c->thread, entry,
 				  child_stack + CHILD_STACK_SIZE);
     if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return -1; }
 
@@ -813,6 +869,13 @@ echo_child_start(const char *label, echo_child_t *c)
     if (kr) { printf("  %s: thread_resume failed %d\n", label, kr); return -1; }
 
     return 0;
+}
+
+/* The echo child of inter, isweep and icc. */
+static int
+echo_child_start(const char *label, echo_child_t *c)
+{
+    return child_start(label, c, child_echo_entry);
 }
 
 /*
@@ -845,7 +908,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     tvalspec_t			t0, t1;
     int				i;
     bench_recv_buf_t		send_buf;
-    bench_null_msg_t		recv_buf;
+    bench_recv_buf_t		recv_buf;
 
     /*
      * Steps 1 to 6: the child, its ports and its running thread.
@@ -867,10 +930,10 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /*
@@ -887,10 +950,10 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
@@ -1470,7 +1533,7 @@ slow_echo_thread_func(void *arg)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -1538,10 +1601,10 @@ bench_slow_receive(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -1556,11 +1619,11 @@ bench_slow_receive(const char *label, int send_size, int iters)
 	send_buf.head.msgh_id	      = 1;
 
 	/* Send wakes the blocked echo thread — continuation fires here */
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
 
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -1839,10 +1902,10 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     get_time(&t0);
@@ -1855,10 +1918,10 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -1956,10 +2019,10 @@ bench_pp_inter(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     get_time(&t0);
@@ -1971,10 +2034,10 @@ bench_pp_inter(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -2070,7 +2133,7 @@ ool_echo_thread_func(void *arg)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -2090,7 +2153,7 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
     tvalspec_t		t0, t1;
     int			i;
     bench_ool_send_msg_t send_buf;
-    bench_null_msg_t	recv_buf;
+    bench_recv_buf_t	recv_buf;
     vm_offset_t		data_buf;
 
     /* Allocate OOL data buffer */
@@ -2126,10 +2189,10 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -2150,10 +2213,10 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -2253,7 +2316,7 @@ oolp_echo_thread_func(void *arg)
 	reply.head.msgh_remote_port = msg.head.msgh_remote_port;
 	reply.head.msgh_local_port  = MACH_PORT_NULL;
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
-	mach_msg(&reply.head, MACH_SEND_MSG, sizeof(reply), 0,
+	mach_msg(&reply.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(reply), 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     return (void *) 0;
@@ -2355,19 +2418,19 @@ bench_ool_ports(unsigned int nports)
 
     for (i = 0; i < 20u; i++) {
 	OOLP_FILL();
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     get_time(&t0);
     for (i = 0; i < (unsigned int) iters; i++) {
 	OOLP_FILL();
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 #undef OOLP_FILL
@@ -2378,6 +2441,7 @@ bench_ool_ports(unsigned int nports)
 	   nports, nports == 1 ? "port" : "ports",
 	   per_op / 1000, (per_op % 1000) / 10,
 	   per_op / (unsigned long) nports, iters);
+    bench_report_failed("ool ports");
 
     for (i = 0; i < nports; i++)
 	mach_port_destroy(mach_task_self(), names[i]);
@@ -2458,7 +2522,7 @@ child_ool_echo_entry(void)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -2478,7 +2542,7 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
     tvalspec_t			t0, t1;
     int				i;
     bench_ool_send_msg_t	send_buf;
-    bench_null_msg_t		recv_buf;
+    bench_recv_buf_t		recv_buf;
     vm_offset_t			data_buf;
 
     /* Allocate OOL data buffer */
@@ -2546,10 +2610,10 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
 
     /* Timed run */
@@ -2569,10 +2633,10 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
 	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
 	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     get_time(&t1);
 
@@ -2688,6 +2752,8 @@ bench_mach_print(int iters)
  *   inter    — inter-task Mach IPC RPC
  *   isweep   — inter-task RPC swept by size, repeated within one boot (#446)
  *   icc      — concurrent inter-task RPC, 1, 2 and 4 pairs, repeated (#446)
+ *   prod     — a producer that does not wait, to a consumer in a task of its own (#777)
+ *   srvq     — a server with requests queued, 2 and 4 clients (#777)
  *   forkrace — concurrent task_create/task_terminate, no IPC (#558)
  *   port     — port alloc/destroy, mach_port_names
  *   pp       — protected payload (test + intra + inter)
@@ -2718,10 +2784,13 @@ bench_mach_print(int iters)
 #define SUITE_ISWEEP	(1u << 16)	/* inter-task RPC by size, repeated (#446) */
 #define SUITE_FORKRACE	(1u << 17)	/* concurrent task_create/terminate (#558) */
 #define SUITE_ICC	(1u << 18)	/* concurrent inter-task RPC (#446) */
+#define SUITE_PROD	(1u << 19)	/* a producer that does not wait (#777) */
+#define SUITE_SRVQ	(1u << 20)	/* a server with requests queued (#777) */
 
 /*
  *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME, and so is
- *	`icc' (#446), which creates child tasks per run for the same reason.
+ *	`icc' (#446), which creates child tasks per run for the same reason,
+ *	and so are #777's `prod' and `srvq', which do too.
  *
  *	It answers one question, it creates a child task per measurement, and
  *	it prints a block that is read as a picture rather than as a row in
@@ -2730,7 +2799,8 @@ bench_mach_print(int iters)
  *	compared against those runs.  Naming it in `suites NOT run' is the
  *	honest form: it says the suite exists and did not run.
  */
-#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC)
+#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC \
+			 & ~SUITE_PROD & ~SUITE_SRVQ)
 
 static int
 streq(const char *a, const char *b)
@@ -2764,6 +2834,8 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
 	else if (streq(argv[i], "icc"))	    mask |= SUITE_ICC;
+	else if (streq(argv[i], "prod"))    mask |= SUITE_PROD;
+	else if (streq(argv[i], "srvq"))    mask |= SUITE_SRVQ;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
 	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
@@ -2847,10 +2919,10 @@ cc_worker_func(void *arg)
 	send_buf.head.msgh_local_port  = w->reply_port;
 	send_buf.head.msgh_id	       = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, w->send_size, 0,
-		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 w->reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, w->send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 w->reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
     }
     return (void *)0;
 }
@@ -2918,6 +2990,7 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
 	   "(%llu ns/RPC aggregate)\n",
 	   nthreads, total_rpc, total_ns,
 	   total_ns / (total_rpc ? total_rpc : 1));
+    bench_report_failed("concurrent same-space");
 }
 
 /* ===================================================================
@@ -2961,10 +3034,10 @@ icc_round_trip(icc_worker_t *w)
     send_buf.head.msgh_local_port  = MACH_PORT_NULL;
     send_buf.head.msgh_id	   = 1;
 
-    mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(bench_null_msg_t), 0,
-	     MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-    mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-	     w->child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    BENCH_CALL(mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(bench_null_msg_t), 0,
+	     MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+    BENCH_CALL(mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+	     w->child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
 }
 
 static void *
@@ -3048,10 +3121,470 @@ bench_concurrent_intertask(int n, int iters_per_thread)
     printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
 	   label, total_rpc, total_ns,
 	   total_ns / (total_rpc ? total_rpc : 1));
+    bench_report_failed(label);
     print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     for (i = 0; i < n; i++)
 	echo_child_stop(&w[i].child);
+}
+
+/* ===================================================================
+ * Senders that do not block (#777)
+ *
+ * Every sender in the suites above blocks right after it sends, which is the
+ * case the hand-off on block was made for.  #777 makes the hand-off happen
+ * only where the kernel knows the sender blocks, and these two suites are the
+ * cases that change makes a difference to -- a sender that does NOT block next:
+ *
+ *   prod  a producer that sends a message, works PROD_WORK_US without
+ *	   blocking, and sends the next: a plain send, no option bit.  Where
+ *	   every send bets on a block (-X before #777), the consumer it wakes is
+ *	   queued behind it on its processor until a tick, a quantum, or a full
+ *	   queue makes the producer stop.
+ *   srvq  a server with requests queued: several clients, each in an RPC of
+ *	   its own (the send and the receive of the reply in one call, as MIG's
+ *	   stubs make it), to one server whose reply and next receive are one
+ *	   call (as mach_msg_server() makes it).  With a request already queued
+ *	   the server's reply does not block, and the client it answers must not
+ *	   wait behind it.
+ *
+ * Both say how long the woken thread waited -- the consumer from a message's
+ * send to its receive, a client a whole round trip -- in TSC ticks, turned into
+ * microseconds by a rate this task measures against the clock first.  #777's
+ * question is how many of those waits reach a millisecond.  The children are
+ * created after the measurement, so their copy of this memory holds the rate:
+ * they may not call MIG, and do not need to.
+ * =================================================================== */
+
+static inline unsigned long long
+bench_tsc(void)
+{
+    unsigned int	lo, hi;
+
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
+static unsigned long long	g_tsc_per_us;	/* 0 until measured */
+
+/*
+ * The TSC's rate against the clock, measured once: the clock read twice, around
+ * TSC_CAL_TICKS of the TSC spun through -- 20 to 70 ms on the machines measured.
+ *
+ * ⚠️ TWO READINGS OF THE CLOCK, NOT A LOOP OF THEM.  The clock can step back by
+ * a little between two readings on two processors (#318), and elapsed_ns() then
+ * answers nearly 2^64.  The first version polled the clock until 20 ms had gone
+ * and ended at once on such a step, with a rate of 0 (KVM, four processors,
+ * 03/11); the second started again on one, and on omen's metal, at ccac34fd,
+ * met one in each of ten tries.  Two readings tens of milliseconds apart are
+ * not undone by a step of microseconds.  A rate outside 100 MHz to 20 GHz is
+ * still refused, and a refusal says what it saw.
+ */
+#define	TSC_CAL_TICKS	(1ULL << 26)
+
+static int
+tsc_calibrate(const char *label)
+{
+    tvalspec_t		t0, t1;
+    unsigned long long	c0, c1;
+    unsigned long	spins;
+    long long		d;
+    int			tries;
+
+    if (g_tsc_per_us != 0)
+	return 0;
+    for (tries = 0; tries < 3; tries++) {
+	get_time(&t0);
+	c0 = bench_tsc();
+	/* Bounded: a TSC that stopped must not hold the benchmark for ever. */
+	for (spins = 0; bench_tsc() - c0 < TSC_CAL_TICKS && spins < (1UL << 30);
+	     spins++)
+	    ;
+	c1 = bench_tsc();
+	get_time(&t1);
+	d = ((long long)t1.tv_sec - (long long)t0.tv_sec) * 1000000000LL +
+	    ((long long)t1.tv_nsec - (long long)t0.tv_nsec);
+	if (d > 1000000LL) {
+	    g_tsc_per_us = (c1 - c0) * 1000ULL / (unsigned long long)d;
+	    if (g_tsc_per_us >= 100 && g_tsc_per_us <= 20000)
+		return 0;
+	}
+	printf("  %s: the TSC ran %llu ticks in %lld ns of the clock -- "
+	       "refused\n", label, c1 - c0, d);
+	g_tsc_per_us = 0;
+    }
+    printf("  %s: the TSC's rate could not be measured in %d tries -- not "
+	   "measured\n", label, tries);
+    return -1;
+}
+
+/* How long woken threads waited, by decade of microseconds. */
+#define	WAIT_BUCKETS	5	/* < 10 us, < 100 us, < 1 ms, < 10 ms, more */
+
+typedef struct {
+    unsigned int	n;
+    unsigned int	bucket[WAIT_BUCKETS];
+    unsigned long long	max_us;
+} wait_hist_t;
+
+/*
+ * `from' and `to' may be read on two processors.  Their TSCs run together on
+ * every machine this measures, but a reading that comes out before the stamp
+ * is counted as no wait rather than as an unsigned wrap.
+ */
+static void
+wait_hist_add(wait_hist_t *h, unsigned long long from, unsigned long long to)
+{
+    unsigned long long	us;
+    int			b;
+
+    us = (to > from && g_tsc_per_us != 0) ? (to - from) / g_tsc_per_us : 0;
+    b = us < 10 ? 0 : us < 100 ? 1 : us < 1000 ? 2 : us < 10000 ? 3 : 4;
+    h->n++;
+    h->bucket[b]++;
+    if (us > h->max_us)
+	h->max_us = us;
+}
+
+static void
+wait_hist_merge(wait_hist_t *into, const wait_hist_t *h)
+{
+    int	b;
+
+    into->n += h->n;
+    for (b = 0; b < WAIT_BUCKETS; b++)
+	into->bucket[b] += h->bucket[b];
+    if (h->max_us > into->max_us)
+	into->max_us = h->max_us;
+}
+
+static void
+wait_hist_print(const char *label, const wait_hist_t *h)
+{
+    printf("  [wait] %-28s %u: %u under 10 us, %u under 100 us, %u under "
+	   "1 ms, %u under 10 ms, %u longer; max %llu us; %u of 1 ms or more\n",
+	   label, h->n, h->bucket[0], h->bucket[1], h->bucket[2], h->bucket[3],
+	   h->bucket[4], h->max_us, h->bucket[3] + h->bucket[4]);
+}
+
+/* ---- prod: a producer that does not wait ---- */
+
+#define	PROD_MSGS	500
+#define	PROD_WORK_US	2000	/* the producer's work between two sends */
+
+/*
+ * 🔑 WHOSE IS A LONG WAIT: THE SCHEDULER'S, OR THE WHOLE MACHINE'S.
+ *
+ * On omen's metal, at the first measurement, a few waits a boot still reached
+ * 2.5 ms with the hand-off out of the way.  A wait the kernel caused leaves the
+ * rest of the machine running; one that stopped every processor -- a system
+ * management interrupt, firmware -- stops a thread spinning elsewhere too.  So
+ * the consumer notes when each wait of a millisecond or more began, and a
+ * thread of this task spins beside the producer noting every gap of 100 us or
+ * more in its own reading of the TSC: a long wait with a gap at the same time
+ * is the machine's.
+ */
+#define	PROD_LONG_MAX	8	/* noted, of each kind */
+#define	PROD_LONG_US	1000
+#define	STALL_GAP_US	100
+
+typedef struct {
+    mach_msg_header_t	head;
+    unsigned long long	stamp;	/* bench_tsc() at the send */
+    unsigned int	done;	/* 1: answer the histogram, start a new one */
+    unsigned int	pad;
+} prod_msg_t;
+
+typedef struct {
+    mach_msg_header_t	head;
+    wait_hist_t		hist;
+    unsigned int	nlong;	/* waits of PROD_LONG_US or more, all of them */
+    unsigned int	pad;
+    unsigned long long	long_at[PROD_LONG_MAX];	/* the send's TSC */
+    unsigned long long	long_us[PROD_LONG_MAX];
+} prod_answer_t;
+
+static void __attribute__((noreturn, used))
+child_prod_entry(void)
+{
+    struct { prod_msg_t m; char trailer[64]; }	in;
+    prod_answer_t				out;
+    unsigned long long				now, us;
+
+    memset(&out, 0, sizeof out);
+    for (;;) {
+	mach_msg(&in.m.head, MACH_RCV_MSG, 0, sizeof(in), CHILD_RECV_NAME,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	now = bench_tsc();
+	if (!in.m.done) {
+	    wait_hist_add(&out.hist, in.m.stamp, now);
+	    us = (now > in.m.stamp && g_tsc_per_us != 0)
+		? (now - in.m.stamp) / g_tsc_per_us : 0;
+	    if (us >= PROD_LONG_US) {
+		if (out.nlong < PROD_LONG_MAX) {
+		    out.long_at[out.nlong] = in.m.stamp;
+		    out.long_us[out.nlong] = us;
+		}
+		out.nlong++;
+	    }
+	    continue;
+	}
+	out.head.msgh_bits	  = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	out.head.msgh_size	  = sizeof(out);
+	out.head.msgh_remote_port = CHILD_SEND_NAME;
+	out.head.msgh_local_port  = MACH_PORT_NULL;
+	out.head.msgh_id	  = 777;
+	mach_msg(&out.head, MACH_SEND_MSG, sizeof(out), 0, MACH_PORT_NULL,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	memset(&out, 0, sizeof out);
+    }
+}
+
+static volatile int		g_stall_stop;
+static unsigned int		g_nstall;	/* gaps seen, all of them */
+static unsigned long long	g_stall_at[PROD_LONG_MAX];
+static unsigned long long	g_stall_us[PROD_LONG_MAX];
+
+/* Spins until told to stop, noting each gap of STALL_GAP_US or more. */
+static void *
+stall_watch_func(void *arg)
+{
+    unsigned long long	last, now, gap = STALL_GAP_US * g_tsc_per_us;
+
+    (void)arg;
+    last = bench_tsc();
+    while (!g_stall_stop) {
+	now = bench_tsc();
+	if (now - last >= gap) {
+	    if (g_nstall < PROD_LONG_MAX) {
+		g_stall_at[g_nstall] = last;
+		g_stall_us[g_nstall] = (now - last) / g_tsc_per_us;
+	    }
+	    g_nstall++;
+	}
+	last = now;
+    }
+    return (void *)0;
+}
+
+/* "N: at +T us for D us, ..." -- times from `t0', the first `n' of `count'. */
+static void
+print_long_list(const char *tag, const char *label, const char *what,
+		unsigned int count, const unsigned long long *at,
+		const unsigned long long *dur, unsigned long long t0)
+{
+    unsigned int	i, n = count < PROD_LONG_MAX ? count : PROD_LONG_MAX;
+
+    printf("  [%s] %-28s %u %s", tag, label, count, what);
+    for (i = 0; i < n; i++)
+	printf("%s at +%llu us for %llu us", i ? "," : ":",
+	       (at[i] > t0 && g_tsc_per_us != 0) ? (at[i] - t0) / g_tsc_per_us : 0,
+	       dur[i]);
+    printf("\n");
+}
+
+static void
+prod_send(echo_child_t *c, unsigned int done)
+{
+    prod_msg_t	m;
+
+    m.head.msgh_bits	    = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.head.msgh_size	    = sizeof(m);
+    m.head.msgh_remote_port = c->to_child;
+    m.head.msgh_local_port  = MACH_PORT_NULL;
+    m.head.msgh_id	    = 1;
+    m.done		    = done;
+    m.pad		    = 0;
+    m.stamp		    = bench_tsc();
+    mach_msg(&m.head, MACH_SEND_MSG, sizeof(m), 0, MACH_PORT_NULL,
+	     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static void
+bench_producer(void)
+{
+    const char		*label = "producer, 2 ms between sends";
+    echo_child_t	c;
+    struct { prod_answer_t a; char trailer[64]; }	ans;
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok = 0, i, round;
+    unsigned long long	t, t0 = 0;
+    pthread_t		watch;
+
+    if (tsc_calibrate(label) != 0)
+	return;
+    if (child_start(label, &c, child_prod_entry) != 0)
+	return;
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    /* Round 0 warms the pair up and its answer is thrown away. */
+    for (round = 0; round < 2; round++) {
+	int	msgs = round == 0 ? 20 : PROD_MSGS;
+
+	if (round == 1) {
+	    g_stall_stop = 0;
+	    g_nstall = 0;
+	    pthread_create(&watch, NULL, stall_watch_func, NULL);
+	    ho_ok = handoff_snap(&ho_before);
+	    t0 = bench_tsc();
+	}
+	for (i = 0; i < msgs; i++) {
+	    prod_send(&c, 0);
+	    t = bench_tsc();
+	    while (bench_tsc() - t < PROD_WORK_US * g_tsc_per_us)
+		;
+	}
+	if (round == 1) {
+	    ho_ok &= handoff_snap(&ho_after);
+	    g_stall_stop = 1;
+	    pthread_join(watch, NULL);
+	}
+	prod_send(&c, 1);
+	mach_msg(&ans.a.head, MACH_RCV_MSG, 0, sizeof(ans), c.to_parent,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    printf("  %s   %d messages to a consumer in a task of its own\n",
+	   label, PROD_MSGS);
+    wait_hist_print(label, &ans.a.hist);
+    print_long_list("long", label, "wait(s) of 1 ms or more", ans.a.nlong,
+		    ans.a.long_at, ans.a.long_us, t0);
+    print_long_list("stall", label, "gap(s) of 100 us or more on a thread "
+		    "spinning beside it", g_nstall, g_stall_at, g_stall_us, t0);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
+    echo_child_stop(&c);
+}
+
+/* ---- srvq: a server with requests queued ---- */
+
+#define	SRVQ_WORK_US	5	/* the server's work on each request */
+#define	SRVQ_ITERS	5000	/* round trips a client */
+
+static void __attribute__((noreturn, used))
+child_srvq_entry(void)
+{
+    bench_recv_buf_t	buf;
+    mach_msg_option_t	opt = MACH_RCV_MSG;
+    mach_msg_size_t	send_size = 0;
+    unsigned long long	t;
+
+    for (;;) {
+	BENCH_CALL(mach_msg(&buf.head, opt, send_size, sizeof(buf), CHILD_RECV_NAME,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	t = bench_tsc();
+	while (bench_tsc() - t < SRVQ_WORK_US * g_tsc_per_us)
+	    ;
+	/*
+	 * The reply, to the send-once right the request carried, and the next
+	 * request, in one call, as mach_msg_server() makes them.
+	 */
+	buf.head.msgh_bits	 = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	buf.head.msgh_size	 = sizeof(bench_null_msg_t);
+	buf.head.msgh_local_port = MACH_PORT_NULL;
+	buf.head.msgh_id	+= 100;
+	opt	  = MACH_SEND_MSG | MACH_RCV_MSG;
+	send_size = sizeof(bench_null_msg_t);
+    }
+}
+
+typedef struct {
+    mach_port_t	server;		/* this task's send right to the server */
+    mach_port_t	reply;		/* this client's reply port */
+    int		iters;
+    wait_hist_t	hist;
+    pthread_t	th;
+} srvq_client_t;
+
+static volatile int	g_srvq_ready, g_srvq_go;
+
+static void *
+srvq_client_func(void *arg)
+{
+    srvq_client_t	*c = (srvq_client_t *)arg;
+    bench_recv_buf_t	buf;
+    unsigned long long	t;
+    int			i;
+
+    for (i = -WARMUP_ITERS; i < c->iters; i++) {
+	if (i == 0) {
+	    __sync_fetch_and_add(&g_srvq_ready, 1);
+	    while (!g_srvq_go)
+		(void) syscall_thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_NONE, 0);
+	}
+	buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	buf.head.msgh_size	  = sizeof(bench_null_msg_t);
+	buf.head.msgh_remote_port = c->server;
+	buf.head.msgh_local_port  = c->reply;
+	buf.head.msgh_id	  = 1;
+	t = bench_tsc();
+	BENCH_CALL(mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG,
+		 sizeof(bench_null_msg_t), sizeof(buf), c->reply,
+		 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL));
+	if (i >= 0)
+	    wait_hist_add(&c->hist, t, bench_tsc());
+    }
+    return (void *)0;
+}
+
+static void
+bench_server_queue(int k)
+{
+    char		label[64];
+    echo_child_t	s;
+    srvq_client_t	c[MAX_CC_THREADS];
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    wait_hist_t		all;
+    tvalspec_t		t0, t1;
+    unsigned long long	total_ns;
+    long		total_rpc;
+    int			i, ho_ok;
+
+    if (k > MAX_CC_THREADS)
+	k = MAX_CC_THREADS;
+    snprintf(label, sizeof label, "server with requests queued x%d", k);
+    if (tsc_calibrate(label) != 0)
+	return;
+    if (child_start(label, &s, child_srvq_entry) != 0)
+	return;
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    g_srvq_ready = 0;
+    g_srvq_go = 0;
+    for (i = 0; i < k; i++) {
+	memset(&c[i], 0, sizeof c[i]);
+	c[i].server = s.to_child;
+	c[i].iters = SRVQ_ITERS;
+	mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			   &c[i].reply);
+	pthread_create(&c[i].th, NULL, srvq_client_func, &c[i]);
+    }
+    while (g_srvq_ready < k)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    ho_ok = handoff_snap(&ho_before);
+    get_time(&t0);
+    g_srvq_go = 1;
+    for (i = 0; i < k; i++)
+	pthread_join(c[i].th, NULL);
+    get_time(&t1);
+    ho_ok &= handoff_snap(&ho_after);
+
+    memset(&all, 0, sizeof all);
+    for (i = 0; i < k; i++)
+	wait_hist_merge(&all, &c[i].hist);
+    total_ns  = elapsed_ns(&t0, &t1);
+    total_rpc = (long)k * SRVQ_ITERS;
+    printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
+	   label, total_rpc, total_ns, total_ns / (total_rpc ? total_rpc : 1));
+    bench_report_failed(label);
+    wait_hist_print(label, &all);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
+
+    for (i = 0; i < k; i++)
+	mach_port_destroy(mach_task_self(), c[i].reply);
+    echo_child_stop(&s);
 }
 
 /*
@@ -3394,7 +3927,8 @@ main(int argc, char **argv)
 	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
 	    { SUITE_ISWEEP,  "isweep" }, { SUITE_FORKRACE, "forkrace" },
-	    { SUITE_ICC,     "icc" },
+	    { SUITE_ICC,     "icc" },     { SUITE_PROD,    "prod" },
+	    { SUITE_SRVQ,    "srvq" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -3599,6 +4133,22 @@ main(int argc, char **argv)
 	    bench_concurrent_intertask(4, BENCH_ITERS);
 	}
 
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Senders that do not block next: a producer, and a server with
+     * requests queued [#777]
+     * --------------------------------------------------------- */
+    if (suites & SUITE_PROD) {
+	printf("--- Producer that does not wait (#777) ---\n");
+	bench_producer();
+	printf("\n");
+    }
+    if (suites & SUITE_SRVQ) {
+	printf("--- Server with requests queued (#777) ---\n");
+	bench_server_queue(2);
+	bench_server_queue(4);
 	printf("\n");
     }
 

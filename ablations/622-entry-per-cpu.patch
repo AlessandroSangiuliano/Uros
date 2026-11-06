@@ -10,10 +10,10 @@ Expect: syscall_profile: thread 0x[0-9a-f]+ entered trap [0-9]+ with a reading [
 Note: profile_entry judges only what crosses its window, and a crossing trap is sampled now and then; syscall_profile says each one itself, whenever it comes.  On OMEGA (30/10, the union with #770 and #783 on 7e5ff3e4), under TCG both came after the window had closed: the judge said PASS for its own and the harness failed the boot on syscall_profile's lines, which the Expect did not know.
 
 diff --git a/uros/src/mach_kernel/kern/syscall_profile.c b/uros/src/mach_kernel/kern/syscall_profile.c
-index 1dcd15c6..b9cae074 100644
+index e3201b04..e92736dd 100644
 --- a/uros/src/mach_kernel/kern/syscall_profile.c
 +++ b/uros/src/mach_kernel/kern/syscall_profile.c
-@@ -600,7 +600,7 @@ syscall_profile_enter(int trap_number)
+@@ -752,7 +752,7 @@ syscall_profile_enter(int trap_number)
  	 * 0 is a stub that takes no reading (i386, #554): the sample opens from
  	 * the clock instead, and its entry column says unknown.
  	 */
@@ -23,7 +23,7 @@ index 1dcd15c6..b9cae074 100644
  		return;
  	}
 diff --git a/uros/src/mach_kernel/x86_64/cpu/percpu.c b/uros/src/mach_kernel/x86_64/cpu/percpu.c
-index 68bdf27a..fa307c04 100644
+index 98a848f1..86539653 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/percpu.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/percpu.c
 @@ -311,8 +311,14 @@ void percpu_activate(uint32_t cpu_id)
@@ -44,19 +44,19 @@ index 68bdf27a..fa307c04 100644
  #endif	/* SYSCALL_PROFILE */
  
 diff --git a/uros/src/mach_kernel/x86_64/cpu/percpu.h b/uros/src/mach_kernel/x86_64/cpu/percpu.h
-index 820b7984..c8af3421 100644
+index f36ac8ca..586993ed 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/percpu.h
 +++ b/uros/src/mach_kernel/x86_64/cpu/percpu.h
-@@ -41,6 +41,8 @@
- #define PERCPU_FRAME_SYSRETS	192
- #define PERCPU_FRAME_IRETQS	200
- #define PERCPU_FRAME_SYSCALLS	208
-+#define PERCPU_SYSCALL_TSC	368
-+#define PERCPU_SYSCALL_TSC_THREAD	376
+@@ -44,6 +44,8 @@
+ #define PERCPU_FRAME_RET_CYC	216
+ #define PERCPU_FRAME_RET_CNT	224
+ #define PERCPU_FRAME_RET_MARK	232
++#define PERCPU_SYSCALL_TSC	392
++#define PERCPU_SYSCALL_TSC_THREAD	400
  
  #ifndef __ASSEMBLER__
  
-@@ -365,6 +367,8 @@ struct percpu {
+@@ -387,6 +389,8 @@ struct percpu {
  		uint64_t gen;
  	} pcid_slot[PCID_SLOTS];
  	uint32_t pcid_victim;		/* the slot the next miss takes */
@@ -65,10 +65,10 @@ index 820b7984..c8af3421 100644
  
  #if	CONTEXT_FPU_COUNT
  	/*
-@@ -425,6 +429,10 @@ _Static_assert(__builtin_offsetof(struct percpu, frame_iretqs)
- 	       == PERCPU_FRAME_IRETQS, "percpu frame_iretqs moved");
- _Static_assert(__builtin_offsetof(struct percpu, frame_syscalls)
- 	       == PERCPU_FRAME_SYSCALLS, "percpu frame_syscalls moved");
+@@ -453,6 +457,10 @@ _Static_assert(__builtin_offsetof(struct percpu, frame_ret_count)
+ 	       == PERCPU_FRAME_RET_CNT, "percpu frame_ret_count moved");
+ _Static_assert(__builtin_offsetof(struct percpu, frame_ret_mark)
+ 	       == PERCPU_FRAME_RET_MARK, "percpu frame_ret_mark moved");
 +_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc)
 +	       == PERCPU_SYSCALL_TSC, "percpu syscall_tsc moved");
 +_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc_thread)

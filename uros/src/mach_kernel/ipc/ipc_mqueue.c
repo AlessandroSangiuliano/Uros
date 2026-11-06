@@ -716,8 +716,26 @@ ipc_mqueue_deliver(
 		if (!direct)
 			splx(s);
 	}
-	if (!direct)
+	if (!direct) {
+#if	NCPUS > 1
+		/*
+		 * #777: the hint is for this thread, and this is the one place
+		 * that knows it.  Left loose it went to whichever thread_setrun()
+		 * came first between the send and here: the port lock's waiter
+		 * at the ip_unlock() above, an interrupt's wakeup, whatever a
+		 * kernel port's server woke.  That thread waited on this
+		 * processor, and the receiver went the ordinary way.
+		 */
+		thread_t self = current_thread();
+
+		if (self->handoff_hint)
+			self->handoff_target = receiver;
+#endif	/* NCPUS > 1 */
 		thread_go(receiver);
+#if	NCPUS > 1
+		self->handoff_target = THREAD_NULL;
+#endif	/* NCPUS > 1 */
+	}
 	imq_unlock(mqueue);
 
 	/*

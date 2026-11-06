@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #446
 Takes out: the hand-off to a thread of another task -- thread_setrun() hands off within the waker's task only again, the fence #356 put up for i386, which #446 measured to cost 23-35% of an inter-task round trip on x86-64
-Run: --entry 18 300 -smp 4
-Expect: quiet_census: -X has queued [0-9]+ woken thread\(s\) on their waker's processor, [0-9]+ of them of another task; [1-9][0-9]* of another task sent to an idle processor by the same-task fence \(#446\) -- WRONG: -X reaches any task here
+Run: --entry 14 300 -smp 4
+Expect: quiet_census: the hand-off has queued [0-9]+ woken thread\(s\) on their waker's processor, [0-9]+ of them of another task; [1-9][0-9]* of another task sent to an idle processor by the same-task fence \(#446\) -- WRONG: the hand-off reaches any task here
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
 index 0f4b76c4..fa1157e5 100644

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #777
+Takes out: the hand-off on block -- sched_rpc_handoff stays off, as every boot was before #777 without -X; the arm without it, for a comparison
+Run: --entry 14 1200 -smp 4
+Measure: ipc_bench's inter, intra and icc, and the disk suite's RPCs to ext_server: the waits and costs #777's body has with the hand-off off
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/startup.c b/uros/src/mach_kernel/x86_64/cpu/startup.c
+index 79c7e522..fa79d9d0 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/startup.c
++++ b/uros/src/mach_kernel/x86_64/cpu/startup.c
+@@ -168,7 +168,7 @@ machine_init(void)
+ 	 * ⚠️ Written once, here: machine_init() runs after the timers and before
+ 	 * any thread does, so nothing has been placed yet.
+ 	 */
+-	sched_rpc_handoff = SCHED_RPC_HANDOFF_ANY_TASK;
++	sched_rpc_handoff = SCHED_RPC_HANDOFF_OFF;
+ 
+ 	/*
+ 	 * Configure the clock devices (#425).

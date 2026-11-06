@@ -41,6 +41,9 @@
 #define PERCPU_FRAME_SYSRETS	192
 #define PERCPU_FRAME_IRETQS	200
 #define PERCPU_FRAME_SYSCALLS	208
+#define PERCPU_FRAME_RET_CYC	216
+#define PERCPU_FRAME_RET_CNT	224
+#define PERCPU_FRAME_RET_MARK	232
 
 #ifndef __ASSEMBLER__
 
@@ -339,6 +342,24 @@ struct percpu {
 	uint64_t frame_syscalls;
 
 	/*
+	 * #777: what the way out through the frame has cost this processor, as
+	 * syscall_ret_cycles above says for the way out by the syscall entry's
+	 * SYSRET -- summed and counted in thread_user_frame_return
+	 * (trap/entry.S), for the system calls that slept only, from its top
+	 * to the RESTORE_REGS of either way.  Since #771 every call that
+	 * blocked in its continuation leaves through there, and with nothing
+	 * timing it the profile's return covered the calls that did not block:
+	 * on omen half of them, which read as a return that had not changed.
+	 * The mark is this path's own scratch, safe as the other one is: written
+	 * after thread_return_ast(), read with interrupts still off.  Asserted,
+	 * for the assembly; after frame_syscalls, so that no offset it knew
+	 * moves.
+	 */
+	uint64_t frame_ret_cycles;
+	uint64_t frame_ret_count;
+	uint64_t frame_ret_mark;	/* scratch: the way out began */
+
+	/*
 	 * #526: the last raise of this processor's level from zero -- where it
 	 * was asked for, and on which thread.  A level left raised never comes
 	 * back to zero, so after such a leak no later raise from zero overwrites
@@ -426,6 +447,12 @@ _Static_assert(__builtin_offsetof(struct percpu, frame_iretqs)
 	       == PERCPU_FRAME_IRETQS, "percpu frame_iretqs moved");
 _Static_assert(__builtin_offsetof(struct percpu, frame_syscalls)
 	       == PERCPU_FRAME_SYSCALLS, "percpu frame_syscalls moved");
+_Static_assert(__builtin_offsetof(struct percpu, frame_ret_cycles)
+	       == PERCPU_FRAME_RET_CYC, "percpu frame_ret_cycles moved");
+_Static_assert(__builtin_offsetof(struct percpu, frame_ret_count)
+	       == PERCPU_FRAME_RET_CNT, "percpu frame_ret_count moved");
+_Static_assert(__builtin_offsetof(struct percpu, frame_ret_mark)
+	       == PERCPU_FRAME_RET_MARK, "percpu frame_ret_mark moved");
 
 /*
  * Two halves, and the split is not tidiness.

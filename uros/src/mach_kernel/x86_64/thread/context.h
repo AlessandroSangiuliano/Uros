@@ -39,7 +39,7 @@
 #define _X86_64_THREAD_CONTEXT_H_
 
 /*
- * The switch frame: what context_switch_raw() leaves at ctx.rsp, as indices
+ * The switch frame: what context_switch_to() leaves at ctx.rsp, as indices
  * of 64-bit words, in the order it pops them.  pushfq first and %r15 last,
  * so counting up from the saved stack pointer the registers come out
  * reversed.
@@ -124,6 +124,14 @@ struct context {
 	 */
 	uint64_t user_frame;		/* the frame's base: kernel_rsp     */
 	uint64_t entry_stack;		/* where C runs after an entry     */
+
+	/*
+	 * #777: where a thread that blocked with a continuation starts again,
+	 * at the top of entry_stack -- written when it switches away, with rsp
+	 * 0 for "no frames saved".  That pair is the whole of its switch state,
+	 * as i386's saved Thread_continue and stack top are (cswitch.S).
+	 */
+	void	(*fresh_entry)(void *);
 };
 
 /*
@@ -131,10 +139,11 @@ struct context {
  * `entry(arg)`.
  *
  * The stack is written to look exactly as though the thread had been
- * switched out — six saved registers and a return address — because that is
- * the only shape the switch knows how to resume.  A thread that has never
- * run and one that was interrupted must be indistinguishable to it, or
- * there would be two ways to resume and one of them would be rare.
+ * switched out — seven saved words and a return address — because that is
+ * the shape the switch pops.  A thread that has never run and one that was
+ * interrupted must be indistinguishable to it, or a rare way to resume would
+ * hide among the common one.  The other way, for a thread that blocked with
+ * a continuation, has no frame at all: the switch jumps to its restart (#777).
  *
  * `stack_top` is the high end; stacks grow down.
  *
@@ -237,35 +246,38 @@ void context_switch(struct context *old, struct context *fresh);
 
 /*
  * A switch away from a thread that blocked with a continuation (#771): its
- * resume point has been reset with context_reset_to_continuation(), so its
- * live frames are abandoned rather than saved.
+ * live frames are abandoned rather than saved, and it starts again at the top
+ * of its kernel stack, in `entry' (the trampoline that ends in
+ * thread_continue), keeping its floating-point area and user frame.  Since
+ * #777 nothing of it is written but that: no registers, no frame (see
+ * context_switch_to() in context.S).
  */
-void context_switch_continuation(struct context *old, struct context *fresh);
+void context_switch_continuation(struct context *old, struct context *fresh,
+				 void (*entry)(void *));
 
 /*
- * Point a blocked thread's context at a fresh start at the top of its kernel
- * stack, in `entry' (the trampoline that ends in thread_continue), keeping its
- * floating-point area and user frame -- for a thread resuming on a
- * continuation rather than by returning (#771).
- */
-void context_reset_to_continuation(struct context *ctx, void (*entry)(void *));
-
-/*
- * Whether a switched-out context will resume in a fresh frame at the top of
- * its stack rather than in the frames it saved (#771) -- the half of "how
- * this thread resumes" that its continuation field must agree with.
+ * Whether a switched-out context will resume fresh at the top of its stack
+ * rather than in the frames it saved (#771) -- the half of "how this thread
+ * resumes" that its continuation field must agree with.  Fresh is either of
+ * two shapes: the frame context_init() forges for a thread that has never
+ * run, or, since #777, no frame at all for one that blocked with a
+ * continuation.
  */
 int context_resumes_fresh(const struct context *ctx);
 
 /*
- * The raw form, in assembly: save at *old_rsp, resume from new_rsp.
+ * The raw form, in assembly, with both halves of a switch made optional
+ * (#777): save at *old_rsp unless it is 0, resume from fresh_rsp unless it is
+ * 0, and otherwise start at the top of fresh_stack in fresh_entry(0).
  *
  * context_switch() is this plus the bookkeeping that must accompany it —
  * chiefly telling this processor which stack an entry from ring 3 should
- * land on now.  Nothing outside thread/ should need the raw form; it is
- * declared because the C wrapper calls it.
+ * land on now.  Nothing outside thread/ should need the raw form, and
+ * context_switch_body() is its one caller: one call site is what keeps the
+ * return after a switch predicted (context.S).
  */
-void context_switch_raw(uint64_t *old_rsp, uint64_t fresh_rsp);
+void context_switch_to(uint64_t *old_rsp, uint64_t fresh_rsp,
+		       uint64_t fresh_stack, void (*fresh_entry)(void *));
 
 #endif	/* __ASSEMBLER__ */
 

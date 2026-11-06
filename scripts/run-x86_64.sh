@@ -561,6 +561,8 @@ must_report 'sprintf_test: starting' 'sprintf_test: \(PASS\|WRONG\|NOT ASKED\)' 
 	'Both sides make a fixed number of calls and the verdict is printed either way; a run that stops after the start line has stopped inside sprintf(), whose lock one side never gave back (#655).'
 must_report 'clear_wait_test: starting' 'clear_wait_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'The rounds are a fixed number and the waker stops on a flag, so the verdict is printed either way; a run that stops after the start line has stopped in a clear that waits for a waker that never finishes, or has panicked in assert_wait() on a wait left behind (#599).'
+must_report 'wakee_test: starting' 'wakee_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'The wakee is held for two seconds at most and every other wait is bounded, so the verdict is printed either way; a run that stops after the start stopped in the test.'
 must_report 'census_test: starting' 'census_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'The victims end on their own and the walk is one pass under a lock, so the verdict is printed unless the walk does not come back; a run that stops after the start line has faulted or looped inside the census, on a thread freed under it (#657).'
 must_report 'refused_fault_test: starting' 'refused_fault_test: \(PASS\|WRONG\|NOT ASKED\)' \

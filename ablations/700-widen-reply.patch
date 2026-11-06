@@ -4,10 +4,10 @@ Holds open: a reply's window between taking its receiver off the queue and wakin
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index 091038b8..9f7f6c12 100644
+index 37620827..90e9b68e 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-@@ -192,6 +192,7 @@
+@@ -191,6 +191,7 @@
  #include <kern/ipc_sched.h>
  #include <kern/ipc_kobject.h>
  #include <kern/misc_protos.h>
@@ -15,7 +15,7 @@ index 091038b8..9f7f6c12 100644
  #include <ipc/ipc_mqueue.h>
  #include <ipc/ipc_thread.h>
  #include <ipc/ipc_kmsg.h>
-@@ -734,6 +735,32 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
+@@ -557,6 +558,32 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
   */
  unsigned int	ipc_dts_declined_swapped;
  
@@ -48,16 +48,16 @@ index 091038b8..9f7f6c12 100644
  mach_msg_return_t
  ipc_mqueue_deliver(
  	register ipc_port_t	port,
-@@ -945,6 +972,8 @@ ipc_mqueue_deliver(
+@@ -716,6 +743,8 @@ ipc_mqueue_deliver(
  		if (!direct)
  			splx(s);
  	}
 +	widen_700(receiver, WIDEN_700_DELIVERER_US,
 +	    "a reply holds its receiver off the queue, not yet woken, for");
- 	if (!direct)
- 		thread_go(receiver);
- 	imq_unlock(mqueue);
-@@ -1185,6 +1214,8 @@ ipc_mqueue_receive(
+ 	if (!direct) {
+ #if	NCPUS > 1
+ 		/*
+@@ -971,6 +1000,8 @@ ipc_mqueue_receive(
  		thread_block(continuation);
  		if (option & MACH_RCV_TIMEOUT)
  			reset_timeout_check(&self->timer);
@@ -67,10 +67,10 @@ index 091038b8..9f7f6c12 100644
                  /* Save proper wait_result in case we block */
  		save_wait_result = self->wait_result;
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
-index 4892ac32..00ea84d5 100644
+index cac857e7..63250a85 100644
 --- a/uros/src/mach_kernel/kern/sched_prim.c
 +++ b/uros/src/mach_kernel/kern/sched_prim.c
-@@ -619,6 +619,11 @@ thread_go(thread_t thread)
+@@ -626,6 +626,11 @@ thread_go(thread_t thread)
  	 * under thread_lock too, so the check is race-free.
  	 */
  	if ((thread->state & TH_WAIT) && thread->wait_event == NO_EVENT) {

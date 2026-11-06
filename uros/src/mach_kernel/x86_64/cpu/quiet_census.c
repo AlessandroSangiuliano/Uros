@@ -736,9 +736,9 @@ quiet_fpu_areas_so_far(void)
 }
 
 /*
- * #446: what -X did, said by every boot that has it on -- at zero too, so that
- * a boot whose hand-off never happened is told from one that was not asked.
- * On this target -X reaches a thread of any task, so none of another task may
+ * #446: what the hand-off did, said at zero too, so that a boot whose hand-off
+ * never happened is told from one that was not asked.  On this target it
+ * reaches a thread of any task, so none of another task may
  * have been sent to an idle processor by the same-task fence: one that was is
  * the fence back, and is said as WRONG (ablations/446-fence-back.patch).  With
  * each report as the machine goes idle, for the reason quiet_stacks_so_far()
@@ -779,17 +779,32 @@ static void
 quiet_handoff_so_far(void)
 {
 	unsigned long	same, other, fenced;
+	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE];
 
 	if (sched_rpc_handoff == SCHED_RPC_HANDOFF_OFF)
 		return;
 
 	sched_rpc_handoff_counts(&same, &other, &fenced);
-	printf("quiet_census: -X has queued %lu woken thread(s) on their "
+	printf("quiet_census: the hand-off has queued %lu woken thread(s) on their "
 	       "waker's processor, %lu of them of another task; %lu of another "
 	       "task sent to an idle processor by the same-task fence (#446)%s\n",
 	       same + other, other, fenced,
 	       sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK && fenced != 0 ?
-	       " -- WRONG: -X reaches any task here" : "");
+	       " -- WRONG: the hand-off reaches any task here" : "");
+	/* #777: on a line of its own, under the console's 256 bytes (#802) */
+	sched_rpc_handoff_undone(undone);
+	printf("quiet_census: of those, %lu bet(s) lost and undone -- %lu at a "
+	       "receive that found a message, %lu at a return to user space "
+	       "without a block, %lu when the waker left for another thread, "
+	       "%lu at a tick (#777)\n",
+	       undone[SCHED_HANDOFF_UNDO_RECEIVE] +
+	       undone[SCHED_HANDOFF_UNDO_RETURN] +
+	       undone[URMACH_HANDOFF_UNDO_LEFT] +
+	       undone[URMACH_HANDOFF_UNDO_TICK],
+	       undone[SCHED_HANDOFF_UNDO_RECEIVE],
+	       undone[SCHED_HANDOFF_UNDO_RETURN],
+	       undone[URMACH_HANDOFF_UNDO_LEFT],
+	       undone[URMACH_HANDOFF_UNDO_TICK]);
 }
 
 void

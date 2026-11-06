@@ -9,12 +9,11 @@
  *
  * The rule is that a thread which blocked with a continuation is reported by
  * its RESUME POINT and never by a backtrace, because the continuation is the
- * thread declaring it does not need its stack kept and
- * machine_kernel_stack_init() then resets that stack to the trampoline.  The
- * memory stays mapped and stays walkable, which is what makes it dangerous: a
- * walk comes back with two or three well-formed frames of
- * context_thread_start and thread_begin_trampoline, and says nothing about
- * why the thread stopped.
+ * thread declaring it does not need its stack kept, and the switch saves
+ * nothing for it (#771, #777): there is no frame to start a walk from.  What
+ * its last call left on the stack stays mapped, which is what would make a
+ * walk from anywhere else dangerous: well-formed frames that say nothing
+ * about why the thread stopped.
  *
  * That rule was written and never once executed.  Three places in this tree
  * block with a continuation -- the IPC receive path, a VM test, and the VM

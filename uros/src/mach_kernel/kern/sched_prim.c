@@ -1883,6 +1883,22 @@ thread_invoke(
 
 	thread_unlock(new_thread);
 
+#if	NCPUS > 1
+	/*
+	 * #777: the old thread leaves the processor.  If the thread it queued
+	 * here is the one that gets it, the bet was won.  If another does, one
+	 * of higher priority or a processor's action thread, the bet was lost
+	 * here: the wakee would wait behind that thread on a queue no other
+	 * processor takes from, for as long as it runs and with others idle.
+	 */
+	if (old_thread->handoff_wakee != THREAD_NULL) {
+		if (old_thread->handoff_wakee != new_thread)
+			(void) thread_handoff_undo(URMACH_HANDOFF_UNDO_LEFT);
+		old_thread->handoff_wakee = THREAD_NULL;
+		old_thread->handoff_spare = FALSE;
+	}
+#endif	/* NCPUS > 1 */
+
 	ETAP_DATA_LOAD(probe_data[0], new_thread);
 	ETAP_DATA_LOAD(probe_data[1], old_thread->etap_reason);
 	ETAP_DATA_LOAD(probe_data[2], reason);
@@ -2775,10 +2791,10 @@ run_queue_enqueue(
 #if	NCPUS > 1
 /*
  * #356: run-time gate for the synchronous-RPC hand-off-on-block placement
- * (see the hint consumption in thread_setrun).  Off by default, for
- * same-binary A/B on hardware: -X turns it on -- on i386, where -P is its old
- * name, for a thread of the waker's task; on x86-64 for a thread of any task
- * (#446).
+ * (see the hint consumption in thread_setrun).  On x86-64 it is on, for a
+ * thread of any task (#446, #777: x86_64/cpu/startup.c).  On i386 it is off by
+ * default, for same-binary A/B on hardware: -X turns it on, or -P, its old
+ * name, for a thread of the waker's task.
  *
  * The hand-off also stays dormant until EVERY CPU has passed cpu_up()
  * (machine_info.avail_cpus reaches real_ncpus -- guaranteed on any boot
@@ -2796,27 +2812,28 @@ int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
 extern int	real_ncpus;
 
 /*
- * #446: what -X did.  Each processor counts the woken threads it queued on
+ * #446: what the hand-off did.  Each processor counts the woken threads it queued on
  * itself, split by whether the thread was of its waker's task, and the census
  * says the sums (x86_64/cpu/quiet_census.c).  A line of its own for each
- * processor because this is the hand-off's own path, taken on every RPC while
- * -X is on: one shared counter would be a cache line passed between the very
- * processors whose placement is being measured.  Each counter has one writer,
- * its processor, so none is lost; a sum read while they move is a little
- * behind, which a count of what happened can afford.
+ * processor because this is the hand-off's own path, taken on every RPC: one
+ * shared counter would be a cache line passed between the very processors whose
+ * placement is being measured.  Each counter has one writer, its processor, so
+ * none is lost; a sum read while they move is a little behind, which a count of
+ * what happened can afford.
  */
 static struct sched_handoff_count {
 	unsigned long	same_task;
 	unsigned long	other_task;
 	unsigned long	other_task_fenced;	/* sent to an idle processor */
+	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE];	/* #777 */
 } __attribute__((aligned(64))) sched_handoff_count[NCPUS];
 
 /*
  * The third count is the check (#446): a woken thread of another task, its
  * waker about to block, that the same-task fence sent to an idle processor
- * instead.  Where -X reaches any task it has to stay at zero, and the census
- * says WRONG when it does not -- which is how the fence, put back by a patch
- * or by a mistake, is seen in the first boot that has -X on.
+ * instead.  Where the hand-off reaches any task it has to stay at zero, and the
+ * census says WRONG when it does not -- which is how the fence, put back by a
+ * patch or by a mistake, is seen in the first boot after it.
  */
 void
 sched_rpc_handoff_counts(
@@ -2834,6 +2851,101 @@ sched_rpc_handoff_counts(
 		*other_task += sched_handoff_count[cpu].other_task;
 		*other_task_fenced += sched_handoff_count[cpu].other_task_fenced;
 	}
+}
+
+/*
+ * #777: the bets lost and undone, by where it showed: SCHED_HANDOFF_UNDO_*
+ * and URMACH_HANDOFF_UNDO_*.
+ */
+void
+sched_rpc_handoff_undone(
+	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE])
+{
+	int	cpu, where;
+
+	for (where = 0; where < SCHED_HANDOFF_UNDO_WHERE; where++) {
+		undone[where] = 0;
+		for (cpu = 0; cpu < NCPUS; cpu++)
+			undone[where] += sched_handoff_count[cpu].undone[where];
+	}
+}
+
+/*
+ * #777: undo a hand-off on block whose bet was lost.
+ *
+ * The hint queued the woken thread on this processor's own run queue, which
+ * no other processor takes from (thread_select() reads its own and the set's),
+ * on the bet that the waker would block at once and leave it the processor.
+ * Where the waker does not -- its receive found a message, or its call
+ * returns to user space unblocked -- the woken thread would wait behind it for
+ * a tick or a quantum.  So it is taken off this queue and dispatched the
+ * ordinary way, to an idle processor if there is one, and a lost race costs
+ * microseconds instead.
+ *
+ * The waker knows the thread by name only: once it ran, it may have exited,
+ * so handoff_wakee is never followed.  It is looked for on this processor's
+ * queue, under the queue's lock, by comparing pointers; a thread found there
+ * is alive, since a thread on a run queue has not run.  Not found, it already
+ * ran, and there is nothing to undo.  The queue is this processor's because the
+ * waker cannot have moved with a hand-off pending: it leaves a processor through
+ * thread_invoke(), which settles it, or through the hot path's switch, which
+ * settles it first.
+ *
+ * Called at splsched or lower, with no lock held; returns whether it undid one.
+ */
+boolean_t
+thread_handoff_undo(
+	int	where)
+{
+	thread_t	self = current_thread();
+	thread_t	th = self->handoff_wakee;
+	run_queue_t	rq;
+	queue_t		q = (queue_t) 0;
+	queue_entry_t	e;
+	int		whichq;
+	boolean_t	found = FALSE;
+	spl_t		s;
+
+	if (th == THREAD_NULL)
+		return FALSE;
+	self->handoff_wakee = THREAD_NULL;
+	self->handoff_spare = FALSE;
+
+	s = splsched();
+	mp_disable_preemption();
+	rq = &current_processor()->runq;
+	simple_lock(&rq->lock);
+	for (whichq = rq->low; whichq <= MINPRI && !found; ) {
+		q = rq->runq + whichq;
+		for (e = queue_first(q); !queue_end(q, e); e = queue_next(e))
+			if ((thread_t) e == th) {
+				found = TRUE;
+				break;
+			}
+		if (!found)
+			whichq++;
+	}
+	if (found) {
+		remqueue(q, (queue_entry_t) th);
+		rq->count--;
+		if (th->whichq == DEPRESSPRI)
+			rq->depress_count--;
+		if (queue_empty(q)) {
+			clrbit(whichq, rq->bitmap);
+			rq->low = ffsbit(rq->bitmap);
+		}
+		th->runq = RUN_QUEUE_NULL;
+	}
+	simple_unlock(&rq->lock);
+	if (found) {
+		thread_lock(th);
+		thread_setrun(th, TRUE, TAIL_Q);	/* no hint now: the ordinary way */
+		thread_unlock(th);
+		sched_handoff_count[cpu_number()].undone[where]++;
+	}
+	mp_enable_preemption();
+	splx(s);
+	return found;
 }
 #endif	/* NCPUS > 1 */
 
@@ -2931,22 +3043,26 @@ thread_setrun(
 
 	    /*
 	     * #356 hand-off on block: the waker flagged that it is about to
-	     * block (a send in mach_msg -- the combined send-and-receive, or a
-	     * send its caller follows with a receive; ipc/mach_msg.c sets the
-	     * hint for both).  A synchronous RPC pair is
+	     * block.  #777: ipc/mach_msg.c sets the hint only where it knows --
+	     * a combined send-and-receive whose receive will block (on the
+	     * reply port the message carries, or on a queue empty at the
+	     * send), or a send whose caller says it blocks next
+	     * (MACH_SEND_HANDOFF) -- not on every send.  A synchronous RPC pair is
 	     * inherently serial, so instead of shipping the wakee to a remote
 	     * idle CPU (cold caches, wake-from-idle latency -- the measured
 	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
 	     * runq: thread_select picks it up the moment the waker blocks, on
-	     * the one CPU where its data is warm.  One-shot: consumed by the
-	     * first wakeup of the send.  Runtime-gated by -X (-P on i386).
+	     * the one CPU where its data is warm.  One-shot, and for the one
+	     * thread ipc_mqueue_deliver() names, the receiver; any other wakeup
+	     * on the way goes the ordinary way.  Always on x86-64; by -X or -P
+	     * on i386.
 	     *
 	     * Same-task only on i386.  The fence was put up there, where a
 	     * switch between tasks on one CPU reloads cr3 and throws the whole
 	     * TLB away, and the split was measured cheaper.  On x86-64 the
 	     * hand-off is cheaper across tasks too, with PCID and without
 	     * (#446, measured on 29/10; x86_64/cpu/startup.c has the numbers),
-	     * so -X there reaches a thread of any task.
+	     * so there it reaches a thread of any task.
 	     */
 	    if (sched_rpc_handoff &&
 		machine_info.avail_cpus >= real_ncpus) {
@@ -2954,8 +3070,8 @@ thread_setrun(
 
 		/* #370: self is THREAD_NULL on an early-AP that has not yet
 		 * installed its current thread; nothing to hand off then. */
-		if (self != THREAD_NULL && self->handoff_hint) {
-			self->handoff_hint = FALSE;
+		if (self != THREAD_NULL && self->handoff_target == th) {
+			self->handoff_target = THREAD_NULL;
 			if (
 #if	MACH_HOST
 			    pset == current_processor()->processor_set &&
@@ -2976,6 +3092,8 @@ thread_setrun(
 						sched_handoff_count[cpu_number()].other_task++;
 					(void) run_queue_enqueue(
 						&current_processor()->runq, th, tail);
+					/* #777: by name, for thread_handoff_undo() */
+					self->handoff_wakee = th;
 					mp_enable_preemption();
 					return;
 				}
