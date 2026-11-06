@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #777
+Takes out: the tick's own count of the bets it undoes: each one reads as a thread that left its processor, so that arm 40 sees every try settled in a switch and has nothing to judge the tick by; the arm must say that, and not call the kernel wrong
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[40\] 20 sends alone, and in 20 of them this thread left for another before a tick looked . NOT ASKED
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -2941,7 +2941,7 @@
+ 		thread_lock(th);
+ 		thread_setrun(th, TRUE, TAIL_Q);	/* no hint now: the ordinary way */
+ 		thread_unlock(th);
+-		sched_handoff_count[cpu_number()].undone[where]++;
++		sched_handoff_count[cpu_number()].undone[where == URMACH_HANDOFF_UNDO_TICK ? URMACH_HANDOFF_UNDO_LEFT : where]++;
+ 	}
+ 	mp_enable_preemption();
+ 	splx(s);
