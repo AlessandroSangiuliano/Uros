@@ -90,8 +90,13 @@
 #ifndef	_MACH_MACH_PARAM_H_
 #define _MACH_MACH_PARAM_H_
 
-/* Number of "registered" ports */
+/*
+ * Number of "registered" ports.  The fourth is cap_server's (#744): bootstrap
+ * makes a port for every slot, every task inherits them, and a server takes
+ * its slot's receive right from bootstrap -- the name server slot 0, cap_server
+ * slot 3 (CAP_SERVER_SLOT in <mach_init.h>).
+ */
 
-#define TASK_PORT_REGISTER_MAX	3
+#define TASK_PORT_REGISTER_MAX	4
 
 #endif	/* _MACH_MACH_PARAM_H_ */
