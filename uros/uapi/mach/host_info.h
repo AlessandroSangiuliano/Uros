@@ -299,6 +299,12 @@ struct host_rpc_handoff_info {
 	unsigned int	undone_return;	/* a return to user space unblocked */
 	unsigned int	undone_left;	/* the waker left, for another thread */
 	unsigned int	undone_tick;	/* a tick found it still pending */
+	/*
+	 * Whether a receiver in a wait is switched to from inside the send
+	 * (-N): no run queue, so no hand-off and no bet.  From outside that
+	 * cannot be told from a bet lost and left, so it is said here.
+	 */
+	unsigned int	direct_switch;
 };
 
 typedef struct host_rpc_handoff_info	host_rpc_handoff_info_data_t;
