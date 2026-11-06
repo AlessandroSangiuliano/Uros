@@ -590,7 +590,7 @@ ipc_right_destroy(
 	mach_port_type_t type = IE_BITS_TYPE(bits);
 
 	assert(space->is_active);
-	space->is_generation++;		/* invalidate per-thread port caches */
+	space->is_generation++;		/* the lock-free resolve's filter */
 
 	switch (type) {
 	    case MACH_PORT_TYPE_DEAD_NAME:
@@ -723,7 +723,7 @@ ipc_right_dealloc(
 	mach_port_type_t type = IE_BITS_TYPE(bits);
 
 	assert(space->is_active);
-	space->is_generation++;		/* invalidate per-thread port caches */
+	space->is_generation++;		/* the lock-free resolve's filter */
 
 	switch (type) {
 	    case MACH_PORT_TYPE_DEAD_NAME: {
@@ -910,15 +910,14 @@ ipc_right_delta(
 
 	/*
 	 * #390: bump the generation like ipc_right_dealloc/destroy do.  It is
-	 * the filter of the mach_msg hot-path port cache (#321): the branches
-	 * below that free a name (mod_refs dropping the last ref) or retype it
-	 * leave the port active, and a stale mapping is a miss at once.  It
-	 * is no guard: what guards a mapping is
-	 * urmach_msg_cached_rights_hold() (#868), and not every remover moves
-	 * this.  Cold path — an unconditional head bump matches
-	 * ipc_right_dealloc.
+	 * the filter of mach_msg's lock-free resolve: the branches below that
+	 * free a name (mod_refs dropping the last ref) or retype it leave the
+	 * port active, and a stale mapping is a miss at once.  It is no guard:
+	 * what guards a mapping is urmach_msg_rights_hold() (#868), and not
+	 * every remover moves this.  Cold path — an unconditional head bump
+	 * matches ipc_right_dealloc.
 	 */
-	space->is_generation++;		/* invalidate per-thread port caches */
+	space->is_generation++;		/* the lock-free resolve's filter */
 
 	/* Rights-specific restrictions and operations. */
 
@@ -2012,7 +2011,7 @@ ipc_right_rename(
 	 * Bump the generation to invalidate it (cold path, head bump like
 	 * ipc_right_dealloc).
 	 */
-	space->is_generation++;		/* invalidate per-thread port caches */
+	space->is_generation++;		/* the lock-free resolve's filter */
 
 	/*
 	 *	If IE_BITS_COMPAT, we can't allow the entry to be renamed

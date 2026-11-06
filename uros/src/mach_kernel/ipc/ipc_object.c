@@ -474,11 +474,11 @@ ipc_object_copyin(
 		/*
 		 * #390: moving out the last right frees the name while the
 		 * port lives on (its ref went into the message).  The
-		 * generation is the hot-path cache's filter, so a hit on this
-		 * name is a miss at once -- what guards the mapping is
-		 * urmach_msg_cached_rights_hold() (#868).  Only here, in the
-		 * dealloc branch: copyin is the message hot path and a bump
-		 * on every port-carrying message would defeat the cache.
+		 * generation is the lock-free resolve's filter, so this name
+		 * is a miss at once -- what guards the mapping is
+		 * urmach_msg_rights_hold() (#868).  Only here, in the dealloc
+		 * branch: copyin is the message hot path, and a bump on every
+		 * port-carrying message would make the resolve give up.
 		 */
 		space->is_generation++;
 		ipc_entry_dealloc(space, name, entry);
