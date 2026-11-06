@@ -6822,6 +6822,8 @@ arm_forty_two_simple_message_scattered(void)
 #define	A43_ROUNDS	128
 #define	A43_TRIES	3
 #define	A43_LIST	3000	/* kalloc.4096 */
+#define	A43_POLLS	2000	/* depressed: a millisecond at most */
+#define	A43_ENDS	4000	/* and the rest asleep: twenty seconds */
 
 static volatile mach_port_t	a43_thread, a43_port;
 static volatile unsigned	a43_ended;
@@ -6920,9 +6922,30 @@ a43_round(mach_port_t host, const char *zone, int what, int *grew)
 			a43_port = port;
 			(void) arm_thread_waiting(&a43_thread);
 			(void) mach_port_destroy(mach_task_self(), port);
-			for (j = 0; j < 2000 && a43_ended == ended; j++)
+			/*
+			 * Polls and then time.  2000 depressed switches are a
+			 * millisecond at most, and a thread takes 1.3 ms at the
+			 * median to run after a wakeup on EPYC under KVM.  Past
+			 * them this went on to the next round; the thread, back
+			 * at last from this one, wrote MACH_PORT_NULL over the
+			 * next round's port and went back to polling, and
+			 * arm_thread_waiting() waited for a receive nobody was
+			 * making, 40 s since it sleeps.  A boot of entry 37 went
+			 * from 15 s to 265 s, and campaign 42225212497 ran out
+			 * of its 330 minutes, with no line to say why.  And an
+			 * end that never comes is a thing to say.
+			 */
+			for (j = 0; j < A43_ENDS && a43_ended == ended; j++)
 				(void) thread_switch(MACH_PORT_NULL,
-						     SWITCH_OPTION_DEPRESS, 1);
+						     j < A43_POLLS ?
+						     SWITCH_OPTION_DEPRESS :
+						     SWITCH_OPTION_WAIT, 1);
+			if (a43_ended == ended) {
+				printf("act_test: [43] a receive whose port was "
+				       "destroyed under it had not ended after "
+				       "%u waits — WRONG\n", j);
+				return 0;
+			}
 			continue;
 		}
 		(void) mach_port_destroy(mach_task_self(), port);
