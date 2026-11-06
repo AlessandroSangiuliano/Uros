@@ -19,8 +19,10 @@ if(UROS_BUILD_MUSL)
   # musl dynamic linker, entry _dlstart) and the ld-musl-i386.so.1 symlink.
   # --syslibdir below keeps the symlink inside our install tree instead of
   # the host's absolute /lib.
+  # #414: this name and --target below follow the target; --target is what
+  # tells musl which arch/ directory to build.
   set(MUSL_SO       ${MUSL_PREFIX}/lib/libc.so)
-  set(MUSL_LDSO     ${MUSL_PREFIX}/lib/ld-musl-i386.so.1)
+  set(MUSL_LDSO     ${MUSL_PREFIX}/lib/ld-musl-${UROS_TARGET_ARCH}.so.1)
 
   # i386 freestanding-ish build.  We still rely on the host gcc with -m32
   # for now; cross-toolchain comes in a later phase.  Shared is enabled
@@ -46,7 +48,7 @@ if(UROS_BUILD_MUSL)
                         --srcdir=${MUSL_SRC}
                         --prefix=${MUSL_PREFIX}
                         --syslibdir=${MUSL_PREFIX}/lib
-                        --target=i386-linux-gnu
+                        --target=${UROS_TARGET_ARCH}-linux-gnu
                         --enable-shared
                         CC=cc
                         "CFLAGS=${UROS_ARCH_FLAGS_STR} -Os -pipe -fno-stack-protector"

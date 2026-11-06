@@ -8,6 +8,7 @@
 # build's cache, because nothing in the tree said what those options were.
 set(CMAKE_BUILD_TYPE Release CACHE STRING "")
 set(UROS_TARGET_ARCH x86_64 CACHE STRING "")
+set(UROS_BUILD_MUSL ON CACHE BOOL "")
 
 # Release turns the kernel symbol table off by default; every build the harness
 # has judged had it on.
