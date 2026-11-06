@@ -8580,7 +8580,9 @@ arm_fifty_two_fs_base_goes_with_the_thread(void)
  * Arm fifty-three (#414): a task whose threads all fault at once.
  *
  * A child with nothing mapped and no exception port, and threads that fault on
- * their first instruction, resumed together.  One terminates the task and the
+ * their first instruction, at an address of this arm's own, resumed together.
+ * Each death is a line of exception_no_server(), which the harness takes for a
+ * failure at any other address.  One terminates the task and the
  * others find it being terminated and end themselves, and the first must not
  * trip over an activation on its way out: that stopped the kernel, from a task
  * with no privilege.  The verdict is that each child goes and the machine is
@@ -8614,8 +8616,8 @@ a53_round(mach_port_t me)
 			break;
 		made++;
 		__builtin_memset(&state, 0, sizeof state);
-		state.rip = 0x1000;	/* nothing is mapped */
-		state.rsp = 0x2000;
+		state.rip = 0x5300000;	/* run-x86_64.sh knows this one */
+		state.rsp = 0x5300000;
 		kr = thread_set_state(th[i], x86_64_THREAD_STATE,
 				      (thread_state_t) &state,
 				      x86_64_THREAD_STATE_COUNT);
