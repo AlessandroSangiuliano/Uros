@@ -268,8 +268,22 @@ main(int argc, char **argv)
 
     /*
      * Enter service loop.
+     *
+     * 🔴 AS LARGE AS THE LARGEST MESSAGE MIG SAYS EITHER SUBSYSTEM TAKES,
+     * AND NOT A NUMBER WRITTEN HERE (#716).  It was 256, and a request larger
+     * than the buffer is destroyed by the kernel unread (MACH_RCV_TOO_LARGE),
+     * its reply right with it: the client is told MIG_SERVER_DIED by a
+     * server that is alive.  netname_look_up_mount takes a path of up to
+     * NETNAME_PATH_MAX, so a long path met it already; a mount's check-in,
+     * which carries its capability, met it every time.
      */
-    kr = mach_msg_server(snames_demux, 256, pset, MACH_MSG_OPTION_NONE);
+    {
+	mach_msg_size_t max = do_netname_subsystem.maxsize;
+
+	if (do_notify_subsystem.maxsize > max)
+	    max = do_notify_subsystem.maxsize;
+	kr = mach_msg_server(snames_demux, max, pset, MACH_MSG_OPTION_NONE);
+    }
     panic("%s: mach_msg_server: %s\n",
 	    program, mach_error_string(kr));
     return(1);
