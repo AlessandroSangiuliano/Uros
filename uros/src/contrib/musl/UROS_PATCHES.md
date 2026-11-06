@@ -36,6 +36,8 @@ each entry by hand.
 | 2026-11-06 | `src/thread/x86_64/__unmapself.s`    | #414  | Whole body replaced by a jump to `__uros_unmapself`, Mach traps and no stack. |
 | 2026-11-06 | `src/process/x86_64/vfork.s`         | #414  | Whole body replaced by a jump to `fork`. |
 | 2026-11-06 | `src/internal/uros_syscall_stub.c`   | #414  | WEAK `__uros_unmapself`, so that libc.so links standalone. |
+| 2026-11-06 | `src/internal/uros_main_thread.c`    | #414  | The synthesized auxv carries AT_PHDR, AT_PHENT and AT_PHNUM, read from `__ehdr_start`, so that `__init_tls` finds PT_TLS in a task bootstrap loaded. |
+| 2026-11-06 | `src/internal/uros_main_thread.c`    | #414  | `libc.auxv` is set: a NULL there is a read of address 0 in `malloc()`'s first call. |
 
 ## Planned future patches (Phase 3+)
 
