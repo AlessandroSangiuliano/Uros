@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #799
 Over: 799-widen-dispatch.patch
-Takes out: the order -- state is written first, as i386's compiler wrote it at two sites of three, with the 200 us of the widen before next_thread.  An idle processor that leaves its wait in that window finds DISPATCHING and nothing to run.
+Takes out: the order -- state is written first, as i386's compiler wrote it at two sites of three, with the 200 us of the widen before next_thread.  An idle processor that leaves its wait in that window, or an interrupt on it in thread_setrun(), finds DISPATCHING and nothing to run.
 Run: --entry 14 600 -smp 4
 Expect: is DISPATCHING with no next_thread
 
