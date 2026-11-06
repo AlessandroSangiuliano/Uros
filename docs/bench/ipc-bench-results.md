@@ -8,6 +8,10 @@ Note: KVM timing is noisy (±0.3–0.5 µs between runs); the "run A/B" columns 
 
 ## feature/55 — Port Lookup Cache (2026-03-08)
 
+The cache was removed by #868 in November 2026. These are the numbers of its
+day, on i386; the measure that removed it is in
+`docs/bench/micro-optimizations.md`.
+
 ### Intra-task (thread-to-thread, same task)
 
 | Test          | run A   | run B   | #54 baseline |
