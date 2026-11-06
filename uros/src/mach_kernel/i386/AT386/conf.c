@@ -265,7 +265,7 @@ struct dev_ops	dev_name_list[] =
 	 * console.  Returning the error keeps reads from ever reaching that
 	 * NULL-buffer path. */
 	{ "console",	consoleopen,	consoleclose,	NO_READ,
-	  consolewrite,	NULL_GETS,	NULL_SETS,	NO_MMAP,
+	  consolewrite,	NO_GETS,	NULL_SETS,	NO_MMAP,
 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },
 

@@ -7612,6 +7612,87 @@ arm_forty_seven_failed_state_gives_back(void)
 	return 1;
 }
 
+/*
+ * Arm fifty (#851): the holes in two structures any task can ask for about
+ * itself.  They are filled field by field, and the holes used to bring back what
+ * was on the kernel's stack.  The buffer starts as anything but zero, so a zero
+ * there was written.
+ */
+static unsigned
+a50_hole(const unsigned char *p, size_t from, size_t to, const char *what)
+{
+	size_t		i;
+	unsigned	bad = 0;
+
+	for (i = from; i < to; i++)
+		if (p[i] != 0) {
+			printf("act_test: [50] byte %u of %s, a hole, came back "
+			       "as 0x%x\n", (unsigned) i, what, p[i]);
+			bad++;
+		}
+	return bad;
+}
+
+#define	A50_END(type, field)						\
+	(__builtin_offsetof(type, field) + sizeof (((type *) 0)->field))
+
+static int
+arm_fifty_holes_come_back_zero(void)
+{
+	static union {
+		struct task_basic_info		t;
+		vm_region_basic_info_data_t	r;
+		unsigned char			b[256];
+	} u;
+	vm_address_t		addr = (vm_address_t) &u;
+	vm_size_t		size = 0;
+	mach_port_t		object = MACH_PORT_NULL;
+	mach_msg_type_number_t	n;
+	kern_return_t		kr;
+	unsigned		i, bad = 0;
+
+	for (i = 0; i < sizeof u; i++)
+		u.b[i] = 0xa5;
+	n = TASK_BASIC_INFO_COUNT;
+	kr = task_info(mach_task_self(), TASK_BASIC_INFO,
+		       (task_info_t) &u.t, &n);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [50] task_info answered 0x%x — WRONG\n", kr);
+		return 0;
+	}
+	bad += a50_hole(u.b, A50_END(struct task_basic_info, suspend_count),
+			__builtin_offsetof(struct task_basic_info, virtual_size),
+			"task_basic_info");
+	bad += a50_hole(u.b, A50_END(struct task_basic_info, policy),
+			sizeof (struct task_basic_info), "task_basic_info");
+
+	for (i = 0; i < sizeof u; i++)
+		u.b[i] = 0xa5;
+	n = VM_REGION_BASIC_INFO_COUNT;
+	kr = vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO,
+		       (vm_region_info_t) &u.r, &n, &object);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [50] vm_region answered 0x%x — WRONG\n", kr);
+		return 0;
+	}
+	bad += a50_hole(u.b, A50_END(vm_region_basic_info_data_t, reserved),
+			__builtin_offsetof(vm_region_basic_info_data_t, offset),
+			"vm_region_basic_info");
+	bad += a50_hole(u.b, A50_END(vm_region_basic_info_data_t,
+				     user_wired_count),
+			sizeof (vm_region_basic_info_data_t),
+			"vm_region_basic_info");
+
+	if (bad != 0) {
+		printf("act_test: [50] %u byte(s) of holes came back from the "
+		       "kernel not zero — WRONG (#851)\n", bad);
+		return 0;
+	}
+	printf("act_test: [50] the holes in task_basic_info and "
+	       "vm_region_basic_info came back zero — OK (#851)\n");
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7758,6 +7839,8 @@ main(int argc, char **argv)
 		arms--;
 	else
 		passed += r;
+	arms++;		/* arm fifty, #851 */
+	passed += arm_fifty_holes_come_back_zero();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

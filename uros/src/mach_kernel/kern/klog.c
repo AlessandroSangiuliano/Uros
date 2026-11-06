@@ -154,7 +154,19 @@ host_get_log(host_t host,
 	     mach_msg_type_number_t *count,
 	     natural_t *next)
 {
+	kern_return_t	kr;
+	unsigned int	n;
+
 	if (host == HOST_NULL)
 		return KERN_INVALID_HOST;
-	return klog_read(start, buf, count, next);
+	kr = klog_read(start, buf, count, next);
+
+	/*
+	 * #851: the stub rounds the array up to a word and puts `next' after
+	 * it, and the bytes between are the reply's, from kalloc().
+	 */
+	if (kr == KERN_SUCCESS)
+		for (n = *count; n & 3; n++)
+			buf[n] = '\0';
+	return kr;
 }

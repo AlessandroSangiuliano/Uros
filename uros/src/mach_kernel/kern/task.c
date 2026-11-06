@@ -1628,6 +1628,12 @@ task_info(
 
 		basic_info = (task_basic_info_t) task_info_out;
 
+		/*
+		 * #851: the structure has holes on x86-64, 8 bytes, and what
+		 * it is written into is a kalloc() reply or the kernel stack.
+		 */
+		bzero((char *) basic_info, sizeof (*basic_info));
+
 		map = (task == kernel_task) ? kernel_map : task->map;
 
 		basic_info->virtual_size  = map->size;

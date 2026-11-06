@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #851
+Takes out: NO_GETS on the console -- nulldev() answers D_SUCCESS again.  The clear is still in, so that boot_ports_test [6] reads a success with every word zero, and says WRONG because the console has no status to give.
+Run: --entry 14 600 -smp 4
+Expect: boot_ports_test: \[6\] WRONG .* words, all zero: it has no status to give
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/conf.c b/uros/src/mach_kernel/x86_64/cpu/conf.c
+index 9b5e32e2..f8228f23 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/conf.c
++++ b/uros/src/mach_kernel/x86_64/cpu/conf.c
+@@ -75,7 +75,7 @@ struct dev_ops	dev_name_list[] =
+ 	   async_in,	reset,		port_death,	subdev,
+ 	   dev_info */
+ 	{ "console",	consoleopen,	consoleclose,	NO_READ,
+-	  consolewrite,	NO_GETS,	NULL_SETS,	NO_MMAP,
++	  consolewrite,	NULL_GETS,	NULL_SETS,	NO_MMAP,
+ 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
+ 	  NO_DINFO },
+ };

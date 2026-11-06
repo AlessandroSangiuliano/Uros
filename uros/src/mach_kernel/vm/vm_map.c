@@ -6817,6 +6817,12 @@ vm_region(
 	basic = (vm_region_basic_info_t) info;
 	*count = VM_REGION_BASIC_INFO_COUNT;
 
+	/*
+	 * #851: the structure has holes, 6 bytes on x86-64, and what it is
+	 * written into is a kalloc() reply or the kernel stack.
+	 */
+	bzero((char *) basic, sizeof (*basic));
+
 	vm_map_lock_read(map);
 
 	start = *address;

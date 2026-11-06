@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #851
+Takes out: the clear in ds_device_get_status(), with NO_GETS, without which no driver on this target answers success and writes less.  One patch and not one over the other, because a base is in the fixed arm too.  boot_ports_test [6] soils a block of the size of the reply, and reads back a word of it.
+Run: --entry 14 600 -smp 4
+Expect: boot_ports_test: \[6\] WRONG .* and word [0-9]+ is 0x[0-9a-f]+, which nothing in the call wrote
+
+diff --git a/uros/src/mach_kernel/device/ds_routines.c b/uros/src/mach_kernel/device/ds_routines.c
+index 2c310276..1d007a1c 100644
+--- a/uros/src/mach_kernel/device/ds_routines.c
++++ b/uros/src/mach_kernel/device/ds_routines.c
+@@ -1793,7 +1793,6 @@ ds_device_get_status(
+ 		 * the count is what the caller asked for.  A driver that says
+ 		 * success and writes less hands back zeros and not heap.
+ 		 */
+-		bzero((char *) status, *status_count * sizeof (*status));
+ 		return ((*device->dev_ops->d_getstat)(device->dev_number,
+ 						      flavor,
+ 						      status,
+diff --git a/uros/src/mach_kernel/x86_64/cpu/conf.c b/uros/src/mach_kernel/x86_64/cpu/conf.c
+index 9b5e32e2..f8228f23 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/conf.c
++++ b/uros/src/mach_kernel/x86_64/cpu/conf.c
+@@ -75,7 +75,7 @@ struct dev_ops	dev_name_list[] =
+ 	   async_in,	reset,		port_death,	subdev,
+ 	   dev_info */
+ 	{ "console",	consoleopen,	consoleclose,	NO_READ,
+-	  consolewrite,	NO_GETS,	NULL_SETS,	NO_MMAP,
++	  consolewrite,	NULL_GETS,	NULL_SETS,	NO_MMAP,
+ 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
+ 	  NO_DINFO },
+ };

@@ -969,6 +969,7 @@ act_machine_get_state(
 		state->eip = saved_state->eip;
 		state->efl = saved_state->efl;
 		state->uesp = saved_state->uesp;
+		state->esp = 0;		/* #851: uesp is the one that means it */
 
 		state->cs = saved_state->cs;
 		state->ss = saved_state->ss;
