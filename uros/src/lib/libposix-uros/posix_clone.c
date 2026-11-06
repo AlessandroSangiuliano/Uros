@@ -35,11 +35,19 @@
 
 #include <mach.h>
 #include <mach/mach_traps.h>
+#include <mach/mach_syscalls.h>
 #include <mach/mach_port.h>
 #include <mach/mach_interface.h>
 #include <mach/thread_status.h>
 
 extern void __uros_clone_trampoline(void);
+
+/* In musl (src/internal/uros_main_thread.c), which has the thread's structure.
+ * Two 32-bit words there, and these two words here. */
+extern struct mach_thread_state *__uros_mach_thread_state(void);
+_Static_assert(sizeof(struct mach_thread_state) == 8,
+               "uros_mach_state in musl's struct __pthread is two words");
+extern struct mach_thread_state *mach_thread_state(void);
 
 #ifdef UROS_PTHREAD_SMOKE
 extern void mach_print(const char *);
@@ -53,7 +61,6 @@ extern int __uros_install_thread_tls_at(mach_port_t target_thread,
 
 /* Linux switch_thread_switch options.  Matches kern/syscall_subr.h. */
 #define UROS_SWITCH_OPTION_NONE 0
-extern int    syscall_thread_switch(unsigned long, int, int);
 extern void   _exit(int);
 
 /* Kernel half of CLONE_CHILD_CLEARTID — see issue #257.  Registers a
@@ -99,6 +106,22 @@ __uros_thread_bootstrap(int (*fn)(void *), void *arg,
 }
 
 #define TRACE(s) BOOT_TRACE(s)
+
+/*
+ * A thread gives back its reply port on the way out, with a trap: the RPC would
+ * ask for a reply port, which is the thing being given back (#414).
+ */
+void
+__uros_thread_leaving(void)
+{
+    struct mach_thread_state *state = mach_thread_state();
+    mach_port_t port = state->reply_port;
+
+    state->reply_port = MACH_PORT_NULL;
+    if (port != MACH_PORT_NULL)
+        (void)syscall_mach_port_mod_refs(mach_task_self(), port,
+                                         MACH_PORT_RIGHT_RECEIVE, -1);
+}
 
 /* Linux clone(2) flag bits that musl pthread_create cares about. */
 #define UROS_CLONE_SETTLS         0x00080000
@@ -160,6 +183,16 @@ __uros_clone(int (*fn)(void *),
     ((uintptr_t *)sp)[3] = 0;     /* tls_base — installed below by parent */
     ((uintptr_t *)sp)[4] = (uintptr_t)ctid;
 #endif
+
+    /*
+     * Each thread its own reply port, from before there is a second one
+     * (#414).  Two threads receiving on one port take each other's replies,
+     * and the one whose reply was taken waits for good (#299).  Asked every
+     * time, as pthread_create() asks in libpthreads: it returns at once when
+     * it is done already, and a forked child goes back to the task's state
+     * and hands over again here.
+     */
+    mig_init(__uros_mach_thread_state);
 
     /* 1. Create the kernel thread, suspended. */
     mach_port_t new_thread = MACH_PORT_NULL;
@@ -266,6 +299,7 @@ extern void __uros_unmap_and_exit(mach_port_t task, vm_offset_t base,
 void
 __uros_unmapself(void *base, size_t size)
 {
+    __uros_thread_leaving();
     __uros_unmap_and_exit(mach_task_self(), (vm_offset_t)base,
                           (vm_size_t)size, mach_thread_self());
 }
