@@ -61,6 +61,16 @@ The Hurd, which also stands on Mach, is worth reading here: its auth server
 takes part when an identity is established with a server, not at every open. Its
 code is GPL, so only the idea.
 
+## A session as a world
+
+This is a further proposal, on top of the one above.
+
+A task reaches the system only through the ports it holds, so those ports are its world. A login could build one for the session: a child of `bootstrap` that hands the session's tasks a name server of its own, a manifest of its own, and a host port that says what they may use. Then a user's rights would be the ports of that world and nothing else. What a session does not hold it cannot name, and logging out would mean ending the world, not revoking its rights one at a time.
+
+This is the first level of the virtualization direction: nothing inside can tell, the protocols are the same, and a port passed on is the real port, so only what a parent chooses to intercept pays an extra hop. It meets three things that do not exist yet: a nested `bootstrap` that gives out a subset of its rights, a proxy for the host port, and a name server per world. Today `name_server` holds one mount table, and a mount is visible to every task.
+
+The token above would still have its place: `ext_server` has to know who asks, and a session could keep a token in its world. Whether the two ideas are one design or two is open.
+
 ## Before it
 
 - #747: a token has to be bound to whoever holds it. As long as it is not,
@@ -86,3 +96,4 @@ code is GPL, so only the idea.
   has logged in. With what identity, and what does it need from the boot
   manifest?
 - What is the credential: a password, or something else (#366)?
+- Is a session a world, and if so, what is left for the token to do? A shared file, a server every session reaches, and a user with two sessions at once are the cases to try it on.
