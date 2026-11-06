@@ -1035,11 +1035,21 @@ thread_terminate_self(void)
 	task = thr_act->task;
 
 	/*
-  	 * the test for task_active seems unnecessary because
-   	 * the thread holds a reference to the task (so it
-	 * can't be deleted out from under it).
+	 * 🔴 NOT ONLY IN A LIVE TASK (#414).  This asked task->active first,
+	 * so a thread dying in a task already being terminated left its
+	 * activation on the task's list, active, with its shuttle on the way
+	 * to the reaper.  task_terminate() walks that list, and two threads of
+	 * a task that faulted together were enough: one terminated the task,
+	 * the other came here, and the first found the activation after the
+	 * reaper had let go of top_act (#749).  act_abort() read that as an
+	 * activation in the middle of a chain and wrote through a null
+	 * `higher'.  Inactive and off the list before the reaper can see it,
+	 * thread_terminate() answers KERN_TERMINATED.
+	 *
+	 * The thread holds a reference to the task, so it cannot be deleted
+	 * out from under it.
 	 */
-	if( task && task->active) {
+	if (task != TASK_NULL) {
 		time_value_t user_time, system_time;
 
 		thread_read_times(thread, &user_time, &system_time);
