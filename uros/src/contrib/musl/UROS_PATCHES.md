@@ -30,6 +30,12 @@ each entry by hand.
 
 | 2026-05-22 | `Makefile`                           | #234  | Add `EXTRA_OBJS` (empty default) and fold it into the `lib/libc.so` link rule.  Incr 2b feeds our PIC archives (libposix-uros + libmach + libvfs + … built `-fPIC -DUROS_LIBC_UMBRELLA`) here so the dynamic linker (== libc.so) carries the real `__uros_syscall` dispatcher + Mach/VFS stack.  Empty default ⇒ vanilla build unchanged; the Uros CMake passes `EXTRA_OBJS=...` on the make line.  Normal archive semantics pull only the referenced closure.  musl stays the linker of libc.so (keeps `_dlstart`, `--dynamic-list`, `DT_TEXTREL`). |
 | 2026-07-10 | `src/thread/pthread_cancel.c`        | #375  | `__syscall_cp_c` now routes cancellation points through the plain `__syscall` (→ patched `__uros_syscallN`) instead of `__syscall_cp_asm`.  That asm issues a raw `int $0x80`, which Uros traps as `EXC_SYSCALL` → SIGSYS (same reason `__set_thread_area.s` was rewritten for #259).  The umbrella `libc.so` always carries this strong gate, so every dynamic tool making a cancellable syscall (nanosleep, read, raw `write`, wait, …) crashed on its first one — surfaced by cpustat's live refresh (`nanosleep`).  Uros has no signal-driven pthread cancellation, so the uncancellable path loses nothing today. |
+| 2026-11-06 | `arch/x86_64/syscall_arch.h`         | #414  | The patch of #250 on x86-64: `__syscallN` calls `__uros_syscallN`.  vDSO macros dropped. |
+| 2026-11-06 | `src/thread/x86_64/__set_thread_area.s` | #414 | Whole body replaced by a jump to libposix-uros `__uros_set_thread_area_tp`, which calls `urmach_thread_set_fs_base()`. |
+| 2026-11-06 | `src/thread/x86_64/clone.s`          | #414  | Whole body replaced by a jump to `__uros_clone`: same arguments in the same places under the C ABI. |
+| 2026-11-06 | `src/thread/x86_64/__unmapself.s`    | #414  | Whole body replaced by a jump to `__uros_unmapself`, Mach traps and no stack. |
+| 2026-11-06 | `src/process/x86_64/vfork.s`         | #414  | Whole body replaced by a jump to `fork`. |
+| 2026-11-06 | `src/internal/uros_syscall_stub.c`   | #414  | WEAK `__uros_unmapself`, so that libc.so links standalone. |
 
 ## Planned future patches (Phase 3+)
 

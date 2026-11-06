@@ -62,3 +62,7 @@ UROS_SYS_STUB int __uros_clone(int (*fn)(void *), void *stack, int flags,
 
 UROS_SYS_STUB int __uros_set_thread_area_tp(void *tp)
 { (void)tp; return -ENOSYS; }
+
+/* x86-64's __unmapself.s reaches for this one (#414). */
+UROS_SYS_STUB void __uros_unmapself(void *base, unsigned long size)
+{ (void)base; (void)size; }

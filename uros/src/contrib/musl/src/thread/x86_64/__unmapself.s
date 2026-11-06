@@ -1,10 +1,10 @@
-/* Copyright 2011-2012 Nicholas J. Kain, licensed under standard MIT license */
+/*
+ * Uros patch (#414): a detached thread gives its stack back and exits, and has
+ * no stack left to do the second half on.  The Linux numbers this used are not
+ * reachable by SYSCALL here; libposix-uros has the same sequence in Mach traps.
+ */
 .text
 .global __unmapself
 .type   __unmapself,@function
 __unmapself:
-	movl $11,%eax   /* SYS_munmap */
-	syscall         /* munmap(arg2,arg3) */
-	xor %rdi,%rdi   /* exit() args: always return success */
-	movl $60,%eax   /* SYS_exit */
-	syscall         /* exit(0) */
+	jmp __uros_unmapself
