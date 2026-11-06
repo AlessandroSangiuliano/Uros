@@ -2,6 +2,146 @@ cmake_minimum_required(VERSION 3.16)
 project(libmach C)
 
 # ===========================================================================
+# libmach_core (#251) — slim libmach for servers that link musl libc.
+#
+# Same source set as libmach minus every file that defines a symbol musl
+# already provides.  Used by servers migrated to the musl libc path so
+# they can link without -Wl,--allow-multiple-definition.  When the last
+# server is migrated (Phase 8 of #219), the excluded files are deleted
+# from libmach itself and libmach_core gets renamed back to libmach.
+#
+# Gated by UROS_BUILD_MUSL: no point building a duplicate archive for
+# users not on the musl path.
+#
+# A function, called by both halves of this file (#414): each half has its own
+# list of sources and the rest is one thing, so that it is written once.
+# ===========================================================================
+function(uros_add_libmach_core LIB_SOURCES)
+  if(NOT UROS_BUILD_MUSL)
+    return()
+  endif()
+
+  set(LIBMACH_MUSL_CONFLICTS
+    # stdio (musl src/stdio/, src/string/__doprintf)
+    "/printf\\.c$"
+    "/sprintf\\.c$"
+    "/doprnt\\.c$"
+    "/fprintf_stderr\\.c$"
+    # malloc family (musl src/malloc/mallocng)
+    "/malloc\\.c$"
+    "/sbrk\\.c$"
+    # process termination (musl src/exit/)
+    "/exit\\.c$"
+    "/panic\\.c$"          # abort wrapper, calls printf+exit
+    "/Ovfork\\.c$"         # defines vfork(); musl has its own
+    # SSP (musl src/env/__stack_chk_fail.c); init_stack_guard stub
+    # is provided by libposix-uros so crt0.c still links cleanly.
+    "/stack_protector\\.c$"
+    # error reporting (musl src/errno/, src/string/strerror.c)
+    "/errno\\.c$"
+    "/error_codes\\.c$"
+    # POSIX libc bits (musl src/{ctype,env,unistd,stdlib}/)
+    "/ctype\\.c$"
+    "/getenv\\.c$"
+    "/sleep\\.c$"
+    # string family (musl src/string/) — both the consolidated
+    # sa_string.c and the per-function .c files
+    "/sa_string\\.c$"
+    "/strcat\\.c$"   "/strcmp\\.c$"   "/strcpy\\.c$"
+    "/strlen\\.c$"   "/strspn\\.c$"
+    "/strncat\\.c$"  "/strncmp\\.c$"  "/strncpy\\.c$"
+    "/strlcat\\.c$"  "/strlcpy\\.c$"
+    # numeric conversion (musl src/stdlib/strto*.c)
+    "/strtol\\.c$"   "/strtoul\\.c$"
+    "/strtoq\\.c$"   "/strtouq\\.c$"
+    # i386 assembly conflicts
+    "/i386/memset\\.s$"     # memset, bzero  — musl provides
+    "/i386/memcpy\\.s$"     # memcpy, memmove, bcopy
+    "/i386/ffs\\.s$"        # ffs
+    "/i386/gcc\\.s$"        # __divsi3 / __udivsi3 (libgcc provides)
+    "/i386/fork\\.s$"       # fork() syscall stub
+    # What x86-64 builds from C where i386 has the assembly above.
+    "/bcopy\\.c$"    "/memcpy\\.c$"   "/memmove\\.c$"   "/memset\\.c$"
+  )
+
+  set(LIBMACH_CORE_SOURCES ${LIB_SOURCES})
+  foreach(_pat IN LISTS LIBMACH_MUSL_CONFLICTS)
+    list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX ${_pat})
+  endforeach()
+
+  # The preprocessed i386 .s outputs were appended after running through
+  # cpp into ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/*.S.  Filter those
+  # too so the i386 stubs above don't sneak back in via the preprocessed
+  # path.
+  list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/generated/asm/(memset|memcpy|ffs|gcc|fork|bzero)\\.s\\.S$")
+
+  add_library(libmach_core STATIC ${LIBMACH_CORE_SOURCES})
+  add_dependencies(libmach_core mig_device_header mig_mach_public_headers)
+
+  # Mirror libmach's compile + include configuration so the two stay
+  # ABI-compatible (same gnu11, same SSE2, same SSP guard mode).
+  target_compile_options(libmach_core PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin 
+                            -mstack-protector-guard=global -include stdint.h>
+  )
+  target_compile_options(libmach_core PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
+  target_compile_options(libmach_core PRIVATE
+    ${UROS_ARCH_FLAGS}
+  )
+
+  target_include_directories(libmach_core BEFORE PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+  )
+  target_include_directories(libmach_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/generated/include
+    ${CMAKE_SOURCE_DIR}/uapi
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include
+    ${UROS_ARCH_INCLUDE}
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel
+    ${CMAKE_SOURCE_DIR}/include
+  )
+
+  set_target_properties(libmach_core PROPERTIES
+    OUTPUT_NAME "mach_core"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
+  )
+
+  # PIC variant for the umbrella libc.so (#234 incr 2b).  Same slim source
+  # set as libmach_core (musl provides the excluded libc symbols), compiled
+  # position-independent so the Mach traps + RPC stubs can be folded into
+  # libc.so via EXTRA_OBJS.  Flags/includes copied from libmach_core so the
+  # two never drift.  The Mach trap is lcall/sysenter (immediate-only) and
+  # the SSE2 mem*.s use no absolute relocs → PIC-clean.
+  add_library(libmach_core-pic STATIC ${LIBMACH_CORE_SOURCES})
+  add_dependencies(libmach_core-pic mig_device_header mig_mach_public_headers)
+  set_target_properties(libmach_core-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(libmach_core-pic PRIVATE
+    $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
+  target_include_directories(libmach_core-pic PRIVATE
+    $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
+  set_target_properties(libmach_core-pic PROPERTIES OUTPUT_NAME "mach_core-pic")
+
+  # #396: the two objects the musl umbrella must receive LOOSE (see
+  # src/contrib/CMakeLists.txt — its --exclude-libs=ALL hides every archive
+  # member, and only loose objects keep the Mach surface exported for
+  # dynamic tools like cpustat, #375).  Compiled here as an OBJECT library
+  # so the umbrella names them as $<TARGET_OBJECTS:...> instead of guessing
+  # this target's internal CMakeFiles object paths — which encoded the
+  # source depth as __/ segments and broke the day libmach moved.
+  add_library(libmach_export_objs OBJECT
+    ${CMAKE_BINARY_DIR}/generated/mach_host_user.c
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S
+  )
+  add_dependencies(libmach_export_objs mig_device_header mig_mach_public_headers)
+  set_target_properties(libmach_export_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(libmach_export_objs PRIVATE
+    $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
+  target_include_directories(libmach_export_objs PRIVATE
+    $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
+endfunction()
+
+# ===========================================================================
 # The Mach trap stubs, alone, on a target whose userland is not up yet (#426)
 # ===========================================================================
 #
@@ -262,6 +402,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include)
+
+  # The musl half (#414), from the list the target above is built from, and
+  # with no bzero object: that one exists for a libmach with no assembly, and
+  # musl has its own.
+  uros_add_libmach_core("${_traps_pp};${_MACH_C};${LIBMACH_MIG_GENERATED}")
 
   return()
 endif()
@@ -559,133 +704,5 @@ set_target_properties(libmach PROPERTIES
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
-# ===========================================================================
-# libmach_core (#251) — slim libmach for servers that link musl libc.
-#
-# Same source set as libmach minus every file that defines a symbol musl
-# already provides.  Used by servers migrated to the musl libc path so
-# they can link without -Wl,--allow-multiple-definition.  When the last
-# server is migrated (Phase 8 of #219), the excluded files are deleted
-# from libmach itself and libmach_core gets renamed back to libmach.
-#
-# Gated by UROS_BUILD_MUSL: no point building a duplicate archive for
-# users not on the musl path.
-# ===========================================================================
-if(UROS_BUILD_MUSL)
-  set(LIBMACH_MUSL_CONFLICTS
-    # stdio (musl src/stdio/, src/string/__doprintf)
-    "/printf\\.c$"
-    "/sprintf\\.c$"
-    "/doprnt\\.c$"
-    "/fprintf_stderr\\.c$"
-    # malloc family (musl src/malloc/mallocng)
-    "/malloc\\.c$"
-    "/sbrk\\.c$"
-    # process termination (musl src/exit/)
-    "/exit\\.c$"
-    "/panic\\.c$"          # abort wrapper, calls printf+exit
-    "/Ovfork\\.c$"         # defines vfork(); musl has its own
-    # SSP (musl src/env/__stack_chk_fail.c); init_stack_guard stub
-    # is provided by libposix-uros so crt0.c still links cleanly.
-    "/stack_protector\\.c$"
-    # error reporting (musl src/errno/, src/string/strerror.c)
-    "/errno\\.c$"
-    "/error_codes\\.c$"
-    # POSIX libc bits (musl src/{ctype,env,unistd,stdlib}/)
-    "/ctype\\.c$"
-    "/getenv\\.c$"
-    "/sleep\\.c$"
-    # string family (musl src/string/) — both the consolidated
-    # sa_string.c and the per-function .c files
-    "/sa_string\\.c$"
-    "/strcat\\.c$"   "/strcmp\\.c$"   "/strcpy\\.c$"
-    "/strlen\\.c$"   "/strspn\\.c$"
-    "/strncat\\.c$"  "/strncmp\\.c$"  "/strncpy\\.c$"
-    "/strlcat\\.c$"  "/strlcpy\\.c$"
-    # numeric conversion (musl src/stdlib/strto*.c)
-    "/strtol\\.c$"   "/strtoul\\.c$"
-    "/strtoq\\.c$"   "/strtouq\\.c$"
-    # i386 assembly conflicts
-    "/i386/memset\\.s$"     # memset, bzero  — musl provides
-    "/i386/memcpy\\.s$"     # memcpy, memmove, bcopy
-    "/i386/ffs\\.s$"        # ffs
-    "/i386/gcc\\.s$"        # __divsi3 / __udivsi3 (libgcc provides)
-    "/i386/fork\\.s$"       # fork() syscall stub
-  )
-
-  set(LIBMACH_CORE_SOURCES ${LIB_SOURCES})
-  foreach(_pat IN LISTS LIBMACH_MUSL_CONFLICTS)
-    list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX ${_pat})
-  endforeach()
-
-  # The preprocessed i386 .s outputs were appended after running through
-  # cpp into ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/*.S.  Filter those
-  # too so the i386 stubs above don't sneak back in via the preprocessed
-  # path.
-  list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/generated/asm/(memset|memcpy|ffs|gcc|fork|bzero)\\.s\\.S$")
-
-  add_library(libmach_core STATIC ${LIBMACH_CORE_SOURCES})
-  add_dependencies(libmach_core mig_device_header mig_mach_public_headers)
-
-  # Mirror libmach's compile + include configuration so the two stay
-  # ABI-compatible (same gnu11, same SSE2, same SSP guard mode).
-  target_compile_options(libmach_core PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin 
-                            -mstack-protector-guard=global -include stdint.h>
-  )
-  target_compile_options(libmach_core PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
-  target_compile_options(libmach_core PRIVATE
-    ${UROS_ARCH_FLAGS}
-  )
-
-  target_include_directories(libmach_core BEFORE PUBLIC
-    ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
-  )
-  target_include_directories(libmach_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_BINARY_DIR}/generated/include
-    ${CMAKE_SOURCE_DIR}/uapi
-    ${CMAKE_SOURCE_DIR}/src/mach_services/include
-    ${UROS_ARCH_INCLUDE}
-    ${CMAKE_SOURCE_DIR}/src/mach_kernel
-    ${CMAKE_SOURCE_DIR}/include
-  )
-
-  set_target_properties(libmach_core PROPERTIES
-    OUTPUT_NAME "mach_core"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
-  )
-
-  # PIC variant for the umbrella libc.so (#234 incr 2b).  Same slim source
-  # set as libmach_core (musl provides the excluded libc symbols), compiled
-  # position-independent so the Mach traps + RPC stubs can be folded into
-  # libc.so via EXTRA_OBJS.  Flags/includes copied from libmach_core so the
-  # two never drift.  The Mach trap is lcall/sysenter (immediate-only) and
-  # the SSE2 mem*.s use no absolute relocs → PIC-clean.
-  add_library(libmach_core-pic STATIC ${LIBMACH_CORE_SOURCES})
-  add_dependencies(libmach_core-pic mig_device_header mig_mach_public_headers)
-  set_target_properties(libmach_core-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_compile_options(libmach_core-pic PRIVATE
-    $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
-  target_include_directories(libmach_core-pic PRIVATE
-    $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
-  set_target_properties(libmach_core-pic PROPERTIES OUTPUT_NAME "mach_core-pic")
-
-  # #396: the two objects the musl umbrella must receive LOOSE (see
-  # src/contrib/CMakeLists.txt — its --exclude-libs=ALL hides every archive
-  # member, and only loose objects keep the Mach surface exported for
-  # dynamic tools like cpustat, #375).  Compiled here as an OBJECT library
-  # so the umbrella names them as $<TARGET_OBJECTS:...> instead of guessing
-  # this target's internal CMakeFiles object paths — which encoded the
-  # source depth as __/ segments and broke the day libmach moved.
-  add_library(libmach_export_objs OBJECT
-    ${CMAKE_BINARY_DIR}/generated/mach_host_user.c
-    ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S
-  )
-  add_dependencies(libmach_export_objs mig_device_header mig_mach_public_headers)
-  set_target_properties(libmach_export_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_compile_options(libmach_export_objs PRIVATE
-    $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
-  target_include_directories(libmach_export_objs PRIVATE
-    $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
-endif()
+# The musl half of this library, from the same list as the target above (#251).
+uros_add_libmach_core("${LIB_SOURCES}")
