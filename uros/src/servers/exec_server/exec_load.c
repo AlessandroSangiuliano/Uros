@@ -506,6 +506,26 @@ exec_do_load(mach_port_t client_task, const char *path,
         return EXEC_ERR_TASK_CREATE;
     }
 
+    /*
+     * Page zero is nobody's (#421).  A task starts with an empty map, and an
+     * allocation that may land anywhere lands at the bottom of it, so without
+     * this the first one in an exec'd program was given address 0, and a NULL
+     * pointer read that memory instead of faulting.  bootstrap does the same
+     * for what it loads; a forked child inherits the entry.
+     */
+    {
+        vm_address_t zero = 0;
+
+        kr = vm_map(new_task, &zero, vm_page_size, 0, FALSE,
+                    MEMORY_OBJECT_NULL, 0, TRUE,
+                    VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_COPY);
+        if (kr != KERN_SUCCESS) {
+            printf("exec: reserving page zero kr=%d\n", kr);
+            return fail_after_task(new_task, &img, file_buf,
+                                   EXEC_ERR_VM_SETUP);
+        }
+    }
+
     /* ET_DYN/PIE images load at a bias; fixed ET_EXEC at 0. */
     main_bias = (elf_type(&img) == ET_DYN) ? EXEC_DYN_BASE : 0;
 
