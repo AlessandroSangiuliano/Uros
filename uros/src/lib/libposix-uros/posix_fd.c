@@ -763,6 +763,21 @@ long __uros_close(int fd)
     return 0;
 }
 
+#ifdef __x86_64__
+/* lseek(fd, off, whence) — the offset fits a register here. */
+long __uros_lseek(int fd, long off, unsigned int whence)
+{
+    int err;
+    vfs_fd_t vfd = resolve_fd(fd, &err);
+    if (err) return err;
+    if (vfd == -2)                    /* console is not seekable */
+        return -ESPIPE;
+    off_t r = vfs_lseek(vfd, (off_t)off, (int)whence);
+    if (r == (off_t)-1)
+        return -EINVAL;
+    return (long)r;
+}
+#else
 /* _llseek(fd, off_hi, off_lo, result*, whence) — i386 large-file lseek. */
 long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
                    void *result, unsigned int whence)
@@ -780,10 +795,11 @@ long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
         *(int64_t *)result = (int64_t)r;
     return 0;
 }
+#endif
 
 /*
  * statx(dirfd, path, flags, mask, statxbuf).  musl tries this first on
- * i386 (time64).  We fill the subset of struct statx that musl copies
+ * i386 (time64), and on x86-64 __uros_fstatat() below goes through it.  We fill the subset of struct statx that musl copies
  * out in fstatat.c.  Layout mirrors the kernel UAPI struct statx.
  */
 struct lx_statx_timestamp { int64_t tv_sec; uint32_t tv_nsec; int32_t pad; };
@@ -870,6 +886,66 @@ long __uros_statx(int dirfd, const char *path, int flags,
     fill_statx(sx, &vs);
     return 0;
 }
+
+#ifdef __x86_64__
+/*
+ * The kernel's struct stat on x86-64, which is what musl's fstatat() reads
+ * (arch/x86_64/kstat.h, which is not a public header).  Spelled in widths
+ * because it is an ABI, and #397 and #401 are what declaring these structures
+ * by resemblance has cost.
+ */
+struct lx_kstat {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint64_t st_nlink;
+    uint32_t st_mode;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint32_t pad0;
+    uint64_t st_rdev;
+    int64_t  st_size;
+    int64_t  st_blksize;
+    int64_t  st_blocks;
+    int64_t  st_atime_sec, st_atime_nsec;
+    int64_t  st_mtime_sec, st_mtime_nsec;
+    int64_t  st_ctime_sec, st_ctime_nsec;
+    int64_t  unused[3];
+};
+_Static_assert(sizeof(struct lx_kstat) == 144,
+               "struct lx_kstat is not the size of the kernel's struct stat");
+
+/*
+ * stat, lstat, fstat and newfstatat, through the one path that knows a
+ * descriptor from a name.  AT_SYMLINK_NOFOLLOW is accepted and has no effect,
+ * as with statx on i386: libvfs has one stat.
+ */
+long __uros_fstatat(int dirfd, const char *path, void *kst, int flags)
+{
+    struct lx_statx sx;
+    struct lx_kstat *k = kst;
+    long rc;
+
+    if (!k)
+        return -EFAULT;
+    rc = __uros_statx(dirfd, path, flags, LX_STATX_BASIC_STATS, &sx);
+    if (rc != 0)
+        return rc;
+
+    memset(k, 0, sizeof(*k));
+    k->st_ino     = sx.stx_ino;
+    k->st_nlink   = sx.stx_nlink;
+    k->st_mode    = sx.stx_mode;
+    k->st_uid     = sx.stx_uid;
+    k->st_gid     = sx.stx_gid;
+    k->st_size    = (int64_t)sx.stx_size;
+    k->st_blksize = sx.stx_blksize;
+    k->st_blocks  = (int64_t)sx.stx_blocks;
+    k->st_atime_sec = sx.stx_atime.tv_sec;
+    k->st_mtime_sec = sx.stx_mtime.tv_sec;
+    k->st_ctime_sec = sx.stx_ctime.tv_sec;
+    return 0;
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  execve fd handoff hooks (#262 step 3)                              */
