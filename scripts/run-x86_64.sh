@@ -623,6 +623,10 @@ must_report 'cow_test: started' 'cow_test: [0-9]* of [0-9]* arms passed' \
 must_report 'act_test: started' 'act_test: [0-9]* of [0-9]* arms passed' \
 	'It was in NEITHER list until #425 -- not the one that ends the run and not the one that fails it for silence -- so it could start, stop dead, and be reported as a pass by omission.'
 
+must_report '=== sig_test (' '=== sig_test: [0-9]* PASS, 0 FAIL ===' \
+	'It sends signals through proc_server, and the line that ends it has a count of failures in it.  The pattern asks for none: this program predates WRONG, and a FAIL of its own is not a line the unexplained scan reads (#496).' \
+	sig_test
+
 must_report 'musl_test: started' 'musl_test: [0-9]* of [0-9]* arms passed' \
 	'A static C program with musl under it, asking for threads, memory, signals and files through the system calls of this target (#414).  It started and did not reach its last line, which is a stop inside the personality or a thread that never came back.'
 
