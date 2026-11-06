@@ -285,6 +285,13 @@ void percpu_activate(uint32_t cpu_id)
 	 * find the same block.
 	 */
 	wrmsr(MSR_KERNEL_GS_BASE, va);
+
+	/*
+	 * #414: what the firmware left here is nobody's.  p->fs_base says what
+	 * the register holds, so the register is made to hold that.
+	 */
+	wrmsr(MSR_FS_BASE, 0);
+	p->fs_base = 0;
 }
 
 #if	SYSCALL_PROFILE
