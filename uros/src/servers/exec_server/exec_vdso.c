@@ -30,7 +30,7 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
-/*  Minimal Elf32 header (no dependency on a system elf.h)             */
+/*  Minimal ELF header (no dependency on a system elf.h)               */
 /* ------------------------------------------------------------------ */
 
 #define EI_MAG0          0
@@ -48,17 +48,36 @@
 #define ELFMAG2       'L'
 #define ELFMAG3       'F'
 #define ELFCLASS32       1
+#define ELFCLASS64       2
 #define ELFDATA2LSB      1
 #define EV_CURRENT       1
 #define ELFOSABI_NONE    0
 
 #define ET_DYN           3
 #define EM_386           3
+#define EM_X86_64       62
 
 /*
- * 52-byte Elf32_Ehdr laid out by hand — no struct alignment surprises
- * across compilers.  Fields not interesting to a consumer that only
- * needs to confirm "this is an ELF" are left at 0.
+ * This target's class and machine, and the two numbers that follow from the
+ * class: the header's size, and where e_ehsize sits in it, because the
+ * addresses ahead of it are four bytes or eight (#421).
+ */
+#if defined(__x86_64__)
+#define VDSO_CLASS       ELFCLASS64
+#define VDSO_MACHINE     EM_X86_64
+#define VDSO_EHSIZE      64
+#define VDSO_EHSIZE_AT   52
+#else
+#define VDSO_CLASS       ELFCLASS32
+#define VDSO_MACHINE     EM_386
+#define VDSO_EHSIZE      52
+#define VDSO_EHSIZE_AT   40
+#endif
+
+/*
+ * An ELF header laid out by hand — no struct alignment surprises across
+ * compilers.  Fields not interesting to a consumer that only needs to
+ * confirm "this is an ELF" are left at 0.
  */
 static void
 build_vdso_blob(uint8_t *page, vm_size_t page_size)
@@ -70,7 +89,7 @@ build_vdso_blob(uint8_t *page, vm_size_t page_size)
     page[EI_MAG1]    = ELFMAG1;
     page[EI_MAG2]    = ELFMAG2;
     page[EI_MAG3]    = ELFMAG3;
-    page[EI_CLASS]   = ELFCLASS32;
+    page[EI_CLASS]   = VDSO_CLASS;
     page[EI_DATA]    = ELFDATA2LSB;
     page[EI_VERSION] = EV_CURRENT;
     page[EI_OSABI]   = ELFOSABI_NONE;
@@ -80,9 +99,9 @@ build_vdso_blob(uint8_t *page, vm_size_t page_size)
     page[16] = (uint8_t)ET_DYN;
     page[17] = (uint8_t)(ET_DYN >> 8);
 
-    /* e_machine = EM_386 */
-    page[18] = (uint8_t)EM_386;
-    page[19] = (uint8_t)(EM_386 >> 8);
+    /* e_machine */
+    page[18] = (uint8_t)VDSO_MACHINE;
+    page[19] = (uint8_t)(VDSO_MACHINE >> 8);
 
     /* e_version = EV_CURRENT (uint32) */
     page[20] = (uint8_t)EV_CURRENT;
@@ -91,9 +110,9 @@ build_vdso_blob(uint8_t *page, vm_size_t page_size)
     page[23] = 0;
 
     /* e_entry / e_phoff / e_shoff / e_flags stay 0 — no segments
-     * exported in v0.4.0.  e_ehsize = 52 (sizeof Elf32_Ehdr). */
-    page[40] = 52;
-    page[41] = 0;
+     * exported in v0.4.0. */
+    page[VDSO_EHSIZE_AT]     = VDSO_EHSIZE;
+    page[VDSO_EHSIZE_AT + 1] = 0;
     /* e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx all 0. */
 }
 
