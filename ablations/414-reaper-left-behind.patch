@@ -4,7 +4,7 @@ Over: 414-widen-reaper-first.patch
 Takes out: both drops with the task unlocked, and the mutex's word about it, so that the thread terminating a task sleeps on its own lock, the reaper sleeps behind it, and no thread is freed again; the arm has to see that from the zone, where the port had said the task was gone
 Accel: tcg,kvm
 Run: --entry 14 300 -smp 4
-Expect: act_test: \[53\] [0-9]+ tasks of 4 threads faulted together, and the zone of threads read [0-9]+ before and [0-9]+ after [0-9]+ waits: they are still there
+Expect: act_test: \[53\] [0-9]+ tasks of 4 threads faulted together, and the zone of tasks read [0-9]+ before and [0-9]+ after [0-9]+ waits: they are still there
 
 diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
 --- a/uros/src/mach_kernel/kern/task.c
