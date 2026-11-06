@@ -75,6 +75,26 @@ if(UROS_BUILD_MUSL)
     LOG_INSTALL       ON
   )
 
+  # ExternalProject knows of a build it has made, and nothing of what went into
+  # it: a patch to a file under musl/ left libc-musl.a as it was, the next link
+  # took the old archive, and the program ran the code from before the patch
+  # with nothing to say so (#414).  This step depends on the files, so that the
+  # build runs when one of them changes, and musl's own Makefile then decides
+  # what to compile.
+  file(GLOB_RECURSE MUSL_SOURCES CONFIGURE_DEPENDS
+    ${MUSL_SRC}/src/*
+    ${MUSL_SRC}/arch/*
+    ${MUSL_SRC}/crt/*
+    ${MUSL_SRC}/ldso/*
+    ${MUSL_SRC}/include/*
+  )
+  ExternalProject_Add_Step(musl_extproj sources_changed
+    COMMENT "musl: its sources are newer than its last build"
+    DEPENDEES configure
+    DEPENDERS build
+    DEPENDS ${MUSL_SOURCES}
+  )
+
   # Imported target so consumers can do: target_link_libraries(x musl::c)
   add_library(musl::c STATIC IMPORTED GLOBAL)
   set_target_properties(musl::c PROPERTIES
