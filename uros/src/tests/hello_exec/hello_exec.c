@@ -35,6 +35,11 @@
  * On x86-64 a trap is SYSCALL with its number in a range above 0x100 and its
  * arguments in registers (<mach/x86_64/syscall_sw.h>), and a C function can say
  * that with no help from assembly.  Both traps here take no more than three.
+ *
+ * ⚠️ A trap keeps what a function keeps and no more: the kernel is entitled to
+ * every register the C ABI lets a callee destroy, because the stubs are
+ * functions.  Telling the compiler only about the two SYSCALL takes left it a
+ * pointer in r8 across the call, and r8 came back zero.
  */
 #define HE_TRAP_BASE	0x100
 #define HE_TRAP_PRINT	14
@@ -46,9 +51,9 @@ he_trap(long number, long a1, long a2, long a3)
     long ret;
 
     __asm__ volatile ("syscall"
-                      : "=a"(ret)
-                      : "a"(HE_TRAP_BASE + number), "D"(a1), "S"(a2), "d"(a3)
-                      : "rcx", "r11", "memory");
+                      : "=a"(ret), "+D"(a1), "+S"(a2), "+d"(a3)
+                      : "a"(HE_TRAP_BASE + number)
+                      : "rcx", "r8", "r9", "r10", "r11", "memory");
     return ret;
 }
 
@@ -268,10 +273,21 @@ _start(void)
     __builtin_unreachable();
 }
 
+/* The address the harness knows a fault at to be asked for (#414). */
+#define HE_FAULT_ADDRESS	0x5300000
+
 void
 __attribute__((noreturn, used))
 c_main(he_word_t *init_sp)
 {
+    /*
+     * With any argument it dies instead (#496): a task with no libc and no
+     * exception port, which ends by a fault and says nothing to anybody, is
+     * what its parent's waitpid has to tell from an exit.
+     */
+    if (init_sp[0] > 1)
+        *(volatile he_word_t *)HE_FAULT_ADDRESS = 1;
+
     mach_print("hello_exec: hello from exec_server v0.4.0\n");
     dump_auxv(init_sp);
 
