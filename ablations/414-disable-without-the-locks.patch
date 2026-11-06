@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #414
+Takes out: the locks thread_terminate_self() takes around act_disable_task_locked(), whose reference went with a plain decrement beside task_terminate(); the assert at the top of it reads the owner
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: Assertion failed: file .*kern/thread_act\.c|thr_act->lock\.own_thr == \(vm_offset_t\) current_thread\(\)
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1076,10 +1076,8 @@
+ 		 * decrement beside task_terminate(), which references this
+ 		 * activation under them.
+ 		 */
+-		(void) act_lock_thread(thr_act);
+ 		if( thr_act->active && (thr_act->pool_port == IP_NULL))
+ 			act_disable_task_locked( thr_act );
+-		act_unlock_thread(thr_act);
+ 		task_unlock( task );
+ 	}
+ 

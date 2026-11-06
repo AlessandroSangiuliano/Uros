@@ -9,10 +9,10 @@ Note: Judged under QEMU (TCG and KVM), fault_test's arm six, on victus 02/11/202
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
 +++ b/uros/src/mach_kernel/x86_64/trap/trap.c
-@@ -2261,10 +2261,7 @@
- 		vm_map_t	map;
+@@ -2279,10 +2279,7 @@
  		vm_prot_t	prot;
  
+ 		fault_addr = addr;
 -		if (va_is_kernel(addr) && (frame->cs & 3) == USER_RPL) {
 -			map = VM_MAP_NULL;
 -			fault_kr = KERN_INVALID_ADDRESS;
@@ -24,7 +24,7 @@ diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_
 diff --git a/uros/src/mach_kernel/vm/vm_kern.c b/uros/src/mach_kernel/vm/vm_kern.c
 --- a/uros/src/mach_kernel/vm/vm_kern.c
 +++ b/uros/src/mach_kernel/vm/vm_kern.c
-@@ -857,7 +857,7 @@
+@@ -885,7 +885,7 @@
  				    &addr, start - VM_MIN_KERNEL_ADDRESS,
  				    (vm_offset_t) 0, TRUE,
  				    VM_OBJECT_NULL, (vm_offset_t) 0, FALSE,

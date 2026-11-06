@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #414
+Over: 414-widen-reaper-first.patch
+Takes out: the drop of the reference on the activation waited for before, with the task unlocked: it goes back under the lock, where the last reference takes task_lock() again from act_free(), and the mutex says so
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: mutex_lock: thread 0x[0-9a-f]+ asks for mutex 0x[0-9a-f]+, which it took at 0x[0-9a-f]+ and holds
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1471,8 +1471,8 @@
+ 				refd_thr_act = thr_act;
+ 				act_locked_act_reference(thr_act);
+ 				act_unlock_thread(thr_act);
++				act_deallocate(last_thr_act);
+ 				task_unlock(task);
+-				act_deallocate(last_thr_act);
+ 				(void)thread_wait(thread);
+ 				{
+ 					extern void delay(int);
