@@ -54,13 +54,7 @@
 #include "cap_revoke.h"          /* MIG-generated cap_revoke_notify user stub */
 #include "gpu_console.h"         /* #209: async printf mirror */
 
-/*
- * netname_check_in: publish our service port under "cap_server".
- */
-extern kern_return_t netname_check_in(mach_port_t server_port,
-                                      char *service_name,
-                                      mach_port_t signature,
-                                      mach_port_t port);
+#include "service.h"			/* #744: service_checkin */
 
 /*
  * Bootstrap ports (standard for any Mach server).
@@ -719,7 +713,6 @@ int
 main(int argc, char **argv)
 {
     kern_return_t kr;
-    mach_port_t sig = MACH_PORT_NULL;
     const char *key_source;
 
     kr = bootstrap_ports(bootstrap_port,
@@ -758,11 +751,19 @@ main(int argc, char **argv)
     else
         printf("cap: kernel hmac key registered via urmach_cap_register\n");
 
-    kr = mach_port_allocate(mach_task_self(),
-                            MACH_PORT_RIGHT_RECEIVE,
-                            &cap_port);
+    /*
+     * 🔴 THE PORT IS BOOTSTRAP'S TO GIVE (#744).  It used to be a port of
+     * this server's making, published under a name that any task could check
+     * in first -- and six start before this one.  Bootstrap makes the port
+     * with the other registered ports, every task inherits it in
+     * CAP_SERVER_SLOT, the name server publishes it as "cap_server" before
+     * anyone can ask, and the receive right is bootstrap's to hand over, on
+     * this server's own bootstrap port, to cap_server and nobody else.
+     * Requests sent before this point wait in its queue.
+     */
+    kr = service_checkin(bootstrap_port, urmach_cap_server_port, &cap_port);
     if (kr != KERN_SUCCESS) {
-        printf("cap: mach_port_allocate failed (%d)\n", kr);
+        printf("cap: service_checkin of CAP_SERVER_SLOT failed (%d)\n", kr);
         return 1;
     }
 
@@ -792,18 +793,8 @@ main(int argc, char **argv)
         return 1;
     }
 
-    /*
-     * #744: signed with a port only this task holds.  It was MACH_PORT_NULL,
-     * so any task could check "cap_server" in again over this one, and every
-     * child bootstrap provisioned after that had its task port sent there.
-     */
-    kr = urmach_netname_signature(&sig);
-    if (kr == KERN_SUCCESS)
-        kr = netname_check_in(name_server_port, "cap_server", sig, cap_port);
-    if (kr != KERN_SUCCESS)
-        printf("cap: netname_check_in failed (%d)\n", kr);
-    else
-        printf("cap: registered as \"cap_server\"\n");
+    printf("cap: serving CAP_SERVER_SLOT's port 0x%x, which the name server "
+           "publishes as \"cap_server\" (#744)\n", (unsigned)cap_port);
 
     /* #209: cap_server boots before gpu_server in bootstrap.conf
      * (gpu_server cap_subscribe_revoke's against us at startup), so
