@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #881
+Over: 881-widen-receiver-held.patch
+Takes out: the removal of the hot path's assert that a reply port with no message has no parked sender -- a kernel RPC with that reply port stops a development kernel
+Run: --entry 14 600 -smp 4
+Expect: reply_port->ip_blocked
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 47be94b4..852186a4 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -3065,6 +3065,9 @@ urmach_msg_overwrite_trap_call(
+ 		 * count, so it makes no room, and the sender stays where it is.
+ 		 */
+ 
++		assert(ipc_thread_queue_first(&reply_port->ip_blocked)
++				== ITH_NULL);
++
+ 		dest_port = reply_port;
+ 		local_seqno = dest_port->ip_seqno++;
+ 		imq_unlock(rcv_mqueue);

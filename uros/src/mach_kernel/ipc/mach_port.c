@@ -1668,7 +1668,9 @@ mach_port_set_attributes(
                 if (count < MACH_PORT_LIMITS_INFO_COUNT)
                         return KERN_FAILURE;
                 
-                if (mplp->mpl_qlimit > MACH_PORT_QLIMIT_MAX)
+                /* #881: mach_port.defs says 1 <= qlimit */
+                if (mplp->mpl_qlimit == 0 ||
+                    mplp->mpl_qlimit > MACH_PORT_QLIMIT_MAX)
                         return KERN_INVALID_VALUE;
 
                 kr = ipc_port_translate_receive(space, name, &port);

@@ -2558,12 +2558,9 @@ urmach_msg_overwrite_trap_call(
 		assert(kmsg != IKM_NULL);
 		dest_port = kmsg->ikm_dest;
 
-			{
-			ip_lock(dest_port);
-			assert(dest_port->ip_msgcount > 0);
-			dest_port->ip_msgcount--;
-			ip_unlock(dest_port);
-		}
+		ip_lock(dest_port);
+		urmach_port_message_taken(dest_port);
+		ip_unlock(dest_port);
 
 		hdr = &kmsg->ikm_header;
 		send_size = hdr->msgh_size;
@@ -3059,14 +3056,12 @@ urmach_msg_overwrite_trap_call(
 		}
 
 		/*
-		 * We can directly receive this reply.
-		 * Since there were no messages queued
-		 * on the reply port, there should be
-		 * no threads blocked waiting to send.
+		 * We can directly receive this reply.  A sender can be parked
+		 * on this port all the same: an empty queue says nothing of
+		 * ip_msgcount, which holds what was handed to a receiver that
+		 * has not run yet (#881).  This reply never went through the
+		 * count, so it makes no room, and the sender stays where it is.
 		 */
-
-		assert(ipc_thread_queue_first(&reply_port->ip_blocked)
-				== ITH_NULL);
 
 		dest_port = reply_port;
 		local_seqno = dest_port->ip_seqno++;

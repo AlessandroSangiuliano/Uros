@@ -174,6 +174,10 @@ extern mach_msg_return_t ipc_mqueue_finish_receive(
 	mach_msg_option_t	option,
 	mach_msg_size_t		max_size);
 
+/* A message has left this port (#881) */
+extern void urmach_port_message_taken(
+	ipc_port_t	port);
+
 /*
  *	extern void
  *	ipc_mqueue_send_always(ipc_kmsg_t);

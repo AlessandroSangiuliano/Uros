@@ -7044,6 +7044,270 @@ arm_forty_four_index_zero_name(void)
 	return 1;
 }
 
+/*
+ * Arm forty-five (#881): a message taken off a port wakes a sender parked on
+ * it, by the hot path too.  A port with a limit of one, a server parked by the
+ * hot path, and a thread that sends two messages: the first is handed to the
+ * server and fills the count, the second parks until the server runs.  With no
+ * wakeup it stays parked on a port with room.  At one processor that happens by
+ * itself; at more, the server is there first unless
+ * ablations/881-widen-receiver-held.patch holds it, and then nothing was asked.
+ *
+ * The second send has no timeout, and that is the point of it.  A timeout would
+ * end the wait, and ipc_mqueue_send() goes round once more when it does, finds
+ * the room, delivers and answers success: a lost wakeup would cost half a second
+ * and show in no answer.  So this thread is what times it, and the port's death
+ * is what lets it go.
+ *
+ * Two rounds, because the two questions get in each other's way.  In the second,
+ * while the sender is parked, a kernel RPC with this port as its reply port: the
+ * queue is empty and a sender is parked, which the hot path once asserted could
+ * not be.  That reply makes no room, and a sender still parked after it is let go
+ * by destroying the port.  But a server that has come back to the port by then
+ * takes that reply as it would any message, the slow way, and that wakes the
+ * sender, which then says nothing of the hot path's wakeup.  So the first round
+ * makes no such call.
+ * A limit of 0, which mach_port.defs rules out, is refused.
+ */
+#define	A45_RPC		4500
+#define	A45_ONE		4501
+#define	A45_TWO		4502
+#define	A45_FIN		4503
+#define	A45_NO_SUCH_ID	999999	/* the kernel answers it with MIG_BAD_ID */
+#define	A45_TIMEOUT	500
+#define	A45_TICKS	2000	/* how long it may stay parked: 20 s */
+
+static mach_port_t	a45_port;
+static volatile mach_port_t a45_server_thread, a45_sender_thread;
+static volatile mach_msg_return_t a45_second;
+static volatile int	a45_second_next, a45_done;
+
+static void *
+a45_server(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+	mach_msg_option_t	opt = MACH_RCV_MSG;
+	mach_msg_size_t		size = 0;
+
+	(void) arg;
+	a45_server_thread = mach_thread_self();
+	for (;;) {
+		if (mach_msg(&m.h, opt, size, sizeof m, a45_port,
+			     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)
+		    != MACH_MSG_SUCCESS || m.h.msgh_id == A45_TWO)
+			return NULL;
+		if (m.h.msgh_id == A45_RPC) {
+			m.h.msgh_bits = MACH_MSGH_BITS(
+			    MACH_MSGH_BITS_REMOTE(m.h.msgh_bits), 0);
+			m.h.msgh_size = sizeof m.h;
+			m.h.msgh_local_port = MACH_PORT_NULL;
+			m.h.msgh_id = A45_RPC + 100;
+			size = sizeof m.h;
+			opt = MACH_SEND_MSG | MACH_RCV_MSG;
+		} else {
+			size = 0;
+			opt = MACH_RCV_MSG;
+		}
+	}
+}
+
+static mach_msg_return_t
+a45_send(int id, mach_msg_option_t option, mach_msg_timeout_t timeout)
+{
+	mach_msg_header_t	h;
+
+	h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	h.msgh_size = sizeof h;
+	h.msgh_remote_port = a45_port;
+	h.msgh_local_port = MACH_PORT_NULL;
+	h.msgh_reserved = 0;
+	h.msgh_id = id;
+	return mach_msg(&h, MACH_SEND_MSG | option, sizeof h, 0, MACH_PORT_NULL,
+			timeout, MACH_PORT_NULL);
+}
+
+static void *
+a45_sender(void *arg)
+{
+	(void) arg;
+	a45_sender_thread = mach_thread_self();
+	(void) a45_send(A45_ONE, MACH_SEND_TIMEOUT, 0);
+	a45_second_next = 1;
+	a45_second = a45_send(A45_TWO, 0, 0);
+	(void) a45_send(A45_FIN, MACH_SEND_TIMEOUT, A45_TIMEOUT);
+	a45_done = 1;
+	return NULL;
+}
+
+/* The answer to a combined call to `dest', received on a45_port's name. */
+static mach_msg_return_t
+a45_rpc(mach_port_t dest, mach_port_t rcv, int id)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[128];
+	} m;
+
+	m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+				       MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	m.h.msgh_size = sizeof m.h;
+	m.h.msgh_remote_port = dest;
+	m.h.msgh_local_port = rcv;
+	m.h.msgh_reserved = 0;
+	m.h.msgh_id = id;
+	return mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG, sizeof m.h, sizeof m,
+			rcv, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+/*
+ * Answers 1 for a sender seen parked that went on, 0 for one that did not, and
+ * -1 if it was never seen parked.
+ */
+static int
+a45_round(int with_rpc)
+{
+	const char		*round = with_rpc ? ", around a kernel RPC" : "";
+	mach_port_t		task = mach_task_self(), reply;
+	mach_port_limits_t	l;
+	struct thread_basic_info info;
+	mach_msg_type_number_t	n;
+	mach_msg_return_t	mr = MACH_MSG_SUCCESS;
+	pthread_t		server, sender;
+	kern_return_t		kr;
+	unsigned		i;
+	int			parked = 0, gone = 0, ok = 1;
+
+	a45_port = arm_own_port(45);
+	reply = arm_own_port(45);
+	if (a45_port == MACH_PORT_NULL || reply == MACH_PORT_NULL)
+		return 0;
+
+	l.mpl_qlimit = 0;
+	kr = mach_port_set_attributes(task, a45_port, MACH_PORT_LIMITS_INFO,
+				      (mach_port_info_t) &l,
+				      MACH_PORT_LIMITS_INFO_COUNT);
+	if (kr != KERN_INVALID_VALUE) {
+		printf("act_test: [45] a limit of 0 answered 0x%x — WRONG\n",
+		       (int) kr);
+		return 0;
+	}
+	l.mpl_qlimit = 1;
+	kr = mach_port_set_attributes(task, a45_port, MACH_PORT_LIMITS_INFO,
+				      (mach_port_info_t) &l,
+				      MACH_PORT_LIMITS_INFO_COUNT);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [45] a limit of 1 answered 0x%x — WRONG\n",
+		       (int) kr);
+		return 0;
+	}
+
+	a45_server_thread = a45_sender_thread = MACH_PORT_NULL;
+	a45_second = -1;
+	a45_second_next = a45_done = 0;
+	if (pthread_create(&server, NULL, a45_server, NULL) != 0) {
+		printf("act_test: [45] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	/* Until the server sits in a combined call, parked by the hot path. */
+	for (i = 0; i < 3 && mr == MACH_MSG_SUCCESS; i++)
+		mr = a45_rpc(a45_port, reply, A45_RPC);
+	if (mr != MACH_MSG_SUCCESS || !arm_thread_waiting(&a45_server_thread)) {
+		printf("act_test: [45] the server did not come to wait: 0x%x — "
+		       "WRONG\n", (int) mr);
+		return 0;
+	}
+
+	if (pthread_create(&sender, NULL, a45_sender, NULL) != 0) {
+		printf("act_test: [45] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	for (i = 0; i < 4000 && !a45_done && !parked; i++) {
+		n = THREAD_BASIC_INFO_COUNT;
+		if (a45_second_next &&
+		    thread_info(a45_sender_thread, THREAD_BASIC_INFO,
+				(thread_info_t) &info, &n) == KERN_SUCCESS &&
+		    info.run_state == TH_STATE_WAITING)
+			parked = 1;
+		else
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, 1);
+	}
+	if (with_rpc && parked && !a45_done) {
+		/* A reply to this port, with the sender parked on it. */
+		mr = a45_rpc(task, a45_port, A45_NO_SUCH_ID);
+		if (mr != MACH_MSG_SUCCESS && mr != MACH_RCV_TOO_LARGE) {
+			printf("act_test: [45] a kernel RPC with this reply port "
+			       "answered 0x%x — WRONG (#881)\n", (int) mr);
+			ok = 0;
+		}
+		n = THREAD_BASIC_INFO_COUNT;
+		if (thread_info(a45_sender_thread, THREAD_BASIC_INFO,
+				(thread_info_t) &info, &n) == KERN_SUCCESS &&
+		    info.run_state == TH_STATE_WAITING) {
+			(void) mach_port_destroy(task, a45_port);
+			gone = 1;
+		}
+	}
+	/*
+	 * In time, and not in polls: a depressed thread_switch() comes back at
+	 * once with nothing else to run, and 4000 of those are over before the
+	 * sender has got anywhere under the widen.
+	 */
+	for (i = 0; i < A45_TICKS && !a45_done; i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+
+	if (!a45_done) {
+		printf("act_test: [45] after %u ticks the sender stayed parked on "
+		       "a port with room — WRONG (#881)\n", i);
+		ok = 0;
+		(void) mach_port_destroy(task, a45_port);
+		gone = 1;
+	} else if (a45_second != MACH_MSG_SUCCESS) {
+		printf("act_test: [45] the second send answered 0x%x — WRONG "
+		       "(#881)\n", (int) a45_second);
+		ok = 0;
+	}
+	(void) pthread_join(sender, NULL);
+	if (!gone)
+		(void) mach_port_destroy(task, a45_port);
+	(void) mach_port_destroy(task, reply);
+	(void) pthread_join(server, NULL);
+	(void) mach_port_deallocate(task, a45_sender_thread);
+	(void) mach_port_deallocate(task, a45_server_thread);
+	if (!ok)
+		return 0;
+	if (!parked) {
+		printf("act_test: [45] the server took the first message before "
+		       "the second was sent%s — NOT ASKED\n", round);
+		return -1;
+	}
+	if (gone)
+		printf("act_test: [45] a sender stayed parked through a kernel "
+		       "reply on its port, and the port's death let it go — "
+		       "OK\n");
+	else
+		printf("act_test: [45] a sender parked by a message the hot path "
+		       "held went on when it was taken%s — OK\n", round);
+	return 1;
+}
+
+static int
+arm_forty_five_parked_sender(void)
+{
+	int	alone, around;
+
+	alone = a45_round(0);
+	if (alone == 0)
+		return 0;
+	around = a45_round(1);
+	if (around == 0)
+		return 0;
+	return (alone > 0 || around > 0) ? 1 : -1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7176,6 +7440,12 @@ main(int argc, char **argv)
 	passed += arm_forty_three_receive_gives_back();
 	arms++;		/* arm forty-four, #880 */
 	passed += arm_forty_four_index_zero_name();
+	arms++;		/* arm forty-five, #881 */
+	r = arm_forty_five_parked_sender();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

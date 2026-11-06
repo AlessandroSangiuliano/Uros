@@ -1101,29 +1101,43 @@ ipc_mqueue_finish_receive(
 	}
 
 	ip_lock(port);
-
-	if (ip_active(port)) {
-		ipc_thread_queue_t senders;
-		ipc_thread_t sender;
-
-		assert(port->ip_msgcount > 0);
-		port->ip_msgcount--;
-
-		{
-			senders = &port->ip_blocked;
-			sender = ipc_thread_queue_first(senders);
-	
-			if ((sender != ITH_NULL) &&
-			    (port->ip_msgcount < port->ip_qlimit)) {
-				ipc_thread_rmqueue(senders, sender);
-				sender->ith_state = MACH_MSG_SUCCESS;
-				thread_go(sender);
-			}
-		}
-	}
-
+	urmach_port_message_taken(port);
 	ip_unlock(port);
 
 	*kmsgp = kmsg;
 	return mr;
+}
+
+/*
+ *	Routine:	urmach_port_message_taken
+ *	Purpose:
+ *		A message has left this port: the count comes down, and if
+ *		that makes room, one sender parked on the port goes on (#881).
+ *
+ *		ip_msgcount counts what the port has accepted and not given
+ *		up, queued or handed to a receiver that has not run yet, so a
+ *		sender can be parked with the queue empty.  Every route a
+ *		message leaves by comes through here: the hot path's parked
+ *		receiver lowered the count and woke no one.
+ *	Conditions:
+ *		The port is locked.
+ */
+void
+urmach_port_message_taken(
+	ipc_port_t	port)
+{
+	ipc_thread_t	sender;
+
+	if (!ip_active(port))
+		return;
+
+	assert(port->ip_msgcount > 0);
+	port->ip_msgcount--;
+
+	sender = ipc_thread_queue_first(&port->ip_blocked);
+	if ((sender != ITH_NULL) && (port->ip_msgcount < port->ip_qlimit)) {
+		ipc_thread_rmqueue(&port->ip_blocked, sender);
+		sender->ith_state = MACH_MSG_SUCCESS;
+		thread_go(sender);
+	}
 }
