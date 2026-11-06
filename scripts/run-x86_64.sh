@@ -1637,6 +1637,8 @@ expected_reports() {
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
 		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
+		'musl_test: started'    'musl_test: [0-9]* of [0-9]* arms passed' \
+		'=== sig_test ('        '=== sig_test: [0-9]* PASS, [0-9]* FAIL ===' \
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
