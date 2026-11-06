@@ -16,9 +16,12 @@
  * Source grammar (line-based, lenient):
  *
  *     # comments after '#' to end of line, blank lines ignored
- *     name        <server_name>            # mandatory, once
- *     required    <type-int> <ops-hex>     # zero or more
- *     delegatable <type-int> <ops-hex>     # zero or more
+ *     name        <server_name>                 # mandatory, once
+ *     required    <type-int> <id> <ops-hex>     # zero or more
+ *     delegatable <type-int> <id> <ops-hex>     # zero or more
+ *
+ * <id> is a number, `any', or `name:<string>' -- the id of a resource named
+ * by a string, cap_name_hash(<string>): `name:/proc', `name:ahci0c' (#716).
  *
  * Types are the cap_resource_type_t enum values from
  * <mach/cap_types.h> (4 == RESOURCE_BLK_DEVICE, etc.).  Ops are a
@@ -31,6 +34,7 @@
  */
 
 #include <mach/cap_manifest.h>
+#include <mach/cap_name_hash.h>	/* #716: `name:' ids */
 
 #include <ctype.h>
 #include <errno.h>
@@ -114,6 +118,21 @@ parse_entry(const char *kw, char *args, cap_manifest_entry_t *out_arr,
 
     if (strcmp(id_s, "any") == 0) {
         id = CAP_MANIFEST_ANY_ID;
+    } else if (strncmp(id_s, "name:", 5) == 0) {
+        /*
+         * #716: a resource named by a string -- a mount point, a partition --
+         * has cap_name_hash() of it for an id, and the line says the string.
+         * Written as a number it would be a hash nobody could read, or check
+         * against the name it stands for.  ⚠️ The string ends at the first
+         * blank, as every field here does, so a name with one in it cannot be
+         * said; none of the names this is for has one.
+         */
+        if (id_s[5] == '\0')
+            die("line %d: `name:' with no name", lineno);
+        id = cap_name_hash(id_s + 5);
+        if (id == CAP_MANIFEST_ANY_ID)
+            die("line %d: the hash of '%s' is the value that means `any'",
+                lineno, id_s + 5);
     } else {
         errno = 0;
         id = strtoull(id_s, &end, 0);
