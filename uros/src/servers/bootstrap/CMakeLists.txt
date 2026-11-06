@@ -610,8 +610,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   if(UROS_BUILD_MUSL)
     set(_MUSL_LINE  "hello_world hello_world\nmusl_test musl_test\n")
     set(_MUSL_FILES "hello_world:${_SBIN}/hello_world"
-                    "musl_test:${_SBIN}/musl_test")
-    set(_MUSL_DEP   hello_world_bin musl_test_bin)
+                    "musl_test:${_SBIN}/musl_test"
+                    "ush:${_SBIN}/ush")
+    set(_MUSL_DEP   hello_world_bin musl_test_bin ush_bin)
   else()
     set(_MUSL_LINE  "")
     set(_MUSL_FILES "")
@@ -626,8 +627,18 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # host port.  The bundle for a real machine, below, carries it too: a real
   # machine ends a boot sooner than any host under TCG, so without it -t would
   # ask there even less.
+  # A boot for somebody at the serial line (#414, #501): the servers ush asks
+  # for, and ush last.  None of the tests, because they talk over it and take the
+  # processors, and char_server here needs OSFMK_BUILD_CHAR_SERVER.  What drives
+  # it is scripts/ush-x86_64.py.
+  option(UROS_BUNDLE_USH "The x86-64 bundle boots to ush on the serial line" OFF)
+  if(UROS_BUNDLE_USH)
+    file(GENERATE OUTPUT ${_CONF}
+         CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-H proc_server proc_server\n-D char_server char_server\nush ush\n")
+  else()
   file(GENERATE OUTPUT ${_CONF}
        CONTENT "name_server name_server\nnetname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nexec_server exec_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+  endif()
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the

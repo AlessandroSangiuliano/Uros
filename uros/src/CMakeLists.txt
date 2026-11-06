@@ -629,6 +629,7 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
   add_subdirectory(tests/hello_world)
   add_subdirectory(tests/hello_dyn_world)
   add_subdirectory(tests/musl_test)
+  add_subdirectory(cmds/ush)
 endif()
 
 # Everything below is userland; skip it wholesale on a non-i386 target.
