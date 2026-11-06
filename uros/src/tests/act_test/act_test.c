@@ -72,6 +72,7 @@
 #include <mach/ndr.h>		/* #688: NDR_record, for its message */
 #include <mach/mach_port.h>	/* #662: mach_port_names(), to count the space */
 #include <mach/notify.h>	/* #843: arm thirty-five's no-senders */
+#include <mach/rpc.h>		/* #869: struct rpc_subsystem */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -7863,6 +7864,207 @@ arm_forty_eight_hint_and_lock_order(void)
 	return 1;
 }
 
+/*
+ * Arm forty-nine (#869): a port holds one reference on its subsystem, and gives
+ * it back when it dies, once, however it dies.
+ *
+ * A port with a port-destroyed request does not die when it is destroyed: it
+ * goes to its backup alive, and on the subsystem.  The release used to come
+ * before that was known, so each such destroy released again, down to zero with
+ * the creator's reference outstanding.  And the other ways to destroy a receive
+ * right did not release at all.  The count is read at each step, and the
+ * creator allocates on the subsystem after, through the trap, for cap_test's
+ * reason in [10]: libmach's fallback would turn a refusal into a success on a
+ * port with no subsystem.
+ */
+#define	A49_ROUNDS	3
+
+static int
+a49_count_is(mach_port_t subsys, unsigned want, const char *when)
+{
+	unsigned	have = 0;
+	kern_return_t	kr;
+
+	kr = urmach_subsystem_ref_count(subsys, &have);
+	if (kr != KERN_SUCCESS || have != want) {
+		printf("act_test: [49] %s: the count answered 0x%x, %u, where %u "
+		       "was due — WRONG (#869)\n", when, kr, have, want);
+		return 0;
+	}
+	return 1;
+}
+
+/* A port on the subsystem goes to its backup, comes back, and then dies. */
+static int
+a49_survives_a_destroy(mach_port_t subsys, unsigned base)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_port_descriptor_t	d;
+		unsigned char			rest[256];
+	} n;
+	mach_port_t		a = MACH_PORT_NULL, backup, old = MACH_PORT_NULL;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+	unsigned		i;
+	int			ok = 1;
+
+	backup = arm_own_port(49);
+	if (backup == MACH_PORT_NULL)
+		return 0;
+	kr = mach_port_allocate_subsystem(mach_task_self(), subsys, &a);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [49] a port on the subsystem answered 0x%x — "
+		       "WRONG\n", kr);
+		(void) mach_port_destroy(mach_task_self(), backup);
+		return 0;
+	}
+
+	for (i = 0; ok && i < A49_ROUNDS; i++) {
+		kr = mach_port_request_notification(mach_task_self(), a,
+						    MACH_NOTIFY_PORT_DESTROYED,
+						    0, backup,
+						    MACH_MSG_TYPE_MAKE_SEND_ONCE,
+						    &old);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [49] the request answered 0x%x — "
+			       "WRONG\n", kr);
+			ok = 0;
+			break;
+		}
+		(void) mach_port_destroy(mach_task_self(), a);
+		a = MACH_PORT_NULL;
+		ok = a49_count_is(subsys, base + 1, "a port gone to its backup");
+		mr = mach_msg(&n.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof n, backup, 5000, MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS ||
+		    n.h.msgh_id != MACH_NOTIFY_PORT_DESTROYED) {
+			printf("act_test: [49] the backup got 0x%x, id %d — "
+			       "WRONG\n", (int) mr, (int) n.h.msgh_id);
+			ok = 0;
+			break;
+		}
+		a = n.d.name;
+	}
+	if (a != MACH_PORT_NULL)
+		(void) mach_port_destroy(mach_task_self(), a);
+	(void) mach_port_destroy(mach_task_self(), backup);
+	return ok;
+}
+
+/* The two ways that used not to release. */
+static int
+a49_other_deaths(mach_port_t subsys, unsigned base)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_port_descriptor_t	d;
+	} m;
+	mach_port_t		a = MACH_PORT_NULL, q;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+	int			ok;
+
+	kr = mach_port_allocate_subsystem(mach_task_self(), subsys, &a);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [49] a port on the subsystem answered 0x%x — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+	(void) mach_port_mod_refs(mach_task_self(), a, MACH_PORT_RIGHT_RECEIVE,
+				  -1);
+	ok = a49_count_is(subsys, base, "after mach_port_mod_refs()");
+
+	q = arm_own_port(49);
+	if (q == MACH_PORT_NULL)
+		return 0;
+	kr = mach_port_allocate_subsystem(mach_task_self(), subsys, &a);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [49] a port on the subsystem answered 0x%x — "
+		       "WRONG\n", kr);
+		(void) mach_port_destroy(mach_task_self(), q);
+		return 0;
+	}
+	m.h.msgh_bits = MACH_MSGH_BITS_COMPLEX |
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.h.msgh_size = sizeof m;
+	m.h.msgh_remote_port = q;
+	m.h.msgh_local_port = MACH_PORT_NULL;
+	m.h.msgh_id = 49;
+	m.b.msgh_descriptor_count = 1;
+	m.d.name = a;
+	m.d.disposition = MACH_MSG_TYPE_MOVE_RECEIVE;
+	m.d.type = MACH_MSG_PORT_DESCRIPTOR;
+	mr = mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m, 0,
+		      MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [49] the send answered 0x%x — WRONG\n",
+		       (int) mr);
+		(void) mach_port_destroy(mach_task_self(), a);
+		ok = 0;
+	}
+	(void) mach_port_destroy(mach_task_self(), q);
+	return a49_count_is(subsys, base,
+			    "after a destroyed message held the right") && ok;
+}
+
+static int
+arm_forty_nine_subsystem_released_once(void)
+{
+	struct rpc_subsystem	desc;
+	mach_port_t		subsys = MACH_PORT_NULL, probe = MACH_PORT_NULL;
+	unsigned		i, base = 0;
+	kern_return_t		kr;
+	int			ok = 1;
+
+	for (i = 0; i < sizeof desc; i++)
+		((volatile char *) &desc)[i] = 0;
+	desc.base_addr = (vm_address_t) &desc;
+	kr = mach_subsystem_create(mach_task_self(), (user_subsystem_t) &desc,
+				   (mach_msg_type_number_t) sizeof desc,
+				   &subsys);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [49] mach_subsystem_create answered 0x%x — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+	kr = urmach_subsystem_ref_count(subsys, &base);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [49] the count answered 0x%x — WRONG\n", kr);
+		(void) mach_port_deallocate(mach_task_self(), subsys);
+		return 0;
+	}
+
+	ok = a49_survives_a_destroy(subsys, base);
+
+	/* The creator's reference has to be there, whatever the count says. */
+	kr = syscall_mach_port_allocate_subsystem(mach_task_self(), subsys,
+						  &probe);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [49] the creator can no longer allocate on "
+		       "its subsystem: 0x%x — WRONG (#869)\n", kr);
+		(void) mach_port_deallocate(mach_task_self(), subsys);
+		return 0;
+	}
+	(void) mach_port_destroy(mach_task_self(), probe);
+	if (!ok) {
+		(void) mach_port_deallocate(mach_task_self(), subsys);
+		return 0;
+	}
+
+	ok = a49_count_is(subsys, base, "after the port died") &&
+	    a49_other_deaths(subsys, base);
+	(void) mach_port_deallocate(mach_task_self(), subsys);
+	if (ok)
+		printf("act_test: [49] a port's subsystem reference stayed "
+		       "through %d destroys with a backup, and came back at its "
+		       "death by each route: the count is %u again — OK (#869)\n",
+		       A49_ROUNDS, base);
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8013,6 +8215,8 @@ main(int argc, char **argv)
 	passed += arm_fifty_holes_come_back_zero();
 	arms++;		/* arm forty-eight, #889 */
 	passed += arm_forty_eight_hint_and_lock_order();
+	arms++;		/* arm forty-nine, #869 */
+	passed += arm_forty_nine_subsystem_released_once();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

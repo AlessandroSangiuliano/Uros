@@ -208,6 +208,7 @@
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_print.h>
 #include <ipc/ipc_table.h>
+#include <kern/subsystem.h>
 #if	MACH_KDB
 #include <machine/db_machdep.h>
 #include <ddb/db_command.h>
@@ -827,6 +828,7 @@ ipc_port_destroy(
 	ipc_thread_t sender;
 	ipc_port_request_t dnrequests;
 	thread_pool_t thread_pool;
+	subsystem_t subsystem = SUBSYSTEM_NULL;
 
 	assert(ip_active(port));
 	/* port->ip_receiver_name is garbage */
@@ -889,7 +891,22 @@ ipc_port_destroy(
 	/* save for later */
 	dnrequests = port->ip_dnrequests;
 	port->ip_dnrequests = IPR_NULL;
+
+	/*
+	 * #869: the reference mach_port_allocate_full() took for this port.
+	 * It goes here because every way a receive right is destroyed ends
+	 * here, and only here is the port known to die: with a backup it
+	 * left above, alive and on the same subsystem.  The release comes
+	 * after the unlock, since the subsystem's lock comes before the
+	 * port's.
+	 */
+	if (port->ip_subsystem != RPC_SUBSYSTEM_NULL) {
+		subsystem = port->ip_subsystem->subsystem;
+		port->ip_subsystem = RPC_SUBSYSTEM_NULL;
+	}
 	ip_unlock(port);
+
+	subsystem_deallocate(subsystem);
 
 	/* wakeup any threads waiting on this pool port for an activation */
 	if ((thread_pool = &port->ip_thread_pool) != THREAD_POOL_NULL)

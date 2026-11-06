@@ -295,6 +295,36 @@ subsystem_deallocate(
 }
 
 
+/*
+ *	Routine:	urmach_subsystem_ref_count [kernel call]
+ *	Purpose:
+ *		Retrieve the references on a subsystem, not counting the
+ *		one this call holds (#869).
+ *	Conditions:
+ *		Nothing locked.
+ *	Returns:
+ *		KERN_SUCCESS		Retrieved the count.
+ *		KERN_INVALID_ARGUMENT	The port names no live subsystem.
+ */
+kern_return_t
+urmach_subsystem_ref_count(
+	subsystem_t	subsystem,
+	unsigned int	*countp)
+{
+	spl_t	s;
+
+	if (subsystem == SUBSYSTEM_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	s = splsched();
+	subsystem_lock(subsystem);
+	*countp = subsystem->ref_count - 1;
+	subsystem_unlock(subsystem);
+	splx(s);
+	return KERN_SUCCESS;
+}
+
+
 #include <mach_kdb.h>
 #if	MACH_KDB
 

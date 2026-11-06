@@ -303,3 +303,12 @@ routine	mach_port_kernel_object(
 skip;	/* mach_port_kernel_object */
 #endif /* !defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG */
 
+/*
+ *	The references on a subsystem: its creator's, and one for each
+ *	port on it that is alive (#869).
+ */
+
+routine	urmach_subsystem_ref_count(
+		subsys		: subsystem_t;
+	out	count		: unsigned);
+
