@@ -604,9 +604,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # with a whole C library under it has the most new ways of going wrong of
   # anything on this list, and everything above has already spoken when it runs.
   if(UROS_BUILD_MUSL)
-    set(_MUSL_LINE  "hello_world hello_world\n")
-    set(_MUSL_FILES "hello_world:${_SBIN}/hello_world")
-    set(_MUSL_DEP   hello_world_bin)
+    set(_MUSL_LINE  "hello_world hello_world\nmusl_test musl_test\n")
+    set(_MUSL_FILES "hello_world:${_SBIN}/hello_world"
+                    "musl_test:${_SBIN}/musl_test")
+    set(_MUSL_DEP   hello_world_bin musl_test_bin)
   else()
     set(_MUSL_LINE  "")
     set(_MUSL_FILES "")

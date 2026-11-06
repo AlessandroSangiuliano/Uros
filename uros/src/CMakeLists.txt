@@ -612,6 +612,7 @@ endif()
 # target (#414).
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
   add_subdirectory(tests/hello_world)
+  add_subdirectory(tests/musl_test)
 endif()
 
 # Everything below is userland; skip it wholesale on a non-i386 target.

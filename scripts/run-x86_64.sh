@@ -623,6 +623,9 @@ must_report 'cow_test: started' 'cow_test: [0-9]* of [0-9]* arms passed' \
 must_report 'act_test: started' 'act_test: [0-9]* of [0-9]* arms passed' \
 	'It was in NEITHER list until #425 -- not the one that ends the run and not the one that fails it for silence -- so it could start, stop dead, and be reported as a pass by omission.'
 
+must_report 'musl_test: started' 'musl_test: [0-9]* of [0-9]* arms passed' \
+	'A static C program with musl under it, asking for threads, memory, signals and files through the system calls of this target (#414).  It started and did not reach its last line, which is a stop inside the personality or a thread that never came back.'
+
 must_report 'msg_server_test: started' 'msg_server_test: [0-9]* of [0-9]* arms passed' \
 	'It runs the mach_msg_server of libmach in a thread and asks it, after a one-way message, whether it still holds a right it kept (#583).  A loop that lost the right answers WRONG; silence means the loop never answered at all.'
 
