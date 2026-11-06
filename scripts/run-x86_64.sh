@@ -647,6 +647,16 @@ must_report 'msg_server_test: started' 'msg_server_test: [0-9]* of [0-9]* arms p
 must_report 'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 	'Two tasks claim one I/O range at the same instant for 400 rounds; a torn table is a kernel that answered two winners, and a test that stops dead mid-round is a wedge nobody would otherwise count (#538).'
 
+# #744: ipc_bench, when a bundle carries it (UROS_BUNDLE_IPC_BENCH).  It is the
+# last entry, and cow_test's verdict, which comes first, ended the run and
+# killed it mid-suite (servers/bootstrap/CMakeLists.txt says so beside the
+# option): a measurement taken that way is a table of whichever suites happened
+# to finish.  With the pair here the run waits for its last line, as it waits
+# for every test that has started; a bundle without it never prints the first.
+must_report '=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ===' \
+	'ipc_bench started and never finished, so whatever it printed is the suites that happened to run before the end (#744).' \
+	ipc_bench
+
 must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
 
@@ -1626,7 +1636,8 @@ expected_reports() {
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
-		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed'
+		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
+		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='
 }
 
 # #579: the clock the run gets, asked once a second of the cores qemu's
