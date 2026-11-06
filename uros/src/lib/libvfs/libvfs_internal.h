@@ -31,6 +31,16 @@
  * buffers and by libvfs.c's close path to free them. */
 #define VFS_PREFETCH_SIZE        VFS_FLIPC_MAX_READ
 
+/*
+ * The most one vfs_read() or vfs_write() moves (#716): INT_MAX rounded down to
+ * a page, which is Linux's MAX_RW_COUNT.  The request carries the count in 32
+ * bits, and a larger one was truncated -- a read of 4 GiB asked for zero
+ * bytes, and the caller took the zero for end of file -- and the answer is an
+ * ssize_t, which on i386 cannot say 2 GiB.  A larger request moves this much
+ * and returns the short count read() and write() are allowed to return.
+ */
+#define VFS_RW_MAX               0x7ffff000u
+
 struct vfs_fd_entry {
     int             in_use;
     int             dead;        /* fs_server died — every op returns EIO */

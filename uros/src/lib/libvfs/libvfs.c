@@ -442,6 +442,9 @@ vfs_read(vfs_fd_t fd, void *buf, size_t count)
     mach_msg_type_number_t data_count = 0;
     kern_return_t kr;
 
+    if (count > VFS_RW_MAX)
+        count = VFS_RW_MAX;             /* #716: a short read, said */
+
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
     if (!e || e->dead) {
@@ -500,6 +503,9 @@ vfs_write(vfs_fd_t fd, const void *buf, size_t count)
     vfs_u64_t offset;
     vfs_u32_t written = 0;
     kern_return_t kr;
+
+    if (count > VFS_RW_MAX)
+        count = VFS_RW_MAX;             /* #716: a short write, said */
 
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
