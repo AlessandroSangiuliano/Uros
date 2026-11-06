@@ -35,6 +35,14 @@
 #include "internal.h"
 
 /*
+ * The numbers are musl's own, generated from arch/<target>/bits/syscall.h.in,
+ * so they are the ones its callers pass on whichever target this is built for
+ * (#414).  x86-64's table shares no numbering with i386's, and a list kept here
+ * by hand was one list too many.
+ */
+#include <sys/syscall.h>
+
+/*
  * Mach trap stubs we reach for from this freestanding TU.  Declared
  * locally to keep handlers.c independent of `<mach.h>` (which would
  * pull in a lot of musl-vs-Mach type juggling).  Names match
@@ -71,10 +79,17 @@ extern long __uros_write(int fd, const void *buf, size_t count);
 extern long __uros_readv(int fd, const void *iov, int iovcnt);
 extern long __uros_writev(int fd, const void *iov, int iovcnt);
 extern long __uros_close(int fd);
+#ifdef SYS__llseek
 extern long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
                           void *result, unsigned int whence);
+#else
+extern long __uros_lseek(int fd, long off, unsigned int whence);
+#endif
 extern long __uros_statx(int dirfd, const char *path, int flags,
                          unsigned int mask, void *statxbuf);
+#ifdef SYS_newfstatat
+extern long __uros_fstatat(int dirfd, const char *path, void *kst, int flags);
+#endif
 
 /*
  * Timed sleep (#375) — implemented in posix_time.c, which owns the
@@ -82,52 +97,6 @@ extern long __uros_statx(int dirfd, const char *path, int flags,
  * fd handlers above.
  */
 extern long __uros_nanosleep(const void *req, void *rem);
-
-/* ------------------------------------------------------------------ */
-/* Linux i386 syscall numbers we care about.  Subset of the table musl */
-/* builds from arch/i386/bits/syscall.h.in.                            */
-/* ------------------------------------------------------------------ */
-#define UROS_SYS_exit             1
-#define UROS_SYS_fork             2
-#define UROS_SYS_read             3
-#define UROS_SYS_write            4
-#define UROS_SYS_open             5
-#define UROS_SYS_close            6
-#define UROS_SYS_waitpid          7
-#define UROS_SYS_execve          11
-#define UROS_SYS_getpid          20
-#define UROS_SYS_getuid          24
-#define UROS_SYS_kill            37
-#define UROS_SYS_brk             45
-#define UROS_SYS__llseek        140
-#define UROS_SYS_wait4          114
-#define UROS_SYS_mprotect       125
-#define UROS_SYS_nanosleep      162
-#define UROS_SYS_getgid          47
-#define UROS_SYS_geteuid         49
-#define UROS_SYS_getegid         50
-#define UROS_SYS_ioctl           54
-#define UROS_SYS_munmap          91
-#define UROS_SYS_readv          145
-#define UROS_SYS_writev         146
-#define UROS_SYS_rt_sigaction   174
-#define UROS_SYS_rt_sigprocmask 175
-#define UROS_SYS_mmap2          192
-#define UROS_SYS_fstat64        197
-#define UROS_SYS_tkill          238
-#define UROS_SYS_futex          240
-#define UROS_SYS_set_thread_area 243
-#define UROS_SYS_exit_group     252
-#define UROS_SYS_set_tid_address 258
-#define UROS_SYS_tgkill         270
-#define UROS_SYS_openat         295
-#define UROS_SYS_statx          383
-/* Session / process-group syscalls (#275.4). */
-#define UROS_SYS_setpgid         57
-#define UROS_SYS_getpgrp         65
-#define UROS_SYS_setsid          66
-#define UROS_SYS_getpgid        132
-#define UROS_SYS_getsid         147
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -227,6 +196,7 @@ static long h_close(long fd, long a2, long a3,
     return __uros_close((int)fd);
 }
 
+#ifdef SYS__llseek
 static long h_llseek(long fd, long off_hi, long off_lo,
                      long result, long whence, long a6)
 {
@@ -235,6 +205,14 @@ static long h_llseek(long fd, long off_hi, long off_lo,
                          (unsigned long)off_lo, (void *)result,
                          (unsigned int)whence);
 }
+#else
+static long h_lseek(long fd, long off, long whence,
+                    long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return __uros_lseek((int)fd, off, (unsigned int)whence);
+}
+#endif
 
 static long h_statx(long dirfd, long path, long flags,
                     long mask, long statxbuf, long a6)
@@ -243,6 +221,47 @@ static long h_statx(long dirfd, long path, long flags,
     return __uros_statx((int)dirfd, (const char *)path, (int)flags,
                         (unsigned int)mask, (void *)statxbuf);
 }
+
+/*
+ * musl reaches statx only where a 32-bit time would not fit, so on x86-64 it
+ * asks these four and hands over the kernel's struct stat.  fstatat() is
+ * musl's one way in and it picks among them by what it was given.
+ */
+#ifdef SYS_newfstatat
+#define UROS_AT_FDCWD            (-100)
+#define UROS_AT_SYMLINK_NOFOLLOW 0x100
+#define UROS_AT_EMPTY_PATH       0x1000
+
+static long h_stat(long path, long kst, long a3,
+                   long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_fstatat(UROS_AT_FDCWD, (const char *)path, (void *)kst, 0);
+}
+
+static long h_lstat(long path, long kst, long a3,
+                    long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_fstatat(UROS_AT_FDCWD, (const char *)path, (void *)kst,
+                          UROS_AT_SYMLINK_NOFOLLOW);
+}
+
+static long h_fstat(long fd, long kst, long a3,
+                    long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_fstatat((int)fd, "", (void *)kst, UROS_AT_EMPTY_PATH);
+}
+
+static long h_newfstatat(long dirfd, long path, long kst, long flags,
+                         long a5, long a6)
+{
+    (void)a5; (void)a6;
+    return __uros_fstatat((int)dirfd, (const char *)path, (void *)kst,
+                          (int)flags);
+}
+#endif
 
 /*
  * Phase 5b (#255): record our exit code with proc_server before we
@@ -263,8 +282,8 @@ static long h_exit(long status, long a2, long a3,
 }
 
 /*
- * Linux SYS_exit (1) terminates the calling thread only; SYS_exit_group
- * (252) takes down the whole task.  pthread_exit (worker thread end)
+ * Linux SYS_exit terminates the calling thread only; SYS_exit_group
+ * takes down the whole task.  pthread_exit (worker thread end)
  * runs SYS_exit, and mapping it to task_terminate would kill the
  * joiner before pthread_join could observe the result.  Route SYS_exit
  * to thread_terminate(mach_thread_self()) and keep h_exit (task-wide)
@@ -289,6 +308,7 @@ static long h_exit_thread(long status, long a2, long a3,
  */
 #define UROS_MAP_ANONYMOUS  0x20
 #define UROS_MAP_FIXED      0x10
+#define UROS_PAGE_SIZE      4096
 
 /* File-backed branch lives in posix_fd.c (#276 Phase B.3) so handlers.c
  * stays freestanding-clean (no <mach.h>, no libvfs).  Returns mapped
@@ -322,6 +342,21 @@ static long h_mmap2(long addr, long len, long prot,
         return -ENOMEM;
     return (long)out;
 }
+
+/*
+ * mmap is what x86-64 has: the same call with an offset in bytes where mmap2's
+ * is in pages (#414).  This keeps one implementation and refuses what a page
+ * count cannot say.
+ */
+#ifndef SYS_mmap2
+static long h_mmap(long addr, long len, long prot,
+                   long flags, long fd, long off)
+{
+    if (off & (UROS_PAGE_SIZE - 1))
+        return -EINVAL;
+    return h_mmap2(addr, len, prot, flags, fd, off / UROS_PAGE_SIZE);
+}
+#endif
 
 /*
  * mprotect(addr, len, prot).  We map Linux prot bits onto Mach
@@ -723,12 +758,14 @@ static long h_execve(long path, long argv, long envp,
                          (char *const *)envp);
 }
 
+#ifdef SYS_waitpid
 static long h_waitpid(long pid, long status, long options,
                       long a4, long a5, long a6)
 {
     (void)a4; (void)a5; (void)a6;
     return __uros_waitpid((int)pid, (int *)status, (int)options);
 }
+#endif
 
 /* wait4(pid, status*, options, rusage*) — we ignore rusage entirely
  * in Phase 5 and route to waitpid.  Resource accounting in proc_server
@@ -744,6 +781,7 @@ static long h_wait4(long pid, long status, long options, long rusage,
 /* Phase 6a (#256): set_thread_area / futex                            */
 /* ------------------------------------------------------------------ */
 
+#ifdef __i386__
 extern int __uros_set_thread_area(void *desc);
 
 static long h_set_thread_area(long desc, long a2, long a3,
@@ -752,6 +790,7 @@ static long h_set_thread_area(long desc, long a2, long a3,
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
     return __uros_set_thread_area((void *)desc);
 }
+#endif
 
 /*
  * Real futex via mach_msg (#260).  Logic lives in posix_futex.c; this
@@ -805,45 +844,63 @@ static long h_futex(long uaddr, long op, long val, long timeout,
 struct entry { long n; __uros_handler_t h; };
 
 static const struct entry table[] = {
-    { UROS_SYS_exit,             h_exit_thread     },
-    { UROS_SYS_fork,             h_fork            },
-    { UROS_SYS_read,             h_read            },
-    { UROS_SYS_write,            h_write           },
-    { UROS_SYS_open,             h_open            },
-    { UROS_SYS_close,            h_close           },
-    { UROS_SYS_waitpid,          h_waitpid         },
-    { UROS_SYS_execve,           h_execve          },
-    { UROS_SYS_getpid,           h_getpid          },
-    { UROS_SYS_wait4,            h_wait4           },
-    { UROS_SYS_getuid,           h_getuid          },
-    { UROS_SYS_kill,             h_kill            },
-    { UROS_SYS_brk,              h_brk             },
-    { UROS_SYS_getgid,           h_getgid          },
-    { UROS_SYS_geteuid,          h_geteuid         },
-    { UROS_SYS_getegid,          h_getegid         },
-    { UROS_SYS_ioctl,            h_ioctl           },
-    { UROS_SYS_munmap,           h_munmap          },
-    { UROS_SYS_mprotect,         h_mprotect        },
-    { UROS_SYS_nanosleep,        h_nanosleep       },
-    { UROS_SYS_readv,            h_readv           },
-    { UROS_SYS_writev,           h_writev          },
-    { UROS_SYS_rt_sigaction,     h_rt_sigaction    },
-    { UROS_SYS_rt_sigprocmask,   h_rt_sigprocmask  },
-    { UROS_SYS_mmap2,            h_mmap2           },
-    { UROS_SYS__llseek,          h_llseek          },
-    { UROS_SYS_statx,            h_statx           },
-    { UROS_SYS_tkill,            h_tkill           },
-    { UROS_SYS_futex,            h_futex           },
-    { UROS_SYS_set_thread_area,  h_set_thread_area },
-    { UROS_SYS_exit_group,       h_exit            },
-    { UROS_SYS_set_tid_address,  h_set_tid_address },
-    { UROS_SYS_tgkill,           h_tgkill          },
-    { UROS_SYS_openat,           h_openat          },
-    { UROS_SYS_setsid,           h_setsid          },
-    { UROS_SYS_getsid,           h_getsid          },
-    { UROS_SYS_setpgid,          h_setpgid         },
-    { UROS_SYS_getpgid,          h_getpgid         },
-    { UROS_SYS_getpgrp,          h_getpgrp         },
+    { SYS_exit,             h_exit_thread     },
+    { SYS_fork,             h_fork            },
+    { SYS_read,             h_read            },
+    { SYS_write,            h_write           },
+    { SYS_open,             h_open            },
+    { SYS_close,            h_close           },
+#ifdef SYS_waitpid
+    { SYS_waitpid,          h_waitpid         },
+#endif
+    { SYS_execve,           h_execve          },
+    { SYS_getpid,           h_getpid          },
+    { SYS_wait4,            h_wait4           },
+    { SYS_getuid,           h_getuid          },
+    { SYS_kill,             h_kill            },
+    { SYS_brk,              h_brk             },
+    { SYS_getgid,           h_getgid          },
+    { SYS_geteuid,          h_geteuid         },
+    { SYS_getegid,          h_getegid         },
+    { SYS_ioctl,            h_ioctl           },
+    { SYS_munmap,           h_munmap          },
+    { SYS_mprotect,         h_mprotect        },
+    { SYS_nanosleep,        h_nanosleep       },
+    { SYS_readv,            h_readv           },
+    { SYS_writev,           h_writev          },
+    { SYS_rt_sigaction,     h_rt_sigaction    },
+    { SYS_rt_sigprocmask,   h_rt_sigprocmask  },
+#ifdef SYS_mmap2
+    { SYS_mmap2,            h_mmap2           },
+#else
+    { SYS_mmap,             h_mmap            },
+#endif
+#ifdef SYS__llseek
+    { SYS__llseek,          h_llseek          },
+#else
+    { SYS_lseek,            h_lseek           },
+#endif
+    { SYS_statx,            h_statx           },
+#ifdef SYS_newfstatat
+    { SYS_stat,             h_stat            },
+    { SYS_lstat,            h_lstat           },
+    { SYS_fstat,            h_fstat           },
+    { SYS_newfstatat,       h_newfstatat      },
+#endif
+    { SYS_tkill,            h_tkill           },
+    { SYS_futex,            h_futex           },
+#ifdef __i386__
+    { SYS_set_thread_area,  h_set_thread_area },
+#endif
+    { SYS_exit_group,       h_exit            },
+    { SYS_set_tid_address,  h_set_tid_address },
+    { SYS_tgkill,           h_tgkill          },
+    { SYS_openat,           h_openat          },
+    { SYS_setsid,           h_setsid          },
+    { SYS_getsid,           h_getsid          },
+    { SYS_setpgid,          h_setpgid         },
+    { SYS_getpgid,          h_getpgid         },
+    { SYS_getpgrp,          h_getpgrp         },
 };
 
 __uros_handler_t __uros_lookup(long n)

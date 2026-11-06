@@ -1,7 +1,7 @@
 /*
  * libposix-uros — syscall dispatcher.
  *
- * Entry points called by musl's patched arch/i386/syscall_arch.h.
+ * Entry points called by musl's patched arch/<target>/syscall_arch.h.
  * All seven arities forward to the same internal __dispatch(), passing
  * unused arguments as zero — the C ABI handles this cleanly and the
  * handler table sees a uniform 6-arg signature.
