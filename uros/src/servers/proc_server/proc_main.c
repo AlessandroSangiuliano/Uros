@@ -736,13 +736,23 @@ proc_S_kill(
 
     (void)server_port;
 
-    if (!signo_valid(signo)) {
+    if (signo != 0 && !signo_valid(signo)) {
         *result = PROC_ERR_BAD_SIGNO;
         return KERN_SUCCESS;
     }
 
     pthread_mutex_lock(&pid_lock);
     e = find_by_pid_locked(pid);
+    /*
+     * The null signal sends nothing and asks whether the process is there,
+     * and one that has ended and not been waited for still is: its pid is
+     * not free yet, and kill() in POSIX says so (#496).
+     */
+    if (e && signo == 0) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_OK;
+        return KERN_SUCCESS;
+    }
     if (!e || e->state == PROC_STATE_ZOMBIE) {
         pthread_mutex_unlock(&pid_lock);
         *result = PROC_ERR_NOT_FOUND;
@@ -1035,8 +1045,17 @@ proc_S_killpg(
     (void)server_port;
     *n_sent = 0;
 
-    if (!signo_valid(signo)) {
+    if (signo != 0 && !signo_valid(signo)) {
         *result = PROC_ERR_BAD_SIGNO;
+        return KERN_SUCCESS;
+    }
+    if (signo == 0) {           /* as proc_kill: is there such a group? */
+        *result = PROC_ERR_NOT_FOUND;
+        pthread_mutex_lock(&pid_lock);
+        for (i = 0; i < PROC_MAX_TASKS; i++)
+            if (pid_table[i].in_use && pid_table[i].pgrp_id == pgrp)
+                *result = PROC_OK;
+        pthread_mutex_unlock(&pid_lock);
         return KERN_SUCCESS;
     }
     is_uncatch = (signo == PROC_SIGKILL || signo == PROC_SIGSTOP ||
