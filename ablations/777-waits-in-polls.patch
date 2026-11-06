@@ -1,0 +1,46 @@
+Kind: ablation
+Issue: #777
+Over: 777-widen-slow-thread.patch
+Takes out: the sleep in the waits of act_test's arms 39 and 40 -- a depressed thread_switch() comes back at once with nothing else to run, the wait is over in a millisecond or two, and a good kernel is told that a thread never came, as 19 boots of 2256 were on EPYC under KVM
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[(39|40)\] .*(never came to wait|never ran)
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -5910,7 +5910,7 @@
+ 				&n) == KERN_SUCCESS &&
+ 		    info.run_state == TH_STATE_WAITING)
+ 			return 1;
+-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
++		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+ 	}
+ 	return 0;
+ }
+@@ -5995,7 +5995,7 @@
+ 		if (arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP)
+ 		    == MACH_MSG_SUCCESS)
+ 			return;
+-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
++		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+ 	}
+ }
+ 
+@@ -6066,7 +6066,7 @@
+ 		/* On one processor it can run only now. */
+ 		for (i = 0; i < 2000 && arm_thirty_nine_got == before; i++)
+ 			(void) thread_switch(MACH_PORT_NULL,
+-					     SWITCH_OPTION_WAIT, 1);
++					     SWITCH_OPTION_DEPRESS, 1);
+ 		took = arm_thirty_nine_tsc() - start;
+ 		if (arm_thirty_nine_got == before) {
+ 			printf("act_test: [39] the thread woken before %s "
+@@ -6376,7 +6376,7 @@
+ 	unsigned	i;
+ 
+ 	for (i = 0; i < 2000 && arm_forty_got == before; i++)
+-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
++		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+ 	return arm_forty_got != before;
+ }
+ 
