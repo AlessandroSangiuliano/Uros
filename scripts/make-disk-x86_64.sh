@@ -142,6 +142,16 @@ BOOT_FILES="$BOOTDIR/mach_kernel
 # bundle has started it.  This is the half of the disk the kernel reads.
 DISK_SERVERS="cow_test"
 
+# What lives at the root, read by exec_server when a program asks for it by
+# path (#421).  hello_exec has nothing under it but the initial stack, and the
+# two hellos are a static and a dynamic C program.
+ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world"
+
+# The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
+# libc.so under the name musl gives it for this target.
+MUSL_LDSO="$BUILD/src/contrib/musl-install/lib/libc.so"
+MUSL_LDSO_NAME=ld-musl-x86_64.so.1
+
 for cmd in dd truncate sfdisk mke2fs debugfs grub-mkimage; do
 	command -v "$cmd" >/dev/null 2>&1 || {
 		echo "make-disk-x86_64: $cmd not found — install fdisk, e2fsprogs and grub" >&2
@@ -161,12 +171,17 @@ for f in $BOOT_FILES; do
 	}
 done
 
-for s in $DISK_SERVERS; do
+for s in $DISK_SERVERS $ROOT_PROGRAMS; do
 	[ -f "$SBIN/$s" ] || {
 		echo "make-disk-x86_64: $SBIN/$s is missing — build first" >&2
 		exit 1
 	}
 done
+
+[ -f "$MUSL_LDSO" ] || {
+	echo "make-disk-x86_64: $MUSL_LDSO is missing — build first" >&2
+	exit 1
+}
 
 [ -f "$GRUB_CFG" ] || {
 	echo "make-disk-x86_64: $GRUB_CFG is missing" >&2
@@ -213,6 +228,13 @@ echo "set default=$BOOT_ENTRY" > "$WORK/entry.cfg"
 	for s in $DISK_SERVERS; do
 		echo "write $SBIN/$s $s"
 	done
+	echo "cd /"
+	for s in $ROOT_PROGRAMS; do
+		echo "write $SBIN/$s $s"
+	done
+	echo "mkdir /lib"
+	echo "cd /lib"
+	echo "write $MUSL_LDSO $MUSL_LDSO_NAME"
 } | debugfs -w -f /dev/stdin "$PART_IMG" >/dev/null 2>&1
 
 # ── Where GRUB looks for grub.cfg, and why there is nothing else here ──
