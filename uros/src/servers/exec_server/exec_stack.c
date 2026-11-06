@@ -6,14 +6,16 @@
 /*
  * exec_stack.c — initial-stack builder for exec_server (#228 v0.1.0).
  *
- * System V ABI i386 entry layout, top-down:
+ * System V ABI entry layout, top-down.  Every item above the strings is one
+ * word, four bytes on i386 and eight on x86-64 (#421), and the stack pointer
+ * is on a 16-byte boundary at entry on both:
  *
- *   ESP →  argc                 (int32)
+ *   SP  →  argc                 (one word)
  *          argv[0..argc-1]      (char* each, point inside strings region)
  *          NULL                 (argv terminator)
  *          envp[0..envc-1]      (char* each)
  *          NULL                 (envp terminator)
- *          auxv[0]              (Elf32_auxv_t pairs)
+ *          auxv[0]              (pairs of words, Elf32_auxv_t or Elf64_auxv_t)
  *          ...
  *          AT_NULL pair         (auxv terminator)
  *          [strings region]     (raw bytes from argv_blob + envp_blob)
@@ -43,6 +45,9 @@
 
 #define EXEC_PAGE_SIZE  4096U
 #define EXEC_RANDOM_LEN 16U
+
+/* One item of the layout: the target's word, which is what a pointer is. */
+typedef uintptr_t exec_word_t;
 
 /* ------------------------------------------------------------------ */
 /*  Helpers — count NUL-separated strings in a blob                    */
@@ -123,7 +128,7 @@ exec_build_stack(mach_port_t new_task,
     vm_size_t total_bytes;
     unsigned auxv_pairs;
     char *buf;
-    uint32_t *p;
+    exec_word_t *p;
     char *strings_dst;
     vm_address_t base_va;
     vm_address_t stack_va;
@@ -153,14 +158,14 @@ exec_build_stack(mach_port_t new_task,
      *   - argv + envp string blobs
      *   - AT_RANDOM payload (16 bytes the kernel/libc seed from) */
     auxv_pairs = count_auxv_pairs(hints);
-    header_bytes = sizeof(uint32_t)
-                 + (argc + 1) * sizeof(uint32_t)
-                 + (envc + 1) * sizeof(uint32_t)
-                 + auxv_pairs * 2 * sizeof(uint32_t);
+    header_bytes = sizeof(exec_word_t)
+                 + (argc + 1) * sizeof(exec_word_t)
+                 + (envc + 1) * sizeof(exec_word_t)
+                 + auxv_pairs * 2 * sizeof(exec_word_t);
     total_bytes = header_bytes + argv_strs + envp_strs + EXEC_RANDOM_LEN;
 
-    /* Round up to 16-byte alignment so ESP at entry is 16-aligned
-     * (System V ABI requires ESP%16 == 0 at the call to _start). */
+    /* Round up to 16-byte alignment so the stack pointer at entry is
+     * 16-aligned (the System V ABI asks for it at _start). */
     total_bytes = (total_bytes + 15) & ~(vm_size_t)15;
 
     if (total_bytes > EXEC_STACK_SIZE) {
@@ -191,14 +196,14 @@ exec_build_stack(mach_port_t new_task,
         int idx = 0;
         unsigned i;
 
-        p = (uint32_t *)buf;
-        *p++ = (uint32_t)argc;
+        p = (exec_word_t *)buf;
+        *p++ = (exec_word_t)argc;
 
         /* argv[i] string copies + pointer fixups */
         src = (const char *)argv_blob;
         for (idx = 0; idx < argc; idx++) {
             size_t slen = strlen(src) + 1;
-            *p++ = (uint32_t)cur_va;
+            *p++ = (exec_word_t)cur_va;
             memcpy(dst, src, slen);
             dst    += slen;
             cur_va += slen;
@@ -210,7 +215,7 @@ exec_build_stack(mach_port_t new_task,
         src = (const char *)envp_blob;
         for (idx = 0; idx < envc; idx++) {
             size_t slen = strlen(src) + 1;
-            *p++ = (uint32_t)cur_va;
+            *p++ = (exec_word_t)cur_va;
             memcpy(dst, src, slen);
             dst    += slen;
             cur_va += slen;
@@ -222,19 +227,19 @@ exec_build_stack(mach_port_t new_task,
          * optional entries only when the caller provided real values.
          * Order matters only for AT_NULL coming last. */
         *p++ = AT_PAGESZ;        *p++ = EXEC_PAGE_SIZE;
-        *p++ = AT_RANDOM;        *p++ = (uint32_t)random_va;
+        *p++ = AT_RANDOM;        *p++ = (exec_word_t)random_va;
         if (hints) {
             if (hints->vdso_base) {
-                *p++ = AT_SYSINFO_EHDR; *p++ = (uint32_t)hints->vdso_base;
+                *p++ = AT_SYSINFO_EHDR; *p++ = (exec_word_t)hints->vdso_base;
             }
             if (hints->entry_va) {
-                *p++ = AT_ENTRY;        *p++ = (uint32_t)hints->entry_va;
+                *p++ = AT_ENTRY;        *p++ = (exec_word_t)hints->entry_va;
             }
             if (hints->interp_base) {
-                *p++ = AT_BASE;         *p++ = (uint32_t)hints->interp_base;
+                *p++ = AT_BASE;         *p++ = (exec_word_t)hints->interp_base;
             }
             if (hints->phdr_va) {
-                *p++ = AT_PHDR;         *p++ = (uint32_t)hints->phdr_va;
+                *p++ = AT_PHDR;         *p++ = (exec_word_t)hints->phdr_va;
                 *p++ = AT_PHENT;        *p++ = hints->phent;
                 *p++ = AT_PHNUM;        *p++ = hints->phnum;
             }

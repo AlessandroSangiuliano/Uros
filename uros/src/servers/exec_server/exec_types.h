@@ -45,12 +45,17 @@
 #define EXEC_BLOB_MAX            4096    /* argv/envp serialized blob */
 
 /*
- * Initial stack layout in the new task: 16 KiB at a fixed VA below
- * the load_bias range used by ET_DYN binaries.  Everything in v0.1.0
- * is static ET_EXEC so this is just below the typical text base.
+ * Initial stack layout in the new task: at a fixed VA below the
+ * load_bias range used by ET_DYN binaries.  Everything in v0.1.0 is
+ * static ET_EXEC so this is just below the typical text base.
+ *
+ * A megabyte and not the 16 KiB it was (#421): it is the main thread's
+ * stack for the life of the program, and with floating-point formatting
+ * and execve's two 4 KiB blobs on it there was nothing to spare.  Pages
+ * nobody touches cost nothing.
  */
 #define EXEC_STACK_VA            0xBF800000U
-#define EXEC_STACK_SIZE          (16 * 1024)
+#define EXEC_STACK_SIZE          (1024 * 1024)
 #define EXEC_STACK_TOP           (EXEC_STACK_VA + EXEC_STACK_SIZE)
 
 /*
