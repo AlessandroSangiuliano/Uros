@@ -299,18 +299,16 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
 #if defined(__x86_64__)
     regs.rip = (uint64_t)entry;
     /*
-     * ⚠️ EIGHT off the top, which the i386 branch does not do.
+     * ⚠️ Exactly the top, and it said eight below it (#421).
      *
-     * The System V ABI wants rsp sixteen-byte aligned AT a call, so a
-     * function sees it eight past a boundary once its return address is
-     * pushed.  A thread the kernel starts is entered by a jump and has no
-     * return address, so what its entry point must see is what a callee
-     * sees; starting it on a boundary misaligns every SSE spill in that
-     * function.  Same reasoning bootstrap's x86_64/set_regs.c carries for
-     * the first user thread, and the reason this is not a width
-     * translation of the line below.
+     * That was reasoning about a function, and _start is not one: the
+     * System V ABI gives a process's entry point a stack pointer ON a
+     * sixteen-byte boundary and AT argc, and every crt reads argc and its
+     * frame through it.  exec_build_stack() answers that address.  Eight
+     * below it put argc in a word that was not there, and the next word
+     * where argv[0] should be.
      */
-    regs.rsp = (uint64_t)stack_top - 0x8;
+    regs.rsp = (uint64_t)stack_top;
 
     kr = thread_set_state(th, x86_64_THREAD_STATE,
                           (thread_state_t)&regs, reg_count);
