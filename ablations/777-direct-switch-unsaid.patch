@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #777
+Takes out: the kernel's word that a direct switch takes the wakeup -- with it gone arms 39 and 40 ask under -N, where there is no bet to lose, and read a bet never made as one lost.  That is what they did, by a race, in two boots of 2256 on EPYC under TCG: without the word they do it in every boot
+Accel: tcg,kvm
+Run: --entry 26 300 -smp 4
+Expect: act_test: \[39\] 20 bets lost at a call that was not a receive, none undone
+
+diff --git a/uros/src/mach_kernel/kern/host.c b/uros/src/mach_kernel/kern/host.c
+--- a/uros/src/mach_kernel/kern/host.c
++++ b/uros/src/mach_kernel/kern/host.c
+@@ -401,7 +401,7 @@
+ 		handoff_info->undone_tick =
+ 		    (unsigned int) undone[URMACH_HANDOFF_UNDO_TICK];
+ #if	NCPUS > 1
+-		handoff_info->direct_switch = (unsigned int) ipc_dts_smp;
++		handoff_info->direct_switch = 0;
+ #else	/* NCPUS > 1 */
+ 		handoff_info->direct_switch = 1;	/* with one, always */
+ #endif	/* NCPUS > 1 */
