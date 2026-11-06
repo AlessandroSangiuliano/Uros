@@ -8626,13 +8626,24 @@ arm_fifty_two_fs_base_goes_with_the_thread(void)
  * failure at any other address.  One terminates the task and the
  * others find it being terminated and end themselves, and the first must not
  * trip over an activation on its way out: that stopped the kernel, from a task
- * with no privilege.  The verdict is that each child goes and the machine is
- * there to say so.  The window is narrow, so a boot asks a few and the merge
- * test asks many boots, and a widen holds it open on demand.
+ * with no privilege.
+ *
+ * 🔴 A PORT THAT STOPS ANSWERING IS NOT A TASK THAT HAS GONE.  task_terminate()
+ * disables the port first, and the verdict here used to be that: it said each
+ * child went while the thread terminating it slept on its own lock
+ * (task_wait_locked()) and the reaper slept behind that, for good, so that no
+ * thread of any task was freed again in that boot.  3345 threads alive after
+ * 1024 rounds, and this arm passed.  So the threads are counted, from the
+ * zone: the arm leaves as many as it found, give or take the rest of the
+ * system, which can have some coming and going.  The window is narrow, so
+ * a boot asks a few and the merge test asks many boots, and a widen holds it
+ * open on demand.
  */
-#define	A53_TASKS	16
+#define	A53_TASKS	32
 #define	A53_THREADS	4
 #define	A53_WAIT_MS	5000
+#define	A53_GONE_WAITS	500	/* ten milliseconds each, on a tick */
+#define	A53_SLACK	(A53_TASKS * A53_THREADS / 2)
 
 static int
 a53_round(mach_port_t me)
@@ -8699,14 +8710,39 @@ static int
 arm_fifty_three_threads_fault_together(void)
 {
 	mach_port_t	me = mach_task_self();
-	unsigned	i;
+	mach_port_t	host = mach_host_self();
+	int		before = 0, after = 0, asked;
+	unsigned	i, waited = 0;
 
+	asked = a43_zone(host, "threads", &before);
 	for (i = 0; i < A53_TASKS; i++)
-		if (!a53_round(me))
+		if (!a53_round(me)) {
+			(void) mach_port_deallocate(me, host);
 			return 0;
+		}
+	while (asked && waited++ < A53_GONE_WAITS) {
+		asked = a43_zone(host, "threads", &after);
+		if (after <= before + A53_SLACK)
+			break;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	}
+	(void) mach_port_deallocate(me, host);
+	if (!asked) {
+		printf("act_test: [53] the zone of threads does not answer here "
+		       "— NOT ASKED\n");
+		return 1;
+	}
+	if (after > before + A53_SLACK) {
+		printf("act_test: [53] %u tasks of %u threads faulted together, "
+		       "and the zone of threads read %d before and %d after %u "
+		       "waits: they are still there — WRONG\n", A53_TASKS,
+		       A53_THREADS, before, after, waited);
+		return 0;
+	}
 	printf("act_test: [53] %u tasks of %u threads faulted together, no "
-	       "exception port, and each went, with the machine still here to "
-	       "say so (#414)\n", A53_TASKS, A53_THREADS);
+	       "exception port, and each went: the zone of threads read %d "
+	       "before and %d after (#414)\n", A53_TASKS, A53_THREADS, before,
+	       after);
 	return 1;
 }
 
