@@ -18,19 +18,18 @@
 /*
  * cap_test — negative tests for the UrMach capability fast path.
  *
- * Issue B installs a trust-on-first-use (TOFU) identity in the kernel:
- * the first task that calls urmach_cap_register with a setup token
- * (cap_id == 0) becomes the trusted cap_server, and all later register
- * calls from other tasks must fail with CAP_ERR_UNAUTHORIZED.
+ * The kernel takes its HMAC key from one task: the one bootstrap started as
+ * cap_server, named to it before that task ran (urmach_cap_server_set(),
+ * #744).  Every setup token from another task must fail with
+ * CAP_ERR_UNAUTHORIZED -- arm [1] -- and it does whenever this test asks.
  *
- * The bootstrap launches tasks in parallel, so this test must wait
- * until cap_server has already registered before calling
- * urmach_cap_register itself — otherwise we'd win the TOFU race and
- * wrongly brick the whole capability subsystem for the boot.  We use
- * cap_server's netname registration as the synchronization barrier:
- * cap_server only calls netname_check_in *after* its own successful
- * urmach_cap_register, so seeing the port in the name server means the
- * key slot is taken.
+ * ⚠️ IT USED TO DEPEND ON WHEN.  Issue B installed a trust-on-first-use
+ * identity: the first task to send a setup token became the trusted
+ * cap_server, so this test waited for cap_server's name, which cap_server
+ * checked in after its own registration, lest it win the race and brick the
+ * subsystem for the boot.  What it waits for now is cap_server serving
+ * (wait_for_cap_server()), which the other arms need: a key installed and
+ * the table up.
  */
 
 #include <stdio.h>
@@ -55,6 +54,7 @@
 #include "ahci_batch.h"	/* #432: a disk reading into a page it does not own */
 #include <libcap.h>
 #include <servers/netname_defs.h>	/* #744: [33]'s refusals */
+#include "service.h"			/* #744: [34]'s service_checkin */
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
 
 /*
@@ -139,22 +139,53 @@ extern kern_return_t netname_register_send_right(mach_port_t server_port,
 extern void printf_init(mach_port_t device_server_port);
 
 /*
- * Spin on netname_look_up until cap_server appears, yielding the CPU
- * between tries so the scheduler can actually run cap_server.  No
- * upper bound here — a missing cap_server means boot is broken and the
- * QEMU timeout will surface the failure clearly.
+ * The port "cap_server" names, once cap_server serves it (#744).
+ *
+ * 🔴 THE NAME USED TO BE THE BARRIER, AND IT SAYS NOTHING NOW.  cap_server
+ * checked "cap_server" in after installing its key, so the name appearing
+ * meant the key was in, and this spun on the look-up until it did.  The name
+ * server now publishes the name before any task can ask, for the port
+ * bootstrap made in CAP_SERVER_SLOT, so it is there before cap_server has
+ * even started -- and its absence is a WRONG, the name server's half of
+ * #744 missing.
+ *
+ * 🔑 So the barrier is an RPC.  It waits in the port's queue until cap_server
+ * takes the receive right, and cap_server installs its key before its first
+ * receive, so an answer -- any answer, to a token that is garbage on purpose
+ * -- is the fact the arms below need.  No bound: a missing cap_server is a
+ * broken boot, and the harness's timeout says so.
  */
 static mach_port_t
 wait_for_cap_server(void)
 {
-    mach_port_t port = MACH_PORT_NULL;
-    for (;;) {
-        kern_return_t kr = netname_look_up(name_server_port, "",
-                                           (char *)"cap_server", &port);
-        if (kr == KERN_SUCCESS)
-            return port;
-        thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 50);
+    mach_port_t     port = MACH_PORT_NULL;
+    struct uros_cap bogus;
+    kern_return_t   kr;
+
+    kr = netname_look_up(name_server_port, "", (char *)"cap_server", &port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: WRONG — \"cap_server\" is not published (%d): "
+               "the name server publishes it before anyone can ask (#744)\n",
+               (int)kr);
+        return MACH_PORT_NULL;
     }
+    memset(&bogus, 0x5A, sizeof(bogus));
+    kr = cap_verify(&bogus, 1, 0);
+    /*
+     * ⚠️ An answer FROM cap_server, which is one of its own codes.  A request
+     * destroyed unanswered comes back MIG_SERVER_DIED, and a send that could
+     * not be made a MACH_SEND_* code: neither is cap_server serving.
+     */
+    if (kr < CAP_ERR_UNAUTHORIZED || kr > CAP_ERR_NO_MANIFEST_SLOT) {
+        printf("cap_test: WRONG — a garbage token sent to \"cap_server\" "
+               "(0x%x) came back %d, which is not cap_server answering "
+               "(#744)\n", (unsigned)port, (int)kr);
+        return port;
+    }
+    printf("cap_test: \"cap_server\" is 0x%x, and a garbage token sent "
+           "there came back %d — cap_server is serving (#744)\n",
+           (unsigned)port, (int)kr);
+    return port;
 }
 
 /*
@@ -171,8 +202,10 @@ wait_for_cap_server(void)
  * own, and the name must answer afterwards with the port it answered with
  * before.  The two refusals are two halves, and each is asserted by its whole
  * value: the name server refusing a signature nobody holds alone
- * (NETNAME_INVALID_PORT), and cap_server's signature refusing this task's
- * (NETNAME_NOT_YOURS).
+ * (NETNAME_INVALID_PORT), and the name's own signature refusing this task's
+ * (NETNAME_NOT_YOURS) -- the name server's, which publishes "cap_server" for
+ * CAP_SERVER_SLOT's port before anyone can ask, and was cap_server's own
+ * until then.
  *
  * ⚠️ A name that did change hands is put back before the arm says WRONG, under
  * whichever signature took it and as a copied send right, since this task has
@@ -228,6 +261,53 @@ cap_servers_name_is_its_own(mach_port_t cap)
     }
 
     (void)mach_port_destroy(mach_task_self(), mine);
+    return ok;
+}
+
+/*
+ * Test [34]: a registered port's receive right is not this task's to take
+ * (#744).
+ *
+ * Bootstrap makes a port for every registered slot, every task inherits them,
+ * and a server takes its slot's receive right with service_checkin().  That
+ * used to be given to whoever asked first, on the service port every task
+ * inherits, so bootstrap could not tell who asked: any task could have taken
+ * the name server's slot before the name server, or after it died and the
+ * port came back -- and the environment slot, which no server takes, is
+ * anyone's in every boot.  It is the slot this arm asks for, for that reason:
+ * the one a refusal can only come from the rule and not from its being taken.
+ *
+ * Asked both ways: on this task's own bootstrap port, which names it to
+ * bootstrap (#620), and on the shared service port, which names nobody.  Each
+ * must be refused with KERN_NO_ACCESS.  A receive right that came anyway is
+ * destroyed, which hands it back to bootstrap by its port-destroyed
+ * notification.
+ */
+static int
+a_slot_is_not_this_tasks(void)
+{
+    mach_port_t   got = MACH_PORT_NULL;
+    kern_return_t on_own, on_shared;
+    int           ok;
+
+    on_own = service_checkin(bootstrap_port, environment_port, &got);
+    if (on_own == KERN_SUCCESS)
+        (void)mach_port_destroy(mach_task_self(), got);
+    got = MACH_PORT_NULL;
+    on_shared = service_checkin(service_port, environment_port, &got);
+    if (on_shared == KERN_SUCCESS)
+        (void)mach_port_destroy(mach_task_self(), got);
+
+    ok = on_own == KERN_NO_ACCESS && on_shared == KERN_NO_ACCESS;
+    if (ok)
+        printf("cap_test: [34] the environment slot's receive right, asked "
+               "for on this task's bootstrap port and on the service port: "
+               "refused both times with KERN_NO_ACCESS (#744)\n");
+    else
+        printf("cap_test: [34] WRONG — the environment slot's receive right, "
+               "asked for on this task's bootstrap port: %d, on the service "
+               "port: %d, not KERN_NO_ACCESS(%d) (#744)\n", (int)on_own,
+               (int)on_shared, KERN_NO_ACCESS);
     return ok;
 }
 
@@ -3522,6 +3602,9 @@ main(int argc, char **argv)
 
     /* [33], #744: the name is the key's neighbour, and was as open. */
     if (!cap_servers_name_is_its_own(cap_server))
+        pass = 0;
+    /* [34], #744: and so was the port behind it. */
+    if (!a_slot_is_not_this_tasks())
         pass = 0;
 
     /*

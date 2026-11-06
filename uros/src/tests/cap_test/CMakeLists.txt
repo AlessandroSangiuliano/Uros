@@ -31,6 +31,12 @@ add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci/ahci_b
 list(REMOVE_ITEM CT_BATCH_GENERATED ${_CT_OUT}/ahci_batch_server.c)
 list(APPEND CT_MIG_GENERATED ${CT_BATCH_GENERATED})
 
+# service.defs, user half (#744): [34] asks bootstrap for a registered port's
+# receive right that is not this task's to take, on both ports it could ask on.
+set(CT_SVC_GENERATED)
+add_mig_userland_client(${UROS_UAPI_DIR}/servers/service.defs ${_CT_OUT} CT_SVC)
+list(APPEND CT_MIG_GENERATED ${CT_SVC_GENERATED})
+
 add_executable(cap_test_server
   cap_test.c ${CT_MIG_GENERATED}
 )
