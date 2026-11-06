@@ -51,6 +51,17 @@ extern void __uros_signals_init(void) __attribute__((__weak__));
  * links for smokes that don't pull in the archive. */
 extern void __uros_absorb_inherited_fds(void) __attribute__((__weak__));
 
+/*
+ * #414: where the calling thread keeps its MIG reply port.  libmach asks for it
+ * through mig_init(), and the structure is here because libc.so cannot have
+ * __thread variables of its own: musl's dynamic linker gives its own image no
+ * TLS block.
+ */
+void *__uros_mach_thread_state(void)
+{
+	return &__pthread_self()->uros_mach_state;
+}
+
 void __uros_libc_init(void)
 {
 	/* Minimal synthetic auxv.  Indexed up to AT_RANDOM; everything
