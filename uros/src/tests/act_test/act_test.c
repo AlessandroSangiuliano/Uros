@@ -7265,8 +7265,7 @@ a45_round(int with_rpc)
 		ok = 0;
 		(void) mach_port_destroy(task, a45_port);
 		gone = 1;
-	} else if (a45_second != MACH_MSG_SUCCESS &&
-		   !(gone && a45_second == MACH_SEND_INVALID_DEST)) {
+	} else if (a45_second != MACH_MSG_SUCCESS) {
 		printf("act_test: [45] the second send answered 0x%x — WRONG "
 		       "(#881)\n", (int) a45_second);
 		ok = 0;
@@ -7285,10 +7284,10 @@ a45_round(int with_rpc)
 		       "the second was sent%s — NOT ASKED\n", round);
 		return -1;
 	}
-	if (gone && a45_second == MACH_SEND_INVALID_DEST)
+	if (gone)
 		printf("act_test: [45] a sender stayed parked through a kernel "
-		       "reply on its port, and the port's death let it go, "
-		       "0x%x — OK\n", (int) a45_second);
+		       "reply on its port, and the port's death let it go — "
+		       "OK\n");
 	else
 		printf("act_test: [45] a sender parked by a message the hot path "
 		       "held went on when it was taken%s — OK\n", round);
