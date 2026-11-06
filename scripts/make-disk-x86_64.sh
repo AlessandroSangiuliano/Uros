@@ -146,7 +146,7 @@ DISK_SERVERS="cow_test"
 # at /, read by exec_server when a program asks for it by path (#421).  hello_exec
 # has nothing under it but the initial stack, and the two hellos are a static
 # and a dynamic C program.
-ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world"
+ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test"
 
 # The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
 # libc.so under the name musl gives it for this target.

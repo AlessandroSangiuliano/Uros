@@ -612,7 +612,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     set(_MUSL_FILES "hello_world:${_SBIN}/hello_world"
                     "musl_test:${_SBIN}/musl_test"
                     "ush:${_SBIN}/ush")
-    set(_MUSL_DEP   hello_world_bin musl_test_bin ush_bin)
+    # hello_exec, hello_dyn_world and the umbrella go on the disk and not in the
+    # bundle, and they are here because make-disk-x86_64.sh refuses a disk
+    # without them and run-x86_64.sh builds the bundle, not ALL.
+    set(_MUSL_DEP   hello_world_bin musl_test_bin ush_bin
+                    hello_exec_bin hello_dyn_world musl_umbrella)
   else()
     set(_MUSL_LINE  "")
     set(_MUSL_FILES "")
