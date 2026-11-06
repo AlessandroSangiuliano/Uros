@@ -850,6 +850,82 @@ arm_proc(void)
 }
 
 /*
+ * ── [22] Threads in the servers at once ─────────────────────────────────
+ *
+ * Four kinds of request to two servers, from four threads, so that a reply that
+ * reached the wrong thread is a reply of the wrong shape, and a thread whose
+ * reply was taken never comes back.
+ */
+#define R_THREADS	4
+#define R_ROUNDS	1000
+
+static int	r_wrong, r_done;
+
+static void *
+rpc_thread(void *arg)
+{
+	int	kind = (int)(uintptr_t)arg;
+	int	i, ok;
+
+	for (i = 0; i < R_ROUNDS; i++) {
+		struct stat	st;
+
+		switch (kind) {
+		case 0:
+			ok = getsid(0) > 0;
+			break;
+		case 1:
+			ok = getpgid(0) > 0;
+			break;
+		case 2:
+			ok = kill(getpid(), 0) == 0;
+			break;
+		default:
+			ok = stat(F_PATH, &st) == 0;
+			break;
+		}
+		if (!ok)
+			__atomic_add_fetch(&r_wrong, 1, __ATOMIC_SEQ_CST);
+	}
+	__atomic_add_fetch(&r_done, 1, __ATOMIC_SEQ_CST);
+	return NULL;
+}
+
+static void
+arm_threads_in_servers(void)
+{
+	pthread_attr_t	attr;
+	pthread_t	th;
+	int		i, rc;
+
+	if (access_by_stat(F_PATH) != 0) {
+		not_asked(22, "no disk mounted on this boot");
+		return;
+	}
+	(void)pthread_attr_init(&attr);
+	(void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	for (i = 0; i < R_THREADS; i++) {
+		rc = pthread_create(&th, &attr, rpc_thread,
+				    (void *)(uintptr_t)i);
+		if (rc != 0) {
+			verdict(22, 0, "pthread_create %d said %d", i, rc);
+			return;
+		}
+	}
+	(void)pthread_attr_destroy(&attr);
+
+	for (i = 0; i < 3 * WAIT_STEPS
+	     && __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS; i++)
+		pause_a_little();
+	verdict(22, __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) == R_THREADS
+		&& __atomic_load_n(&r_wrong, __ATOMIC_SEQ_CST) == 0,
+		"%d of %d threads made %d calls each to two servers, %d "
+		"answered wrongly", __atomic_load_n(&r_done, __ATOMIC_SEQ_CST),
+		R_THREADS, R_ROUNDS,
+		__atomic_load_n(&r_wrong, __ATOMIC_SEQ_CST));
+}
+
+/*
  * ── [21] Many forks ─────────────────────────────────────────────────────
  *
  * Each child has a whole personality to bring up, with two threads of its own,
@@ -962,6 +1038,7 @@ main(int argc, char **argv)
 	arm_page_zero();
 	arm_proc();
 	arm_many_forks();
+	arm_threads_in_servers();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
