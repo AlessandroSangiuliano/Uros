@@ -370,8 +370,8 @@ host_info(
 
 		/*
 		 * #777: a caller built before the undo counts asks for the four
-		 * fields of #446 and gets them; one that asks for more gets the
-		 * two counts too, and the count handed back says which it got.
+		 * fields of #446 and gets them; one that asks for all of them
+		 * gets all of them, and the count handed back says which it got.
 		 */
 		if (*count < HOST_RPC_HANDOFF_INFO_COUNT_446)
 			return(KERN_FAILURE);
