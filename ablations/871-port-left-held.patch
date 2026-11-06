@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #871
+Takes out: the release in urmach_msg_receive_failed() -- a blocked receive that ends with no message keeps its reference on the port, and the port stays allocated for good
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[43\] [0-9]+ receive\(s\) (timed out|ended by their port's death) grew ipc ports by [0-9]+
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 1dca7e84..74377ed9 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -721,7 +721,6 @@ urmach_msg_receive_failed(
+ 	boolean_t slist_rt = ipc_object_is_rt(object);
+ #endif	/* MACH_RT */
+ 
+-	ipc_object_release(object);
+ 	FREE_SCATTER_LIST(slist, slist_size, slist_rt);
+ 	thread_set_syscall_return(self, mr);
+ 	thread_exception_return();

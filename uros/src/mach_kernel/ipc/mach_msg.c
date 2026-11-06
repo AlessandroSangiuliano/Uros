@@ -703,6 +703,31 @@ mach_msg_receive(
  *		Called via Thread_continue -> thread_continue with
  *		the kernel stack reset.  Cannot return normally.
  */
+/*
+ * #871: a blocked receive that ends with no message.  The reference
+ * ipc_mqueue_copyin() took and the scatter list belong to the wait, and a
+ * receive that blocked does not come back to mach_msg_receive() to have them
+ * given back.  Does not return.
+ */
+static void
+urmach_msg_receive_failed(
+	ipc_thread_t		self,
+	ipc_object_t		object,
+	mach_msg_return_t	mr)
+{
+	mach_msg_body_t *slist = self->ith_scatter_list;
+	mach_msg_size_t slist_size = self->ith_scatter_list_size;
+#if	MACH_RT
+	boolean_t slist_rt = ipc_object_is_rt(object);
+#endif	/* MACH_RT */
+
+	ipc_object_release(object);
+	FREE_SCATTER_LIST(slist, slist_size, slist_rt);
+	thread_set_syscall_return(self, mr);
+	thread_exception_return();
+	/*NOTREACHED*/
+}
+
 void
 mach_msg_receive_continue(void)
 {
@@ -747,8 +772,8 @@ mach_msg_receive_continue(void)
 	    case MACH_RCV_PORT_DIED:
 	    case MACH_RCV_PORT_CHANGED:
 		imq_unlock(mqueue);
-		mr = self->ith_state;
-		goto out;
+		urmach_msg_receive_failed(self, object, self->ith_state);
+		/*NOTREACHED*/
 
 	    case MACH_RCV_IN_PROGRESS:
 	    case MACH_RCV_IN_PROGRESS_TIMED:
@@ -763,8 +788,9 @@ mach_msg_receive_continue(void)
 		switch (save_wait_result) {
 		    case THREAD_INTERRUPTED:
 			imq_unlock(mqueue);
-			mr = MACH_RCV_INTERRUPTED;
-			goto out;
+			urmach_msg_receive_failed(self, object,
+						  MACH_RCV_INTERRUPTED);
+			/*NOTREACHED*/
 
 		    case THREAD_TIMED_OUT:
 			/*
@@ -782,8 +808,9 @@ mach_msg_receive_continue(void)
 			    }
 			}
 			imq_unlock(mqueue);
-			mr = MACH_RCV_TIMED_OUT;
-			goto out;
+			urmach_msg_receive_failed(self, object,
+						  MACH_RCV_TIMED_OUT);
+			/*NOTREACHED*/
 
 		    case THREAD_RESTART:
 		    default:
@@ -877,7 +904,6 @@ done:
 #endif	/* MACH_RT */
 	FREE_SCATTER_LIST(slist, slist_size, slist_rt);
 
-out:
 	thread_set_syscall_return(self, mr);
 	thread_exception_return();
 	/*NOTREACHED*/

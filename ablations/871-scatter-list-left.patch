@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #871
+Takes out: the free of the scatter list in urmach_msg_receive_failed() -- a blocked receive with MACH_RCV_OVERWRITE that ends with no message leaves its list allocated
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[43\] [0-9]+ receive\(s\) timed out with a scatter list grew kalloc.4096 by [0-9]+
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 1dca7e84..d14481fe 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -722,7 +722,8 @@ urmach_msg_receive_failed(
+ #endif	/* MACH_RT */
+ 
+ 	ipc_object_release(object);
+-	FREE_SCATTER_LIST(slist, slist_size, slist_rt);
++	(void) slist;
++	(void) slist_size;
+ 	thread_set_syscall_return(self, mr);
+ 	thread_exception_return();
+ 	/*NOTREACHED*/
