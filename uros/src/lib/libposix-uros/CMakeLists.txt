@@ -100,7 +100,10 @@ set_source_files_properties(${CHAR_USER_C} ${CHAR_USER_H} PROPERTIES GENERATED T
 
 # Phase 6a (#256): i386_set_ldt MIG stubs.  The user side isn't
 # generated anywhere else in the tree (mach_i386.defs only emits the
-# in-kernel server impl by default), so we MIG it locally.
+# in-kernel server impl by default), so we MIG it locally.  i386's alone:
+# x86-64 has no LDT to set, and a thread's FS base goes through a trap or
+# through thread_set_state (#414).
+if(UROS_TARGET_ARCH STREQUAL "i386")
 set(MACH_I386_DEFS   ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/i386/mach_i386.defs)
 set(MACH_I386_USER_C ${CMAKE_CURRENT_BINARY_DIR}/mach_i386_user.c)
 set(MACH_I386_USER_H ${CMAKE_CURRENT_BINARY_DIR}/mach_i386.h)
@@ -125,6 +128,7 @@ add_custom_command(
   VERBATIM
 )
 set_source_files_properties(${MACH_I386_USER_C} ${MACH_I386_USER_H} PROPERTIES GENERATED TRUE)
+endif()
 
 set(LIBPOSIX_UROS_SRCS
   syscall.c
@@ -138,16 +142,20 @@ set(LIBPOSIX_UROS_SRCS
   posix_exec.c
   posix_wait.c
   posix_fork.c
-  posix_tls.c
   posix_clone.c
   posix_futex.c
   ${PROC_USER_C}
   ${EXEC_USER_C}
   ${CHAR_USER_C}
-  ${MACH_I386_USER_C}
-  i386/fork_capture.S
-  i386/clone_trampoline.S
+  ${UROS_TARGET_ARCH}/posix_tls.c
+  ${UROS_TARGET_ARCH}/fork_capture.S
+  ${UROS_TARGET_ARCH}/clone_trampoline.S
 )
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  list(APPEND LIBPOSIX_UROS_SRCS ${MACH_I386_USER_C})
+else()
+  list(APPEND LIBPOSIX_UROS_SRCS x86_64/unmap_and_exit.S)
+endif()
 
 add_library(libposix-uros STATIC ${LIBPOSIX_UROS_SRCS})
 
@@ -203,9 +211,11 @@ set_source_files_properties(${EXEC_USER_C} PROPERTIES
 set_source_files_properties(${CHAR_USER_C} PROPERTIES
   COMPILE_OPTIONS "-Wno-parentheses;-Wno-unused-variable;-fno-strict-aliasing"
 )
-set_source_files_properties(${MACH_I386_USER_C} PROPERTIES
-  COMPILE_OPTIONS "-Wno-parentheses;-Wno-unused-variable;-fno-strict-aliasing"
-)
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  set_source_files_properties(${MACH_I386_USER_C} PROPERTIES
+    COMPILE_OPTIONS "-Wno-parentheses;-Wno-unused-variable;-fno-strict-aliasing"
+  )
+endif()
 
 # musl headers (errno.h, signal.h, ...) — published by Phase 1
 # ExternalProject under build/src/contrib/musl-install/.
