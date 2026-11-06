@@ -71,6 +71,9 @@ static struct blk_handle *blk_handles_head = NULL;
  * are NOT considered authenticated for I/O: callers must first invoke
  * device_open_cap to obtain a handle.  Returns NULL on any other case.
  */
+static kern_return_t blk_token_check(const struct uros_cap *, uint32_t,
+				     uint32_t, uint64_t);	/* #744 */
+
 static struct blk_handle *
 blk_authed_handle(mach_port_t device)
 {
@@ -81,6 +84,9 @@ blk_authed_handle(mach_port_t device)
 	if (magic != BLK_MAGIC_HANDLE)
 		return NULL;
 	struct blk_handle *h = blk_object_for(device);
+	uint32_t now;
+	kern_return_t kr;
+
 	/*
 	 * Issue #183: a handle whose cap was revoked stays linked in the
 	 * list (so explicit close / no-senders can still find it) but
@@ -89,6 +95,34 @@ blk_authed_handle(mach_port_t device)
 	 */
 	if (h->revoked)
 		return NULL;
+
+	/*
+	 * 🔴 AND A REVOCATION IS THIS SERVER'S TO SEE, NOT ONLY TO BE TOLD OF
+	 * (#744).  The handle was revoked by cap_server's notice and by nothing
+	 * else, so a notice not delivered -- a full queue, a subscriber slot
+	 * taken, cap_server stopped -- left a revoked capability moving data.
+	 * The kernel knows: every revocation moves its epoch, and the token
+	 * the open was granted on is asked again whenever the epoch is not the
+	 * one it last verified at.  That is one urmach_cap_epoch() per transfer
+	 * and one urmach_cap_verify() per handle per revocation, which is the
+	 * scheme dma_cap[] already keeps (#537).
+	 *
+	 * ⚠️ The epoch is read BEFORE the check: a revocation between the two
+	 * leaves it behind the kernel's, and the next use asks again.
+	 */
+	now = (uint32_t)urmach_cap_epoch();
+	if (h->cap_epoch != now) {
+		kr = blk_token_check(&h->cap, RESOURCE_BLK_DEVICE, h->cap_op,
+				     h->cap_resource_id);
+		if (kr != KERN_SUCCESS) {
+			h->revoked = 1;
+			printf("blk: handle for %s revoked: its token no longer "
+			       "verifies (kr=%d, #744)\n",
+			       h->part ? h->part->name : "(unknown)", (int)kr);
+			return NULL;
+		}
+		h->cap_epoch = now;
+	}
 	return h;
 }
 
@@ -382,6 +416,8 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	 * client looked up, so try both.
 	 */
 	uint64_t resource_id = cap_name_hash(part->name);
+	/* #744: before the check, as blk_authed_handle() reads it */
+	uint32_t epoch = (uint32_t)urmach_cap_epoch();
 	kern_return_t kr = blk_token_check(&token, RESOURCE_BLK_DEVICE, op,
 					   resource_id);	/* #599: typed */
 	if (kr != KERN_SUCCESS && part->stable_name[0] != '\0') {
@@ -417,6 +453,10 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	h->cap_id    = token.cap_id;
 	h->revoked   = 0;
 	h->mode      = mode & (D_READ | D_WRITE);	/* #614 */
+	h->cap       = token;			/* #744 */
+	h->cap_op    = op;
+	h->cap_resource_id = resource_id;
+	h->cap_epoch = epoch;
 
 	mach_port_t hport = MACH_PORT_NULL;
 	kr = mach_port_allocate(mach_task_self(),
