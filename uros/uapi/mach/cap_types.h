@@ -248,24 +248,10 @@ _Static_assert(__builtin_offsetof(struct uros_cap, hmac) == 160,
 #define CAP_TOKEN_SIZE       (sizeof(struct uros_cap))
 
 /*
- * FNV-1a 64-bit hash of a device/resource name.  Used to derive a
- * stable resource_id for capabilities issued on named resources like
- * block-device partitions ("ahci0a", "virtio_blk0a", ...).  Clients
- * ask cap_server to sign a token with id = cap_name_hash(name), and
- * servers recompute the same hash on their local copy of the name
- * when verifying — so the agreement is on the string, not on a
- * database of numeric ids.
+ * cap_name_hash(), the resource id of a resource named by a string, is in a
+ * header of its own so that the host's mkmanifest can include it (#716).
  */
-static inline uint64_t
-cap_name_hash(const char *name)
-{
-    uint64_t h = 0xcbf29ce484222325ULL;
-    while (*name) {
-        h ^= (uint8_t)(*name++);
-        h *= 0x100000001b3ULL;
-    }
-    return h;
-}
+#include <mach/cap_name_hash.h>
 
 /*
  * Error codes.  These live in the KERN_RETURN space (positive ints).
