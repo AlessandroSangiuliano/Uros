@@ -1962,15 +1962,32 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	 * same port as the name (#716): under MACH_PORT_NULL any task could
 	 * check the mount out, "/" included, and check its own port in. */
 	if (mount_path) {
-		kr = netname_check_in_mount(name_server_port,
-					    (char *)mount_path,
-					    sig, mnt->port);
-		if (kr != KERN_SUCCESS)
-			printf("ext2: netname_check_in_mount(%s) "
-			       "failed (kr=%d)\n", mount_path, kr);
-		else
-			printf("ext2: mount registered at \"%s\"\n",
-			       mount_path);
+		struct uros_cap mtok;
+		char mtok_blob[CAP_TOKEN_MAX];
+
+		/* #716: and with a capability for the prefix, which the name
+		 * server asks for -- this task's manifest grants the four in
+		 * part_table[], by name. */
+		kr = cap_request(RESOURCE_MOUNT_POINT, cap_name_hash(mount_path),
+				 CAP_OP_MOUNT_REGISTER, 0 /* no expiry */,
+				 &mtok);
+		if (kr != KERN_SUCCESS) {
+			printf("ext2: cap_request(mount %s) failed (%d)\n",
+			       mount_path, kr);
+		} else {
+			memcpy(mtok_blob, &mtok, sizeof(mtok));
+			kr = netname_check_in_mount(name_server_port,
+						    (char *)mount_path,
+						    sig, mnt->port, mtok_blob,
+						    (mach_msg_type_number_t)
+						    sizeof(mtok));
+			if (kr != KERN_SUCCESS)
+				printf("ext2: netname_check_in_mount(%s) "
+				       "failed (kr=%d)\n", mount_path, kr);
+			else
+				printf("ext2: mount registered at \"%s\"\n",
+				       mount_path);
+		}
 	}
 
 	pthread_mutex_init(&mnt->of_lock, NULL);	/* #385 */

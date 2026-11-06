@@ -159,6 +159,8 @@ target_include_directories(proc_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
+  # libcap.h: the /proc mount's capability (#716)
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
 )
 
 target_link_libraries(proc_server_bin PRIVATE
@@ -166,6 +168,7 @@ target_link_libraries(proc_server_bin PRIVATE
   libpthreads
   libmach
   libnetname
+  libcap
   -Wl,--end-group
 )
 

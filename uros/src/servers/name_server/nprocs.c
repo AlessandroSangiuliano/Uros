@@ -53,6 +53,8 @@
 #include <mach.h>
 #include <mach/message.h>
 #include <mach/notify.h>
+#include <mach/mach_traps.h>	/* #716: urmach_cap_verify */
+#include <mach/cap_types.h>	/* #716: a mount's capability */
 #include <sa_mach.h>
 #include <mach_error.h>
 
@@ -532,11 +534,36 @@ mount_prefix_match(const char *path, const char *prefix)
     return 0;
 }
 
+/*
+ * Whether `token' lets its bearer check a mount in under `prefix' (#716).
+ *
+ * The kernel verifies it: urmach_cap_verify() checks the MAC with the key
+ * cap_server installed, the type, the id, the operation, and whether it was
+ * revoked.  The id is the prefix's as the caller spelled it, so a capability
+ * for "/mnt/disk2" is not one for "/mnt" or for "/etc".  The copy is because
+ * the token arrives as bytes inside the message, which promises nothing of
+ * the alignment a struct uros_cap wants.
+ */
+static kern_return_t
+mount_capability(netname_name_in_t prefix, const char *token,
+		 mach_msg_type_number_t count)
+{
+    struct uros_cap t;
+
+    if (count != sizeof t)
+	return CAP_ERR_INVALID_TOKEN;
+    memcpy(&t, token, sizeof t);
+    return urmach_cap_verify(&t, RESOURCE_MOUNT_POINT, CAP_OP_MOUNT_REGISTER,
+			     cap_name_hash(prefix));
+}
+
 kern_return_t
 do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
-			  mach_port_t sig, mach_port_t port)
+			  mach_port_t sig, mach_port_t port,
+			  cap_token_t token, mach_msg_type_number_t tokenCnt)
 {
     mount_record_t this;
+    kern_return_t kr;
 
     if (Debug)
 	printf("%s: netname_check_in_mount('%.80s', port=%x, sig=%x)\n",
@@ -553,6 +580,16 @@ do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
     /* Validate: must be absolute. */
     if (prefix[0] != '/')
 	return NETNAME_NOT_YOURS;
+
+    /*
+     * #716: and the prefix is the caller's to mount under only with a
+     * capability for it.  Asked before the registry is, so that a refusal
+     * says nothing of whether the prefix is taken; the kernel's answer goes
+     * back as it is, a CAP_ERR_* that names why.
+     */
+    kr = mount_capability(prefix, token, tokenCnt);
+    if (kr != KERN_SUCCESS)
+	return kr;
 
     /* Reject duplicates (caller should check_out_mount first). */
     for (this = mounts; this != NULL; this = this->next)

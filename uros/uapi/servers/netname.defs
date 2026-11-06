@@ -156,11 +156,35 @@ routine netname_notify(
  * fs_server without per-client hardcoded knowledge of who owns what.
  */
 
+/*
+ * Who may put a mount where, and who may take it out (#716).
+ *
+ * 🔴 A PREFIX IS MOUNTED ON A CAPABILITY, AND UNMOUNTED ON A SIGNATURE.
+ * Before, a mount was checked in with MACH_PORT_NULL and anybody's to check
+ * out, "/" included; and a longer prefix needed nobody's leave at all -- a
+ * task that registered "/etc" answered every open under it, because the
+ * look-up takes the longest match.
+ *
+ * - check-in: `token' is a RESOURCE_MOUNT_POINT capability whose id is
+ *   cap_name_hash(prefix), for CAP_OP_MOUNT_REGISTER; cap_server issues it as
+ *   the task's manifest says, the name server verifies it with the kernel.  A
+ *   prefix that has a mount is refused whoever holds a capability for it.
+ * - check-out, and every other change to a mount: the signature it was
+ *   checked in with, which no task can present as MACH_PORT_NULL.
+ *
+ * ⚠️ The capability is asked at check-in and not after: one revoked later
+ * does not take the mount out, which its server's signature or its death
+ * does.  A mount is an act the capability allowed, not a use of it.
+ */
+type cap_token_t = array[*:256] of char;
+import <mach/cap_types.h>;
+
 routine netname_check_in_mount(
 	server_port	: mach_port_t;
 	prefix		: netname_name_in_t;
 	signature	: mach_port_copy_send_t;
-	port_id		: mach_port_make_send_t);
+	port_id		: mach_port_make_send_t;
+	token		: cap_token_t);
 
 routine netname_check_out_mount(
 	server_port	: mach_port_t;
