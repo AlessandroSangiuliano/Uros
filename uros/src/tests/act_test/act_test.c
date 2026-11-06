@@ -5886,9 +5886,15 @@ static volatile int	arm_thirty_nine_stop;
 
 /*
  * A thread the kernel has in a wait.  A flag set before mach_msg() says only
- * that it is on its way, and thread_switch() with nothing else to run comes
- * back at once, so a message sent on that word reaches a queue with no receiver
- * on it, and no hand-off is bet at all.  arm 39 and arm 40.
+ * that it is on its way, so a message sent on that word reaches a queue with no
+ * receiver on it, and no hand-off is bet at all.  arm 39 and arm 40.
+ *
+ * The waits of these two arms sleep, as this one does.  A depressed
+ * thread_switch() with nothing else to run comes back at once: 4000 of them were
+ * 0.6 to 2 ms on a quiet desktop, and 2000 half of that, and a virtual processor
+ * takes that long to wake where its host is shared.  From a send to the thread's
+ * running was 5 us on that desktop and 1.3 ms at the median on EPYC under KVM,
+ * and 19 boots of 2256 there said of a good kernel that a thread never came.
  */
 static int
 arm_thread_waiting(volatile mach_port_t *thread)
@@ -5904,7 +5910,7 @@ arm_thread_waiting(volatile mach_port_t *thread)
 				&n) == KERN_SUCCESS &&
 		    info.run_state == TH_STATE_WAITING)
 			return 1;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 	}
 	return 0;
 }
@@ -5989,7 +5995,7 @@ arm_thirty_nine_stop_it(void)
 		if (arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP)
 		    == MACH_MSG_SUCCESS)
 			return;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 	}
 }
 
@@ -6060,7 +6066,7 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 		/* On one processor it can run only now. */
 		for (i = 0; i < 2000 && arm_thirty_nine_got == before; i++)
 			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_DEPRESS, 1);
+					     SWITCH_OPTION_WAIT, 1);
 		took = arm_thirty_nine_tsc() - start;
 		if (arm_thirty_nine_got == before) {
 			printf("act_test: [39] the thread woken before %s "
@@ -6370,7 +6376,7 @@ arm_forty_ran(unsigned before)
 	unsigned	i;
 
 	for (i = 0; i < 2000 && arm_forty_got == before; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 	return arm_forty_got != before;
 }
 
