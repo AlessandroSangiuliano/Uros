@@ -199,6 +199,29 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 */
 	desc_set_rsp0(cpu_number(),
 		      pcb->ctx.user_frame + sizeof(struct trap_frame));
+
+	/*
+	 * #414: the thread pointer.  Here, with the stack, because every way
+	 * onto a processor passes through this routine, a new thread's first
+	 * return to user space included.
+	 *
+	 * Not for a thread of the kernel, which never reads %fs: the idle
+	 * thread between two turns of the same user thread would otherwise
+	 * cost two writes for nothing.  And not when the base is already there:
+	 * `wrmsr' is serialising.
+	 *
+	 * ⚠️ `wrmsr' and not WRFSBASE.  The instruction needs CR4.FSGSBASE, and
+	 * that lets ring 3 write its own GS base, which the entry's test of
+	 * who owns GS cannot stand: deny_user_segment_bases() in cpu/percpu.c.
+	 */
+	if (thr_act->task != kernel_task) {
+		struct percpu	*p = percpu();
+
+		if (p->fs_base != pcb->fs_base) {
+			wrmsr(MSR_FS_BASE, pcb->fs_base);
+			p->fs_base = pcb->fs_base;
+		}
+	}
 }
 
 /*

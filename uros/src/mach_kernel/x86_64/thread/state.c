@@ -175,11 +175,11 @@ int thread_state_to_frame(const struct x86_64_thread_state *state,
 		      | RFLAGS_ALWAYS_ONE | RFLAGS_IF;
 
 	/*
-	 * ⚠️ fs_base and gs_base are checked above and go no further, because
-	 * there is nowhere here to put them: they are MSRs, and this builds a
-	 * frame.  Applying them needs a thread to apply them to, which arrives
-	 * with the scheduler.  The check is here now so that it is already the
-	 * guard when the second half lands, rather than something to remember.
+	 * ⚠️ fs_base and gs_base are checked above and go no further here,
+	 * because they are not in a frame.  The caller stores them in the pcb,
+	 * and act_machine_switch_pcb() loads the FS base (#414): this check is
+	 * what keeps a kernel address and a non-canonical one out of that
+	 * `wrmsr', which would fault at ring 0.
 	 */
 	return 1;				/* applied */
 }
