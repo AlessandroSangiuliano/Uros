@@ -1,22 +1,22 @@
 Kind: ablation
 Issue: #688
 Over: 688-widen-copyin-late.patch
-Takes out: fcfc9cf9 -- mach_msg()'s request copyin asserts again, under the read lock, that the sender's space is alive, and reads its table and asks ipc_entry_lookup() whatever the answer, where a dead space answered no name and abort_request_copyin took the request the slow way; act_test [14]'s third thread sends task_info()'s message to its own task in a loop, and over 688-widen-copyin-late, asleep in the hot path while its task is terminated, it comes to the copyin after the space died: the per-thread cache misses on the moved generation, the lock-free resolve refuses a dead space, the locked lookup is where it comes, and the assert stops the kernel; without the widen it never came to the copyin with its space dead, caught 0 times in 6 at 72571f56 and 0 times in 6 at 87bf2a81, where a cache hit on a dead space would have come to the locked lookup too
+Takes out: fcfc9cf9 -- mach_msg()'s request copyin asserts again, under the read lock, that the sender's space is alive, and reads its table and asks ipc_entry_lookup() whatever the answer, where a dead space answered no name and abort_request_copyin took the request the slow way; act_test [14]'s third thread sends task_info()'s message to its own task in a loop, and over 688-widen-copyin-late, asleep in the hot path while its task is terminated, it comes to the copyin after the space died: the lock-free resolve refuses a dead space, the locked lookup is where it comes, and the assert stops the kernel; without the widen it never came to the copyin with its space dead, caught 0 times in 6 at 72571f56 and 0 times in 6 at 87bf2a81
 Run: --entry 14 1200 -smp 4
 Expect: Assertion failed: file "[^"]*/ipc/mach_msg\.c", line [0-9]+: space->is_active
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index 95488932..0c4eecee 100644
+index 5c189ab4..64839931 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -1633,6 +1633,7 @@ urmach_msg_overwrite_trap_call(
+@@ -1557,6 +1557,7 @@ urmach_msg_overwrite_trap_call(
  		    }
  
  			is_read_lock(space);
 +			assert(space->is_active);
  
- 			/*
- 			 * #868: for the cache below, read before the names
-@@ -1647,14 +1648,7 @@ urmach_msg_overwrite_trap_call(
+ 			size = space->is_table_size;
+ 			table = space->is_table;
+@@ -1565,14 +1566,7 @@ urmach_msg_overwrite_trap_call(
  			register ipc_entry_t entry;
  			register ipc_entry_bits_t bits;
  
@@ -32,7 +32,7 @@ index 95488932..0c4eecee 100644
  				entry = &table[index];
  				bits = entry->ie_bits;
  				if (IE_BITS_GEN(bits) != gen ||
-@@ -1665,8 +1659,7 @@ urmach_msg_overwrite_trap_call(
+@@ -1583,8 +1577,7 @@ urmach_msg_overwrite_trap_call(
  				entry = IE_NULL;
  			}
  			if (entry == IE_NULL) {

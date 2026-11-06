@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #868
+Over: 868-widen-resolve.patch
+Takes out: the check with the ports locked -- what the resolve read with nothing locked is believed, as long as the port is alive.  act_test [51] deallocates the send right in the window of the widen, the hot path makes a send right from a port that has none, and the assert beside it stops a development kernel.
+Run: --entry 14 600 -smp 4
+Expect: dest_port->ip_srights > 0
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index eea5c0d5..048f8a84 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1229,8 +1229,9 @@ urmach_msg_lockfree_resolve(
+ 	 * the space is still alive (#688).
+ 	 */
+ 	urmach_rcu_barrier();
+-	if (!urmach_msg_rights_hold(space, gen0, reply_name, rp, dest_name,
+-				    dp)) {
++	(void) urmach_msg_rights_hold(space, gen0, reply_name, rp, dest_name,
++				      dp);
++	if (!ip_active(dp)) {
+ 		ip_unlock(rp);
+ 		ip_unlock(dp);
+ 		return FALSE;

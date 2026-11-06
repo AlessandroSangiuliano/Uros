@@ -1,0 +1,39 @@
+Kind: widen
+Issue: #868
+Takes out: nothing -- it holds urmach_msg_lockfree_resolve() for 120 ms on the message act_test [51] marks, after it has read the two names and before it locks the ports, so that a right can leave in between.  With the check in place the resolve finds that out with the ports locked and gives up, and the RPC after it is refused.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[51\] a right given up by each route was refused
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index ce46cd69..eea5c0d5 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1194,7 +1194,8 @@ urmach_msg_lockfree_resolve(
+ 	mach_port_t	reply_name,
+ 	mach_port_t	dest_name,
+ 	ipc_port_t	*reply_portp,
+-	ipc_port_t	*dest_portp)
++	ipc_port_t	*dest_portp,
++	int		id)
+ {
+ 	natural_t	gen0 = space->is_generation;
+ 	ipc_entry_t	re, de;
+@@ -1215,6 +1216,8 @@ urmach_msg_lockfree_resolve(
+ 	if (rp == IP_NULL || dp == IP_NULL)
+ 		return FALSE;
+ 
++	if (id == 5151)
++		delay(120000);
+ 	ip_lock(dp);
+ 	if (!ip_active(dp) || !ip_lock_try(rp)) {
+ 		ip_unlock(dp);
+@@ -1547,7 +1550,8 @@ urmach_msg_overwrite_trap_call(
+ 
+ 			if (urmach_msg_lockfree_resolve(space, reply_name,
+ 							hdr->msgh_remote_port,
+-							&lf_reply, &lf_dest)) {
++							&lf_reply, &lf_dest,
++							hdr->msgh_id)) {
+ 				reply_port = lf_reply;
+ 				dest_port  = lf_dest;
+ 				goto fast_copyin_resolved;
