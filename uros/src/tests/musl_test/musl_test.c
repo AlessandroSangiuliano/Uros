@@ -859,7 +859,10 @@ arm_proc(void)
 #define R_THREADS	4
 #define R_ROUNDS	1000
 
-static int	r_wrong, r_done;
+static const char *const r_kind[R_THREADS] = {
+	"getsid", "getpgid", "kill", "stat"
+};
+static int	r_wrong[R_THREADS], r_done;
 
 static void *
 rpc_thread(void *arg)
@@ -885,7 +888,7 @@ rpc_thread(void *arg)
 			break;
 		}
 		if (!ok)
-			__atomic_add_fetch(&r_wrong, 1, __ATOMIC_SEQ_CST);
+			__atomic_add_fetch(&r_wrong[kind], 1, __ATOMIC_SEQ_CST);
 	}
 	__atomic_add_fetch(&r_done, 1, __ATOMIC_SEQ_CST);
 	return NULL;
@@ -918,11 +921,44 @@ arm_threads_in_servers(void)
 	     && __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS; i++)
 		pause_a_little();
 	verdict(22, __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) == R_THREADS
-		&& __atomic_load_n(&r_wrong, __ATOMIC_SEQ_CST) == 0,
-		"%d of %d threads made %d calls each to two servers, %d "
-		"answered wrongly", __atomic_load_n(&r_done, __ATOMIC_SEQ_CST),
-		R_THREADS, R_ROUNDS,
-		__atomic_load_n(&r_wrong, __ATOMIC_SEQ_CST));
+		&& r_wrong[0] + r_wrong[1] + r_wrong[2] + r_wrong[3] == 0,
+		"%d of %d threads made %d calls each to two servers, and "
+		"answered wrongly: %s %d, %s %d, %s %d, %s %d",
+		__atomic_load_n(&r_done, __ATOMIC_SEQ_CST), R_THREADS, R_ROUNDS,
+		r_kind[0], r_wrong[0], r_kind[1], r_wrong[1],
+		r_kind[2], r_wrong[2], r_kind[3], r_wrong[3]);
+}
+
+/*
+ * ── [23] The null signal ────────────────────────────────────────────────
+ *
+ * kill(pid, 0) sends nothing and asks whether the process is there.  A child
+ * that has ended and has not been waited for still is, and once it has been
+ * the pid is nobody's.
+ */
+static void
+arm_null_signal(void)
+{
+	pid_t	child;
+	int	self, before, after, saved, status = 0;
+
+	self = kill(getpid(), 0);
+	child = fork();
+	if (child < 0) {
+		verdict(23, 0, "fork failed, errno %d", errno);
+		return;
+	}
+	if (child == 0)
+		_exit(0);
+	before = kill(child, 0);
+	(void)waitpid(child, &status, 0);
+	errno = 0;
+	after = kill(child, 0);
+	saved = errno;
+	verdict(23, self == 0 && before == 0 && after == -1 && saved == ESRCH,
+		"kill(pid, 0) answered %d for this process, %d for a child not "
+		"yet waited for, and %d with errno %d once it was", self, before,
+		after, saved);
 }
 
 /*
@@ -1039,6 +1075,7 @@ main(int argc, char **argv)
 	arm_proc();
 	arm_many_forks();
 	arm_threads_in_servers();
+	arm_null_signal();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
