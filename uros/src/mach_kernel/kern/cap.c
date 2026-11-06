@@ -21,8 +21,11 @@
  * Globals (all protected by cap_lock):
  *   cap_hmac_key[32]    HMAC-SHA256 key, installed by cap_server at boot
  *   cap_key_set         TRUE once a key has been installed
- *   cap_server_task     the task that installed the key; only it may
- *                       refresh the key or revoke caps (TOFU model)
+ *   cap_server_task     the task bootstrap started as cap_server, named by
+ *                       urmach_cap_server_set() before it ran, with a
+ *                       reference held; only it may install or refresh the
+ *                       key or revoke caps (#744 -- it used to be whichever
+ *                       task installed a key first)
  *   cap_state_table[]   hash set of cap_ids that are revoked and/or
  *                       have been consumed (for use-once tokens).
  *
@@ -41,6 +44,7 @@
 #include <kern/kalloc.h>
 #include <kern/lock.h>
 #include <kern/misc_protos.h>
+#include <kern/host.h>		/* #744: HOST_NULL */
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/cpu_data.h>	/* #537: disable_preemption */
@@ -806,6 +810,46 @@ urmach_cap_revoke(uint64_t cap_id)
     return KERN_SUCCESS;
 }
 
+/*
+ * Which task may install the HMAC key: the one bootstrap started as cap_server,
+ * named before it has a thread (#744).  By the privileged host port, which
+ * bootstrap holds and hands to nobody it does not mean to.
+ *
+ * ⚠️ WITH A REFERENCE.  The task used to be kept as a bare pointer, and a
+ * cap_server that died left it naming freed memory, which the task zone gives
+ * to the next task it makes -- the shape of #749.  The reference keeps the
+ * task, ended or not, until another is named.
+ *
+ * Naming another task forgets the key: a key is its cap_server's, and the
+ * tokens it signed are no one's once that server is gone.
+ */
+kern_return_t
+urmach_cap_server_set(host_t host_priv, task_t task)
+{
+    task_t old;
+
+    if (host_priv == HOST_NULL)
+        return KERN_INVALID_HOST;
+    if (task == TASK_NULL)
+        return KERN_INVALID_ARGUMENT;
+
+    task_reference(task);
+    simple_lock(&cap_lock);
+    old = cap_server_task;
+    cap_server_task = task;
+    if (old != task && cap_key_set) {
+        for (unsigned i = 0; i < CAP_HMAC_SIZE; i++)
+            cap_hmac_key[i] = 0;
+        cap_key_set = FALSE;
+        cap_epoch++;			/* #537: no verified token outlives it */
+    }
+    simple_unlock(&cap_lock);
+
+    if (old != TASK_NULL)
+        task_deallocate(old);
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 urmach_cap_register(const struct uros_cap *user_token)
 {
@@ -818,9 +862,19 @@ urmach_cap_register(const struct uros_cap *user_token)
 
     simple_lock(&cap_lock);
 
-    /* Setup-token path: cap_id == 0 → install (or refresh) HMAC key. */
+    /*
+     * Setup-token path: cap_id == 0 → install (or refresh) HMAC key.
+     *
+     * 🔴 ONLY FROM THE TASK BOOTSTRAP NAMED (#744).  It used to be whichever
+     * task installed a key first, and nothing tied that task to the one
+     * bootstrap started as cap_server: six tasks start before it in the
+     * x86-64 bundle, and one that registered first would have held the key
+     * and left cap_server's own registration refused.  Before bootstrap
+     * names a task, nobody may: a capability system with no key refuses
+     * every token, which is the answer for a boot with no cap_server.
+     */
     if (t.cap_id == 0) {
-        if (cap_key_set && caller != cap_server_task) {
+        if (caller != cap_server_task) {
             simple_unlock(&cap_lock);
             return CAP_ERR_UNAUTHORIZED;
         }
@@ -829,7 +883,6 @@ urmach_cap_register(const struct uros_cap *user_token)
         hmac_sha256_key_init(&cap_hmac_ready, cap_hmac_key, CAP_HMAC_SIZE);
         cap_epoch++;			/* #537: nor any key */
         cap_key_set = TRUE;
-        cap_server_task = caller;
         simple_unlock(&cap_lock);
         printf("cap: hmac key registered (len=%u)\n",
                (unsigned)CAP_HMAC_SIZE);
