@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #414
+Over: 414-widen-reaper.patch
+Takes out: the test that a dying thread's activation leaves its task whatever state the task is in -- it stays listed and active while the reaper lets go of top_act, task_terminate() finds it, act_abort() takes it for one in the middle of a chain, and the kernel writes through a null higher
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: <thread_terminate\+0x[0-9a-f]+>
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1049,7 +1049,7 @@
+ 	 * The thread holds a reference to the task, so it cannot be deleted
+ 	 * out from under it.
+ 	 */
+-	if (task != TASK_NULL) {
++	if( task && task->active) {
+ 		time_value_t user_time, system_time;
+ 
+ 		thread_read_times(thread, &user_time, &system_time);
