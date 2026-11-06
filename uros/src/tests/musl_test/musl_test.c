@@ -855,22 +855,32 @@ arm_proc(void)
  * Four kinds of request to two servers, from four threads, so that a reply that
  * reached the wrong thread is a reply of the wrong shape, and a thread whose
  * reply was taken never comes back.
+ *
+ * They go at the pace of the slowest.  A stat takes 3.8 ms under KVM and 31 ms
+ * under TCG, and a thousand of each of the others take 30 ms between them, so
+ * with a thousand rounds each those three were over after three stats, and
+ * stat went on alone, where nothing could take its reply, past this arm's 15 s
+ * on every boot under TCG.
  */
 #define R_THREADS	4
-#define R_ROUNDS	1000
+#define R_ROUNDS	1000	/* the least of each of the fast three */
+#define R_STAT		3	/* the kind that goes to the file server */
+#define R_STATS		20	/* and how many of it, which ends all four */
 
 static const char *const r_kind[R_THREADS] = {
 	"getsid", "getpgid", "kill", "stat"
 };
-static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done;
+static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done, r_over;
 
 static void *
 rpc_thread(void *arg)
 {
 	int	kind = (int)(uintptr_t)arg;
+	int	least = kind == R_STAT ? R_STATS : R_ROUNDS;
 	int	i, ok;
 
-	for (i = 0; i < R_ROUNDS; i++) {
+	for (i = 0; i < least || !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST);
+	     i++) {
 		struct stat	st;
 
 		switch (kind) {
@@ -890,6 +900,8 @@ rpc_thread(void *arg)
 		if (!ok)
 			__atomic_add_fetch(&r_wrong[kind], 1, __ATOMIC_SEQ_CST);
 		__atomic_store_n(&r_round[kind], i + 1, __ATOMIC_SEQ_CST);
+		if (kind == R_STAT && i + 1 == R_STATS)
+			__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST);
 	}
 	__atomic_add_fetch(&r_done, 1, __ATOMIC_SEQ_CST);
 	return NULL;
@@ -900,7 +912,7 @@ arm_threads_in_servers(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, rc;
+	int		i, rc, done;
 
 	if (access_by_stat(F_PATH) != 0) {
 		not_asked(22, "no disk mounted on this boot");
@@ -921,11 +933,13 @@ arm_threads_in_servers(void)
 	for (i = 0; i < 3 * WAIT_STEPS
 	     && __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS; i++)
 		pause_a_little();
-	verdict(22, __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) == R_THREADS
+	done = __atomic_load_n(&r_done, __ATOMIC_SEQ_CST);
+	__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST); /* if stat never came back */
+	verdict(22, done == R_THREADS
 		&& r_wrong[0] + r_wrong[1] + r_wrong[2] + r_wrong[3] == 0,
-		"%d of %d threads made %d calls each to two servers: %s %d "
-		"made and %d wrong, %s %d and %d, %s %d and %d, %s %d and %d",
-		__atomic_load_n(&r_done, __ATOMIC_SEQ_CST), R_THREADS, R_ROUNDS,
+		"%d of %d threads ended, at once in two servers: %s %d made "
+		"and %d wrong, %s %d and %d, %s %d and %d, %s %d and %d",
+		done, R_THREADS,
 		r_kind[0], r_round[0], r_wrong[0],
 		r_kind[1], r_round[1], r_wrong[1],
 		r_kind[2], r_round[2], r_wrong[2],
