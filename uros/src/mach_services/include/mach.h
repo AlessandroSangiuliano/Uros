@@ -153,7 +153,8 @@ extern kern_return_t		vm_read_overwrite(mach_port_t,
 						  vm_address_t,
 						  vm_size_t *);
 
-extern void			*sbrk(int);
+/* intptr_t, as musl's <unistd.h> says it: the two meet in one program (#414). */
+extern void			*sbrk(intptr_t);
 
 extern int			 brk(void *);
 

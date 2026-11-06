@@ -32,7 +32,7 @@ int brk(void * x)
 	return(-1);
 }
 
-void * sbrk(int x)
+void * sbrk(intptr_t x)
 {
 	fprintf_stderr("sbrk: not implemented when linking with libmach\n");
 	return (void *)-1;
