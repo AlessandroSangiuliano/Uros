@@ -142,9 +142,10 @@ BOOT_FILES="$BOOTDIR/mach_kernel
 # bundle has started it.  This is the half of the disk the kernel reads.
 DISK_SERVERS="cow_test"
 
-# What lives at the root, read by exec_server when a program asks for it by
-# path (#421).  hello_exec has nothing under it but the initial stack, and the
-# two hellos are a static and a dynamic C program.
+# What lives at the root of the first AHCI disk, which is what ext_server mounts
+# at /, read by exec_server when a program asks for it by path (#421).  hello_exec
+# has nothing under it but the initial stack, and the two hellos are a static
+# and a dynamic C program.
 ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world"
 
 # The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
@@ -228,13 +229,6 @@ echo "set default=$BOOT_ENTRY" > "$WORK/entry.cfg"
 	for s in $DISK_SERVERS; do
 		echo "write $SBIN/$s $s"
 	done
-	echo "cd /"
-	for s in $ROOT_PROGRAMS; do
-		echo "write $SBIN/$s $s"
-	done
-	echo "mkdir /lib"
-	echo "cd /lib"
-	echo "write $MUSL_LDSO $MUSL_LDSO_NAME"
 } | debugfs -w -f /dev/stdin "$PART_IMG" >/dev/null 2>&1
 
 # ── Where GRUB looks for grub.cfg, and why there is nothing else here ──
@@ -379,6 +373,14 @@ for AHCI_DISK in $AHCI_DISKS; do
 			for f in $BENCH_FILES; do
 				echo "write $WORK/$f $f"
 			done
+			# This disk is what ext_server mounts at /.
+			for s in $ROOT_PROGRAMS; do
+				echo "write $SBIN/$s $s"
+			done
+			echo "mkdir /lib"
+			echo "cd /lib"
+			echo "write $MUSL_LDSO $MUSL_LDSO_NAME"
+			echo "cd /"
 		fi
 		echo "mkdir /mach_servers"
 		echo "cd /mach_servers"

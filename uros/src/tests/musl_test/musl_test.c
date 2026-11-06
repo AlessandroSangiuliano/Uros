@@ -660,6 +660,23 @@ arm_file_map(void)
  * waitpid reads back is the whole of what the parent can see here: what each
  * of them printed on its way is the harness's to read.
  */
+/*
+ * No disk is a boot this arm has nothing to say about.  A disk with the file
+ * the other arms read and without this program is an image built wrong, and it
+ * said NOT ASKED about that too, in a boot that looked clean.
+ */
+static int
+program_is_there(int arm, const char *path)
+{
+	if (access_by_stat(path) == 0)
+		return 1;
+	if (access_by_stat(F_PATH) == 0)
+		verdict(arm, 0, "a disk is mounted, and %s is not on it", path);
+	else
+		not_asked(arm, "no disk mounted on this boot");
+	return 0;
+}
+
 static pid_t
 start_program(const char *path)
 {
@@ -684,10 +701,8 @@ arm_program(int arm, const char *path)
 	pid_t	pid, got;
 	int	status = 0;
 
-	if (access_by_stat(path) != 0) {
-		not_asked(arm, "the program is not on this boot's disk");
+	if (!program_is_there(arm, path))
 		return;
-	}
 	pid = start_program(path);
 	if (pid < 0) {
 		not_asked(arm, "fork refused: no process server on this boot");
@@ -704,10 +719,8 @@ arm_parked_program(int arm, const char *path)
 	pid_t	pid, got;
 	int	status = 0;
 
-	if (access_by_stat(path) != 0) {
-		not_asked(arm, "the program is not on this boot's disk");
+	if (!program_is_there(arm, path))
 		return;
-	}
 	pid = start_program(path);
 	if (pid < 0) {
 		not_asked(arm, "fork refused: no process server on this boot");
