@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #744
+Takes out: bootstrap's naming of cap_server's task to the kernel (13cf7889) -- the kernel then takes no task's key, cap_server's own included, and cap_server must say its registration was refused
+Run: --entry 14 1200 -smp 1
+Expect: cap: urmach_cap_register \(setup\) failed \(2401\)
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index 26d26d8e..5a700461 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -1283,7 +1283,7 @@ main(int argc, char **argv)
+ 		 * other, told before the task has a thread.  It used to take it
+ 		 * from whichever task installed a key first.
+ 		 */
+-		kr = urmach_cap_server_set(bootstrap_master_host_port, user_task);
++		kr = KERN_SUCCESS;
+ 		if (kr != KERN_SUCCESS) {
+ 		    BOOTSTRAP_IO_LOCK();
+ 		    printf("%s: urmach_cap_server_set failed (%d): no task may "

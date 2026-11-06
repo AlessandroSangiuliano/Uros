@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #744
+Takes out: service_checkin()'s rule that a slot's receive right is only its own server's (13cf7889) -- bootstrap hands an untaken slot to whoever asks, on any port, as before, and cap_test's [34] is given the environment slot it asks for
+Run: --entry 14 1200 -smp 1
+Expect: cap_test: \[34\] WRONG .*asked for on this task's bootstrap port: 0, on the service port: 
+
+diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
+index 197ba2c2..0f731593 100644
+--- a/uros/src/servers/bootstrap/service.c
++++ b/uros/src/servers/bootstrap/service.c
+@@ -575,8 +575,8 @@ do_service_checkin(mach_port_t request,
+ 
+     for (i = 0; i < services_count; i++)
+ 	if ((services[i].service == requested) && !services[i].taken) {
+-	    if (asker == NULL || i >= MACH_PORTS_SLOTS_USED ||
+-		slot_server[i] == NULL || strcmp(asker, slot_server[i]) != 0) {
++	    if (0 && (asker == NULL || i >= MACH_PORTS_SLOTS_USED ||
++		slot_server[i] == NULL || strcmp(asker, slot_server[i]) != 0)) {
+ 		BOOTSTRAP_IO_LOCK();
+ 		printf("%s: service_checkin: slot %u refused to %s (#744)\n",
+ 		       program_name, i,

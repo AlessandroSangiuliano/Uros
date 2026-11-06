@@ -1,0 +1,46 @@
+Kind: ablation
+Issue: #744
+Takes out: the name server's publication of "cap_server" (86ccc8d7) -- nobody holds the name, as before cap_server checked it in, and netname_test, which starts first, takes it in [10], says so and gives it back
+Run: --entry 14 1200 -smp 1
+Expect: netname_test: \[10\] WRONG .*checking it in 0, not NETNAME_NOT_YOURS\(1000\)
+
+diff --git a/uros/src/servers/name_server/netname.c b/uros/src/servers/name_server/netname.c
+index b99712fd..842abfdd 100644
+--- a/uros/src/servers/name_server/netname.c
++++ b/uros/src/servers/name_server/netname.c
+@@ -211,35 +211,6 @@ main(int argc, char **argv)
+ 		program, mach_error_string(kr));
+     }
+ 
+-    /*
+-     * 🔴 "cap_server" IS PUBLISHED HERE, BEFORE ANYONE ELSE CAN ASK (#744).
+-     *
+-     * The name was cap_server's to check in when it got round to it, and a
+-     * name nobody holds goes to whoever asks first: six tasks start before
+-     * cap_server in the x86-64 bundle.  Its port is the registered port in
+-     * CAP_SERVER_SLOT, which bootstrap made and gives only to cap_server, so
+-     * the name can say which port it is from the start -- and nothing reaches
+-     * this server before it serves, since what arrives before the slot is
+-     * taken is bootstrap's and what arrives after waits until the loop below.
+-     * Signed as this server's own names are, and like them refused to anyone
+-     * else; a request to the port waits in its queue until cap_server takes
+-     * the receive right.
+-     */
+-    if (MACH_PORT_VALID(urmach_cap_server_port)) {
+-	kr = mach_port_mod_refs(mach_task_self(), mach_task_self(),
+-				MACH_PORT_RIGHT_SEND, 1);
+-	if (kr == KERN_SUCCESS)
+-	    kr = mach_port_mod_refs(mach_task_self(), urmach_cap_server_port,
+-				    MACH_PORT_RIGHT_SEND, 1);
+-	if (kr == KERN_SUCCESS)
+-	    kr = do_netname_check_in(netname_port, (char *)"cap_server",
+-				     mach_task_self(), urmach_cap_server_port);
+-	if (kr != KERN_SUCCESS) {
+-	    panic("%s: netname_check_in(cap_server): %s\n",
+-		  program, mach_error_string(kr));
+-	}
+-    }
+-
+     /* Prepare our port set. */
+ 
+     kr = mach_port_allocate(mach_task_self(),
