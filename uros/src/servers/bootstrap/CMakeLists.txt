@@ -285,6 +285,13 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # in the log rather than separated by three programs that fault and kill
   # threads on purpose.
   #
+  # ⚠️ And with -w (#744), on both lines that start it, here and in the nodisk
+  # bundle below: bootstrap starts nothing after it until it has ended, so its
+  # arms [9] and [10] run before cap_server exists.  That is when they ask --
+  # whether the kernel takes a key, and whether "cap_server" can be checked in,
+  # from a task that starts first -- and without -w the answer would be a race
+  # with cap_server, and a test that passes or not by the order of a boot.
+  #
   # boot_ports_test follows it, on three lines -- none, -D, -H -D -- because
   # what it asks is what each line's flags give (#620).  Harmless by the same
   # rule: a few RPCs to bootstrap and one write to the console.
@@ -609,7 +616,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # machine ends a boot sooner than any host under TCG, so without it -t would
   # ask there even less.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -773,7 +780,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_NODISK_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap-nodisk.bundle)
   set(_NODISK_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-nodisk.conf)
   file(GENERATE OUTPUT ${_NODISK_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-H taskpanic_load taskpanic_load\n${_CHAR_LINE}")
+       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-H taskpanic_load taskpanic_load\n${_CHAR_LINE}")
   add_custom_command(
     OUTPUT ${_NODISK_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_NODISK_BUNDLE}

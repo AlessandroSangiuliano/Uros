@@ -47,6 +47,17 @@
  * nobody holds alone, NETNAME_NOT_YOURS the signature the name was checked in
  * with refusing a different one.  With the first taken out, [3] and [5] get the
  * second, and [6] and [7] get through.
+ *
+ * ── Before cap_server (#744) ──
+ *
+ * [9] and [10] are here, and not in cap_test, because of WHEN this runs:
+ * second in the bundle, with -w, so that bootstrap starts nothing after it
+ * until it has ended and cap_server does not exist yet.  That is the moment
+ * #744 was about -- six tasks start before cap_server, and the key and the
+ * name went to whichever asked first.  [9] sends the kernel a setup token,
+ * which must be refused before bootstrap has named any task; [10] checks
+ * "cap_server" in, which the name server must already hold, for the port in
+ * this task's CAP_SERVER_SLOT.
  */
 
 #include <mach.h>
@@ -54,7 +65,10 @@
 #include <mach/message.h>
 #include <mach/port.h>
 
+#include <mach/cap_types.h>	/* #744: [9]'s setup token */
+
 #include <stdio.h>
+#include <string.h>
 
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
@@ -122,7 +136,7 @@ main(int argc, char **argv)
 		printf("netname_test: WRONG — no name server port in this "
 		       "task's registered ports, so it cannot be contacted "
 		       "from here at all\n");
-		printf("netname_test: 0 of 8 arms passed\n");
+		printf("netname_test: 0 of 10 arms passed\n");
 		return 1;
 	}
 
@@ -133,7 +147,7 @@ main(int argc, char **argv)
 	if (kr != KERN_SUCCESS) {
 		printf("netname_test: WRONG — no port or no signature: %d\n",
 		       kr);
-		printf("netname_test: 0 of 8 arms passed\n");
+		printf("netname_test: 0 of 10 arms passed\n");
 		return 1;
 	}
 
@@ -343,6 +357,63 @@ main(int argc, char **argv)
 		printf("netname_test: [8] WRONG — \"%s\" checked out under its "
 		       "own signature: %d, not NETNAME_SUCCESS, and a look-up "
 		       "hands back 0x%x (#744)\n", TEST_NAME, kr, got);
+
+	/*
+	 * [9] The kernel takes the capability key from no task bootstrap did
+	 * not name: it took it from whichever task sent a setup token first.
+	 * The token's key is 0xCC throughout, so a kernel that took it would
+	 * refuse every real token after.
+	 */
+	arms++;
+	{
+		struct uros_cap	setup;
+
+		memset(&setup, 0, sizeof(setup));
+		setup.cap_id = 0;
+		memset(setup.hmac, 0xCC, sizeof(setup.hmac));
+		kr = urmach_cap_register(&setup);
+	}
+	if (kr == CAP_ERR_UNAUTHORIZED) {
+		printf("netname_test: [9] a setup token from this task, which "
+		       "starts before cap_server, refused with "
+		       "CAP_ERR_UNAUTHORIZED (#744)\n");
+		passed++;
+	} else
+		printf("netname_test: [9] WRONG — a setup token from this task, "
+		       "which starts before cap_server: %d, not "
+		       "CAP_ERR_UNAUTHORIZED(%d) — the kernel took its key from "
+		       "the first task to ask (#744)\n", kr, CAP_ERR_UNAUTHORIZED);
+
+	/*
+	 * [10] "cap_server" is held before cap_server starts, for the port this
+	 * task inherited in CAP_SERVER_SLOT, and refused to this task.  A name
+	 * that did change hands is given back, so cap_server is not left
+	 * without it on this arm's account.
+	 */
+	arms++;
+	kr = netname_check_in(name_server_port, "cap_server", sig, mine);
+	got = MACH_PORT_NULL;
+	kept = netname_look_up(name_server_port, "", "cap_server", &got)
+	       == NETNAME_SUCCESS;
+	if (kr == NETNAME_NOT_YOURS && kept
+	    && MACH_PORT_VALID(urmach_cap_server_port)
+	    && got == urmach_cap_server_port) {
+		printf("netname_test: [10] \"cap_server\", before cap_server "
+		       "starts, answers with this task's CAP_SERVER_SLOT port "
+		       "0x%x, and checking it in is refused with "
+		       "NETNAME_NOT_YOURS (#744)\n", got);
+		passed++;
+	} else {
+		printf("netname_test: [10] WRONG — \"cap_server\", before "
+		       "cap_server starts: checking it in %d, not "
+		       "NETNAME_NOT_YOURS(%d); it answers with 0x%x where "
+		       "CAP_SERVER_SLOT's port is 0x%x (#744)\n", kr,
+		       NETNAME_NOT_YOURS, kept ? got : MACH_PORT_NULL,
+		       urmach_cap_server_port);
+		if (kr == NETNAME_SUCCESS)
+			(void)netname_check_out(name_server_port, "cap_server",
+						sig);
+	}
 
 	printf("netname_test: %d of %d arms passed\n", passed, arms);
 	return (passed == arms) ? 0 : 1;
