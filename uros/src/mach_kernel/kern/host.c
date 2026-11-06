@@ -141,6 +141,7 @@
 #include <mach/port.h>
 #include <kern/processor.h>
 #include <kern/sched_prim.h>		/* #446: sched_rpc_handoff_counts */
+#include <ipc/ipc_mqueue.h>		/* ipc_dts_smp */
 #include <mach/processor_info.h>
 #include <mach/vm_param.h>
 
@@ -399,6 +400,11 @@ host_info(
 		    (unsigned int) undone[URMACH_HANDOFF_UNDO_LEFT];
 		handoff_info->undone_tick =
 		    (unsigned int) undone[URMACH_HANDOFF_UNDO_TICK];
+#if	NCPUS > 1
+		handoff_info->direct_switch = (unsigned int) ipc_dts_smp;
+#else	/* NCPUS > 1 */
+		handoff_info->direct_switch = 1;	/* with one, always */
+#endif	/* NCPUS > 1 */
 		*count = HOST_RPC_HANDOFF_INFO_COUNT;
 		return(KERN_SUCCESS);
 		}
