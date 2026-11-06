@@ -91,6 +91,10 @@ mutex_init(mutex_t *m, etap_event_t event)
 	hw_lock_init(&m->interlock);
 	m->locked  = MUTEX_FREE;
 	m->waiters = 0;
+#if	MUTEX_OWNER_TRACK
+	m->own_thr = 0;		/* _mutex_lock() reads it */
+	m->own_pc  = 0;
+#endif
 #if	MACH_LDEBUG
 	m->type   = MUTEX_TAG;
 	m->pc     = 0;
@@ -136,6 +140,24 @@ _mutex_lock(mutex_t *m)
 		MUTEX_TRACE(m, MTR_LOCK_FAST, 0);
 		return;
 	}
+
+#if	MUTEX_OWNER_TRACK
+	/*
+	 * 🔴 NOBODY WAKES A THREAD FROM ITS OWN MUTEX (#414).
+	 *
+	 * It would sleep for ever and take what depends on the lock with it,
+	 * with nothing said: task_wait_locked()'s reference did that to a task
+	 * and then to the thread asking about the task, and all that showed in
+	 * a boot was that a test stopped.  The census cannot see such a stop
+	 * while any task polls.  Asked here, where a thread is about to sleep
+	 * and a load costs nothing.  own_thr names this thread only if this
+	 * thread wrote it, and a release clears it before it frees the word.
+	 */
+	if (m->own_thr != 0 && m->own_thr == (vm_offset_t) current_thread())
+		panic("mutex_lock: thread %p asks for mutex %p, which it took "
+		      "at %p and holds (#414)", (void *) m->own_thr, (void *) m,
+		      (void *) m->own_pc);
+#endif	/* MUTEX_OWNER_TRACK */
 
 	for (;;) {
 		/*
