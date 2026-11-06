@@ -98,9 +98,25 @@ catch_exception_raise(mach_port_t exception_port,
     unsigned long subcode = codeCnt >= 2 ? (unsigned long)code[1] : 0;
     int           sub0    = codeCnt >= 1 ? (int)code[0] : 0;
 
+#if defined(__x86_64__)
+    /* The address in the codes is cut to 32 bits (#837), and the instruction
+     * is what anybody reading this line needs next. */
+    struct x86_64_thread_state regs = {0};
+    mach_msg_type_number_t regs_count = x86_64_THREAD_STATE_COUNT;
+
+    (void)thread_get_state(thread, x86_64_THREAD_STATE,
+                           (thread_state_t)&regs, &regs_count);
+    printf("(libposix-uros): hw exception %d (%s) thread=0x%x "
+           "code=%d subcode=0x%lx rip=0x%lx rsp=0x%lx fs_base=0x%lx "
+           "— task terminating\n",
+           (int)exception, name, (unsigned)thread, sub0, subcode,
+           (unsigned long)regs.rip, (unsigned long)regs.rsp,
+           (unsigned long)regs.fs_base);
+#else
     printf("(libposix-uros): hw exception %d (%s) thread=0x%x "
            "code=%d subcode=0x%lx — task terminating\n",
            (int)exception, name, (unsigned)thread, sub0, subcode);
+#endif
 
     /* So that waitpid says what ended this task (#496). */
     __uros_record_exit_code(128 + signo);
