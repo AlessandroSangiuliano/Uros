@@ -469,8 +469,8 @@ arm_console(void)
  * look wrong.  So three ways of asking for the size must give one answer, and
  * the bytes at an offset must be the bytes that offset holds.
  */
-#define F_PATH		"/mnt/disk2/from_x86_64.dat"
-#define F_MOUNT_WAIT	(30 * 100)	/* 30 s of 10 ms steps */
+#define F_PATH		"/mach_servers/cow_test"	/* on the root disk, and nobody writes it */
+#define F_MOUNT_WAIT	(15 * 100)			/* 15 s of 10 ms steps */
 
 static void
 arm_file(void)
@@ -480,9 +480,8 @@ arm_file(void)
 	off_t		end, middle;
 	int		fd, i;
 
-	/* xfile_test writes this file, and it may be doing so now. */
 	for (i = 0; i < F_MOUNT_WAIT; i++) {
-		if (stat(F_PATH, &by_name) == 0 && by_name.st_size > 0)
+		if (stat(F_PATH, &by_name) == 0)
 			break;
 		pause_a_little();
 	}
@@ -601,6 +600,45 @@ arm_fork(void)
 		(int)pid, (unsigned)status, fork_word);
 }
 
+/*
+ * ── [13] A file mapped at an offset ─────────────────────────────────────
+ *
+ * This is where mmap and mmap2 differ: the same offset in bytes here and in
+ * pages there.  So the page at one page into the file, read and mapped, must
+ * be one page of bytes.
+ */
+static void
+arm_file_map(void)
+{
+	unsigned char	by_read[PAGE];
+	unsigned char	*mapped;
+	int		fd, same;
+
+	fd = open(F_PATH, O_RDONLY);
+	if (fd < 0) {
+		not_asked(13, "no file on a mounted disk on this boot");
+		return;
+	}
+	if (lseek(fd, PAGE, SEEK_SET) != PAGE
+	    || read(fd, by_read, PAGE) != (ssize_t)PAGE) {
+		verdict(13, 0, "reading the second page failed, errno %d",
+			errno);
+		(void)close(fd);
+		return;
+	}
+	mapped = mmap(NULL, PAGE, PROT_READ, MAP_PRIVATE, fd, PAGE);
+	if (mapped == MAP_FAILED) {
+		verdict(13, 0, "mmap of the file failed, errno %d", errno);
+		(void)close(fd);
+		return;
+	}
+	same = memcmp(mapped, by_read, PAGE) == 0;
+	(void)munmap(mapped, PAGE);
+	(void)close(fd);
+	verdict(13, same, "the second page of a file, mapped and read, was "
+		"%s", same ? "the same" : "not the same");
+}
+
 int
 main(void)
 {
@@ -619,6 +657,7 @@ main(void)
 	arm_sleep();
 	arm_jump();
 	arm_fork();
+	arm_file_map();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
