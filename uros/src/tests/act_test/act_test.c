@@ -8066,20 +8066,18 @@ arm_forty_nine_subsystem_released_once(void)
 }
 
 /*
- * Arm fifty-one (#868): a right given up is gone, whatever the port cache of the
- * hot path remembers.
+ * Arm fifty-one (#868): a right given up is gone.
  *
  * One thread, and a fast RPC: a combined send and receive with COPY_SEND and
- * MAKE_SEND_ONCE, the shape that fills the per-thread cache and hits it.  Nobody
- * serves the destination, so the answer is put on the reply port first, by this
- * thread.  After a few of those the right is given up, by each route that did
- * not move is_generation, and the RPC is asked again.  It must be refused.
+ * MAKE_SEND_ONCE, the shape of mach_msg's hot path.  Nobody serves the
+ * destination, so the answer is put on the reply port first, by this thread.
+ * After a few of those the right is given up, by each route that does not move
+ * is_generation, and the RPC is asked again.  It must be refused.
  *
- * The reply's route comes last, because on a development kernel with the check
- * taken out it stops the machine in an assert, and the others say WRONG and go
- * on.  The one in the middle needs a second thread: a right deallocated while
- * the cache is being filled, in the window ablations/868-widen-fill.patch holds
- * open, must not go in under the generation that counts its removal.
+ * The one in the middle needs a second thread: a right deallocated between the
+ * lock-free resolve's reading the name and its locking the port, in the window
+ * ablations/868-widen-resolve.patch holds open, is what the resolve asks about
+ * again with the ports locked.
  */
 #define	A51_ID		5151	/* the message the widen waits for */
 #define	A51_ROUNDS	6
@@ -8167,7 +8165,7 @@ a51_move(mach_port_t to, mach_port_t what, mach_msg_type_name_t how)
 			MACH_PORT_NULL, 0, MACH_PORT_NULL);
 }
 
-/* The cache filled, and hit once. */
+/* Both rights work: two RPCs before one of them is given up. */
 static int
 a51_warm(mach_port_t dest, mach_port_t reply)
 {
@@ -8220,9 +8218,9 @@ a51_dealloc_thread(void *arg)
 	return NULL;
 }
 
-/* The route that is not a matter of order: deallocated during the fill. */
+/* The route that is not a matter of order: deallocated during the resolve. */
 static int
-a51_during_the_fill(mach_port_t reply)
+a51_during_the_resolve(mach_port_t reply)
 {
 	pthread_t		other;
 	mach_msg_return_t	mr;
@@ -8250,8 +8248,8 @@ a51_during_the_fill(mach_port_t reply)
 		a51_drain(reply);
 		if (mr != MACH_SEND_INVALID_DEST) {
 			printf("act_test: [51] round %u: a right deallocated "
-			       "during the fill went on working, 0x%x — WRONG "
-			       "(#868)\n", round, (int) mr);
+			       "during the resolve went on working, 0x%x — "
+			       "WRONG (#868)\n", round, (int) mr);
 			ok = 0;
 		}
 		(void) mach_port_destroy(mach_task_self(), dest);
@@ -8352,12 +8350,12 @@ arm_fifty_one_rights_that_left(void)
 	}
 
 	ok = a51_dead_name(reply) && ok;
-	ok = a51_during_the_fill(reply) && ok;
+	ok = a51_during_the_resolve(reply) && ok;
 
 	/*
 	 * MOVE_RECEIVE on a send+receive entry leaves a send right.  What is
 	 * asked of here is the reply, so the name to answer is the one that is
-	 * left: on a kernel that took the hit it finds that message.
+	 * left: a kernel that believed the old mapping would find that message.
 	 */
 	r = arm_own_port(51);
 	(void) mach_port_insert_right(task, d, d, MACH_MSG_TYPE_MAKE_SEND);
