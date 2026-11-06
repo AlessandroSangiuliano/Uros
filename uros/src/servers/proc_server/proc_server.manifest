@@ -1,0 +1,16 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# proc_server manifest -- the policy for the task that serves /proc (#716).
+#
+# It had none: it asked cap_server for nothing.  It needs one since the name
+# server checks a mount in only for a task that shows a capability for its
+# prefix, and a capability is issued on the per-task port bootstrap gives a
+# task that ships a manifest.  Shipped beside the binary in i386's bundle
+# (scripts/make-bundle.sh); x86-64 does not run proc_server yet.
+
+name proc_server
+
+# RESOURCE_MOUNT_POINT (3), "/proc" alone, REGISTER (0x1): PROC_MOUNT_PATH,
+# the one mount this server checks in.
+required 3 name:/proc 0x1

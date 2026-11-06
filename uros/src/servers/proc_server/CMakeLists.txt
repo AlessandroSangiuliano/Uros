@@ -179,3 +179,20 @@ set_target_properties(proc_server_bin PROPERTIES
   OUTPUT_NAME "proc_server"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# #716: the policy that lets this server check /proc in -- the name server
+# asks a mount for a capability on its prefix.
+set(PROC_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/proc_server.cmf")
+add_custom_command(
+  OUTPUT ${PROC_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${PROC_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/proc_server.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/proc_server.manifest
+  COMMENT "mkmanifest: proc_server.manifest -> proc_server.cmf"
+  VERBATIM
+)
+add_custom_target(proc_server_manifest ALL DEPENDS ${PROC_MANIFEST_OUT})
+add_dependencies(proc_server_bin proc_server_manifest)

@@ -32,3 +32,19 @@ required 4 any 0x3
 # mount says so, and the cache copies instead.  `any', because the buffer is
 # created at mount time; cap_server asks the kernel whose it is.
 required 10 any 0x3
+
+# RESOURCE_MOUNT_POINT (3), the four prefixes this server mounts, REGISTER
+# (0x1) (#716).
+#
+# The name server checks a mount in only for a task that shows a capability
+# for its prefix -- before, any task could register "/etc" and answer every
+# open under it.  Named one by one and NOT `any', unlike the device above:
+# which partition holds the root is the boot's to say, but where each one is
+# mounted is written in ext_server.c, part_table[], and nowhere else.  A fifth
+# row there needs a fifth line here, and without it the mount is refused with
+# the reason printed -- a prefix this server could register without anyone
+# writing it down would be the same hole with a narrower door.
+required 3 name:/ 0x1
+required 3 name:/mnt/disk1 0x1
+required 3 name:/mnt/disk2 0x1
+required 3 name:/mnt/disk3 0x1

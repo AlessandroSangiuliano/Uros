@@ -102,6 +102,9 @@ GPU_SERVER_CMF="$MANIFESTS/gpu_server.cmf"
 CHAR_SERVER_CMF="$MANIFESTS/char_server.cmf"
 # #744: and the benchmark, whose raw disk suite needs a block-device capability.
 IPC_BENCH_CMF="$MANIFESTS/ipc_bench.cmf"
+# #716: and the /proc server -- the name server checks a mount in only for a
+# task that shows a capability for its prefix.
+PROC_SERVER_CMF="$MANIFESTS/proc_server.cmf"
 # #511: and the scanner, which holds the BUS rather than a device -- the only
 # task in the tree that reads configuration space it has not claimed.
 HAL_SERVER_CMF="$MANIFESTS/hal_server.cmf"
@@ -338,6 +341,7 @@ ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$EXEC_SERVER" ] && ARGS+=("exec_server:$EXEC_SERVER")
 [ -f "$PROC_SERVER" ] && ARGS+=("proc_server:$PROC_SERVER")
+[ -f "$PROC_SERVER_CMF" ] && ARGS+=("proc_server.cmf:$PROC_SERVER_CMF")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
 [ -f "$IRQ_CLAIM_TEST" ] && ARGS+=("irq_claim_test:$IRQ_CLAIM_TEST")
 [ -f "$HAL_BAR_TEST" ] && ARGS+=("hal_bar_test:$HAL_BAR_TEST")

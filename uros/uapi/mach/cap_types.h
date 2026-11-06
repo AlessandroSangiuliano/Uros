@@ -144,6 +144,16 @@ typedef enum {
 /* RESOURCE_REVOKE_NOTICES (#744) */
 #define CAP_OP_REVOKE_SUBSCRIBE  0x0000000000000001ULL  /* be told of them */
 
+/*
+ * RESOURCE_MOUNT_POINT (#716).  The resource is a path PREFIX in the name
+ * server's mount registry, and its id is cap_name_hash() of the prefix
+ * exactly as it is checked in -- "/", "/mnt/disk2", "/proc".  The name server
+ * asks for it in netname_check_in_mount(), and nowhere else: the capability
+ * decides who may put a mount under a prefix, the signature the mount was
+ * checked in with decides who may take it out.
+ */
+#define CAP_OP_MOUNT_REGISTER    0x0000000000000001ULL  /* check a mount in */
+
 /* RESOURCE_FILE (reserved for v2) */
 #define CAP_OP_FILE_READ     0x0000000000000001ULL
 #define CAP_OP_FILE_WRITE    0x0000000000000002ULL
