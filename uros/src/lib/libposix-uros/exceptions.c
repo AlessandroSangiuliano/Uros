@@ -44,6 +44,7 @@
  * the middle of a SIG_DFL terminate path.  Not currently used here but
  * kept handy. */
 extern unsigned int __uros_my_pid;
+extern void __uros_record_exit_code(int status);
 
 mach_port_t  __uros_exc_port = MACH_PORT_NULL;
 
@@ -101,7 +102,8 @@ catch_exception_raise(mach_port_t exception_port,
            "code=%d subcode=0x%lx — task terminating\n",
            (int)exception, name, (unsigned)thread, sub0, subcode);
 
-    (void)signo;     /* reserved for Phase 4c user handler dispatch */
+    /* So that waitpid says what ended this task (#496). */
+    __uros_record_exit_code(128 + signo);
     (void)task_terminate(task);
     return KERN_SUCCESS;
 }

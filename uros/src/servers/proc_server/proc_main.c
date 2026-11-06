@@ -1958,7 +1958,16 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
         /* exit_code was set by proc_S_set_exit_code (#255 / Phase 5b)
          * just before the dying task issued task_terminate; leave it
          * alone here — overwriting with 0 throws away the value
-         * waitpid is about to read. */
+         * waitpid is about to read.
+         *
+         * A task that went without saying how did not exit.  It was
+         * ended from outside, by a fault with nothing to catch it or by
+         * a task_terminate of somebody's, and left at the 0 it was born
+         * with that read "exited normally" (#496, the class of #580). */
+        if (!e->exit_declared) {
+            e->exit_code = 128 + PROC_SIGKILL;
+            e->exit_declared = 1;
+        }
         subscriber    = e->exit_notify;
         e->exit_notify = MACH_PORT_NULL;
         pid           = e->pid;
