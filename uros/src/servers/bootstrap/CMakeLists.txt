@@ -550,8 +550,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # interleaving mistaken for an order (run-x86_64.sh records that one).
     set(_CHAR_CMF
       "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/char_test.cmf")
+    # #744: char_server's own policy, which grants it revocation notices.
+    set(_CHAR_SERVER_CMF
+      "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/char_server.cmf")
     set(_CHAR_LINE  "-D char_server char_server\n-D char_test char_test\n")
     set(_CHAR_FILES "char_server:${_SBIN}/char_server"
+                    "char_server.cmf:${_CHAR_SERVER_CMF}"
                     "modules/char/uart.so:${_MOD}/char/uart.so"
                     "char_test:${_SBIN}/char_test"
                     "char_test.cmf:${_CHAR_CMF}")
@@ -560,7 +564,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # record: a target dependency orders the build and never notices that the
     # output changed, so a stale .cmf ships while the export tree holds the
     # new one.
-    set(_CHAR_DEP   char_server char_uart_module char_test_bin ${_CHAR_CMF})
+    set(_CHAR_DEP   char_server char_uart_module char_test_bin ${_CHAR_CMF}
+                    ${_CHAR_SERVER_CMF})
   else()
     set(_CHAR_CMF   "")
     set(_CHAR_LINE  "")

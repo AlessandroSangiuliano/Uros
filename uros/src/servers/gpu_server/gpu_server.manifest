@@ -20,3 +20,9 @@ name gpu_server
 # the full 0x7 out of symmetry with block_device_server would be granting
 # authority nobody asked for, which is the habit this file exists to break.
 required 5 0x030000 0x2
+
+# RESOURCE_REVOKE_NOTICES (11), any, CAP_OP_REVOKE_SUBSCRIBE (0x1) -- #744.
+#
+# gpu_server subscribes at startup and drops the state of a revoked
+# capability when told.  Subscribing was anyone's; it is a permission now.
+required 11 any 0x1

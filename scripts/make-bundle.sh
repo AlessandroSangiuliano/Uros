@@ -96,6 +96,10 @@ EXT_SERVER_CMF="$MANIFESTS/ext_server.cmf"
 # #511: and the display server, which claims a display-class device so the
 # kernel will map the legacy VGA text window at 0xB8000 for it.
 GPU_SERVER_CMF="$MANIFESTS/gpu_server.cmf"
+# #744: and the keyboard and serial server, whose subscription to revocation
+# notices is a permission now -- with no policy file it has no per-task port
+# to ask on, and a revoked token would go on receiving keys.
+CHAR_SERVER_CMF="$MANIFESTS/char_server.cmf"
 # #511: and the scanner, which holds the BUS rather than a device -- the only
 # task in the tree that reads configuration space it has not claimed.
 HAL_SERVER_CMF="$MANIFESTS/hal_server.cmf"
@@ -349,6 +353,7 @@ if [ -f "$GPU_SERVER" ]; then
 fi
 if [ -f "$CHAR_SERVER" ]; then
     ARGS+=("char_server:$CHAR_SERVER")
+    [ -f "$CHAR_SERVER_CMF" ]       && ARGS+=("char_server.cmf:$CHAR_SERVER_CMF")
     [ -f "$CHAR_PS2_MODULE" ]       && ARGS+=("modules/char/ps2.so:$CHAR_PS2_MODULE")
     [ -f "$CHAR_UART_MODULE" ]      && ARGS+=("modules/char/uart.so:$CHAR_UART_MODULE")
     [ -f "$CHAR_PS2_MOUSE_MODULE" ] && ARGS+=("modules/char/ps2_mouse.so:$CHAR_PS2_MOUSE_MODULE")

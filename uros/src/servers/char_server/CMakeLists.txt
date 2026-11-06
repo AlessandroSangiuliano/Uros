@@ -271,6 +271,23 @@ add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke
 		 char_ps2_module char_uart_module char_ps2_mouse_module
 		 char_console_module)
 
+# #744: the policy that lets this server subscribe to revocation notices,
+# which it needs for a revoked token to stop receiving keys.  As gpu_server's.
+set(CHAR_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/char_server.cmf")
+add_custom_command(
+  OUTPUT ${CHAR_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${CHAR_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/char_server.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/char_server.manifest
+  COMMENT "mkmanifest: char_server.manifest -> char_server.cmf"
+  VERBATIM
+)
+add_custom_target(char_server_manifest ALL DEPENDS ${CHAR_MANIFEST_OUT})
+add_dependencies(char_server char_server_manifest)
+
 target_compile_options(char_server PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(char_server PRIVATE MACH_IPC_COMPAT=0)
 target_include_directories(char_server PRIVATE ${CHAR_INCLUDE_DIRS})
