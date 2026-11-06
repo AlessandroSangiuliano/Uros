@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #867
+Takes out: the first pass's look at a body's disposition -- the sender's byte goes to ipc_object_copyin_type(), which panics on one it does not know, and one message from any task stops the kernel
+Run: --entry 14 600 -smp 4
+Expect: ipc_object_copyin_type: strange rights
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+index 74523a9c..3b4eaaae 100644
+--- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
++++ b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+@@ -1864,10 +1864,6 @@ ipc_kmsg_copyin_body(
+ 		    sstart->type.type == MACH_MSG_PORT_DESCRIPTOR ?
+ 		    sstart->port.disposition : sstart->ool_ports.disposition;
+ 
+-		if (disposition != 0 && !MACH_MSG_TYPE_PORT_ANY(disposition)) {
+-		    ipc_kmsg_clean_partial(kmsg,0,0,0);
+-		    return MACH_SEND_INVALID_TYPE;
+-		}
+ 	}
+ 
+ 	if (sstart->type.type == MACH_MSG_OOL_DESCRIPTOR ||

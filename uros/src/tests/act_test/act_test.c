@@ -6522,6 +6522,185 @@ arm_forty_nothing_after_the_hand_off(void)
 	return ok;
 }
 
+/*
+ * Arm forty-one (#867): a disposition in a message's body is the sender's own
+ * byte.  ipc_object_copyin_type() panics on one it does not know, as it should
+ * for the kernel's own messages, so the first pass over the body has to refuse
+ * it before anything is taken.  Every value around the six known ones, in a
+ * port descriptor, with a name and without, and in an out-of-line port array,
+ * with names and empty.  With the check out the first of these stops the
+ * kernel.  And disposition 0, which is legal with no right behind it and
+ * refused with one.
+ */
+static const unsigned char a41_bad[] = { 1, 15, 22, 23, 127, 128, 255 };
+
+struct a41_msg {
+	mach_msg_header_t		h;
+	mach_msg_body_t			b;
+	mach_msg_port_descriptor_t	first;
+	mach_msg_port_descriptor_t	port;
+	mach_msg_ool_ports_descriptor_t	ports;
+};
+
+static void
+a41_start(struct a41_msg *m, mach_port_t dest, unsigned descriptors)
+{
+	unsigned	i;
+
+	for (i = 0; i < sizeof *m; i++)
+		((unsigned char *) m)[i] = 0;
+	m->h.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			 | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m->h.msgh_size = sizeof m->h + sizeof m->b;
+	m->h.msgh_remote_port = dest;
+	m->h.msgh_local_port = MACH_PORT_NULL;
+	m->h.msgh_id = 41;
+	m->b.msgh_descriptor_count = descriptors;
+}
+
+static mach_msg_return_t
+a41_send(struct a41_msg *m)
+{
+	return mach_msg(&m->h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, m->h.msgh_size,
+			0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/* A port descriptor as the message's only one. */
+static mach_msg_return_t
+a41_port(mach_port_t dest, mach_port_t name, unsigned disposition)
+{
+	struct a41_msg	m;
+
+	a41_start(&m, dest, 1);
+	m.first.name = name;
+	m.first.disposition = disposition;
+	m.first.type = MACH_MSG_PORT_DESCRIPTOR;
+	m.h.msgh_size += sizeof m.first;
+	return a41_send(&m);
+}
+
+/* An out-of-line port array as the message's only one, of count names. */
+static mach_msg_return_t
+a41_ports(mach_port_t dest, mach_port_t *names, unsigned count,
+	  unsigned disposition)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_ool_ports_descriptor_t	ports;
+	} m;
+	unsigned	i;
+
+	for (i = 0; i < sizeof m; i++)
+		((unsigned char *) &m)[i] = 0;
+	m.h.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			| MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.h.msgh_size = sizeof m;
+	m.h.msgh_remote_port = dest;
+	m.h.msgh_id = 41;
+	m.b.msgh_descriptor_count = 1;
+	m.ports.address = names;
+	m.ports.count = count;
+	m.ports.copy = MACH_MSG_PHYSICAL_COPY;
+	m.ports.disposition = disposition;
+	m.ports.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;
+	return mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+static int
+arm_forty_one_body_disposition(void)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[256];
+	} r;
+	struct a41_msg		m;
+	mach_port_t		dest, p, one[1];
+	mach_port_urefs_t	refs = 0;
+	mach_msg_return_t	mr;
+	unsigned		i, refused = 0, cases = 0;
+	int			ok = 1;
+
+	dest = arm_own_port(41);
+	p = arm_own_port(41);
+	if (dest == MACH_PORT_NULL || p == MACH_PORT_NULL) {
+		printf("act_test: [41] the ports could not be made — WRONG\n");
+		return 0;
+	}
+	one[0] = p;
+	for (i = 0; i < sizeof a41_bad; i++) {
+		unsigned	d = a41_bad[i];
+		mach_msg_return_t a[4];
+		unsigned	j;
+
+		a[0] = a41_port(dest, p, d);
+		a[1] = a41_port(dest, MACH_PORT_NULL, d);
+		a[2] = a41_ports(dest, one, 1, d);
+		a[3] = a41_ports(dest, one, 0, d);
+		for (j = 0; j < 4; j++) {
+			cases++;
+			if (a[j] == MACH_SEND_INVALID_TYPE)
+				refused++;
+			else {
+				printf("act_test: [41] disposition %u, case %u, "
+				       "answered 0x%x — WRONG\n", d, j,
+				       (int) a[j]);
+				ok = 0;
+			}
+		}
+	}
+
+	/* A right named before the bad one is still there afterwards. */
+	a41_start(&m, dest, 2);
+	m.first.name = p;
+	m.first.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	m.first.type = MACH_MSG_PORT_DESCRIPTOR;
+	m.port.name = p;
+	m.port.disposition = 23;
+	m.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	m.h.msgh_size += sizeof m.first + sizeof m.port;
+	mr = a41_send(&m);
+	(void) mach_port_get_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND,
+				  &refs);
+	if (mr != MACH_SEND_INVALID_TYPE || refs != 1) {
+		printf("act_test: [41] a message with a good right before a bad "
+		       "one answered 0x%x, and left %u send right(s), not 1 — "
+		       "WRONG\n", (int) mr, (unsigned) refs);
+		ok = 0;
+	}
+
+	/* Disposition 0: refused with a right behind it, legal without. */
+	mr = a41_port(dest, p, 0);
+	if (mr != MACH_SEND_INVALID_RIGHT) {
+		printf("act_test: [41] disposition 0 with a name answered 0x%x — "
+		       "WRONG\n", (int) mr);
+		ok = 0;
+	}
+	mr = a41_ports(dest, one, 1, 0);
+	if (mr != MACH_SEND_INVALID_RIGHT) {
+		printf("act_test: [41] disposition 0 in an array with a name "
+		       "answered 0x%x — WRONG\n", (int) mr);
+		ok = 0;
+	}
+	mr = a41_port(dest, MACH_PORT_NULL, 0);
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [41] disposition 0 with no name answered 0x%x "
+		       "— WRONG\n", (int) mr);
+		ok = 0;
+	}
+	(void) mach_msg(&r.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof r, dest,
+			0, MACH_PORT_NULL);
+
+	(void) mach_port_destroy(mach_task_self(), p);
+	(void) mach_port_destroy(mach_task_self(), dest);
+	if (ok)
+		printf("act_test: [41] %u of %u bad dispositions refused, a right "
+		       "named before one left where it was, and disposition 0 "
+		       "as it should be — OK\n", refused, cases);
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6646,6 +6825,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_nine_lost_bet_undone();
 	arms++;		/* arm forty, #777 */
 	passed += arm_forty_nothing_after_the_hand_off();
+	arms++;		/* arm forty-one, #867 */
+	passed += arm_forty_one_body_disposition();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

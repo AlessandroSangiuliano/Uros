@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #867
+Takes out: ipc_right_copyin()'s answer to disposition 0 with a name behind it -- the panic it had, which any task reaches with one message
+Run: --entry 14 600 -smp 4
+Expect: ipc_right_copyin: strange rights
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
+index 89889716..9829fc2d 100644
+--- a/uros/src/mach_kernel/ipc/ipc_right.c
++++ b/uros/src/mach_kernel/ipc/ipc_right.c
+@@ -1620,7 +1620,7 @@ ipc_right_copyin(
+ 		 * array's names are still in user memory when the body's
+ 		 * dispositions are checked, so this is where it shows.
+ 		 */
+-		return KERN_INVALID_RIGHT;
++		panic("ipc_right_copyin: strange rights");
+ 	}
+ 
+ 	return KERN_SUCCESS;
