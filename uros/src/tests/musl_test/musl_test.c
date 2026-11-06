@@ -862,7 +862,7 @@ arm_proc(void)
 static const char *const r_kind[R_THREADS] = {
 	"getsid", "getpgid", "kill", "stat"
 };
-static int	r_wrong[R_THREADS], r_done;
+static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done;
 
 static void *
 rpc_thread(void *arg)
@@ -889,6 +889,7 @@ rpc_thread(void *arg)
 		}
 		if (!ok)
 			__atomic_add_fetch(&r_wrong[kind], 1, __ATOMIC_SEQ_CST);
+		__atomic_store_n(&r_round[kind], i + 1, __ATOMIC_SEQ_CST);
 	}
 	__atomic_add_fetch(&r_done, 1, __ATOMIC_SEQ_CST);
 	return NULL;
@@ -922,11 +923,13 @@ arm_threads_in_servers(void)
 		pause_a_little();
 	verdict(22, __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) == R_THREADS
 		&& r_wrong[0] + r_wrong[1] + r_wrong[2] + r_wrong[3] == 0,
-		"%d of %d threads made %d calls each to two servers, and "
-		"answered wrongly: %s %d, %s %d, %s %d, %s %d",
+		"%d of %d threads made %d calls each to two servers: %s %d "
+		"made and %d wrong, %s %d and %d, %s %d and %d, %s %d and %d",
 		__atomic_load_n(&r_done, __ATOMIC_SEQ_CST), R_THREADS, R_ROUNDS,
-		r_kind[0], r_wrong[0], r_kind[1], r_wrong[1],
-		r_kind[2], r_wrong[2], r_kind[3], r_wrong[3]);
+		r_kind[0], r_round[0], r_wrong[0],
+		r_kind[1], r_round[1], r_wrong[1],
+		r_kind[2], r_round[2], r_wrong[2],
+		r_kind[3], r_round[3], r_wrong[3]);
 }
 
 /*
