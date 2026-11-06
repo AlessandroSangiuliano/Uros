@@ -194,7 +194,7 @@ ipc_entry_lookup(
  *		it is ALWAYS safe to dereference, but its CONTENTS may be stale.
  *		A caller that acts on entry->ie_object (e.g. locks the port) MUST
  *		revalidate: lock the resolved object, and read the entry again
- *		with it locked, as urmach_msg_cached_rights_hold() does (#868).
+ *		with it locked, as urmach_msg_rights_hold() does (#868).
  *		A read-only caller that only wants ie_bits gets a racy-but-whole
  *		value (the generation / ite_name check rejects a reused slot).
  *	Why it is safe without a lock:
