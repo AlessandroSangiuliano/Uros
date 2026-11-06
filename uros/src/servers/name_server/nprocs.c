@@ -341,12 +341,13 @@ notify_watchers_for(netname_name_in_t key, mach_port_t service_port)
 }
 
 /*
- * Whether `sig' can sign for `port' (#744).
+ * Whether `sig' can sign for `port' (#744), for a name and for a mount (#716).
  *
  * A name is its server's because nobody else can present the signature it was
  * checked in with, and this is the check of the half of that the name server
  * can see.  MACH_PORT_NULL is what every task can present: four servers passed
- * it, so their names were anyone's to check in again or out.  A dead name is
+ * it, so their names were anyone's to check in again or out, and ext_server
+ * and proc_server passed it for every mount, "/" among them.  A dead name is
  * the same for everyone too.  And the port being registered cannot sign for
  * itself, since everyone who looks the name up holds a send right to it.
  *
@@ -541,6 +542,14 @@ do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
 	printf("%s: netname_check_in_mount('%.80s', port=%x, sig=%x)\n",
 	       program, prefix, port, sig);
 
+    /*
+     * #716: a mount is its server's on the same terms as a name, and the
+     * signature is asked before the prefix is looked at, as do_netname_check_in
+     * asks it.  The rights in the request go back with the refusal.
+     */
+    if (!signature_can_sign(sig, port))
+	return NETNAME_INVALID_PORT;
+
     /* Validate: must be absolute. */
     if (prefix[0] != '/')
 	return NETNAME_NOT_YOURS;
@@ -574,6 +583,9 @@ do_netname_check_out_mount(mach_port_t server, netname_name_in_t prefix,
     if (Debug)
 	printf("%s: netname_check_out_mount('%.80s', sig=%x)\n",
 	       program, prefix, sig);
+
+    if (!signature_can_sign(sig, MACH_PORT_NULL))
+	return NETNAME_INVALID_PORT;		/* #716 */
 
     for (prev = &mounts, this = mounts;
 	 this != NULL;
