@@ -2006,9 +2006,9 @@ ipc_right_rename(
 	assert(oname != nname);
 
 	/*
-	 * #390: renaming moves the port from oname to nname; a hot-path
-	 * cache holding oname->port would keep resolving the old name.
-	 * Bump the generation to invalidate it (cold path, head bump like
+	 * #390: renaming moves the port from oname to nname, and a resolve
+	 * without the lock that read oname before the move must not go on
+	 * with it: the generation is its filter (cold path, head bump like
 	 * ipc_right_dealloc).
 	 */
 	space->is_generation++;		/* the lock-free resolve's filter */
