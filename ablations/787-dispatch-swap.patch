@@ -7,24 +7,23 @@ Run: --entry 62 300 -smp 1
 Expect: dispatch_test: WRONG .* L ran first
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
-index 63469ef3..4e87dec0 100644
 --- a/uros/src/mach_kernel/kern/sched_prim.c
 +++ b/uros/src/mach_kernel/kern/sched_prim.c
-@@ -3045,7 +3045,7 @@ thread_setrun(
- 		     * first, inverted them every time.  The NCPUS == 1 branch
+@@ -3235,7 +3235,7 @@
  		     * below, which no build compiles, always compared.
  		     */
--		    if (processor->next_thread->sched_pri > th->sched_pri) {
+ 		    cur_th = urmach_processor_dispatched_thread(processor);
+-		    if (cur_th->sched_pri > th->sched_pri) {
 +		    if (TRUE) {	/* 787-dispatch-swap: whatever the priorities */
- 			cur_th = processor->next_thread;
  			processor->next_thread = th;
  			th = cur_th;
-@@ -3121,7 +3121,7 @@ thread_setrun(
- 		     current_thread()->sched_pri > th->sched_pri)) {
+ 		    }
+@@ -3310,7 +3310,7 @@
  		    if (processor->state == PROCESSOR_DISPATCHING) {
  			/* #787: as in the unbound branch, only if better */
--			if (processor->next_thread->sched_pri > th->sched_pri) {
+ 			cur_th = urmach_processor_dispatched_thread(processor);
+-			if (cur_th->sched_pri > th->sched_pri) {
 +			if (TRUE) {	/* 787-dispatch-swap */
- 			    cur_th = processor->next_thread;
  			    processor->next_thread = th;
  			    th = cur_th;
+ 			}

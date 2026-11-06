@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #799
+Over: 799-widen-dispatch.patch
+Takes out: the order -- state is written first, as i386's compiler wrote it at two sites of three, with the 200 us of the widen before next_thread.  An idle processor that leaves its wait in that window, or an interrupt on it in thread_setrun(), finds DISPATCHING and nothing to run.
+Run: --entry 14 600 -smp 4
+Expect: is DISPATCHING with no next_thread
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 5a02d55e..add7a8ec 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -2982,10 +2982,10 @@ urmach_processor_dispatch(
+ 	processor_t	processor,
+ 	thread_t	th)
+ {
+-	processor->next_thread = th;
++	processor->state = PROCESSOR_DISPATCHING;
+ 	urmach_rcu_barrier();
+ 	delay(200);
+-	processor->state = PROCESSOR_DISPATCHING;
++	processor->next_thread = th;
+ }
+ 
+ /*
