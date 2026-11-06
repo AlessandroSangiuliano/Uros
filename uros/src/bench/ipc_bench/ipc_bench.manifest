@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# ipc_bench manifest -- the policy for the benchmark's raw disk suite (#744).
+#
+# 🔴 IT HAD NONE, SO THE RAW DISK SUITE HAD NOT RUN SINCE #511.  disk_bench
+# asks cap_server for a block-device capability and opens a partition with it,
+# and a task with no policy file is refused every capability: each boot said
+# "raw bench: cap_request(ahci0a) failed kr=2413 (raw skipped)".  It is the one
+# suite whose every request goes through the block server's handle check, and
+# #744 added a step to that check that wants measuring.
+#
+# ⚠️ The suite writes, so it writes where nobody else does: ahci0c, the scratch
+# partition cap_test writes for #596's reason -- never ahci0a, which ext_server
+# mounts as / on x86-64 (disk_bench.c).
+
+name ipc_bench
+
+# RESOURCE_BLK_DEVICE (4), any, READ|WRITE (0x3) -- as cap_test's manifest.
+required 4 any 0x3

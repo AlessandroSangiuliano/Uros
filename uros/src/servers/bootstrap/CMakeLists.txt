@@ -480,8 +480,13 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # UROS_BUNDLE_IPC_BENCH was also set -- bootstrap then looked for it on a
   # disk this boot has no driver for, and the run ended in silence.
   if(UROS_BUNDLE_IPC_BENCH OR UROS_BUNDLE_BENCH_ONLY)
-    set(_IPC_BENCH_FILE "ipc_bench:${_SBIN}/ipc_bench")
-    set(_IPC_BENCH_DEP  ipc_bench_server)
+    # #744: and its policy, for the raw disk suite's capability -- the FILE,
+    # for the reason _CHAR_DEP gives.
+    set(_IPC_BENCH_CMF
+      "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/ipc_bench.cmf")
+    set(_IPC_BENCH_FILE "ipc_bench:${_SBIN}/ipc_bench"
+                        "ipc_bench.cmf:${_IPC_BENCH_CMF}")
+    set(_IPC_BENCH_DEP  ipc_bench_server ${_IPC_BENCH_CMF})
   else()
     set(_IPC_BENCH_FILE "")
     set(_IPC_BENCH_DEP  "")

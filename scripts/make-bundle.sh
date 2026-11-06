@@ -100,6 +100,8 @@ GPU_SERVER_CMF="$MANIFESTS/gpu_server.cmf"
 # notices is a permission now -- with no policy file it has no per-task port
 # to ask on, and a revoked token would go on receiving keys.
 CHAR_SERVER_CMF="$MANIFESTS/char_server.cmf"
+# #744: and the benchmark, whose raw disk suite needs a block-device capability.
+IPC_BENCH_CMF="$MANIFESTS/ipc_bench.cmf"
 # #511: and the scanner, which holds the BUS rather than a device -- the only
 # task in the tree that reads configuration space it has not claimed.
 HAL_SERVER_CMF="$MANIFESTS/hal_server.cmf"
@@ -331,6 +333,7 @@ ARGS+=("hello_server:$HELLO_SERVER")
 [ -f "$HAL_SERVER_CMF" ] && ARGS+=("hal_server.cmf:$HAL_SERVER_CMF")
 [ -f "$IRQ_CLAIM_CMF" ] && ARGS+=("irq_claim_test.cmf:$IRQ_CLAIM_CMF")
 ARGS+=("ipc_bench:$IPC_BENCH")
+[ -f "$IPC_BENCH_CMF" ] && ARGS+=("ipc_bench.cmf:$IPC_BENCH_CMF")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$EXEC_SERVER" ] && ARGS+=("exec_server:$EXEC_SERVER")
