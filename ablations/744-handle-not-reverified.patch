@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #744
+Over: 744-widen-no-revoke-notices.patch
+Takes out: the block server's own look at a revocation -- a handle no longer asks its token again when the kernel's epoch has moved (004e873f), so with no notice delivered the handle of a revoked capability goes on moving data, as before, and cap_test's [5] reads through it after the revoke
+Run: --entry 14 1200 -smp 1
+Expect: cap_test: \[5\] post-revoke read FAIL
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index db466096..e3269836 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -111,7 +111,7 @@ blk_authed_handle(mach_port_t device)
+ 	 * leaves it behind the kernel's, and the next use asks again.
+ 	 */
+ 	now = (uint32_t)urmach_cap_epoch();
+-	if (h->cap_epoch != now) {
++	if (0 && h->cap_epoch != now) {
+ 		kr = blk_token_check(&h->cap, RESOURCE_BLK_DEVICE, h->cap_op,
+ 				     h->cap_resource_id);
+ 		if (kr != KERN_SUCCESS) {
