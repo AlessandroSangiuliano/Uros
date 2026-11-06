@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #414
 Over: 414-widen-reaper-first.patch
-Takes out: the drop with the task unlocked, and the mutex's word about it, so that the thread terminating a task sleeps on its own lock, the reaper sleeps behind it, and no thread is freed again; the arm has to see that from the zone, where the port had said the task was gone
+Takes out: both drops with the task unlocked, and the mutex's word about it, so that the thread terminating a task sleeps on its own lock, the reaper sleeps behind it, and no thread is freed again; the arm has to see that from the zone, where the port had said the task was gone
 Accel: tcg,kvm
 Run: --entry 14 300 -smp 4
 Expect: act_test: \[53\] [0-9]+ tasks of 4 threads faulted together, and the zone of threads read [0-9]+ before and [0-9]+ after [0-9]+ waits: they are still there
@@ -9,16 +9,47 @@ Expect: act_test: \[53\] [0-9]+ tasks of 4 threads faulted together, and the zon
 diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
 --- a/uros/src/mach_kernel/kern/task.c
 +++ b/uros/src/mach_kernel/kern/task.c
-@@ -1471,8 +1471,8 @@
+@@ -1429,7 +1429,7 @@
+ 	register task_t		task)
+ {
+ 	register queue_head_t	*list;
+-	register thread_act_t	thr_act, refd_thr_act, last_thr_act;
++	register thread_act_t	thr_act, refd_thr_act;
+ 	register thread_t	thread, cur_thr;
+ 
+ 	cur_thr = current_thread();
+@@ -1465,14 +1465,16 @@
+ 				break;
+ 			}
+ 			thread = act_lock_thread(thr_act);
++			if (refd_thr_act != THR_ACT_NULL) {
++				act_deallocate(refd_thr_act);
++				refd_thr_act = THR_ACT_NULL;
++			}
+ 			if (thread &&
+ 				thr_act == thread->top_act && thread != cur_thr) {
+-				last_thr_act = refd_thr_act;
  				refd_thr_act = thr_act;
  				act_locked_act_reference(thr_act);
  				act_unlock_thread(thr_act);
-+				act_deallocate(last_thr_act);
  				task_unlock(task);
 -				act_deallocate(last_thr_act);
  				(void)thread_wait(thread);
  				{
  					extern void delay(int);
+@@ -1492,11 +1494,8 @@
+ 	    	if (queue_end(list, (queue_entry_t)thr_act))
+ 			break;
+ 	}
+-	if (refd_thr_act != THR_ACT_NULL) {
+-		task_unlock(task);
++	if (refd_thr_act != THR_ACT_NULL)
+ 		act_deallocate(refd_thr_act);
+-		task_lock(task);
+-	}
+ }
+ 
+ kern_return_t 
 diff --git a/uros/src/mach_kernel/x86_64/sync/mutex.c b/uros/src/mach_kernel/x86_64/sync/mutex.c
 --- a/uros/src/mach_kernel/x86_64/sync/mutex.c
 +++ b/uros/src/mach_kernel/x86_64/sync/mutex.c
