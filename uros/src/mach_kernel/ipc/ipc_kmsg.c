@@ -3567,8 +3567,9 @@ ipc_kmsg_copyout_dest(
  *		Checks scatter and gather lists for consistency.
  *		
  *	Algorithm:
- *		The gather is assumed valid since it has been copied in.
- *		The scatter list has only been range checked.
+ *		A simple message has no gather list, and passes.
+ *		The gather of a complex one is assumed valid since it has been
+ *		copied in.  The scatter list has only been range checked.
  *		Gather list descriptors are sequentially paired with scatter 
  *		list descriptors, with port descriptors in either list ignored.
  *		Descriptors are consistent if the type fileds match and size
@@ -3607,6 +3608,14 @@ ipc_kmsg_check_scatter(
 
 	assert(*slistp != MACH_MSG_BODY_NULL);
 	assert(*sizep != 0);
+
+	/*
+	 * #870: what follows a simple message's header is its payload.  Read
+	 * as a body, its first word was a descriptor count nothing had
+	 * bounded, and the walk went on past the message.
+	 */
+	if (!(kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX))
+		return MACH_MSG_SUCCESS;
 
     	body = (mach_msg_body_t *) (&kmsg->ikm_header + 1);
     	gstart = (mach_msg_descriptor_t *) (body + 1);

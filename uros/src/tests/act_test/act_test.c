@@ -6701,6 +6701,92 @@ arm_forty_one_body_disposition(void)
 	return ok;
 }
 
+/*
+ * Arm forty-two (#870): a simple message has no descriptors, whatever its
+ * payload looks like.  This one's first word says one, and what follows is an
+ * out-of-line descriptor, and the receive names a scatter list of a port array:
+ * read as a gather list it does not match.  The count is one, and the message
+ * holds that one descriptor, so that a kernel without the check stays inside
+ * the message while it says the wrong thing.
+ */
+static int
+arm_forty_two_simple_message_scattered(void)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[128];
+	} buf, m;
+	mach_msg_descriptor_t	d;
+	mach_msg_size_t		scatter_size;
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i, count = 1, same = 0;
+	const unsigned		pay = sizeof (mach_msg_header_t);
+	const unsigned		dsc = pay + sizeof (mach_msg_body_t);
+	unsigned char		*from;
+
+	port = arm_own_port(42);
+	if (port == MACH_PORT_NULL)
+		return 0;
+	scatter_size = dsc + sizeof d;
+
+	for (i = 0; i < sizeof m.bytes; i++)
+		m.bytes[i] = buf.bytes[i] = 0;
+	for (i = 0; i < sizeof d; i++)
+		((unsigned char *) &d)[i] = 0;
+
+	/* The sender's payload: a count, then what would be a descriptor. */
+	m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.h.msgh_size = scatter_size;
+	m.h.msgh_remote_port = port;
+	m.h.msgh_id = 42;
+	for (i = 0; i < sizeof count; i++)
+		m.bytes[pay + i] = ((unsigned char *) &count)[i];
+	d.type.type = MACH_MSG_OOL_DESCRIPTOR;
+	from = (unsigned char *) &d;
+	for (i = 0; i < sizeof d; i++)
+		m.bytes[dsc + i] = from[i];
+
+	/* The receiver's scatter list: one descriptor of another type. */
+	for (i = 0; i < sizeof count; i++)
+		buf.bytes[pay + i] = ((unsigned char *) &count)[i];
+	d.type.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;
+	for (i = 0; i < sizeof d; i++)
+		buf.bytes[dsc + i] = from[i];
+
+	mr = mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, scatter_size, 0,
+		      MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [42] the send answered 0x%x — WRONG\n", (int) mr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+	mr = mach_msg_overwrite(&buf.h, MACH_RCV_MSG | MACH_RCV_OVERWRITE |
+				MACH_RCV_TIMEOUT, 0, sizeof buf, port, 0,
+				MACH_PORT_NULL, &buf.h, scatter_size);
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [42] a simple message whose payload does not "
+		       "match the scatter list answered 0x%x — WRONG (#870)\n",
+		       (int) mr);
+		return 0;
+	}
+	for (i = 0; i < sizeof d; i++)
+		same += buf.bytes[dsc + i] == m.bytes[dsc + i];
+	if (buf.h.msgh_id != 42 || buf.h.msgh_size < scatter_size ||
+	    same != sizeof d) {
+		printf("act_test: [42] the message came back as id %d, %u bytes, "
+		       "%u of %u payload bytes as sent — WRONG (#870)\n",
+		       (int) buf.h.msgh_id, (unsigned) buf.h.msgh_size, same,
+		       (unsigned) sizeof d);
+		return 0;
+	}
+	printf("act_test: [42] a simple message passed a scatter list its "
+	       "payload does not match, whole — OK (#870)\n");
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6827,6 +6913,8 @@ main(int argc, char **argv)
 	passed += arm_forty_nothing_after_the_hand_off();
 	arms++;		/* arm forty-one, #867 */
 	passed += arm_forty_one_body_disposition();
+	arms++;		/* arm forty-two, #870 */
+	passed += arm_forty_two_simple_message_scattered();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
