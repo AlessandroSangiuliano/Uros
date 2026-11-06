@@ -480,6 +480,19 @@ vfs_read(vfs_fd_t fd, void *buf, size_t count)
     }
     if (kr != KERN_SUCCESS)
         return -1;
+    /*
+     * 🔴 NEVER MORE THAN WAS ASKED FOR (#716).  How much came back is the
+     * server's to say, and it was copied as said, into a buffer the caller
+     * sized for `count': whichever task held the mount wrote past the end of
+     * every reader's buffer.  The mount registry decides who answers, not
+     * what an answer may hold, so this holds whoever the server is.  The
+     * region is given back, and the read fails as one the server refused.
+     */
+    if (data_count > count) {
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)data,
+                            (vm_size_t)data_count);
+        return -1;
+    }
     if (data_count > 0 && data) {
         memcpy(buf, (void *)data, data_count);
         vm_deallocate(mach_task_self(), (vm_address_t)data,
