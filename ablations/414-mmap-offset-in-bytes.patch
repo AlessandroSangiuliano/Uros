@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #414
+Takes out: the conversion of mmap's bytes to mmap2's pages
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[13\] WRONG
+
+diff --git a/uros/src/lib/libposix-uros/handlers.c b/uros/src/lib/libposix-uros/handlers.c
+--- a/uros/src/lib/libposix-uros/handlers.c
++++ b/uros/src/lib/libposix-uros/handlers.c
+@@ -354,7 +354,7 @@
+ {
+     if (off & (UROS_PAGE_SIZE - 1))
+         return -EINVAL;
+-    return h_mmap2(addr, len, prot, flags, fd, off / UROS_PAGE_SIZE);
++    return h_mmap2(addr, len, prot, flags, fd, off);
+ }
+ #endif
+ 

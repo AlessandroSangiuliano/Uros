@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #414
+Takes out: the size in the kernel's struct stat, which is the field a wrong layout loses first
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[9\] WRONG -- stat, fstat and lseek each said 0, 0, [0-9]+ bytes
+
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -937,7 +937,6 @@
+     k->st_mode    = sx.stx_mode;
+     k->st_uid     = sx.stx_uid;
+     k->st_gid     = sx.stx_gid;
+-    k->st_size    = (int64_t)sx.stx_size;
+     k->st_blksize = sx.stx_blksize;
+     k->st_blocks  = (int64_t)sx.stx_blocks;
+     k->st_atime_sec = sx.stx_atime.tv_sec;
