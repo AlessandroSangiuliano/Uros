@@ -3134,14 +3134,13 @@ bench_concurrent_intertask(int n, int iters_per_thread)
  * Combined SEND|RCV RPC, several clients (#868)
  *
  * The client of every row above but `comb' makes two calls, a send and a
- * receive.  The per-thread port cache of mach_msg's hot path is reached only by
- * a request that sends and receives in one call on its reply port, as MIG's
- * stubs make it, so `comb' was the one row that could say what the cache is
- * worth, and it has one client and its server, in one task.  These have n
- * clients, each with a port pair of its own:
+ * receive.  An RPC as MIG's stubs make it sends and receives in one call on its
+ * reply port, and only that reaches the request side of mach_msg's hot path, so
+ * `comb' was the one row of that shape, with one client and its server, in one
+ * task.  These have n clients, each with a port pair of its own:
  *
  *   same-space  each server is a thread of this task, so n threads use one
- *		 ipc_space at once, the case the cache was added for;
+ *		 ipc_space at once;
  *   inter-task  each server is a task of its own, answering as
  *		 mach_msg_server() does: an RPC as the system makes it.
  *
