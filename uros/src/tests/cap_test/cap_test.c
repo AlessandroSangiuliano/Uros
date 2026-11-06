@@ -135,6 +135,10 @@ extern kern_return_t netname_register_send_right(mach_port_t server_port,
                                                  char *service_name,
                                                  mach_port_t signature,
                                                  mach_port_t port);
+/* #744: [35] asks the well-known port itself, which libcap no longer does. */
+extern kern_return_t mig_cap_subscribe_revoke(mach_port_t cap_server,
+                                              mach_port_t notify_port,
+                                              mach_msg_type_name_t notify_portPoly);
 
 extern void printf_init(mach_port_t device_server_port);
 
@@ -308,6 +312,52 @@ a_slot_is_not_this_tasks(void)
                "asked for on this task's bootstrap port: %d, on the service "
                "port: %d, not KERN_NO_ACCESS(%d) (#744)\n", (int)on_own,
                (int)on_shared, KERN_NO_ACCESS);
+    return ok;
+}
+
+/*
+ * Test [35]: revocation notices are a permission (#744).
+ *
+ * cap_subscribe_revoke() took anyone, into one of eight slots, and a resource
+ * server that found them taken heard of no revocation -- the block server's
+ * handles are revoked by the notice and by nothing else, which [5] reads
+ * through.  It takes a task whose manifest grants RESOURCE_REVOKE_NOTICES now,
+ * asking on its per-task port.  This task's manifest does not, so both ways in
+ * must be refused with CAP_ERR_NOT_IN_MANIFEST: this task's own port, and the
+ * well-known port, which grants nothing to anyone.
+ *
+ * 🔑 [5] is the other half, and the reason this one can be believed: the
+ * block server, whose manifest does grant it, must still hear of a revocation
+ * -- a cap_server refusing every subscriber would pass this arm and fail that.
+ */
+static int
+revocation_notices_are_a_permission(void)
+{
+    mach_port_t   p = MACH_PORT_NULL;
+    kern_return_t own, well_known;
+    int           ok;
+
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p)
+            != KERN_SUCCESS
+        || mach_port_insert_right(mach_task_self(), p, p,
+                                  MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) {
+        printf("cap_test: [35] WRONG — no port to subscribe with\n");
+        return 0;
+    }
+    own = cap_subscribe_revoke(p);
+    well_known = mig_cap_subscribe_revoke(urmach_cap_server_port, p,
+                                          MACH_MSG_TYPE_COPY_SEND);
+    ok = own == CAP_ERR_NOT_IN_MANIFEST && well_known == CAP_ERR_NOT_IN_MANIFEST;
+    if (ok)
+        printf("cap_test: [35] subscribing to revocation notices, on this "
+               "task's port and on the well-known one: refused both times "
+               "with CAP_ERR_NOT_IN_MANIFEST (#744)\n");
+    else
+        printf("cap_test: [35] WRONG — subscribing to revocation notices, on "
+               "this task's port: %d, on the well-known one: %d, not "
+               "CAP_ERR_NOT_IN_MANIFEST(%d) (#744)\n", (int)own,
+               (int)well_known, CAP_ERR_NOT_IN_MANIFEST);
+    (void)mach_port_destroy(mach_task_self(), p);
     return ok;
 }
 
@@ -3605,6 +3655,9 @@ main(int argc, char **argv)
         pass = 0;
     /* [34], #744: and so was the port behind it. */
     if (!a_slot_is_not_this_tasks())
+        pass = 0;
+    /* [35], #744: and the notices of what it revokes. */
+    if (!revocation_notices_are_a_permission())
         pass = 0;
 
     /*
