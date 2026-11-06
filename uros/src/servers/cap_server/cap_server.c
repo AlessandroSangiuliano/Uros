@@ -146,6 +146,19 @@ fanout_revoke_notify(uint64_t cap_id)
     int i = 0;
     while (i < n_revoke_subscribers) {
         kern_return_t kr = cap_revoke_notify(revoke_subscribers[i], cap_id);
+        /*
+         * #744: a full queue costs that subscriber this notice and nothing
+         * else -- it stays subscribed, and it sees the revocation anyway,
+         * from the kernel's epoch, at the next use of what was revoked.  The
+         * send does not wait (cap_revoke.defs), so this server never does.
+         */
+        if (kr == MACH_SEND_TIMED_OUT) {
+            printf("cap: subscriber 0x%x missed the notice of %llu: its "
+                   "queue is full (#744)\n",
+                   (unsigned)revoke_subscribers[i], (unsigned long long)cap_id);
+            i++;
+            continue;
+        }
         if (kr != KERN_SUCCESS) {
             printf("cap: subscriber 0x%x dropped on revoke notify (kr=%d)\n",
                    (unsigned)revoke_subscribers[i], (int)kr);
