@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #777
+Over: 777-widen-arm-43-end.patch
+Takes out: the sleeping half of arm 43's wait for the end of a receive, so that it waits in polls, a millisecond at most, as it did before campaign 42225212497 ran out of time
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[43\] a receive whose port was destroyed under it had not ended after 2000 waits
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -6841,7 +6841,7 @@
+ #define	A43_TRIES	3
+ #define	A43_LIST	3000	/* kalloc.4096 */
+ #define	A43_POLLS	2000	/* depressed: a millisecond at most */
+-#define	A43_ENDS	4000	/* and the rest asleep: twenty seconds */
++#define	A43_ENDS	2000	/* and the rest asleep: twenty seconds */
+ 
+ static volatile mach_port_t	a43_thread, a43_port;
+ static volatile unsigned	a43_ended;

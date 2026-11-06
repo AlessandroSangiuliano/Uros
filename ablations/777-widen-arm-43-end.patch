@@ -1,0 +1,22 @@
+Kind: widen
+Issue: #777
+Holds open: the thread of act_test's arm 43 for 20 ms or so, running, after its receive has ended and before it says so -- what a virtual processor can take to wake on a shared host
+Run: --entry 14 300 -smp 4
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -6899,6 +6899,13 @@
+ 		}
+ 		(void) mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m, p,
+ 				MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
++		{
++			/* 777-widen-arm-43-end: about 20 ms at 3 GHz, running */
++			unsigned long long	t = __builtin_ia32_rdtsc();
++
++			while (__builtin_ia32_rdtsc() - t < 60000000ULL)
++				;
++		}
+ 		a43_port = MACH_PORT_NULL;
+ 		a43_ended++;
+ 	}
