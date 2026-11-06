@@ -861,6 +861,10 @@ arm_proc(void)
  * with a thousand rounds each those three were over after three stats, and
  * stat went on alone, where nothing could take its reply, past this arm's 15 s
  * on every boot under TCG.
+ *
+ * And it waits for them.  On one processor stat and its server keep it for a
+ * quantum, and under KVM the 20 were over before any of the others had
+ * finished a call.
  */
 #define R_THREADS	4
 #define R_ROUNDS	1000	/* the least of each of the fast three */
@@ -872,6 +876,17 @@ static const char *const r_kind[R_THREADS] = {
 };
 static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done, r_over;
 
+static int
+rpc_others_under_way(void)
+{
+	int	k;
+
+	for (k = 0; k < R_STAT; k++)
+		if (__atomic_load_n(&r_round[k], __ATOMIC_SEQ_CST) == 0)
+			return 0;
+	return 1;
+}
+
 static void *
 rpc_thread(void *arg)
 {
@@ -879,6 +894,9 @@ rpc_thread(void *arg)
 	int	least = kind == R_STAT ? R_STATS : R_ROUNDS;
 	int	i, ok;
 
+	while (kind == R_STAT && !rpc_others_under_way()
+	       && !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST))
+		pause_a_little();
 	for (i = 0; i < least || !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST);
 	     i++) {
 		struct stat	st;
