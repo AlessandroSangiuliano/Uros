@@ -290,7 +290,26 @@ struct blk_partition {
 	natural_t	payload;		/* names it to blk_object_for() */
 	char		name[32];		/* driver-specific: e.g. "ahci0a" */
 	char		stable_name[32];	/* driver-agnostic: e.g. "disk0a" */
+	/*
+	 * #915: what -W decides by, read once before the message loop
+	 * (blk_write_label_read()): whether an ext2 superblock is where
+	 * mke2fs puts one, and the volume label in it.
+	 */
+	int		is_ext2;
+	char		label[17];
+	int		said_write_refused;	/* the refusal is said once */
 };
+
+/*
+ * #915: -W LABEL, writes to the one partition whose ext2 volume is labelled
+ * LABEL.  blk_write_label_set() takes the label from the command line,
+ * blk_write_label_read() reads every partition's label once the partitions
+ * are known and before anyone can open one, and blk_write_refused() answers
+ * the open that would hand out a write right: 1 to refuse it.
+ */
+void blk_write_label_set(const char *label);
+void blk_write_label_read(void);
+int  blk_write_refused(struct blk_partition *part);
 
 /*
  * Per-(client, partition) authenticated handle.  Allocated by

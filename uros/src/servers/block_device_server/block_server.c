@@ -861,6 +861,17 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t kr;
+	int i;
+
+	/*
+	 * #915: -W LABEL, the one partition that takes writes on this boot,
+	 * by its ext2 label.  Taken before anything is probed and acted on
+	 * once the partitions are known (blk_write_label_read()).  A -W with
+	 * nothing after it names no label, and refuses every write.
+	 */
+	for (i = 1; i < argc; i++)
+		if (strcmp(argv[i], "-W") == 0)
+			blk_write_label_set(i + 1 < argc ? argv[++i] : "");
 
 	kr = bootstrap_ports(bootstrap_port,
 			     &host_port, &device_port,
@@ -916,6 +927,9 @@ main(int argc, char **argv)
 		       "stops here by design, this is not a hang\n");
 		return 1;
 	}
+
+	/* #915: before any name is published, so before any open. */
+	blk_write_label_read();
 
 	blk_register_partitions();
 

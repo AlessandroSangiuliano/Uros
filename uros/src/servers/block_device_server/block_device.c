@@ -444,6 +444,14 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 		return KERN_NO_ACCESS;
 	}
 
+	/*
+	 * #915: and a write right only where -W allows one.  Here, because
+	 * this is where a handle gets the mode every transfer toward the disk
+	 * is asked for (blk_handle_for()).
+	 */
+	if ((mode & D_WRITE) && blk_write_refused(part))
+		return D_READ_ONLY;
+
 	struct blk_handle *h = (struct blk_handle *)malloc(sizeof(*h));
 	if (h == NULL)
 		return KERN_RESOURCE_SHORTAGE;
@@ -1930,6 +1938,154 @@ rd32(const unsigned char *p, unsigned int off)
 	     | ((uint32_t)p[off + 1] << 8)
 	     | ((uint32_t)p[off + 2] << 16)
 	     | ((uint32_t)p[off + 3] << 24);
+}
+
+/* ================================================================
+ * #915: writes to one partition, named by its label
+ * ================================================================ */
+
+/*
+ * 🔴 ON A MACHINE WHOSE DISKS ARE SOMEBODY'S, THIS SERVER IS THE ONE PLACE A
+ * WRITE CAN BE REFUSED (#915).  lapsus has three SATA disks: Windows, the
+ * Linux that runs there, and one partition given to Uros for its boot log,
+ * labelled UROSLOG.  Nothing else in the system limits writes to a
+ * partition: the block-device grants in the manifests are `any', and
+ * ext_server opens what its table names D_READ|D_WRITE and writes the
+ * superblock when it mounts.  So with -W LABEL a write right is handed out
+ * for the partition whose ext2 volume is labelled LABEL, and for no other.
+ *
+ * 🔑 By the label and not by the name, because the name is a position:
+ * "ahci2a" is the first partition of the third disk with a device present,
+ * and the same disks on other ports, or one disk more, give that name to
+ * another partition.  The label is written into the filesystem when it is
+ * made, and goes where the filesystem goes.
+ *
+ * ⚠️ And only if exactly one partition carries it: two would be a choice
+ * this server has no ground to make, so it makes none and refuses both.
+ *
+ * Read once, before the message loop: the table does not change under a
+ * running server, and the labels are known before any name is published.
+ * Without -W nothing is read and nothing is refused.
+ */
+#define BLK_LABEL_MAX	16u	/* s_volume_name's bytes */
+
+static const char	*blk_write_label;	/* -W LABEL, NULL without -W */
+static int		blk_write_label_parts;	/* partitions labelled so */
+
+void
+blk_write_label_set(const char *label)
+{
+	blk_write_label = label;
+}
+
+/* The partition's ext2 superblock, if it has one, and its label. */
+static void
+blk_label_read_one(struct blk_partition *part)
+{
+	struct blk_controller	*ctrl = part->ctrl;
+	vm_offset_t		fs = 0;
+	unsigned int		fs_size = 0;
+	const unsigned char	*f;
+	unsigned int		i;
+
+	part->is_ext2 = 0;
+	part->label[0] = '\0';
+	if (ctrl == NULL || ctrl->ops == NULL
+	    || ctrl->ops->read_sectors == NULL) {
+		printf("blk: %s: its driver offers no read_sectors, so its "
+		       "label cannot be read (#915)\n", part->name);
+		return;
+	}
+	/* Four sectors: the superblock is the second KiB. */
+	if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index,
+				    part->start_lba, 4, &fs, &fs_size) < 0
+	    || fs_size < EXT2_SB_OFFSET + EXT2_SB_OFF_LABEL + BLK_LABEL_MAX) {
+		printf("blk: %s: the read of its superblock failed, so its "
+		       "label is unknown (#915)\n", part->name);
+		if (fs != 0)
+			vm_deallocate(mach_task_self(), fs, fs_size);
+		return;
+	}
+	f = (const unsigned char *)fs;
+	if (rd16(f, EXT2_SB_OFFSET + EXT2_SB_OFF_MAGIC) == EXT2_SB_MAGIC) {
+		part->is_ext2 = 1;
+		for (i = 0; i < BLK_LABEL_MAX; i++)
+			part->label[i] =
+				(char)f[EXT2_SB_OFFSET + EXT2_SB_OFF_LABEL + i];
+		part->label[BLK_LABEL_MAX] = '\0';
+	}
+	vm_deallocate(mach_task_self(), fs, fs_size);
+}
+
+/* Why a write right on the partition is refused, or NULL if it is not. */
+static const char *
+blk_write_refused_why(const struct blk_partition *part)
+{
+	if (blk_write_label == NULL)
+		return NULL;
+	if (blk_write_label[0] == '\0'
+	    || strlen(blk_write_label) > BLK_LABEL_MAX)
+		return "the label -W names cannot be an ext2 label";
+	if (!part->is_ext2)
+		return "it holds no ext2 superblock";
+	if (strcmp(part->label, blk_write_label) != 0)
+		return "its label is another";
+	if (blk_write_label_parts != 1)
+		return "more than one partition carries the label";
+	return NULL;
+}
+
+void
+blk_write_label_read(void)
+{
+	const char *why;
+	int i;
+
+	if (blk_write_label == NULL)
+		return;
+
+	blk_write_label_parts = 0;
+	for (i = 0; i < n_partitions; i++) {
+		blk_label_read_one(&partitions[i]);
+		if (partitions[i].is_ext2
+		    && strcmp(partitions[i].label, blk_write_label) == 0)
+			blk_write_label_parts++;
+	}
+
+	printf("blk: -W \"%s\": a write right only for the partition whose "
+	       "ext2 volume is labelled so, and for no other (#915)\n",
+	       blk_write_label);
+	for (i = 0; i < n_partitions; i++) {
+		struct blk_partition *p = &partitions[i];
+
+		why = blk_write_refused_why(p);
+		printf("blk:   %s (%s), %s%s%s: %s%s\n", p->name,
+		       p->stable_name[0] != '\0' ? p->stable_name : "no alias",
+		       p->is_ext2 ? "ext2 labelled \"" : "not ext2",
+		       p->is_ext2 ? p->label : "", p->is_ext2 ? "\"" : "",
+		       why == NULL ? "writes taken" : "writes refused, ",
+		       why == NULL ? "" : why);
+	}
+	if (blk_write_label_parts != 1)
+		printf("blk: %d partitions are labelled \"%s\", so no "
+		       "partition takes writes on this boot (#915)\n",
+		       blk_write_label_parts, blk_write_label);
+}
+
+int
+blk_write_refused(struct blk_partition *part)
+{
+	const char *why = blk_write_refused_why(part);
+
+	if (why == NULL)
+		return 0;
+	if (!part->said_write_refused) {
+		part->said_write_refused = 1;
+		printf("blk: %s: a write right refused -- %s, and only the "
+		       "partition labelled \"%s\" takes writes on this boot "
+		       "(-W, #915)\n", part->name, why, blk_write_label);
+	}
+	return 1;
 }
 
 static void blk_readback_one(struct blk_partition *part);
