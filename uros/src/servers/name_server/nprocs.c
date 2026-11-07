@@ -154,6 +154,17 @@ sub_reference(mach_port_t port)
 	if (this->port == port)
 	    break;
 
+    /*
+     * #574: and if it does not, it says so.  It was a mount whose server had
+     * died: the dead-name notification took the port record and left the
+     * mount, and the next look-up of the mount read this->next at address 0.
+     * The mount goes with its server now; a record that outlives its port is
+     * still a defect, and it is named here rather than read through.
+     */
+    if (this == NULL)
+	panic("%s: sub_reference: port %x is in a record and not in the "
+	      "port list (#574)\n", program, port);
+
     /* move it to the front */
 
     *last = this->next;
