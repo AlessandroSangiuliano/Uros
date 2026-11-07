@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #889
+Over: 889-widen-a48-round-robin.patch
+Takes out: AST_QUANTUM from thread_switch()'s hand-off -- the thread that gave its quantum away goes back at the head of its run queue, as one preempted by a better thread does; at one processor, with every thread of act_test [48] at one priority, the hint thread is the next to run each time the thread it handed off to stops, and the arm's main thread, behind it, never runs again: act_test never gives its count, and the boot goes quiet until the harness cuts it
+Run: --entry 14 300 -smp 1
+Expect: still waiting for: act_test: \[0-9\]\* of \[0-9\]\* arms passed
+
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index bf14eccb..f8fb14f6 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -399,7 +399,7 @@ syscall_thread_switch(
+ 					 * -smp 1 under TCG for 20 minutes.
+ 					 */
+ 					thread_run((void(*)(void))SAFE_THR_DEPRESS,
+-						   thread, AST_QUANTUM);
++						   thread, 0);	/* 889-hint-handoff-to-the-head */
+ 
+ 					did_handoff = 1;
+ 				} else {

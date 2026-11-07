@@ -1,0 +1,99 @@
+Kind: widen
+Issue: #889
+Holds open: the order of the run queue in act_test [48] at one processor -- every thread of the arm at POLICY_RR and one priority, so that where a thread goes back on the queue decides who runs next and nothing else does: the hint thread hands off to the thread it names in a loop, and with the fix it goes to the tail and the arm's main thread and its killer get their turns; under timesharing the priorities moved enough that the stop came only now and then (entry 37 under TCG at -smp 1, once in two merge tests)
+Run: --entry 14 300 -smp 1
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 26b5c245..1cb19fb5 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -7767,6 +7767,30 @@ static volatile int		a48_go, a48_kill_go, a48_stop;
+ static volatile int		a48_self_done, a48_switch_done, a48_kill_done;
+ static volatile unsigned	a48_selfs, a48_switches, a48_kills;
+ 
++/*
++ * 889-widen-a48-round-robin: every thread of the arm at POLICY_RR, one
++ * priority, so that where a thread goes back on the run queue decides who runs
++ * next, and nothing else does.
++ */
++static mach_port_t		a48_pset = MACH_PORT_NULL;
++static int			a48_pri = -1;
++
++static void
++a48_rr(thread_act_t t)
++{
++	policy_rr_base_data_t	rr;
++	policy_rr_limit_data_t	limit;
++
++	if (a48_pset == MACH_PORT_NULL || a48_pri < 0)
++		return;
++	rr.quantum = 0;
++	rr.base_priority = a48_pri;
++	limit.max_priority = a48_pri;
++	(void) thread_set_policy(t, a48_pset, POLICY_RR, (integer_t *) &rr,
++				 POLICY_RR_BASE_COUNT, (integer_t *) &limit,
++				 POLICY_RR_LIMIT_COUNT);
++}
++
+ static void
+ a48_wait_for(volatile int *flag)
+ {
+@@ -7780,6 +7804,7 @@ a48_self_loop(void *arg)
+ 	mach_port_t	t;
+ 
+ 	(void) arg;
++	a48_rr(mach_thread_self());	/* 889-widen-a48-round-robin */
+ 	a48_hint = mach_thread_self();
+ 	a48_wait_for(&a48_go);
+ 	while (!a48_stop) {
+@@ -7796,6 +7821,7 @@ static void *
+ a48_switch_loop(void *arg)
+ {
+ 	(void) arg;
++	a48_rr(mach_thread_self());	/* 889-widen-a48-round-robin */
+ 	a48_wait_for(&a48_go);
+ 	while (!a48_stop) {
+ 		(void) thread_switch(a48_hint, SWITCH_OPTION_NONE, 0);
+@@ -7822,6 +7848,7 @@ a48_kill_loop(void *arg)
+ 	unsigned			i, round;
+ 
+ 	(void) arg;
++	a48_rr(mach_thread_self());	/* 889-widen-a48-round-robin */
+ 	a48_wait_for(&a48_kill_go);
+ 	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE)
+ 	    != KERN_SUCCESS)
+@@ -7834,6 +7861,7 @@ a48_kill_loop(void *arg)
+ 	for (round = 0; round < A48_KILLS; round++) {
+ 		if (thread_create(mach_task_self(), &t) != KERN_SUCCESS)
+ 			break;
++		a48_rr(t);		/* 889-widen-a48-round-robin */
+ 		if (thread_set_state(t, x86_64_THREAD_STATE,
+ 				     (thread_state_t) &state,
+ 				     x86_64_THREAD_STATE_COUNT) != KERN_SUCCESS ||
+@@ -7868,6 +7896,26 @@ arm_forty_eight_hint_and_lock_order(void)
+ {
+ 	pthread_t	self, sw, kill;
+ 
++	/* 889-widen-a48-round-robin: the set's port and the arm's priority. */
++	{
++		mach_port_t			hp, dev, lw, lp, sec, name;
++		struct policy_timeshare_info	ts;
++		mach_msg_type_number_t		n = POLICY_TIMESHARE_INFO_COUNT;
++
++		if (bootstrap_ports(bootstrap_port, &hp, &dev, &lw, &lp, &sec)
++		    == KERN_SUCCESS &&
++		    processor_set_default(mach_host_self(), &name)
++		    == KERN_SUCCESS &&
++		    host_processor_set_priv(hp, name, &a48_pset)
++		    == KERN_SUCCESS &&
++		    thread_info(mach_thread_self(), THREAD_SCHED_TIMESHARE_INFO,
++				(thread_info_t) &ts, &n) == KERN_SUCCESS)
++			a48_pri = ts.base_priority;
++		a48_rr(mach_thread_self());
++		printf("act_test: [48] 889-widen-a48-round-robin: the arm's "
++		       "threads at POLICY_RR, priority %d\n", a48_pri);
++	}
++
+ 	if (pthread_create(&self, NULL, a48_self_loop, NULL) != 0) {
+ 		printf("act_test: [48] pthread_create failed — WRONG\n");
+ 		return 0;
