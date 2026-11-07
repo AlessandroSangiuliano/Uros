@@ -358,10 +358,16 @@ extern void		thread_block_reason(
 extern void		thread_block(
 				void	(*continuation)(void));
 
-/* Switch directly to a particular thread */
+/*
+ * Switch directly to a particular thread.  `reason' is what the current
+ * thread is put back on a run queue for, as thread_invoke()'s: AST_QUANTUM
+ * for one that gave its quantum away, to the tail; 0 for one that is only
+ * stepping aside, to the head (#889).
+ */
 extern void		thread_run(
 				void	(*continuation)(void),
-				thread_t	new_thread);
+				thread_t	new_thread,
+				int		reason);
 
 /* Dispatch a thread not on a run queue */
 extern void		thread_dispatch(
