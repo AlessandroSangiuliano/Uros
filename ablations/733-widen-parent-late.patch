@@ -4,10 +4,10 @@ Holds open: the parent takes 5 ms by the TSC to come back from thread_resume(), 
 Run: --entry 14 120 -smp 4
 
 diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
-index ab999238..098a2b36 100644
+index 3175a931..f4be1200 100644
 --- a/uros/src/lib/libposix-uros/posix_clone.c
 +++ b/uros/src/lib/libposix-uros/posix_clone.c
-@@ -300,6 +300,12 @@ __uros_clone(int (*fn)(void *),
+@@ -299,6 +299,12 @@ __uros_clone(int (*fn)(void *),
          return -11;
      }
      TRACE("thread_resume ok");
@@ -18,5 +18,5 @@ index ab999238..098a2b36 100644
 +            ;
 +    }
  
-     /* ctid is passed through to the bootstrap on the new thread's
-      * stack — it registers it with urmach_thread_set_cleartid so the
+     /* ctid_addr, for CLONE_CHILD_CLEARTID, reached the bootstrap in the
+      * new thread's state (rcx on x86-64, the stack on i386), and the

@@ -7,10 +7,10 @@ Run: --entry 14 120 -smp 4
 Expect: musl_test: \[24\] WRONG -- [0-9]+ threads took an error-checking mutex as their first act, and [1-9][0-9]* were refused it back
 
 diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
-index 098a2b36..4b50184c 100644
+index f4be1200..058ce666 100644
 --- a/uros/src/lib/libposix-uros/posix_clone.c
 +++ b/uros/src/lib/libposix-uros/posix_clone.c
-@@ -288,10 +288,6 @@ __uros_clone(int (*fn)(void *),
+@@ -287,10 +287,6 @@ __uros_clone(int (*fn)(void *),
       * thread then went round that list for ever on its way out, holding the
       * thread list, and the next fork() in the program stopped on that.
       */
@@ -21,7 +21,7 @@ index 098a2b36..4b50184c 100644
      /* 5. Start it. */
      kr = thread_resume(new_thread);
      if (kr != KERN_SUCCESS) {
-@@ -306,6 +302,9 @@ __uros_clone(int (*fn)(void *),
+@@ -305,6 +301,9 @@ __uros_clone(int (*fn)(void *),
          while (__builtin_ia32_rdtsc() - t0 < 15000000ull)
              ;
      }
@@ -29,5 +29,5 @@ index 098a2b36..4b50184c 100644
 +    if ((flags & UROS_CLONE_PARENT_SETTID) && ptid)
 +        *ptid = tid;
  
-     /* ctid is passed through to the bootstrap on the new thread's
-      * stack — it registers it with urmach_thread_set_cleartid so the
+     /* ctid_addr, for CLONE_CHILD_CLEARTID, reached the bootstrap in the
+      * new thread's state (rcx on x86-64, the stack on i386), and the
