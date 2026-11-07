@@ -41,6 +41,19 @@ static char		klog_buf[KLOG_BUF_SIZE];
 static natural_t		klog_head;
 static natural_t		klog_tail;
 static int		klog_ready;
+
+/*
+ * #915: what the boot says before klog_init(), kept for the ring.  A log that
+ * began at klog_init() had none of the early self-tests -- some 32 KB, 281
+ * lines, on a boot of the log bundle -- and on a machine whose memory is
+ * cleared at reset that log is the only one.  One processor runs then, with
+ * interrupts off: no lock.  klog_init() puts it in front of everything else
+ * and says how much did not fit.
+ */
+#define KLOG_EARLY_SIZE	(48u * 1024u)
+static char		klog_early[KLOG_EARLY_SIZE];
+static unsigned int	klog_early_len;
+static unsigned int	klog_early_lost;
 decl_simple_lock_data(static, klog_lock)
 static volatile int	klog_lock_holder = -1;	/* #599, see above */
 
@@ -58,10 +71,58 @@ klog_lock_drop(void)
 	simple_unlock(&klog_lock);
 }
 
+static void
+klog_early_keep(char c)
+{
+	if (klog_early_len < KLOG_EARLY_SIZE)
+		klog_early[klog_early_len++] = c;
+	else
+		klog_early_lost++;
+}
+
+void
+klog_early_putc(char c)
+{
+	if (!klog_ready)
+		klog_early_keep(c);
+}
+
+/* Before klog_ready, into the ring with no lock: klog_init() alone. */
+static void
+klog_init_put(const char *s)
+{
+	for (; *s; s++)
+		klog_buf[klog_head++ % KLOG_BUF_SIZE] = *s;
+}
+
+/*
+ * ⚠️ No printf() here: this runs inside printf_init().  So the note on what
+ * did not fit is written into the ring by hand, the number with it.
+ */
 void
 klog_init(void)
 {
+	char		num[12];
+	unsigned int	i, n;
+
 	simple_lock_init(&klog_lock, ETAP_MISC_PRINTF);
+	for (i = 0; i < klog_early_len; i++)
+		klog_buf[i % KLOG_BUF_SIZE] = klog_early[i];
+	klog_head = klog_early_len;
+	if (klog_early_lost != 0) {
+		i = sizeof(num) - 1;
+		num[i] = '\0';
+		n = klog_early_lost;
+		do {
+			num[--i] = (char)('0' + n % 10);
+			n /= 10;
+		} while (n != 0 && i > 0);
+		klog_init_put("[klog: ");
+		klog_init_put(&num[i]);
+		klog_init_put(" bytes said before klog_init() did not fit in "
+			      "the ones kept (#915)]\n");
+	}
+	klog_tail = klog_head > KLOG_BUF_SIZE ? klog_head - KLOG_BUF_SIZE : 0;
 	klog_ready = 1;
 }
 
@@ -69,8 +130,8 @@ void
 klog_putc(char c)
 {
 	if (!klog_ready) {
-		/* Pre-init printf: drop on the floor.  Same path the
-		 * old kernel had — these chars went only to serial. */
+		/* #915: kept for klog_init(), no longer dropped. */
+		klog_early_keep(c);
 		return;
 	}
 	if (klog_lock_holder == cpu_number())
