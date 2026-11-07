@@ -163,6 +163,12 @@ while q != head and nt < 64:
                       int(th["saved"]["receive"]["mqueue"]), int(th["futex_uaddr"]), int(th["timer"]["set"]),
                       int(th["user_timer"]["low_bits"]), int(th["system_timer"]["low_bits"]),
                       ksym(th["continuation"]) if int(th["continuation"]) else "0", rip, symb(rip), rsp))
+            # What the scheduler chose by (#889): a thread runnable for twenty
+            # minutes beside one that ran says nothing until its priority is
+            # read next to the other's.
+            print("      pri=%d max=%d sched_pri=%d policy=%d depress=%d usage=%u" % (
+                int(th["priority"]), int(th["max_priority"]), int(th["sched_pri"]),
+                int(th["policy"]), int(th["depress_priority"]), int(th["sched_usage"]) & 0xffffffff))
             # A thread asleep on a mutex: who holds it, from own_thr, as
             # quiet_census does.  That census cannot speak while another
             # task polls, and this one asks no one (#889).
