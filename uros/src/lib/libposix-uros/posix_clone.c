@@ -160,7 +160,9 @@ __uros_clone(int (*fn)(void *),
      * x86-64 passes the four in registers, and its stack holds only the
      * return address.  The trampoline jumps to __uros_thread_bootstrap.
      * The TLS is installed by the parent before thread_resume (#258), so
-     * the new thread reaches it from its first instruction.
+     * the new thread reaches it from its first instruction -- on i386 only
+     * if the install worked: a failed one leaves %gs at 0x1f, and the
+     * thread is resumed all the same.
      */
     /*
      * The word the kernel zeroes at the thread's end, for
