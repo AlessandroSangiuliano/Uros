@@ -122,6 +122,21 @@ void ipc_notify_init_send_once(
 void ipc_notify_init_dead_name(
 	mach_dead_name_notification_t		*n);
 
+/*
+ * The size a notification says it has: where its trailer starts (#574).
+ *
+ * It was sizeof less the trailer, which also counts the padding the compiler
+ * puts after the trailer to round the structure up.  On x86-64
+ * mach_msg_body_t is aligned to eight, so the port-destroyed notification --
+ * the one with a body -- measured 52 that way and 48 by MIG's count, and
+ * every stub that received one refused it with MIG_BAD_ARGUMENTS: bootstrap
+ * never got a slot's receive right back from a server that died, and the
+ * right was destroyed with the refused message.  The four others measure the
+ * same either way; they are measured the same way so that none can drift.
+ */
+#define	IPC_NOTIFY_MSGH_SIZE(n)	\
+	((mach_msg_size_t)((char *)&(n)->trailer - (char *)(n)))
+
 mach_port_deleted_notification_t	ipc_notify_port_deleted_template;
 mach_port_destroyed_notification_t	ipc_notify_port_destroyed_template;
 mach_no_senders_notification_t		ipc_notify_no_senders_template;
@@ -144,7 +159,7 @@ ipc_notify_init_port_deleted(
 	m->msgh_local_port = MACH_PORT_NULL;
 	m->msgh_remote_port = MACH_PORT_NULL;
 	m->msgh_id = MACH_NOTIFY_PORT_DELETED;
-	m->msgh_size = ((int)sizeof *n) - sizeof(mach_msg_format_0_trailer_t);
+	m->msgh_size = IPC_NOTIFY_MSGH_SIZE(n);
 
 	n->not_port = MACH_PORT_NULL;
 	n->NDR = NDR_record;
@@ -171,7 +186,7 @@ ipc_notify_init_port_destroyed(
 	m->msgh_local_port = MACH_PORT_NULL;
 	m->msgh_remote_port = MACH_PORT_NULL;
 	m->msgh_id = MACH_NOTIFY_PORT_DESTROYED;
-	m->msgh_size = ((int)sizeof *n) - sizeof(mach_msg_format_0_trailer_t);
+	m->msgh_size = IPC_NOTIFY_MSGH_SIZE(n);
 
 	n->not_body.msgh_descriptor_count = 1;
 	n->not_port.disposition = MACH_MSG_TYPE_PORT_RECEIVE;
@@ -199,7 +214,7 @@ ipc_notify_init_no_senders(
 	m->msgh_local_port = MACH_PORT_NULL;
 	m->msgh_remote_port = MACH_PORT_NULL;
 	m->msgh_id = MACH_NOTIFY_NO_SENDERS;
-	m->msgh_size = ((int)sizeof *n) - sizeof(mach_msg_format_0_trailer_t);
+	m->msgh_size = IPC_NOTIFY_MSGH_SIZE(n);
 
 	n->NDR = NDR_record;
 	n->trailer.msgh_seqno = 0;
@@ -225,7 +240,7 @@ ipc_notify_init_send_once(
 	m->msgh_local_port = MACH_PORT_NULL;
 	m->msgh_remote_port = MACH_PORT_NULL;
 	m->msgh_id = MACH_NOTIFY_SEND_ONCE;
-	m->msgh_size = ((int)sizeof *n) - sizeof(mach_msg_format_0_trailer_t);
+	m->msgh_size = IPC_NOTIFY_MSGH_SIZE(n);
 	n->trailer.msgh_seqno = 0;
 	n->trailer.msgh_sender = KERNEL_SECURITY_TOKEN;
 	n->trailer.msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
@@ -248,7 +263,7 @@ ipc_notify_init_dead_name(
 	m->msgh_local_port = MACH_PORT_NULL;
 	m->msgh_remote_port = MACH_PORT_NULL;
 	m->msgh_id = MACH_NOTIFY_DEAD_NAME;
-	m->msgh_size = ((int)sizeof *n) - sizeof(mach_msg_format_0_trailer_t);
+	m->msgh_size = IPC_NOTIFY_MSGH_SIZE(n);
 
 	n->not_port = MACH_PORT_NULL;
 	n->NDR = NDR_record;
