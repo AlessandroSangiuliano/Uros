@@ -31,7 +31,10 @@
 #include "pthread_internals.h"
 #include <sys/timers.h>		/* For struct timespec and getclock(). */
 
-/* Named by what was compiled against this library's pthread.h (#733). */
+/*
+ * Named by libvfs.c when it is compiled against this pthread.h, so that only a
+ * program that links this library can link that build of it (#733).
+ */
 const char	__uros_libpthreads_abi = 1;
 
 /*

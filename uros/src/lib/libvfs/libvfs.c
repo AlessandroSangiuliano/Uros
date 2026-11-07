@@ -92,7 +92,9 @@ pthread_mutex_t                     vfs_lock = PTHREAD_MUTEX_INITIALIZER;
  * musl gets libvfs-musl, through uros_libc.
  */
 extern const char		__uros_libpthreads_abi;
-const char *const		__uros_libvfs_abi = &__uros_libpthreads_abi;
+#define	VFS_ABI_GUARD()	__asm__ volatile("" : : "r"(&__uros_libpthreads_abi))
+#else
+#define	VFS_ABI_GUARD()	((void)0)
 #endif
 static struct vfs_mount_cache_entry vfs_mounts[VFS_MAX_CACHED_MOUNTS];
 static int                          vfs_initialised;
@@ -281,6 +283,7 @@ vfs_fd_get(vfs_fd_t fd)
 int
 vfs_init(void)
 {
+    VFS_ABI_GUARD();	/* from code: no --gc-sections can drop it */
     pthread_mutex_lock(&vfs_lock);
     if (!vfs_initialised) {
         memset(vfs_fds, 0, sizeof(vfs_fds));
