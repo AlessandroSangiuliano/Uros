@@ -199,12 +199,16 @@ if(UROS_BUILD_MUSL)
 
   # 🔴 IN THE UMBRELLA MUSL'S FUNCTIONS ARE THE ONES (#733).  libmach in full
   # is the servers', with no libc under it; libmach_core is it less what musl
-  # has.  So no part may define a name musl defines, and uros_libc_check.sh
-  # fails the build on one before the archive is made: a second strchr went
-  # on for months, and which of the two a program got was the order of the
-  # archive.  The order is a second line of defence behind the check: ADDLIB
-  # puts each member in front of what is there already, so each library
+  # has.  So no part may define a name musl defines, nor two members of ours
+  # one name for good, and uros_libc_check.sh fails the build on either
+  # before the archive is made: a second strchr went on for months, and which
+  # of the two a program got was the order of the archive.  It first has to
+  # refuse a canary built to fail both, so that a check gone blind stops the
+  # build too.  The order is a second line of defence behind the check:
+  # ADDLIB puts each member in front of what is there already, so each library
   # comes out reversed and the last named, musl, comes first.
+  add_library(uros_libc_check_canary OBJECT uros_libc_check_canary.c)
+  set(UROS_LIBC_CANARY ${CMAKE_CURRENT_BINARY_DIR}/uros_libc_check_canary.a)
   set(_mri "CREATE ${UROS_LIBC_A}\n")
   set(_part_files "")
   foreach(_part IN LISTS UROS_LIBC_PARTS)
@@ -216,11 +220,18 @@ if(UROS_BUILD_MUSL)
 
   add_custom_command(
     OUTPUT ${UROS_LIBC_A}
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${UROS_LIBC_CANARY}
+    COMMAND ${CMAKE_AR} qc ${UROS_LIBC_CANARY}
+            $<TARGET_OBJECTS:uros_libc_check_canary>
+            $<TARGET_OBJECTS:uros_libc_check_canary>
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh --must-refuse
+            ${CMAKE_NM} ${MUSL_OUT} ${UROS_LIBC_CANARY}
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh ${CMAKE_NM} ${MUSL_OUT} ${_part_files}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${UROS_LIBC_A}
     COMMAND sh -c "${CMAKE_AR} -M < ${UROS_LIBC_MRI}"
     DEPENDS musl_extproj ${UROS_LIBC_PARTS} ${MUSL_OUT} ${UROS_LIBC_MRI}
             ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh
+            uros_libc_check_canary $<TARGET_OBJECTS:uros_libc_check_canary>
     COMMENT "Archiving libc-uros.a (musl + posix-uros/vfs/flipc/mach/netname/cap)"
     VERBATIM
   )
