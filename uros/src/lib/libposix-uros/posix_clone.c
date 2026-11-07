@@ -14,16 +14,15 @@
  *      descriptor at slot 4, selector 0x27 = TLS for the new thread.
  *   3. thread_set_state with eip=__uros_clone_trampoline,
  *      uesp=stack top with arg already pushed, ebp=fn, gs=selector.
- *   4. thread_resume.
- *   5. Parent returns the thread port name as the new tid; musl
- *      writes it into the pthread struct.
+ *   4. The thread port name is the new tid, written to *ptid for
+ *      CLONE_PARENT_SETTID BEFORE the thread runs (#733): musl owns
+ *      mutexes and the thread list by it.
+ *   5. thread_resume, and the tid is returned.
  *
  * Out of scope (Phase 6b/c):
- *   - CLONE_CHILD_CLEARTID + futex wake for pthread_join (busy-wait
- *     futex stub in handlers.c is enough for now)
- *   - CLONE_PARENT_SETTID for the rare path where caller wants the
- *     tid synchronously (we still write *ptid, but musl's join logic
- *     doesn't depend on it for the common case)
+ *   - a futex wake for CLONE_CHILD_CLEARTID: the kernel zeroes the
+ *     word (urmach_thread_set_cleartid) and the futex stub's waits
+ *     look again every slice
  *   - pthread_atfork hooks called from __uros_fork
  *
  * Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
@@ -125,6 +124,8 @@ __uros_thread_leaving(void)
 
 /* Linux clone(2) flag bits that musl pthread_create cares about. */
 #define UROS_CLONE_SETTLS         0x00080000
+#define UROS_CLONE_PARENT_SETTID  0x00100000
+#define UROS_CLONE_CHILD_CLEARTID 0x00200000
 
 int
 __uros_clone(int (*fn)(void *),
@@ -278,7 +279,8 @@ __uros_clone(int (*fn)(void *),
      * thread list, and the next fork() in the program stopped on that.
      */
     int tid = (int)new_thread;
-    if (ptid) *ptid = tid;
+    if ((flags & UROS_CLONE_PARENT_SETTID) && ptid)
+        *ptid = tid;
 
     /* 5. Start it. */
     kr = thread_resume(new_thread);
