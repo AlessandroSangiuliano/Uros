@@ -1,0 +1,37 @@
+Kind: ablation
+Issue: #716
+Takes out: the trailer room in mach_msg_server's receive size (d47747d3) -- it passes max_size alone again, so a request of exactly max_size bytes does not fit with its trailer: bootstrap's 176-byte get_module, in a buffer of 176
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[26\] WRONG .*: -308, not KERN_INVALID_ARGUMENT
+
+diff --git a/uros/src/lib/libmach/mach_msg_server.c b/uros/src/lib/libmach/mach_msg_server.c
+index 4403f964..7eb992c6 100644
+--- a/uros/src/lib/libmach/mach_msg_server.c
++++ b/uros/src/lib/libmach/mach_msg_server.c
+@@ -94,7 +94,7 @@ mach_msg_server_once(
+      * max_size bytes was destroyed unread, in a buffer allocated to hold it.
+      */
+     mr = mach_msg_overwrite_trap(&bufRequest->Head, MACH_RCV_MSG|options,
+-				 0, max_size + MAX_TRAILER_SIZE, rcv_name,
++				 0, max_size, rcv_name,
+ 				 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,
+ 				 (mach_msg_header_t *) 0, 0);
+     if (mr == MACH_MSG_SUCCESS) {
+@@ -211,7 +211,7 @@ mach_msg_server(
+ 	/* #716: the limit is the buffer, trailer room included; see
+ 	 * mach_msg_server_once(). */
+ 	mr = mach_msg_overwrite_trap(&bufRequest->Head, MACH_RCV_MSG|options,
+-		      0, max_size + MAX_TRAILER_SIZE, rcv_name,
++		      0, max_size, rcv_name,
+ 		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,
+ 		      (mach_msg_header_t *) 0, 0);
+ 	while (mr == MACH_MSG_SUCCESS) {
+@@ -274,7 +274,7 @@ mach_msg_server(
+ 			  MACH_SEND_MSG|MACH_RCV_MSG|options :
+ 			  MACH_SEND_MSG|MACH_SEND_TIMEOUT|MACH_RCV_MSG|options,
+ 			  bufRequest->Head.msgh_size,
+-			  max_size + MAX_TRAILER_SIZE, rcv_name,
++			  max_size, rcv_name,
+ 			  0, MACH_PORT_NULL, (mach_msg_header_t *) 0, 0);
+ 	}
+ 	if (mr == MACH_MSG_SUCCESS)

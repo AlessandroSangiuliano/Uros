@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #716
+Takes out: bootstrap_msg_size from MIG's numbers (c6337646) -- it is 128 again, and bootstrap_get_module()'s longest request, 176 bytes, is destroyed unread
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[26\] WRONG .*: -308, not KERN_INVALID_ARGUMENT
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index 57012f21..6d499705 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -210,10 +210,7 @@ thread_port_t bootstrap_data_device;
+  * destroyed by the kernel unread, and its sender told MIG_SERVER_DIED.
+  */
+ #define	BOOTSTRAP_MAX(a, b)	((a) > (b) ? (a) : (b))
+-mach_msg_size_t bootstrap_msg_size =
+-	BOOTSTRAP_MAX(do_bootstrap_subsystem_MAX_MESSAGE,
+-		      BOOTSTRAP_MAX(do_service_subsystem_MAX_MESSAGE,
+-				    do_notify_subsystem_MAX_MESSAGE));
++mach_msg_size_t bootstrap_msg_size = 128;
+ 
+ /*
+  * Set when we should ask user for server path and arguments
