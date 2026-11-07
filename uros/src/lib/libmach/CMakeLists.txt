@@ -65,7 +65,7 @@ function(uros_add_libmach_core LIB_SOURCES)
     # musl's strchr is the one in a program of musl (#733).
     "/strchr\\.c$"
     # The second crt0, i386's own, whose entry is __start: __start_mach comes
-    # from crt0.c.  This one defines environ, in front of musl's weak alias
+    # from crt0.c.  This one defines environ, strong over musl's weak alias
     # of __environ, which is the name the check stopped the i386 build on,
     # and _mach_init_routine, which mach_init.c defines as well (#733).
     "/i386/crt0\\.c$"
