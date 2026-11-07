@@ -864,9 +864,9 @@ arm_proc(void)
  * lists in a knot, and the first of them never gets out to let this arm answer.
  *
  * And none of them ends before the arm has answered.  A thread that ends goes
- * through the thread list, which one with no id can tear: in 1 boot of 4 of
- * 733-tid-after-resume under KVM this program died in pthread_exit, at a null
- * pointer, before this arm had said a word.
+ * through the thread list, which one with no id can tear: in 3 boots of 8 of
+ * 733-tid-after-resume, under KVM and TCG, this program died in pthread_exit,
+ * at a null pointer, before this arm had said a word.
  */
 #define O_THREADS	8
 
@@ -902,7 +902,7 @@ arm_own_id(void)
 {
 	pthread_mutexattr_t	attr;
 	pthread_t		th[O_THREADS];
-	int			i, rc = 0, made = 0;
+	int			i, rc = 0, made = 0, waited;
 	int			answered, nameless, refused;
 
 	(void)pthread_mutexattr_init(&attr);
@@ -915,8 +915,8 @@ arm_own_id(void)
 		if (rc == 0)
 			made++;
 	}
-	for (i = 0; i < WAIT_STEPS &&
-	     __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made; i++)
+	for (waited = 0; waited < WAIT_STEPS &&
+	     __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made; waited++)
 		pause_a_little();
 	answered = __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST);
 	nameless = __atomic_load_n(&o_nameless, __ATOMIC_SEQ_CST);
@@ -924,8 +924,8 @@ arm_own_id(void)
 	if (rc != 0)
 		verdict(24, 0, "pthread_create %d said %d", made, rc);
 	else if (answered < made)
-		verdict(24, 0, "of %d threads, %d had answered after %d s",
-			made, answered, WAIT_STEPS / 100);
+		verdict(24, 0, "of %d threads, %d had answered after %d "
+			"sleeps of 10 ms asked", made, answered, waited);
 	else
 		verdict(24, nameless == 0 && refused == 0,
 			"%d threads asked for their id as their first act, %d "
