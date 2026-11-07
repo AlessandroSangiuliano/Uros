@@ -45,6 +45,11 @@
  * still answering, the name gone, and the prefix free to mount again.  [25]
  * is the notification bootstrap was refused when the name server itself
  * died, asked of the kernel directly (mount_notify.c).
+ *
+ * [26] is [12]'s question asked of bootstrap: a request as long as its
+ * interface takes.  Both servers sized their buffers by hand, the name server
+ * at 256 and bootstrap at 128, and a subsystem's maxsize, which they could
+ * have used, is its largest reply and not its largest request (#716).
  */
 
 #include <mach.h>
@@ -52,6 +57,7 @@
 #include <mach/mig_errors.h>		/* MIG_SERVER_DIED */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
+#include <mach/bootstrap.h>		/* [26] */
 #include <mach/cap_types.h>
 #include <mach_init.h>			/* name_server_port */
 
@@ -68,7 +74,7 @@
 #include "mount_test.h"
 
 #define	MT_PREFIX	"/mount_test"
-#define	MT_ARMS		25
+#define	MT_ARMS		26
 #define	MT_WAIT_STEPS	1200		/* x 100 ms: "/" has 120 s to appear */
 
 /* #574: what `mount_test die' checks in and dies with, and the word it waits
@@ -1011,6 +1017,39 @@ main(int argc, char **argv)
 			printf("mount_test: [25] WRONG — a port-destroyed "
 			       "notification (id %d, %u bytes): %s\n", (int)id,
 			       (unsigned)size, why);
+	}
+
+	/*
+	 * [26] A bootstrap request as long as bootstrap.defs allows: two module
+	 * names of 63 characters, 176 bytes.  bootstrap received into 128, and a
+	 * longer request was destroyed unread -- MIG_SERVER_DIED -- where the
+	 * answer for a module that is not there is KERN_INVALID_ARGUMENT.
+	 */
+	{
+		char			class[64], name[64];
+		vm_offset_t		data = 0;
+		mach_msg_type_number_t	count = 0;
+
+		memset(class, 'c', sizeof class - 1);
+		class[sizeof class - 1] = '\0';
+		memset(name, 'n', sizeof name - 1);
+		name[sizeof name - 1] = '\0';
+		kr = bootstrap_get_module(bootstrap_port, class, name, &data,
+					  &count);
+		if (kr == KERN_SUCCESS && count > 0)
+			(void)vm_deallocate(mach_task_self(), data, count);
+		mt_result(kr == KERN_INVALID_ARGUMENT);
+		if (kr == KERN_INVALID_ARGUMENT)
+			printf("mount_test: [26] a bootstrap request as long as "
+			       "its interface takes, two names of %u "
+			       "characters, is answered: KERN_INVALID_ARGUMENT, "
+			       "no such module\n", (unsigned)(sizeof class - 1));
+		else
+			printf("mount_test: [26] WRONG — a bootstrap request as "
+			       "long as its interface takes: %d, not "
+			       "KERN_INVALID_ARGUMENT (%d)%s\n", kr,
+			       KERN_INVALID_ARGUMENT, kr == MIG_SERVER_DIED ?
+			       ": bootstrap never saw it" : "");
 	}
 
 	if (have_root)
