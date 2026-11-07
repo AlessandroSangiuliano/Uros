@@ -857,23 +857,25 @@ arm_proc(void)
  * so, EPERM, where the others let it pass.  So the first thing each of these
  * does is to take one, and it holds it for longer than a parent takes to
  * return.  It runs before the arms that make threads in earnest, because
- * what this leaves behind stops them.
+ * what this leaves behind stops them.  A mutex each: one refused and left on a
+ * thread's robust list, then taken by the next thread, ties the two lists in
+ * a knot, and the first of them never gets out to let this arm answer.
  */
 #define O_THREADS	8
 
-static pthread_mutex_t	o_lock;
+static pthread_mutex_t	o_lock[O_THREADS];
 static int		o_refused;
 
 static void *
 own_id_thread(void *arg)
 {
-	int	rc;
+	pthread_mutex_t	*m = arg;
+	int		rc;
 
-	(void)arg;
-	rc = pthread_mutex_lock(&o_lock);
+	rc = pthread_mutex_lock(m);
 	if (rc == 0) {
 		pause_a_little();
-		rc = pthread_mutex_unlock(&o_lock);
+		rc = pthread_mutex_unlock(m);
 	}
 	if (rc != 0)
 		__atomic_add_fetch(&o_refused, 1, __ATOMIC_SEQ_CST);
@@ -889,10 +891,11 @@ arm_own_id(void)
 
 	(void)pthread_mutexattr_init(&attr);
 	(void)pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-	(void)pthread_mutex_init(&o_lock, &attr);
+	for (i = 0; i < O_THREADS; i++)
+		(void)pthread_mutex_init(&o_lock[i], &attr);
 	(void)pthread_mutexattr_destroy(&attr);
 	for (i = 0; i < O_THREADS; i++) {
-		if (pthread_create(&th[i], NULL, own_id_thread, NULL) != 0)
+		if (pthread_create(&th[i], NULL, own_id_thread, &o_lock[i]) != 0)
 			break;
 		made++;
 	}
