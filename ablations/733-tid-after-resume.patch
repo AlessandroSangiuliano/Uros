@@ -4,7 +4,7 @@ Over: 733-widen-parent-late.patch
 Takes out: writing a new thread's id before it runs: it goes in after thread_resume() again
 Accel: tcg,kvm
 Run: --entry 14 120 -smp 4
-Expect: musl_test: \[24\] WRONG -- [0-9]+ threads took an error-checking mutex as their first act, and [1-9][0-9]* were refused it back
+Expect: musl_test: \[24\] WRONG -- [0-9]+ threads asked for their id as their first act, [1-9][0-9]* got none
 
 diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
 index f4be1200..058ce666 100644
