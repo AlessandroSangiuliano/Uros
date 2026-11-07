@@ -49,7 +49,33 @@ add_custom_command(
   VERBATIM
 )
 
-add_executable(mount_test_bin mount_test.c mount_liar.c ${VFS_SERVER_C})
+# #574: the server half of notify.defs, for [25], which hands a port-destroyed
+# notification the kernel sent to the stub MIG generates for it -- the stub
+# bootstrap's refused every one of on x86-64.
+set(NOTIFY_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/notify_server.c)
+set(NOTIFY_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/notify_server.h)
+add_custom_command(
+  OUTPUT ${NOTIFY_SERVER_C} ${NOTIFY_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    ${UROS_MIG_TARGET_ARGS}
+    -I${UROS_UAPI_DIR}
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -header /dev/null
+    -sheader ${NOTIFY_SERVER_H}
+    -user /dev/null
+    -server ${NOTIFY_SERVER_C}
+    ${UROS_UAPI_DIR}/mach/notify.defs
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${UROS_UAPI_DIR}/mach/notify.defs
+  COMMENT "MIG: notify.defs (server stubs for mount_test's [25])"
+  VERBATIM
+)
+
+add_executable(mount_test_bin mount_test.c mount_liar.c mount_notify.c
+               ${VFS_SERVER_C} ${NOTIFY_SERVER_C})
 
 set_source_files_properties(${VFS_SERVER_C} PROPERTIES
   COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/liar_names.h")

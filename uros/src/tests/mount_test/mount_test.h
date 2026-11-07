@@ -41,4 +41,12 @@ const char *liar_start(mach_port_t port);
 /* Create the FLIPC endpoint and accept on it.  NULL, or what failed. */
 const char *liar_flipc_start(void);
 
+/*
+ * #574: a port-destroyed notification, sent by the kernel to this task and
+ * handed to the stub MIG generates for it (mount_notify.c).  NULL when the
+ * stub took it and the receive right came back; else what went wrong.  The
+ * id and the size the message said it had, as they arrived.
+ */
+const char *mt_port_destroyed(mach_msg_id_t *id, mach_msg_size_t *size);
+
 #endif /* MOUNT_TEST_H */

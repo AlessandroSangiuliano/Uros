@@ -32,10 +32,24 @@
  * Mach path and the FLIPC path, each shown to be the path that answered --
  * and without them the refusals after each could pass on a path never taken.
  * [20] checks the mount out, which is the control for [11].
+ *
+ * ── A server that dies registered (#574) ──
+ *
+ * `mount_test die' is the same program on a line of its own: it checks a name
+ * and a mount in and terminates itself with both checked in, which is what a
+ * server that faults leaves behind.  The name server kept the mounts of a
+ * port that died -- the next look-up of one killed it -- and since #716
+ * nobody could check such a record out.  [21] is the presence: the mount
+ * there, then the death, seen as this task's right to its port turning dead.
+ * [22] to [24] are what must follow: the mount gone with the name server
+ * still answering, the name gone, and the prefix free to mount again.  [25]
+ * is the notification bootstrap was refused when the name server itself
+ * died, asked of the kernel directly (mount_notify.c).
  */
 
 #include <mach.h>
 #include <mach/message.h>
+#include <mach/mig_errors.h>		/* MIG_SERVER_DIED */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
@@ -54,8 +68,14 @@
 #include "mount_test.h"
 
 #define	MT_PREFIX	"/mount_test"
-#define	MT_ARMS		20
+#define	MT_ARMS		25
 #define	MT_WAIT_STEPS	1200		/* x 100 ms: "/" has 120 s to appear */
+
+/* #574: what `mount_test die' checks in and dies with, and the word it waits
+ * for from the main run before it dies. */
+#define	MT_DEAD_PREFIX	"/mount_test_dead"
+#define	MT_DEAD_NAME	"mount_test_dead"
+#define	MT_SEEN_NAME	"mount_test_seen"
 
 static int	passed, arms;
 
@@ -154,6 +174,204 @@ mt_print_buf(char *out, size_t size)
 	out[i] = '\0';
 }
 
+/*
+ * `mount_test die' (#574): check a name and a mount in, both signed, wait for
+ * the main run to say it has seen the mount, and terminate this task with both
+ * still checked in -- no exit path and no cleanup, as a server that faults.
+ */
+static int
+mt_die(void)
+{
+	mach_port_t	port = MACH_PORT_NULL, sig = MACH_PORT_NULL, seen;
+	struct uros_cap	tok;
+	char		blob[CAP_TOKEN_MAX];
+	kern_return_t	km = KERN_FAILURE, kn = KERN_FAILURE;
+	unsigned int	step;
+
+	printf("mount_test (die): started (#574)\n");
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &port) == KERN_SUCCESS &&
+	    mach_port_insert_right(mach_task_self(), port, port,
+				   MACH_MSG_TYPE_MAKE_SEND) == KERN_SUCCESS &&
+	    urmach_netname_signature(&sig) == KERN_SUCCESS) {
+		km = cap_request(RESOURCE_MOUNT_POINT,
+				 cap_name_hash(MT_DEAD_PREFIX),
+				 CAP_OP_MOUNT_REGISTER, 0, &tok);
+		if (km == KERN_SUCCESS) {
+			memcpy(blob, &tok, sizeof tok);
+			km = netname_check_in_mount(name_server_port,
+						    MT_DEAD_PREFIX, sig, port,
+						    blob,
+						    (mach_msg_type_number_t)
+						    sizeof tok);
+		}
+		kn = netname_check_in(name_server_port, MT_DEAD_NAME, sig,
+				      port);
+	}
+	if (km == KERN_SUCCESS && kn == KERN_SUCCESS)
+		printf("mount_test (die): " MT_DEAD_PREFIX " and \""
+		       MT_DEAD_NAME "\" checked in\n");
+	else
+		printf("mount_test (die): WRONG — the mount: %d, the name: %d\n",
+		       km, kn);
+
+	for (step = 0; step < MT_WAIT_STEPS; step++) {
+		seen = MACH_PORT_NULL;
+		if (netname_look_up(name_server_port, "", MT_SEEN_NAME, &seen)
+		    == NETNAME_SUCCESS) {
+			(void)mach_port_deallocate(mach_task_self(), seen);
+			break;
+		}
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	}
+	if (step == MT_WAIT_STEPS)
+		printf("mount_test (die): WRONG — the main run never said it "
+		       "had seen the mount, after %u s\n", MT_WAIT_STEPS / 10);
+	printf("mount_test (die): dying with both still checked in\n");
+	(void)task_terminate(mach_task_self());
+	return 1;
+}
+
+/*
+ * [21] to [24] (#574), with this run's signature and the spare port it mounts
+ * with.  See the top of this file.
+ */
+static void
+mt_death_arms(mach_port_t sig, mach_port_t other)
+{
+	netname_name_t	matched;
+	mach_port_t	dead = MACH_PORT_NULL, got;
+	mach_port_type_t type;
+	struct uros_cap	tok;
+	char		blob[CAP_TOKEN_MAX];
+	kern_return_t	kr = KERN_FAILURE;
+	unsigned int	step;
+	int		seen = 0, signalled = 0, died = 0;
+
+	/* [21] The mount, then its server's death. */
+	for (step = 0; step < MT_WAIT_STEPS; step++) {
+		dead = MACH_PORT_NULL;
+		matched[0] = '\0';
+		kr = netname_look_up_mount(name_server_port,
+					   MT_DEAD_PREFIX "/x", &dead, matched);
+		if (kr == NETNAME_SUCCESS && MACH_PORT_VALID(dead) &&
+		    strcmp(matched, MT_DEAD_PREFIX) == 0) {
+			seen = 1;
+			break;
+		}
+		if (kr == NETNAME_SUCCESS && MACH_PORT_VALID(dead))
+			(void)mach_port_deallocate(mach_task_self(), dead);
+		dead = MACH_PORT_NULL;
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	}
+	if (seen)
+		signalled = (netname_check_in(name_server_port, MT_SEEN_NAME,
+					      sig, other) == NETNAME_SUCCESS);
+	for (step = 0; signalled && step < MT_WAIT_STEPS; step++) {
+		if (mach_port_type(mach_task_self(), dead, &type)
+		    == KERN_SUCCESS && (type & MACH_PORT_TYPE_DEAD_NAME)) {
+			died = 1;
+			break;
+		}
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	}
+	mt_result(died);
+	if (died)
+		printf("mount_test: [21] " MT_DEAD_PREFIX " was mounted by "
+		       "`mount_test die', which then terminated with it "
+		       "checked in: this task's right to its port is dead\n");
+	else
+		printf("mount_test: [21] WRONG — %s\n",
+		       !seen ? "`mount_test die' never mounted " MT_DEAD_PREFIX
+		       : !signalled ? "could not check \"" MT_SEEN_NAME "\" in "
+		       "to let it die" : "its port never died");
+
+	/* [22] The mount went with its server, and the name server answers. */
+	if (!died) {
+		printf("mount_test: [22] WRONG — not asked: no death\n");
+		mt_result(0);
+	} else {
+		for (step = 0; step < 50; step++) {
+			kr = mt_look_up(MT_DEAD_PREFIX "/x", &got, matched);
+			if (kr != NETNAME_SUCCESS ||
+			    strcmp(matched, MT_DEAD_PREFIX) != 0)
+				break;
+			thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+		}
+		if (kr == NETNAME_SUCCESS && strcmp(matched, "/") == 0) {
+			printf("mount_test: [22] after its server's death "
+			       MT_DEAD_PREFIX "/x resolves to \"/\": the mount "
+			       "went with it, and the name server answers\n");
+			mt_result(1);
+		} else {
+			printf("mount_test: [22] WRONG — after its server's death "
+			       "a look-up under " MT_DEAD_PREFIX ": %d, matched "
+			       "\"%s\"%s\n", kr, matched,
+			       kr == MIG_SERVER_DIED ? ": the name server died "
+			       "answering it" : "");
+			mt_result(0);
+		}
+	}
+
+	/* [23] The name went with it too. */
+	if (!died) {
+		printf("mount_test: [23] WRONG — not asked: no death\n");
+		mt_result(0);
+	} else {
+		got = MACH_PORT_NULL;
+		kr = netname_look_up(name_server_port, "", MT_DEAD_NAME, &got);
+		if (kr == NETNAME_SUCCESS && MACH_PORT_VALID(got))
+			(void)mach_port_deallocate(mach_task_self(), got);
+		if (kr == NETNAME_NOT_CHECKED_IN) {
+			printf("mount_test: [23] \"" MT_DEAD_NAME "\" is gone "
+			       "with its server: NETNAME_NOT_CHECKED_IN\n");
+			mt_result(1);
+		} else {
+			printf("mount_test: [23] WRONG — \"" MT_DEAD_NAME "\" "
+			       "after its server's death: %d, not "
+			       "NETNAME_NOT_CHECKED_IN (%d)\n", kr,
+			       NETNAME_NOT_CHECKED_IN);
+			mt_result(0);
+		}
+	}
+
+	/* [24] And the prefix is free: this run mounts it, and takes it out. */
+	if (!died) {
+		printf("mount_test: [24] WRONG — not asked: no death\n");
+		mt_result(0);
+	} else {
+		kr = cap_request(RESOURCE_MOUNT_POINT,
+				 cap_name_hash(MT_DEAD_PREFIX),
+				 CAP_OP_MOUNT_REGISTER, 0, &tok);
+		if (kr == KERN_SUCCESS) {
+			memcpy(blob, &tok, sizeof tok);
+			kr = netname_check_in_mount(name_server_port,
+						    MT_DEAD_PREFIX, sig, other,
+						    blob,
+						    (mach_msg_type_number_t)
+						    sizeof tok);
+		}
+		if (kr == NETNAME_SUCCESS &&
+		    netname_check_out_mount(name_server_port, MT_DEAD_PREFIX,
+					    sig) == NETNAME_SUCCESS) {
+			printf("mount_test: [24] " MT_DEAD_PREFIX " mounted again "
+			       "by this task, and checked out\n");
+			mt_result(1);
+		} else {
+			printf("mount_test: [24] WRONG — " MT_DEAD_PREFIX " "
+			       "mounted again by this task: %d%s\n", kr,
+			       kr == NETNAME_MOUNT_EXISTS ? ", the dead server's "
+			       "mount still in the way" : "");
+			mt_result(0);
+		}
+	}
+
+	if (signalled)
+		(void)netname_check_out(name_server_port, MT_SEEN_NAME, sig);
+	if (MACH_PORT_VALID(dead))
+		(void)mach_port_deallocate(mach_task_self(), dead);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -168,7 +386,9 @@ main(int argc, char **argv)
 	unsigned int	step;
 	char		shown[LIAR_SIZE + 1];
 
-	(void)argc; (void)argv;
+	if (argc > 1 && argv != NULL && argv[1] != NULL &&
+	    strcmp(argv[1], "die") == 0)
+		return mt_die();
 	printf("mount_test: started (#716)\n");
 	memset(tok_blob, 0, sizeof tok_blob);
 
@@ -769,6 +989,28 @@ main(int argc, char **argv)
 			       "it now matches \"%s\"\n", kr, matched);
 			mt_result(0);
 		}
+	}
+
+	mt_death_arms(sig, other);
+
+	/*
+	 * [25] The notification that brings a dead server's receive right back
+	 * to whoever lent it, through the stub that receives it (mount_notify.c).
+	 */
+	{
+		mach_msg_id_t	id;
+		mach_msg_size_t	size;
+
+		why = mt_port_destroyed(&id, &size);
+		mt_result(why == NULL);
+		if (why == NULL)
+			printf("mount_test: [25] a port-destroyed notification "
+			       "(id %d, %u bytes) reached its MIG handler with "
+			       "the receive right\n", (int)id, (unsigned)size);
+		else
+			printf("mount_test: [25] WRONG — a port-destroyed "
+			       "notification (id %d, %u bytes): %s\n", (int)id,
+			       (unsigned)size, why);
 	}
 
 	if (have_root)
