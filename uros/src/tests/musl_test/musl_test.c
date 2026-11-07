@@ -895,8 +895,15 @@ arm_own_id(void)
 		(void)pthread_mutex_init(&o_lock[i], &attr);
 	(void)pthread_mutexattr_destroy(&attr);
 	for (i = 0; i < O_THREADS; i++) {
-		if (pthread_create(&th[i], NULL, own_id_thread, &o_lock[i]) != 0)
-			break;
+		int	rc = pthread_create(&th[i], NULL, own_id_thread,
+					    &o_lock[i]);
+
+		if (rc != 0) {
+			for (; made > 0; made--)
+				(void)pthread_join(th[made - 1], NULL);
+			verdict(24, 0, "pthread_create %d said %d", i, rc);
+			return;
+		}
 		made++;
 	}
 	for (i = 0; i < made; i++)
