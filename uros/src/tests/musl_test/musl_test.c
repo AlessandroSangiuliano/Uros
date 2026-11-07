@@ -850,6 +850,62 @@ arm_proc(void)
 }
 
 /*
+ * ── [24] A thread knows who it is from its first instruction ───────────
+ *
+ * musl owns a mutex by the thread's id, so a thread that took one before it
+ * had an id could not give it back once it had: an error-checking mutex says
+ * so, EPERM, where the others let it pass.  So the first thing each of these
+ * does is to take one, and it holds it for longer than a parent takes to
+ * return.  It runs before the arms that make threads in earnest, because
+ * what this leaves behind stops them.
+ */
+#define O_THREADS	8
+
+static pthread_mutex_t	o_lock;
+static int		o_refused;
+
+static void *
+own_id_thread(void *arg)
+{
+	int	rc;
+
+	(void)arg;
+	rc = pthread_mutex_lock(&o_lock);
+	if (rc == 0) {
+		pause_a_little();
+		rc = pthread_mutex_unlock(&o_lock);
+	}
+	if (rc != 0)
+		__atomic_add_fetch(&o_refused, 1, __ATOMIC_SEQ_CST);
+	return NULL;
+}
+
+static void
+arm_own_id(void)
+{
+	pthread_mutexattr_t	attr;
+	pthread_t		th[O_THREADS];
+	int			i, made = 0;
+
+	(void)pthread_mutexattr_init(&attr);
+	(void)pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+	(void)pthread_mutex_init(&o_lock, &attr);
+	(void)pthread_mutexattr_destroy(&attr);
+	for (i = 0; i < O_THREADS; i++) {
+		if (pthread_create(&th[i], NULL, own_id_thread, NULL) != 0)
+			break;
+		made++;
+	}
+	for (i = 0; i < made; i++)
+		(void)pthread_join(th[i], NULL);
+	verdict(24, made == O_THREADS
+		&& __atomic_load_n(&o_refused, __ATOMIC_SEQ_CST) == 0,
+		"%d threads took an error-checking mutex as their first act, "
+		"and %d were refused it back", made,
+		__atomic_load_n(&o_refused, __ATOMIC_SEQ_CST));
+}
+
+/*
  * ── [22] Threads in the servers at once ─────────────────────────────────
  *
  * Four kinds of request to two servers, from four threads, so that a reply that
@@ -1092,6 +1148,7 @@ main(int argc, char **argv)
 	arm_malloc();
 	arm_mmap();
 	arm_tls();
+	arm_own_id();
 	arm_threads();
 	arm_detached();
 	arm_signals();
