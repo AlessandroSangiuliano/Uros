@@ -489,6 +489,12 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/blk_write_label_test)
 endif()
 
+# The kernel's log, written to a file on the partition that machine keeps its
+# boot log on (#915): bootstrap_bundle_log again.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/bootlog)
+endif()
+
 # What the HAL says about a device's regions, and whether one above four
 # gigabytes can be reached (#427).
 #
