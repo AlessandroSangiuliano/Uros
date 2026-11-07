@@ -426,6 +426,22 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 		if (kr == KERN_SUCCESS)
 			resource_id = alias_id;
 	}
+	/*
+	 * #915: and a third, "label:UROSLOG", where the partition is published
+	 * under its label: a client that found it by the label asks cap_server
+	 * for a capability on that name, and a manifest can grant that
+	 * partition and no other by it, whatever its position.
+	 */
+	if (kr != KERN_SUCCESS && part->label_published) {
+		char lname[sizeof("label:") + sizeof(part->label)];
+		uint64_t label_id;
+
+		snprintf(lname, sizeof(lname), "label:%s", part->label);
+		label_id = cap_name_hash(lname);
+		kr = blk_token_check(&token, RESOURCE_BLK_DEVICE, op, label_id);
+		if (kr == KERN_SUCCESS)
+			resource_id = label_id;
+	}
 	if (kr != KERN_SUCCESS) {
 		/*
 		 * ⚠️ "refused", not "FAIL".  Turning away a token that does not

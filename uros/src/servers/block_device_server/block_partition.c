@@ -335,8 +335,10 @@ blk_register_partitions(void)
 		if (kr != KERN_SUCCESS)
 			printf("blk: netname_check_in(%s) failed (kr=%d)\n",
 			       lname, kr);
-		else
+		else {
+			part->label_published = 1;
 			printf("blk: registered '%s' -> '%s' (#915)\n", lname,
 			       part->name);
+		}
 	}
 }

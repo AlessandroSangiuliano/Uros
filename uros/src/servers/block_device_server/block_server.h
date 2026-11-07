@@ -298,6 +298,7 @@ struct blk_partition {
 	int		is_ext2;
 	char		label[17];
 	int		said_write_refused;	/* the refusal is said once */
+	int		label_published;	/* #915: as "label:<label>" too */
 };
 
 /*
