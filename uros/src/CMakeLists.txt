@@ -482,6 +482,13 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/dma_reclaim_test)
 endif()
 
+# The block server's -W, a write right only for the partition with the label
+# it names (#915): in the bundle for a real machine that keeps its boot log on
+# a disk, bootstrap_bundle_log.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/blk_write_label_test)
+endif()
+
 # What the HAL says about a device's regions, and whether one above four
 # gigabytes can be reached (#427).
 #
