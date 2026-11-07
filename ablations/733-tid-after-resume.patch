@@ -1,36 +1,33 @@
 Kind: ablation
 Issue: #733
-Takes out: writing a new thread's id before it runs: the id goes in after thread_resume() again, and the parent takes 5 ms to get there, so that a thread's first mutex is taken as 0 and given back as itself
+Over: 733-widen-parent-late.patch
+Takes out: writing a new thread's id before it runs: it goes in after thread_resume() again
 Accel: tcg,kvm
 Run: --entry 14 120 -smp 4
 Expect: musl_test: \[24\] WRONG -- [0-9]+ threads took an error-checking mutex as their first act, and [1-9][0-9]* were refused it back
 
 diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
-index 4b15a853..b46aa53d 100644
+index 098a2b36..4b50184c 100644
 --- a/uros/src/lib/libposix-uros/posix_clone.c
 +++ b/uros/src/lib/libposix-uros/posix_clone.c
-@@ -277,9 +277,6 @@ __uros_clone(int (*fn)(void *),
+@@ -288,10 +288,6 @@ __uros_clone(int (*fn)(void *),
       * thread then went round that list for ever on its way out, holding the
       * thread list, and the next fork() in the program stopped on that.
       */
 -    int tid = (int)new_thread;
--    if (ptid) *ptid = tid;
+-    if ((flags & UROS_CLONE_PARENT_SETTID) && ptid)
+-        *ptid = tid;
 -
      /* 5. Start it. */
      kr = thread_resume(new_thread);
      if (kr != KERN_SUCCESS) {
-@@ -288,6 +285,14 @@ __uros_clone(int (*fn)(void *),
-         return -11;
+@@ -306,6 +302,9 @@ __uros_clone(int (*fn)(void *),
+         while (__builtin_ia32_rdtsc() - t0 < 15000000ull)
+             ;
      }
-     TRACE("thread_resume ok");
-+    {
-+        unsigned long long t0 = __builtin_ia32_rdtsc();
-+
-+        while (__builtin_ia32_rdtsc() - t0 < 15000000ull)
-+            ;
-+    }
 +    int tid = (int)new_thread;
-+    if (ptid) *ptid = tid;
++    if ((flags & UROS_CLONE_PARENT_SETTID) && ptid)
++        *ptid = tid;
  
      /* ctid is passed through to the bootstrap on the new thread's
       * stack — it registers it with urmach_thread_set_cleartid so the
