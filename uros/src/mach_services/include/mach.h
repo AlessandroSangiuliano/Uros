@@ -153,8 +153,13 @@ extern kern_return_t		vm_read_overwrite(mach_port_t,
 						  vm_address_t,
 						  vm_size_t *);
 
-/* intptr_t, as musl's <unistd.h> says it: the two meet in one program (#414). */
-extern void			*sbrk(intptr_t);
+/*
+ * intptr_t, as musl's <unistd.h> says it: the two meet in one program (#414).
+ * Spelled as the compiler's own type, which is what musl's intptr_t is on
+ * both targets, because this header is read with no <stdint.h> before it:
+ * sa_mach has none, and posix_time.c reaches it first (i386).
+ */
+extern void			*sbrk(__INTPTR_TYPE__);
 
 extern int			 brk(void *);
 
