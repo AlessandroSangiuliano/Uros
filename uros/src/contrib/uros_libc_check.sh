@@ -7,15 +7,51 @@
 # So no part may define a name that musl defines: a second strchr in
 # libmach_core went on for months, and which of the two a program got was the
 # order of an archive.  Nor may two members of ours both define one for good,
-# weak beside strong being the only pair a link settles by itself: the first
-# reference would pull whichever the index lists first, and a link that came to
-# need the other as well would stop.  Fails, naming each name and where it is.
+# weak beside strong and two commons being the pairs a link settles by itself:
+# the first reference would pull whichever the index lists first, and a link
+# that came to need the other as well would stop.  Fails, naming each name and
+# where it is.
+#
+# uros_libc_check.sh --must-refuse NM MUSL_ARCHIVE CANARY_ARCHIVE -- the same
+# check, on an archive made to fail both halves of it, every build: it must say
+# so, or the check has gone blind and the build stops.  The canary holds
+# uros_libc_check_canary.c's object twice under one name, which defines strchr
+# and uros_libc_check_canary.
 #
 # The i386 PIC thunks (__x86.get_pc_thunk.*) are in COMDAT groups that the
 # linker folds into one, so two definitions of them are not two functions.
+if [ "$1" = --must-refuse ]; then
+	shift
+	said=$(sh "$0" "$@" 2>&1 >/dev/null)
+	rc=$?
+	case $said in
+	*"defines what musl defines: "*"strchr "*) ;;
+	*) rc=0 ;;
+	esac
+	case $said in
+	*"two of ours define uros_libc_check_canary for good"*) ;;
+	*) rc=0 ;;
+	esac
+	if [ "$rc" != 1 ]; then
+		echo "uros_libc_check: the canary got through, so the check is blind: $said" >&2
+		exit 2
+	fi
+	exit 0
+fi
+
 nm=$1
 musl=$2
 shift 2
+# nm -A puts the archive's path in front of each line it prints, and a path
+# with a space in it would split that line into other fields.
+tab=$(printf '\t')
+for a in "$musl" "$@"; do
+	case $a in
+	*" "* | *"$tab"*)
+		echo "uros_libc_check: $a has a space in its path, which nm -A's lines cannot carry" >&2
+		exit 2 ;;
+	esac
+done
 t=$(mktemp -d) || exit 2
 trap 'rm -rf "$t"' EXIT
 
@@ -53,8 +89,10 @@ for part in "$@"; do
 	fi
 done
 
-# Strong is everything but weak (W, V) and common (C), which merges.
-awk '$2 ~ /^[ABDIRTiu]$/ { print $1, $3 }' "$t/ours" | sort -u |
+# Strong is everything but weak (W, V) and common (C), which merges.  One line
+# a member and a name, so two members with one name count as two: the i386
+# libmach.a holds two crt0.c.o.
+awk '$2 ~ /^[ABDIRTiu]$/ { print $1, $3 }' "$t/ours" |
 	awk '{ n[$1]++; where[$1] = where[$1] " " $2 }
 	     END { for (s in n) if (n[s] > 1) print s ":" where[s] }' |
 	sort > "$t/twice"
