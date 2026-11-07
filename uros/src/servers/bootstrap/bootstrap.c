@@ -66,6 +66,8 @@
 #include <mach/module_pool.h>
 #include "bundle.h"
 #include <mach/bootstrap_server.h>
+#include <mach/notify_server.h>		/* #716: bootstrap_msg_size */
+#include "serviceServer.h"		/* #716: bootstrap_msg_size */
 
 #include <device/device_types.h>
 #include <device/device.h>
@@ -201,9 +203,17 @@ security_token_t        bootstrap_security_token;
 thread_port_t bootstrap_data_device;
 
 /*
- * Maximum message size for mach_msg_server.
+ * Maximum message size for mach_msg_server: the largest message, request or
+ * reply, of the three subsystems bootstrap_demux() serves, as MIG sized them
+ * (#716).  It was 128, written here, and bootstrap_get_module() takes a
+ * request of up to 176 bytes, two names of 64: one with long names was
+ * destroyed by the kernel unread, and its sender told MIG_SERVER_DIED.
  */
-mach_msg_size_t bootstrap_msg_size = 128;
+#define	BOOTSTRAP_MAX(a, b)	((a) > (b) ? (a) : (b))
+mach_msg_size_t bootstrap_msg_size =
+	BOOTSTRAP_MAX(do_bootstrap_subsystem_MAX_MESSAGE,
+		      BOOTSTRAP_MAX(do_service_subsystem_MAX_MESSAGE,
+				    do_notify_subsystem_MAX_MESSAGE));
 
 /*
  * Set when we should ask user for server path and arguments
