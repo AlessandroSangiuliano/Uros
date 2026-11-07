@@ -203,13 +203,14 @@ if(UROS_BUILD_MUSL)
   # one name for good, and uros_libc_check.sh fails the build on either
   # before the archive is made: a second strchr went on for months, and which
   # of the two a program got was the order of the archive.  It first has to
-  # refuse a canary, three parts made to fail it with T, B, R, C and D
+  # refuse a canary, three parts made to fail it with T, B, R, C, D and weak
   # definitions of ours against musl's strong, weak-only, weak-object,
   # read-only and data names, across parts, between two and three members that
   # share a name, and each half alone, as uros_libc_check.sh lists; so a check
-  # gone blind in one of those ways stops the build too.  The order is a second line of defence behind the check:
-  # ADDLIB puts each member in front of what is there already, so each library
-  # comes out reversed and the last named, musl, comes first.
+  # gone blind in one of those ways stops the build too.  The order is a second
+  # line of defence behind the check: ADDLIB puts each member in front of what
+  # is there already, so each library comes out reversed and the last named,
+  # musl, comes first.
   add_library(uros_libc_check_canary OBJECT uros_libc_check_canary.c)
   add_library(uros_libc_check_canary_pair OBJECT uros_libc_check_canary_pair.c)
   target_compile_options(uros_libc_check_canary PRIVATE ${UROS_ARCH_FLAGS} -fno-common)

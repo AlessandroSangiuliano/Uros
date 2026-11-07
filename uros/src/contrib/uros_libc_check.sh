@@ -17,14 +17,17 @@
 # uros_libc_check_canary.c's object goes once into the first and the second,
 # and uros_libc_check_canary_pair.c's twice under one member name into the
 # second and three times into the third.  On the first two, each part must be
-# named in a musl line holding all six of the canary's musl names -- strong,
-# weak only, weak object, read-only, data -- and the check must say seven names
+# named in a musl line holding all seven of the canary's musl names -- strong,
+# weak only, weak object, read-only, data, one of them defined weak by the
+# canary itself -- and the check must say seven names
 # of ours are defined twice, each in exactly two members: six as pairs across
 # the parts, the pair's name as two members that share a name.  Neither the
-# common nor the canary's look-alike of a PIC thunk is among them.  On the
+# common, nor the weak one, nor the canary's look-alike of a PIC thunk is among
+# them.  On the
 # first alone only the musl half may speak; on the third alone only the other,
 # for the pair's name in its three members; each must fail the check by
-# itself.  A check that has stopped reading one of T, B, D, R, C, V or W, or a
+# itself.  A check that has stopped reading one of T, B, D, R, C, V or W, on
+# either side, or a
 # part after the first, or a pair across parts, or a member that shares a name,
 # that wants more than two or exactly two, that counts commons as strong, that
 # has widened or lost the thunk filter, or with a half that prints and no
@@ -36,7 +39,7 @@
 if [ "$1" = --must-refuse ]; then
 	shift
 	nm=$1 musl=$2 c1=$3 c2=$4 c3=$5
-	# run WHERE PART... -- "status, musl lines holding all six names, other
+	# run WHERE PART... -- "status, musl lines holding all seven names, other
 	# musl lines, lines of ours defined twice, those that are one of the
 	# canary's seven names in exactly WHERE members", for the check on musl
 	# and those parts.
@@ -52,7 +55,8 @@ if [ "$1" = --must-refuse ]; then
 		printf '%s\n' "$said" | awk -v rc="$rc" -v where="$where" '
 			/defines what musl defines: / {
 				if (/ __errno_location / && / environ / && / in6addr_any / &&
-				    / malloc / && / optind / && / strchr /)
+				    / malloc / && / optind / && / pthread_create / &&
+				    / strchr /)
 					musl++
 				else
 					other++
