@@ -265,7 +265,22 @@ __uros_clone(int (*fn)(void *),
     }
     TRACE("thread_set_state ok");
 
-    /* 4. Start it. */
+    /*
+     * 4. Use the Mach thread port name as the tid.  musl wants a
+     * non-negative int; port names fit comfortably.
+     *
+     * 🔴 BEFORE THE THREAD RUNS, as CLONE_PARENT_SETTID is (#733).  musl
+     * reads self->tid to own a mutex and to take the thread list, and a
+     * thread that got there first did both as nobody.  An owner-tracked
+     * mutex taken as 0 and given back as itself answers EPERM and stays on
+     * the robust list, and the next lock of it links it to itself.  The
+     * thread then went round that list for ever on its way out, holding the
+     * thread list, and the next fork() in the program stopped on that.
+     */
+    int tid = (int)new_thread;
+    if (ptid) *ptid = tid;
+
+    /* 5. Start it. */
     kr = thread_resume(new_thread);
     if (kr != KERN_SUCCESS) {
         TRACE("thread_resume failed");
@@ -274,10 +289,6 @@ __uros_clone(int (*fn)(void *),
     }
     TRACE("thread_resume ok");
 
-    /* 5. Use the Mach thread port name as the tid.  musl wants a
-     * non-negative int; port names fit comfortably. */
-    int tid = (int)new_thread;
-    if (ptid) *ptid = tid;
     /* ctid is passed through to the bootstrap on the new thread's
      * stack — it registers it with urmach_thread_set_cleartid so the
      * kernel clears *ctid on thread_terminate (#257). */
