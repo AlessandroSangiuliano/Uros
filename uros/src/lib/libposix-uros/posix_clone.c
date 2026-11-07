@@ -63,11 +63,11 @@ extern int __uros_install_thread_tls_at(mach_port_t target_thread,
 #define UROS_SWITCH_OPTION_NONE 0
 extern void   _exit(int);
 
-/* Kernel half of CLONE_CHILD_CLEARTID — see issue #257.  Registers a
- * user address that the kernel zeroes when the calling thread
- * terminates, so a joiner polling on it observes the exit even though
- * our futex stub doesn't queue waiters. */
-extern int    urmach_thread_set_cleartid(unsigned long addr);
+/* urmach_thread_set_cleartid() is the kernel half of CLONE_CHILD_CLEARTID
+ * (#257): it registers a user address that the kernel zeroes when the
+ * calling thread terminates, so a joiner polling on it observes the exit
+ * even though our futex stub doesn't queue waiters.  Declared by
+ * <mach/mach_syscalls.h>, with the kernel's own types (#414). */
 
 #ifdef UROS_PTHREAD_SMOKE
 #define BOOT_TRACE(s) mach_print("posix-uros/clone: " s "\n")
