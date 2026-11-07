@@ -178,6 +178,53 @@ if(UROS_BUILD_MUSL)
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
 
+  # -------------------------------------------------------------------------
+  # The umbrella's static twin (#733), which #221 planned beside libc.so.
+  #
+  # libc-uros.a holds what libc.so holds, for a program of musl that links
+  # statically: libc-musl.a and, ahead of it, everything of ours that goes
+  # under it, in the order the linker has to meet them.  libvfs-musl and not
+  # libvfs, and libflipc2 as well, which libc.so leaves out.
+  #
+  # Eight programs used to write this list out by hand, and that is how the
+  # libvfs built for the servers came to be in all of them, with the pthreads
+  # of its header and the pthreads that locked its mutex not the same one.
+  #
+  # uros_libc is the name to link against.  One archive needs no group for the
+  # references among its members, libgcc is the only reason there is one.
+  # -------------------------------------------------------------------------
+  set(UROS_LIBC_A    ${MUSL_PREFIX}/lib/libc-uros.a)
+  set(UROS_LIBC_MRI  ${CMAKE_CURRENT_BINARY_DIR}/libc-uros.mri)
+  set(UROS_LIBC_PARTS libcap libnetname libvfs-musl libflipc2 libmach_core libposix-uros)
+
+  set(_mri "CREATE ${UROS_LIBC_A}\n")
+  foreach(_part IN LISTS UROS_LIBC_PARTS)
+    string(APPEND _mri "ADDLIB $<TARGET_FILE:${_part}>\n")
+  endforeach()
+  string(APPEND _mri "ADDLIB ${MUSL_OUT}\nSAVE\nEND\n")
+  file(GENERATE OUTPUT ${UROS_LIBC_MRI} CONTENT "${_mri}")
+
+  add_custom_command(
+    OUTPUT ${UROS_LIBC_A}
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${UROS_LIBC_A}
+    COMMAND sh -c "${CMAKE_AR} -M < ${UROS_LIBC_MRI}"
+    DEPENDS musl_extproj ${UROS_LIBC_PARTS} ${MUSL_OUT}
+    COMMENT "Archiving libc-uros.a (musl + posix-uros/vfs/flipc/mach/netname/cap)"
+    VERBATIM
+  )
+  add_custom_target(uros_libc_archive ALL DEPENDS ${UROS_LIBC_A})
+
+  add_library(uros_libc INTERFACE)
+  add_dependencies(uros_libc uros_libc_archive)
+  target_link_libraries(uros_libc INTERFACE
+    -Wl,--start-group ${UROS_LIBC_A} ${MUSL_LIBGCC} -Wl,--end-group
+  )
+  foreach(_part IN LISTS UROS_LIBC_PARTS)
+    target_include_directories(uros_libc INTERFACE
+      $<TARGET_PROPERTY:${_part},INTERFACE_INCLUDE_DIRECTORIES>
+    )
+  endforeach()
+
   # Phase 1 host smoke (kept).  Links musl against host libgcc only.
   add_custom_target(musl_smoke
     COMMAND cc ${UROS_ARCH_FLAGS} -nostdinc
