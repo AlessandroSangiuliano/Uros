@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# boot-log-disk-x86_64.sh -- the bundle for a real machine that keeps its boot
+# log on a disk (#915), booted in QEMU on three AHCI disks laid out as
+# lapsus's: one with two NTFS partitions, which the block server does not
+# publish; one with an ext4 and a swap, as the Linux that runs there; and one
+# with an ext2 labelled UROS_LOG_LABEL, made as lapsus's was (filetype alone).
+# The image is make-baremetal-x86_64.sh --log's with -b, so the machine
+# restarts after the boot's final census and qemu leaves (-no-reboot).
+#
+# The verdict is the boot's and the disks':
+#   - blk_write_label_test's count, all three arms;
+#   - the NTFS and the Linux disk byte for byte what they were before the boot,
+#     an oracle no part of the system under test computes.  The log disk is
+#     only reported: what may be written there is the log.
+#
+# Usage:  scripts/boot-log-disk-x86_64.sh [-o DIR] [--kvm] [-smp N] [BUDGET]
+#   -o DIR   where the image, the disks and the log go (a NEW directory;
+#            default: the build's log-disk/<date-time>)
+#   --kvm    under KVM; the default is TCG
+#   -smp N   processors (default 4)
+#   BUDGET   seconds the boot may take before -b restarts it (default 600)
+#
+# The build is UROS_BUILD_DIR when set, else uros/build-x86_64.
+#
+# Exit status: 0 passed · 1 a WRONG, a disk written that must not be, or no
+# verdict · 2 the command line is wrong · 3 a tool or a file is missing.
+
+set -u
+
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
+OUT=""
+KVM=0
+SMP=4
+BUDGET=600
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o)	OUT=${2:?-o needs a directory}; shift 2 ;;
+	--kvm)	KVM=1; shift ;;
+	-smp)	SMP=${2:?-smp needs a number}; shift 2 ;;
+	[0-9]*)	BUDGET=$1; shift ;;
+	*)	echo "usage: $0 [-o DIR] [--kvm] [-smp N] [BUDGET]" >&2; exit 2 ;;
+	esac
+done
+
+for cmd in qemu-system-x86_64 sfdisk mke2fs truncate dd md5sum xorriso; do
+	command -v "$cmd" >/dev/null || { echo "boot-log-disk: $cmd is missing" >&2; exit 3; }
+done
+[ -n "$OUT" ] || OUT=$BUILD/log-disk/$(date +%Y%m%d-%H%M%S)
+[ ! -e "$OUT" ] || { echo "boot-log-disk: $OUT already exists: give a new directory" >&2; exit 2; }
+mkdir -p "$OUT" || exit 3
+
+LABEL=$(sed -n 's/^UROS_LOG_LABEL:STRING=//p' "$BUILD/CMakeCache.txt" 2>/dev/null)
+[ -n "$LABEL" ] || { echo "boot-log-disk: no UROS_LOG_LABEL in $BUILD/CMakeCache.txt" >&2; exit 3; }
+
+# The image: the log bundle, -b with the budget as its deadline.
+UROS_BUILD_DIR=$BUILD "$REPO/scripts/make-baremetal-x86_64.sh" --log \
+	-o "$OUT/log.iso" --entry "-b reset_after=$BUDGET" > "$OUT/iso.txt" 2>&1 || {
+	echo "boot-log-disk: the image could not be made, see $OUT/iso.txt" >&2; exit 3; }
+
+SECT=512
+START=2048
+# part IMAGE SECTORS MKFS-ARGS... -- a partition's filesystem in a file of its own.
+part() {
+	local img=$1 sects=$2
+	shift 2
+	truncate -s $(( sects * SECT )) "$img" && mke2fs -q -F "$@" "$img"
+}
+
+# Disk 0, Windows's: two NTFS entries over zeros, which the block server does
+# not publish (it publishes 0x83 and 0x82 alone).
+truncate -s 64M "$OUT/disk0-ntfs.img"
+sfdisk --quiet "$OUT/disk0-ntfs.img" <<EOF || exit 3
+label: dos
+start=$START, size=40960, type=7
+type=7
+EOF
+
+# Disk 1, the Linux that runs there: an ext4 root and a swap.
+truncate -s 128M "$OUT/disk1-linux.img"
+sfdisk --quiet "$OUT/disk1-linux.img" <<EOF || exit 3
+label: dos
+start=$START, size=196608, type=83
+type=82
+EOF
+part "$OUT/root.part" 196608 -t ext4 -L linuxroot || exit 3
+dd if="$OUT/root.part" of="$OUT/disk1-linux.img" bs=$SECT seek=$START conv=notrunc status=none
+
+# Disk 2, the one given to Uros: the log partition, as lapsus's was made.
+truncate -s 64M "$OUT/disk2-log.img"
+sfdisk --quiet "$OUT/disk2-log.img" <<EOF || exit 3
+label: dos
+start=$START, type=83
+EOF
+part "$OUT/log.part" $(( 64 * 2048 - START )) -t ext2 -b 4096 -I 256 -r 1 \
+	-O none,filetype -L "$LABEL" || exit 3
+dd if="$OUT/log.part" of="$OUT/disk2-log.img" bs=$SECT seek=$START conv=notrunc status=none
+rm -f "$OUT/root.part" "$OUT/log.part"
+
+md5sum "$OUT"/disk*.img > "$OUT/md5-before.txt"
+
+ACCEL="-accel tcg"
+[ "$KVM" = 1 ] && ACCEL="-enable-kvm"
+LOG=$OUT/serial.log
+# shellcheck disable=SC2086
+qemu-system-x86_64 -cpu max $ACCEL -smp "$SMP" -m 1G \
+	-cdrom "$OUT/log.iso" -boot d \
+	-device ich9-ahci,id=ahci0 \
+	-drive if=none,id=d0,file="$OUT/disk0-ntfs.img",format=raw \
+	-device ide-hd,drive=d0,bus=ahci0.0 \
+	-drive if=none,id=d1,file="$OUT/disk1-linux.img",format=raw \
+	-device ide-hd,drive=d1,bus=ahci0.1 \
+	-drive if=none,id=d2,file="$OUT/disk2-log.img",format=raw \
+	-device ide-hd,drive=d2,bus=ahci0.2 \
+	-display none -monitor none -serial file:"$LOG" -no-reboot \
+	> "$OUT/qemu.out" 2>&1 &
+QPID=$!
+# -b restarts the machine after the census, or at BUDGET; a minute more for the
+# restart, and then qemu is stopped as a run that did not end.
+t0=$(date +%s)
+while kill -0 "$QPID" 2>/dev/null; do
+	if [ $(( $(date +%s) - t0 )) -gt $(( BUDGET + 60 )) ]; then
+		kill "$QPID" 2>/dev/null
+		echo "boot-log-disk: qemu still running after $(( BUDGET + 60 )) s: stopped" | tee -a "$OUT/verdict.txt"
+		break
+	fi
+	sleep 1
+done
+wait "$QPID" 2>/dev/null
+echo "boot-log-disk: the boot took $(( $(date +%s) - t0 )) s ($([ "$KVM" = 1 ] && echo KVM || echo TCG), -smp $SMP)" | tee -a "$OUT/verdict.txt"
+
+md5sum "$OUT"/disk*.img > "$OUT/md5-after.txt"
+rc=0
+grep -a -E '^blk: (-W|  [a-z_0-9]+ \()|^blk_write_label_test: ' "$LOG" | tee -a "$OUT/verdict.txt"
+if grep -aq '^blk_write_label_test: 3 of 3 arms passed' "$LOG"; then
+	echo "boot-log-disk: blk_write_label_test 3 of 3 arms passed" | tee -a "$OUT/verdict.txt"
+else
+	echo "boot-log-disk: WRONG -- blk_write_label_test did not pass all three arms (or said nothing)" | tee -a "$OUT/verdict.txt"
+	rc=1
+fi
+for d in disk0-ntfs disk1-linux; do
+	if [ "$(grep "/$d.img" "$OUT/md5-before.txt" | cut -d' ' -f1)" = \
+	     "$(grep "/$d.img" "$OUT/md5-after.txt" | cut -d' ' -f1)" ]; then
+		echo "boot-log-disk: $d.img byte for byte as before the boot" | tee -a "$OUT/verdict.txt"
+	else
+		echo "boot-log-disk: WRONG -- $d.img was written" | tee -a "$OUT/verdict.txt"
+		rc=1
+	fi
+done
+if [ "$(grep '/disk2-log.img' "$OUT/md5-before.txt" | cut -d' ' -f1)" = \
+     "$(grep '/disk2-log.img' "$OUT/md5-after.txt" | cut -d' ' -f1)" ]; then
+	echo "boot-log-disk: disk2-log.img unchanged" | tee -a "$OUT/verdict.txt"
+else
+	echo "boot-log-disk: disk2-log.img written" | tee -a "$OUT/verdict.txt"
+fi
+echo "boot-log-disk: $([ $rc = 0 ] && echo PASSED || echo WRONG), in $OUT" | tee -a "$OUT/verdict.txt"
+exit $rc
