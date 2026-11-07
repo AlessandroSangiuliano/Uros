@@ -2278,16 +2278,49 @@ main(int argc, char **argv)
 {
 	kern_return_t kr;
 	int	      i;
+	/*
+	 * #915: -p DEVICE:PATH, a partition to mount and where, in place of the
+	 * table below -- for a machine whose disks are not QEMU's, where
+	 * "ahci0a" is whatever partition the first disk with a device holds:
+	 * on lapsus the Linux that runs there.  DEVICE is a name the block
+	 * server publishes, "label:UROSLOG" for one, and PATH is what follows
+	 * the last colon, starting with '/'.  The first is waited for, as
+	 * ahci0a is; the rest are mounted if they are there.
+	 */
+	char		p_dev[MAX_MOUNTS][64];
+	const char	*p_path[MAX_MOUNTS];
+	const char	*p_bad = NULL;
+	int		n_p = 0;
 
 	/*
 	 * Unknown arguments are ignored rather than fatal: this server is
 	 * started by bootstrap from a line in bootstrap.conf, and a server that
 	 * refuses to boot over a flag it does not know is a worse failure than
-	 * one that ignores it.
+	 * one that ignores it.  A -p it cannot read is said, below, once there
+	 * is a console, and mounts nothing.
 	 */
-	for (i = 1; i < argc; i++)
-		if (strcmp(argv[i], "-v") == 0)
+	for (i = 1; i < argc; i++) {
+		const char *arg, *colon;
+
+		if (strcmp(argv[i], "-v") == 0) {
 			ext2_verbose = 1;
+			continue;
+		}
+		if (strcmp(argv[i], "-p") != 0)
+			continue;
+		arg = i + 1 < argc ? argv[++i] : "";
+		colon = strrchr(arg, ':');
+		if (n_p == MAX_MOUNTS || colon == NULL || colon == arg
+		    || colon[1] != '/'
+		    || (size_t)(colon - arg) >= sizeof(p_dev[0])) {
+			p_bad = arg;
+			continue;
+		}
+		memcpy(p_dev[n_p], arg, (size_t)(colon - arg));
+		p_dev[n_p][colon - arg] = '\0';
+		p_path[n_p] = colon + 1;
+		n_p++;
+	}
 
 	kr = bootstrap_ports(bootstrap_port,
 			     &host_port, &device_port,
@@ -2369,6 +2402,33 @@ main(int argc, char **argv)
 		printf("ext2: fs_pager_init failed\n");
 		return 1;
 	}
+
+	if (p_bad != NULL)
+		printf("ext2: -p \"%s\" is not DEVICE:/PATH, or one too many: "
+		       "not mounted (#915)\n", p_bad);
+
+	/* #915: the partitions -p names, and not the table. */
+	if (n_p > 0) {
+		for (i = 0; i < n_p; i++) {
+			char	svc[sizeof("ext_server:") + 3];
+			int	rc;
+
+			if (i == 0)
+				snprintf(svc, sizeof(svc), "ext_server");
+			else
+				snprintf(svc, sizeof(svc), "ext_server:%d", i);
+			rc = mount_partition(&mounts[i], p_dev[i], svc,
+					     p_path[i], /*blocking=*/ (i == 0));
+			if (rc < 0) {
+				if (i == 0)
+					return 1;	/* mandatory */
+				continue;		/* optional */
+			}
+			n_mounts++;
+		}
+		printf("ext2: %d partition(s) mounted, as -p names them "
+		       "(#915)\n", n_mounts);
+	} else
 
 	/* Mount partitions.
 	 * First partition (ahci0a) is mandatory — blocks until available.
