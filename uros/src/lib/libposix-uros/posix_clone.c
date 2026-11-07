@@ -76,11 +76,11 @@ extern void   _exit(int);
 #endif
 
 /*
- * Entry point for newly-created pthread Mach threads.  Called by the
- * trampoline with the cdecl frame __uros_clone laid out; runs on the
- * new thread itself so the LDT install + LDTR-activation yield happen
- * in the right context (same idiom __uros_main_tls_init uses for the
- * main thread).
+ * Where a new thread begins, from the trampoline, with what __uros_clone laid
+ * out for it: a cdecl frame on i386, registers on x86-64.  Its TLS is the
+ * parent's work (#258).  What has to run on the thread itself is the
+ * registration of its clear-tid word, which the trap makes for the thread
+ * that calls it.
  */
 void
 __uros_thread_bootstrap(int (*fn)(void *), void *arg,
@@ -145,7 +145,7 @@ __uros_clone(int (*fn)(void *),
         return -22; /* -EINVAL */
 
     /*
-     * Lay out the new thread's initial stack as a cdecl call frame for
+     * On i386 the new thread's initial stack is a cdecl call frame for
      * __uros_thread_bootstrap(fn, arg, tls_base, ctid_addr):
      *
      *   [high]
@@ -157,9 +157,10 @@ __uros_clone(int (*fn)(void *),
      *                  for further calls; we never return through it)
      *   [low / uesp]
      *
-     * The trampoline jumps to __uros_thread_bootstrap.  The TLS is
-     * installed by the parent before thread_resume (#258), so the new
-     * thread reaches it from its first instruction.
+     * x86-64 passes the four in registers, and its stack holds only the
+     * return address.  The trampoline jumps to __uros_thread_bootstrap.
+     * The TLS is installed by the parent before thread_resume (#258), so
+     * the new thread reaches it from its first instruction.
      */
     /*
      * The word the kernel zeroes at the thread's end, for
