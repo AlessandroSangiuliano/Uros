@@ -15,22 +15,28 @@
 #   - No serial.  GRUB's terminal is the console, and gfxpayload makes it hand
 #     the kernel a linear framebuffer through multiboot2's framebuffer tag,
 #     which is where the kernel's own console draws (#568).
-#   - Diskless, and unable to reach a disk.  GRUB loads the kernel, bootstrap
-#     and the bundle into RAM.  The bundle is the build's bootstrap-nodisk
-#     (target bootstrap_bundle_nodisk): the servers and tests that drive no
-#     device, and no block server, no AHCI module, nothing that writes a block
-#     (#596) or claims a device where the disks are somebody's.  With
-#     --bench-only it is name_server and ipc_bench alone, the way #332
+#   - Diskless, and unable to reach a disk, but with --log.  GRUB loads the
+#     kernel, bootstrap and the bundle into RAM.  The bundle is the build's
+#     bootstrap-nodisk (target bootstrap_bundle_nodisk): the servers and tests
+#     that drive no device, and no block server, no AHCI module, nothing that
+#     writes a block (#596) or claims a device where the disks are somebody's.
+#     With --bench-only it is name_server and ipc_bench alone, the way #332
 #     measures.
 #
 # The script writes no device and needs no root.  Putting the ISO on a stick
 # is a step the user takes, with the dd line it prints.
 #
-# Usage:  scripts/make-baremetal-x86_64.sh [--bench-only[=SUITES]] [-o OUT.iso]
-#             [--kernel NAME=PATH]... [--entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]
+# Usage:  scripts/make-baremetal-x86_64.sh [--bench-only[=SUITES] | --log]
+#             [-o OUT.iso] [--kernel NAME=PATH]... [--entry [NAME:]FLAGS]...
+#             [-- KERNEL-FLAGS...]
 #   --bench-only  name_server and ipc_bench in the bundle (#332); with
 #                 =SUITES, ipc_bench runs those suites ("isweep inter comb")
 #                 instead of all of them
+#   --log         the bundle that REACHES a disk, for a machine that keeps its
+#                 boot log on one (#915): bootstrap-log, the diskless one with
+#                 the AHCI driver and the block server started with -W, which
+#                 hands out a write right for the partition labelled
+#                 UROS_LOG_LABEL (UROSLOG) and for no other
 #   -o OUT.iso    where the ISO goes (default: the build directory)
 #   --kernel      another kernel in the image, as /boot/NAME -- a build with an
 #                 ablation, say; NAME is letters, digits, '.', '_' or '-'
@@ -59,6 +65,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 OUT=""
 BENCH_ONLY=0
 BENCH_SUITES=""
+LOG=0
 # -f: the kernel puts on the screen, at a readable pace, what the boot said
 # before the screen was ready -- the calibration and the early self-tests,
 # which on a machine with no serial port reach no one otherwise (#595).
@@ -75,6 +82,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--bench-only)	BENCH_ONLY=1; shift ;;
 	--bench-only=*)	BENCH_ONLY=1; BENCH_SUITES=${1#--bench-only=}; shift ;;
+	--log)		LOG=1; shift ;;
 	-o)		OUT=${2:?-o needs a path}; shift 2 ;;
 	--kernel)	kv=${2:?--kernel needs NAME=PATH}
 			KNAMES+=("${kv%%=*}"); KPATHS+=("${kv#*=}"); shift 2 ;;
@@ -84,7 +92,7 @@ while [ $# -gt 0 ]; do
 	--before)	BEFORE=${2:?--before needs a GRUB command}; shift 2 ;;
 	--suites)	SUITES_NEXT=${2:?--suites needs the suites}; shift 2 ;;
 	--)		shift; FLAGS="$FLAGS $*"; break ;;
-	*)		echo "usage: $0 [--bench-only[=SUITES]] [-o OUT.iso] [--kernel NAME=PATH]... [[--before CMD] [--suites SUITES] --entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]" >&2; exit 2 ;;
+	*)		echo "usage: $0 [--bench-only[=SUITES] | --log] [-o OUT.iso] [--kernel NAME=PATH]... [[--before CMD] [--suites SUITES] --entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]" >&2; exit 2 ;;
 	esac
 done
 
@@ -121,16 +129,25 @@ TREE=$(mktemp -d "${TMPDIR:-/tmp}/uros-baremetal.XXXXXX")
 # while the log is being written, and a file that grows under it is a MISHAP
 # that fails the run -- with the ISO written all the same (10/10/2026).
 MKLOG=$(mktemp "${TMPDIR:-/tmp}/uros-baremetal-mkrescue.XXXXXX")
+[ "$BENCH_ONLY" = 1 ] && [ "$LOG" = 1 ] && {
+	echo "make-baremetal: --bench-only and --log are two bundles: give one" >&2; exit 2; }
+
 trap 'rm -rf "$TREE" "$MKLOG"' EXIT
 mkdir -p "$TREE/boot/grub"
 
-# The bundle: nothing in it reaches a disk.
+# The bundle: nothing in it reaches a disk, but for --log's, whose block server
+# writes to the one partition its label names (#915).
 if [ "$BENCH_ONLY" = 1 ]; then
 	conf=$TREE/bootstrap.conf
 	printf 'name_server name_server\n-H ipc_bench ipc_bench%s\n' "${BENCH_SUITES:+ $BENCH_SUITES}" > "$conf"
 	"$MKBUNDLE" -o "$TREE/boot/bootstrap.bundle" "bootstrap.conf:$conf" \
 		"name_server:$SBIN/name_server" "ipc_bench:$SBIN/ipc_bench" >/dev/null
 	CONTENTS="name_server ipc_bench${BENCH_SUITES:+ ($BENCH_SUITES)}"
+elif [ "$LOG" = 1 ]; then
+	ninja -C "$BUILD" bootstrap_bundle_log >/dev/null || {
+		echo "make-baremetal: the build could not make bootstrap-log.bundle" >&2; exit 1; }
+	cp "$BUILD/bootstrap-log.bundle" "$TREE/boot/bootstrap.bundle"
+	CONTENTS="bootstrap-log ($(sed -n 's/^\(-[A-Za-z] \)*\([a-z_]*\) .*/\2/p' "$BUILD/src/servers/bootstrap/bootstrap-log.conf" | tr '\n' ' ' | sed 's/ $//'); the block server's line: $(grep 'block_device_server' "$BUILD/src/servers/bootstrap/bootstrap-log.conf"))"
 else
 	ninja -C "$BUILD" bootstrap_bundle_nodisk >/dev/null || {
 		echo "make-baremetal: the build could not make bootstrap-nodisk.bundle" >&2; exit 1; }
