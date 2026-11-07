@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #915
+Takes out: the refusal of a write open in ds_device_open_cap() -- with -W the block server still reads the labels and says which partition takes writes, and then hands out a write right for every partition whatever its label, as it did before -W; on boot-log-disk-x86_64.sh's disks laid out as lapsus's, the ext4 and the swap take the write open as the partition labelled UROSLOG does, and blk_write_label_test's [1] and [3] must say WRONG
+Accel: tcg,kvm
+Script: scripts/boot-log-disk-x86_64.sh
+Expect: blk_write_label_test: \[3\] 3 partition\(s\) took a write.*WRONG
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index 3b497223..2d481750 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -449,7 +449,7 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
+ 	 * this is where a handle gets the mode every transfer toward the disk
+ 	 * is asked for (blk_handle_for()).
+ 	 */
+-	if ((mode & D_WRITE) && blk_write_refused(part))
++	if (0 && (mode & D_WRITE) && blk_write_refused(part))	/* 915-write-open-not-refused */
+ 		return D_READ_ONLY;
+ 
+ 	struct blk_handle *h = (struct blk_handle *)malloc(sizeof(*h));
