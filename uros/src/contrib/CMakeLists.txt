@@ -197,25 +197,29 @@ if(UROS_BUILD_MUSL)
   set(UROS_LIBC_MRI  ${CMAKE_CURRENT_BINARY_DIR}/libc-uros.mri)
   set(UROS_LIBC_PARTS libcap libnetname libvfs-musl libflipc2 libmach_core libposix-uros)
 
-  # 🔴 ADDLIB PUTS A LIBRARY IN FRONT OF WHAT IS THERE ALREADY.  So the
-  # script names them from the last the linker should meet to the first:
-  # written in the order above, musl came first in the archive and won every
-  # symbol it shares with us -- strchr over libmach's, and whatever
-  # libposix-uros means to put in musl's place.  Found in review.
-  set(_parts ${UROS_LIBC_PARTS})
-  list(REVERSE _parts)
-  set(_mri "CREATE ${UROS_LIBC_A}\nADDLIB ${MUSL_OUT}\n")
-  foreach(_part IN LISTS _parts)
+  # 🔴 IN THE UMBRELLA MUSL'S FUNCTIONS ARE THE ONES (#733).  libmach in full
+  # is the servers', with no libc under it; libmach_core is it less what musl
+  # has.  So no part may define a name musl defines, and uros_libc_check.sh
+  # fails the build on one before the archive is made: a second strchr went
+  # on for months, and which of the two a program got was the order of the
+  # archive.  The order is the second line: ADDLIB puts each library in
+  # front of what is there already, so the last named, musl, comes first.
+  set(_mri "CREATE ${UROS_LIBC_A}\n")
+  set(_part_files "")
+  foreach(_part IN LISTS UROS_LIBC_PARTS)
     string(APPEND _mri "ADDLIB $<TARGET_FILE:${_part}>\n")
+    list(APPEND _part_files "$<TARGET_FILE:${_part}>")
   endforeach()
-  string(APPEND _mri "SAVE\nEND\n")
+  string(APPEND _mri "ADDLIB ${MUSL_OUT}\nSAVE\nEND\n")
   file(GENERATE OUTPUT ${UROS_LIBC_MRI} CONTENT "${_mri}")
 
   add_custom_command(
     OUTPUT ${UROS_LIBC_A}
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh ${CMAKE_NM} ${MUSL_OUT} ${_part_files}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${UROS_LIBC_A}
     COMMAND sh -c "${CMAKE_AR} -M < ${UROS_LIBC_MRI}"
     DEPENDS musl_extproj ${UROS_LIBC_PARTS} ${MUSL_OUT} ${UROS_LIBC_MRI}
+            ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh
     COMMENT "Archiving libc-uros.a (musl + posix-uros/vfs/flipc/mach/netname/cap)"
     VERBATIM
   )
