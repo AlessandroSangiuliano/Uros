@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #716
+Takes out: the name server's refusal of a mount signature that cannot sign, at check-in and at check-out (ccb71403) -- MACH_PORT_NULL mounts again, and checks out what it mounted; ext_server still signs "/", so its signature is what refuses [2]'s null one, with NETNAME_NOT_YOURS
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[7\] WRONG .*checked in with no signature: 0, not NETNAME_INVALID_PORT
+Expect: mount_test: \[2\] WRONG .*checked out with no signature: 1000, not NETNAME_INVALID_PORT
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+index d49a839c..a2805628 100644
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -574,7 +574,7 @@ do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
+      * signature is asked before the prefix is looked at, as do_netname_check_in
+      * asks it.  The rights in the request go back with the refusal.
+      */
+-    if (!signature_can_sign(sig, port))
++    if (0 && !signature_can_sign(sig, port))
+ 	return NETNAME_INVALID_PORT;
+ 
+     /* Validate: must be absolute. */
+@@ -621,7 +621,7 @@ do_netname_check_out_mount(mach_port_t server, netname_name_in_t prefix,
+ 	printf("%s: netname_check_out_mount('%.80s', sig=%x)\n",
+ 	       program, prefix, sig);
+ 
+-    if (!signature_can_sign(sig, MACH_PORT_NULL))
++    if (0 && !signature_can_sign(sig, MACH_PORT_NULL))
+ 	return NETNAME_INVALID_PORT;		/* #716 */
+ 
+     for (prev = &mounts, this = mounts;
