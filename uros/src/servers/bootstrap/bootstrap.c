@@ -378,8 +378,12 @@ bootstrap_exception_thread(void *arg)
 {
 	(void)arg;
 	for (;;) {
+		/*
+		 * The larger of request and reply: the subsystem's maxsize is
+		 * its largest reply, and a state exception's request is longer.
+		 */
 		(void)mach_msg_server(exc_server,
-				      catch_exc_subsystem.maxsize,
+				      catch_exc_subsystem_MAX_MESSAGE,
 				      bootstrap_exception_port,
 				      MACH_MSG_OPTION_NONE);
 	}
