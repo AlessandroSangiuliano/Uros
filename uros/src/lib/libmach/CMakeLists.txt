@@ -62,6 +62,8 @@ function(uros_add_libmach_core LIB_SOURCES)
     "/i386/fork\\.s$"       # fork() syscall stub
     # What x86-64 builds from C where i386 has the assembly above.
     "/bcopy\\.c$"    "/memcpy\\.c$"   "/memmove\\.c$"   "/memset\\.c$"
+    # musl's strchr is the one in a program of musl (#733).
+    "/strchr\\.c$"
     # The second mach_init, which no image links: mach_init.c is the one in
     # all of them, libc.so's and the static programs'.  The two define the
     # same globals, and a link that met this one first got it (#733).
