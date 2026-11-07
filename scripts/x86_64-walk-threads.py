@@ -131,6 +131,33 @@ gdb.execute("set confirm off")
 gdb.execute("target remote :" + PORT)
 print("=== active=%s task_count=%s sched_tick=%s" % (
     ev("cpu_data[0].active_thread"), ev("default_pset.task_count"), ev("sched_tick")))
+# The run queues and processor 0's quantum and pending ASTs (#889): a thread
+# runnable at a better priority than the one running says nothing until the
+# queue it should be on is read beside it.
+print("=== pset runq count=%s low=%s depress=%s; cpu0 runq count=%s low=%s; "
+      "cpu0 quantum=%s first_quantum=%s state=%s; need_ast[0]=%s" % (
+          ev("default_pset.runq.count"), ev("default_pset.runq.low"),
+          ev("default_pset.runq.depress_count"),
+          ev("processor_array[0].runq.count"), ev("processor_array[0].runq.low"),
+          ev("processor_array[0].quantum"), ev("processor_array[0].first_quantum"),
+          ev("processor_array[0].state"), ev("need_ast[0]")))
+# And every queue that holds a thread, head to tail: which thread a processor
+# takes next is the head of the best queue.  `links' is a thread's first field.
+for rq in ("default_pset.runq", "processor_array[0].runq"):
+    for pri in range(32):
+        hd = ev("&%s.runq[%d]" % (rq, pri))
+        nx = ev("%s.runq[%d].next" % (rq, pri))
+        if hd is None or nx is None:
+            continue
+        head, e, order = int(hd), int(nx), []
+        while e != head and len(order) < 64:
+            order.append("%#x" % e)
+            n = ev("((queue_entry_t) %d)->next" % e)
+            if n is None:
+                break
+            e = int(n)
+        if order:
+            print("=== %s[%d]: %s" % (rq, pri, " ".join(order)))
 tt = gdb.lookup_type("struct task").pointer()
 at = gdb.lookup_type("struct thread_activation").pointer()
 head = int(ev("&default_pset.tasks"))
@@ -166,9 +193,10 @@ while q != head and nt < 64:
             # What the scheduler chose by (#889): a thread runnable for twenty
             # minutes beside one that ran says nothing until its priority is
             # read next to the other's.
-            print("      pri=%d max=%d sched_pri=%d policy=%d depress=%d usage=%u" % (
+            print("      pri=%d max=%d sched_pri=%d policy=%d depress=%d usage=%u runq=%#x" % (
                 int(th["priority"]), int(th["max_priority"]), int(th["sched_pri"]),
-                int(th["policy"]), int(th["depress_priority"]), int(th["sched_usage"]) & 0xffffffff))
+                int(th["policy"]), int(th["depress_priority"]), int(th["sched_usage"]) & 0xffffffff,
+                int(th["runq"])))
             # A thread asleep on a mutex: who holds it, from own_thr, as
             # quiet_census does.  That census cannot speak while another
             # task polls, and this one asks no one (#889).
