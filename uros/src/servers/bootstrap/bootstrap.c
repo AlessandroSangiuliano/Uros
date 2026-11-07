@@ -129,7 +129,7 @@ static kern_return_t data_device_load_file(task_port_t, const char *,
  * to cap_server via cap_provision_task, and stamp the returned
  * per-task cap_port into the freshly-created child task as
  * TASK_CAP_PORT.  Best-effort: missing manifest, cap_server listed
- * after the child or gone before it checked in its name, or RPC failure
+ * after the child or gone before it took its slot, or RPC failure
  * all leave the child without a per-task port, so every capability it
  * asks for is refused (#511).  Returns 1 on a successful install (info
  * only), 0 otherwise.
@@ -151,7 +151,7 @@ provision_cap_port_for_child(task_port_t child_task,
  * printed on every healthy boot.  A line that cries wolf once a boot is a line
  * that stops being read, which is how the real one gets missed.
  *
- * 🔑 The server and not a flag (#412), so that the wait for its name can also
+ * 🔑 The server and not a flag (#412), so that the wait for its slot can also
  * see it die: cap_server_checked_in().
  */
 static struct server	*cap_server_sp;
@@ -293,7 +293,8 @@ static mach_port_t bds_boot_handle = MACH_PORT_NULL;
  * How often stage 2 looks up from waiting to ask whether the server that would
  * publish the partition is still alive.  A POLLING PERIOD, not a deadline: the
  * wait ends on a fact and never on elapsed time.  See bootstrap_enter_stage2();
- * cap_server_checked_in() waits for cap_server's name on the same terms (#412).
+ * cap_server_checked_in() waits for cap_server's slot on the same terms (#412),
+ * and since #744 with no period at all: it is woken.
  */
 #define STAGE2_POLL_MS	250
 
@@ -711,16 +712,24 @@ provision_cap_port_for_child(task_port_t child_task,
 	}
 
 	/*
-	 * 🔥 AND IT HAS TO WAIT FOR cap_server, WHICH IS A TASK THIS FILE
-	 * STARTED.  #216 provisions at task-CREATION time and cap_server is
-	 * itself created here, so the first child with a manifest is offered
-	 * one before cap_server has registered its name -- cap_provision then
-	 * answers CAP_ERR_INTERNAL, and the task runs WITHOUT its manifest,
-	 * refused everything it would have allowed (#511).
+	 * 🔥 cap_server IS A TASK THIS FILE STARTED.  #216 provisions at
+	 * task-CREATION time and cap_server is itself created here, so the
+	 * first child with a manifest is offered one before cap_server is
+	 * there.  Until #744 cap_provision then answered CAP_ERR_INTERNAL, and
+	 * the task ran WITHOUT its manifest, refused everything it would have
+	 * allowed (#511).
 	 *
 	 * ⚠️ INVISIBLE UNTIL #432 SHIPPED THE FIRST .cmf.  Nothing had a
 	 * manifest, so this call had never once been reached with a blob to
-	 * hand over.  How the wait ends is cap_server_checked_in()'s business.
+	 * hand over.
+	 *
+	 * 🔑 SINCE #744 THE WAIT NO LONGER DECIDES THAT.  The slot's port is
+	 * bootstrap's until cap_server takes it: a request sent before then
+	 * waits in its queue, and one to a slot whose cap_server died first is
+	 * refused (service_cap_server_refuse()).  With the wait taken out and
+	 * cap_server's check-in held back 10 s, cap_test had its manifest in 4
+	 * boots of 4.  The wait spares a call that could only be refused; how
+	 * it ends is cap_server_checked_in()'s business.
 	 */
 	if (cap_server_checked_in())
 		kr = cap_provision(child_task, blob, (unsigned int)sz, &cap_port);
@@ -1276,7 +1285,7 @@ main(int argc, char **argv)
 	     * creation so libmach init reads it on the first instruction.
 	     * The call is a silent no-op for unmigrated servers; one with
 	     * a manifest, listed after cap_server, waits until cap_server
-	     * has checked in its name (cap_server_checked_in(), #412).
+	     * has taken its slot or died (cap_server_checked_in(), #412).
 	     */
 	    (void)provision_cap_port_for_child(user_task, sp->symtab_name);
 
