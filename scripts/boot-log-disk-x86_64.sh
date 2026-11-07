@@ -26,7 +26,8 @@
 # The build is UROS_BUILD_DIR when set, else uros/build-x86_64.
 #
 # Exit status: 0 passed · 1 a WRONG, a disk written that must not be, or no
-# verdict · 2 the command line is wrong · 3 a tool or a file is missing.
+# verdict · 2 the run could not be made: the command line, a tool or a file
+# (ablate.sh reads 2 so).
 
 set -u
 
@@ -48,19 +49,19 @@ while [ $# -gt 0 ]; do
 done
 
 for cmd in qemu-system-x86_64 sfdisk mke2fs truncate dd md5sum xorriso; do
-	command -v "$cmd" >/dev/null || { echo "boot-log-disk: $cmd is missing" >&2; exit 3; }
+	command -v "$cmd" >/dev/null || { echo "boot-log-disk: $cmd is missing" >&2; exit 2; }
 done
 [ -n "$OUT" ] || OUT=$BUILD/log-disk/$(date +%Y%m%d-%H%M%S)
 [ ! -e "$OUT" ] || { echo "boot-log-disk: $OUT already exists: give a new directory" >&2; exit 2; }
-mkdir -p "$OUT" || exit 3
+mkdir -p "$OUT" || exit 2
 
 LABEL=$(sed -n 's/^UROS_LOG_LABEL:STRING=//p' "$BUILD/CMakeCache.txt" 2>/dev/null)
-[ -n "$LABEL" ] || { echo "boot-log-disk: no UROS_LOG_LABEL in $BUILD/CMakeCache.txt" >&2; exit 3; }
+[ -n "$LABEL" ] || { echo "boot-log-disk: no UROS_LOG_LABEL in $BUILD/CMakeCache.txt" >&2; exit 2; }
 
 # The image: the log bundle, -b with the budget as its deadline.
 UROS_BUILD_DIR=$BUILD "$REPO/scripts/make-baremetal-x86_64.sh" --log \
 	-o "$OUT/log.iso" --entry "-b reset_after=$BUDGET" > "$OUT/iso.txt" 2>&1 || {
-	echo "boot-log-disk: the image could not be made, see $OUT/iso.txt" >&2; exit 3; }
+	echo "boot-log-disk: the image could not be made, see $OUT/iso.txt" >&2; exit 2; }
 
 SECT=512
 START=2048
@@ -74,7 +75,7 @@ part() {
 # Disk 0, Windows's: two NTFS entries over zeros, which the block server does
 # not publish (it publishes 0x83 and 0x82 alone).
 truncate -s 64M "$OUT/disk0-ntfs.img"
-sfdisk --quiet "$OUT/disk0-ntfs.img" <<EOF || exit 3
+sfdisk --quiet "$OUT/disk0-ntfs.img" <<EOF || exit 2
 label: dos
 start=$START, size=40960, type=7
 type=7
@@ -82,22 +83,22 @@ EOF
 
 # Disk 1, the Linux that runs there: an ext4 root and a swap.
 truncate -s 128M "$OUT/disk1-linux.img"
-sfdisk --quiet "$OUT/disk1-linux.img" <<EOF || exit 3
+sfdisk --quiet "$OUT/disk1-linux.img" <<EOF || exit 2
 label: dos
 start=$START, size=196608, type=83
 type=82
 EOF
-part "$OUT/root.part" 196608 -t ext4 -L linuxroot || exit 3
+part "$OUT/root.part" 196608 -t ext4 -L linuxroot || exit 2
 dd if="$OUT/root.part" of="$OUT/disk1-linux.img" bs=$SECT seek=$START conv=notrunc status=none
 
 # Disk 2, the one given to Uros: the log partition, as lapsus's was made.
 truncate -s 64M "$OUT/disk2-log.img"
-sfdisk --quiet "$OUT/disk2-log.img" <<EOF || exit 3
+sfdisk --quiet "$OUT/disk2-log.img" <<EOF || exit 2
 label: dos
 start=$START, type=83
 EOF
 part "$OUT/log.part" $(( 64 * 2048 - START )) -t ext2 -b 4096 -I 256 -r 1 \
-	-O none,filetype -L "$LABEL" || exit 3
+	-O none,filetype -L "$LABEL" || exit 2
 dd if="$OUT/log.part" of="$OUT/disk2-log.img" bs=$SECT seek=$START conv=notrunc status=none
 rm -f "$OUT/root.part" "$OUT/log.part"
 
