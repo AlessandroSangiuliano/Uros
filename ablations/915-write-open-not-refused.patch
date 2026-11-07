@@ -3,6 +3,8 @@ Issue: #915
 Takes out: the refusal of a write open in ds_device_open_cap() -- with -W the block server still reads the labels and says which partition takes writes, and then hands out a write right for every partition whatever its label, as it did before -W; on boot-log-disk-x86_64.sh's disks laid out as lapsus's, the ext4 and the swap take the write open as the partition labelled UROSLOG does, and blk_write_label_test's [1] and [3] must say WRONG
 Accel: tcg,kvm
 Script: scripts/boot-log-disk-x86_64.sh
+Script: 240
+Note: 240 s of budget, because with ext_server in the bundle no quiet census comes and every boot runs to the -b deadline; ablate.sh puts --kvm in front under KVM
 Expect: blk_write_label_test: \[3\] 3 partition\(s\) took a write.*WRONG
 
 diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
