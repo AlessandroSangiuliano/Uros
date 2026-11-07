@@ -6,12 +6,13 @@ Run: --entry 14 300 -smp 4
 Expect: musl_test: \[4\] WRONG -- a new thread never got as far as its own word
 
 diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
+index ab999238..159df986 100644
 --- a/uros/src/lib/libposix-uros/posix_clone.c
 +++ b/uros/src/lib/libposix-uros/posix_clone.c
-@@ -183,7 +183,7 @@
+@@ -227,7 +227,7 @@ __uros_clone(int (*fn)(void *),
      state.rdi     = (uintptr_t)fn;
      state.rsi     = (uintptr_t)arg;
-     state.rcx     = (uintptr_t)ctid;
+     state.rcx     = ctid_addr;
 -    state.fs_base = tls_base;
 +    state.fs_base = tls_base & 0;
  
