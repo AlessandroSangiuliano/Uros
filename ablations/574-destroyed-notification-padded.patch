@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #574
+Takes out: the port-destroyed template's size by the trailer's offset (72318b01) -- it says sizeof less the trailer again, 52 bytes on x86-64 with the tail padding, and the stub that receives it reads 48
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[25\] WRONG .*\(id [0-9]+, 52 bytes\): the stub refused it
+Expect: mig: mach_notify_port_destroyed refused a message: MIG_BAD_ARGUMENTS \(id [0-9]+, 52 bytes\)
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_notify.c b/uros/src/mach_kernel/ipc/ipc_notify.c
+index fc4dad01..c3a97329 100644
+--- a/uros/src/mach_kernel/ipc/ipc_notify.c
++++ b/uros/src/mach_kernel/ipc/ipc_notify.c
+@@ -186,7 +186,7 @@ ipc_notify_init_port_destroyed(
+ 	m->msgh_local_port = MACH_PORT_NULL;
+ 	m->msgh_remote_port = MACH_PORT_NULL;
+ 	m->msgh_id = MACH_NOTIFY_PORT_DESTROYED;
+-	m->msgh_size = IPC_NOTIFY_MSGH_SIZE(n);
++	m->msgh_size = ((int)sizeof *n) - sizeof(mach_msg_format_0_trailer_t);
+ 
+ 	n->not_body.msgh_descriptor_count = 1;
+ 	n->not_port.disposition = MACH_MSG_TYPE_PORT_RECEIVE;
