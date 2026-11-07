@@ -557,6 +557,31 @@ mount_capability(netname_name_in_t prefix, const char *token,
 			     cap_name_hash(prefix));
 }
 
+/*
+ * The mounts of a port that died (#574): every record whose port or signature
+ * is `name'.
+ *
+ * The dead-name notification removed a server's names and its port record,
+ * and left its mounts: the next look-up of one handed sub_reference() a port
+ * it no longer knew, and the name server died on a NULL.  And since #716 a
+ * left record could not be checked out by anyone -- its signature was dead --
+ * so a server started again could never mount its prefix either.
+ */
+static void
+mount_remove(mach_port_t name)
+{
+    mount_record_t *prev = &mounts, this;
+
+    while ((this = *prev) != NULL)
+	if (this->port == name || this->sig == name) {
+	    printf("%s: mount \"%.80s\" is gone with the port it named or "
+		   "was signed by\n", program, this->prefix);
+	    *prev = this->next;
+	    free(this);
+	} else
+	    prev = &this->next;
+}
+
 kern_return_t
 do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
 			  mach_port_t sig, mach_port_t port,
@@ -744,6 +769,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 	printf("%s: do_mach_notify_dead_name: %x\n", program, name);
 
     netname_remove(name);
+    mount_remove(name);		/* #574 */
     remove_port(name);
     return KERN_SUCCESS;
 }
