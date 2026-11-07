@@ -203,18 +203,20 @@ if(UROS_BUILD_MUSL)
   # one name for good, and uros_libc_check.sh fails the build on either
   # before the archive is made: a second strchr went on for months, and which
   # of the two a program got was the order of the archive.  It first has to
-  # refuse a canary, two parts made to fail both halves in each type and in
-  # each way of reading a part that uros_libc_check.sh lists, so that a check
-  # gone blind in one of those stops the build too.  The order is a second line
-  # of defence behind the check: ADDLIB puts each member in front of what is
-  # there already, so each library comes out reversed and the last named,
-  # musl, comes first.
+  # refuse a canary, three parts made to fail it with T, B and D definitions of
+  # ours against musl's strong, weak-object and weak-only names, across parts
+  # and between members that share a name, and each half alone, as
+  # uros_libc_check.sh lists; so a check gone blind in one of those ways stops
+  # the build too.  The order is a second line of defence behind the check:
+  # ADDLIB puts each member in front of what is there already, so each library
+  # comes out reversed and the last named, musl, comes first.
   add_library(uros_libc_check_canary OBJECT uros_libc_check_canary.c)
   add_library(uros_libc_check_canary_pair OBJECT uros_libc_check_canary_pair.c)
   target_compile_options(uros_libc_check_canary PRIVATE ${UROS_ARCH_FLAGS} -fno-common)
   target_compile_options(uros_libc_check_canary_pair PRIVATE ${UROS_ARCH_FLAGS} -fno-common)
   set(UROS_LIBC_CANARY1 ${CMAKE_CURRENT_BINARY_DIR}/uros_libc_check_canary1.a)
   set(UROS_LIBC_CANARY2 ${CMAKE_CURRENT_BINARY_DIR}/uros_libc_check_canary2.a)
+  set(UROS_LIBC_CANARY3 ${CMAKE_CURRENT_BINARY_DIR}/uros_libc_check_canary3.a)
   set(_mri "CREATE ${UROS_LIBC_A}\n")
   set(_part_files "")
   foreach(_part IN LISTS UROS_LIBC_PARTS)
@@ -226,16 +228,21 @@ if(UROS_BUILD_MUSL)
 
   add_custom_command(
     OUTPUT ${UROS_LIBC_A}
-    BYPRODUCTS ${UROS_LIBC_CANARY1} ${UROS_LIBC_CANARY2}
+    BYPRODUCTS ${UROS_LIBC_CANARY1} ${UROS_LIBC_CANARY2} ${UROS_LIBC_CANARY3}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${UROS_LIBC_CANARY1} ${UROS_LIBC_CANARY2}
+            ${UROS_LIBC_CANARY3}
     COMMAND ${CMAKE_AR} qc ${UROS_LIBC_CANARY1}
             $<TARGET_OBJECTS:uros_libc_check_canary>
     COMMAND ${CMAKE_AR} qc ${UROS_LIBC_CANARY2}
             $<TARGET_OBJECTS:uros_libc_check_canary>
             $<TARGET_OBJECTS:uros_libc_check_canary_pair>
             $<TARGET_OBJECTS:uros_libc_check_canary_pair>
+    COMMAND ${CMAKE_AR} qc ${UROS_LIBC_CANARY3}
+            $<TARGET_OBJECTS:uros_libc_check_canary_pair>
+            $<TARGET_OBJECTS:uros_libc_check_canary_pair>
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh --must-refuse
             ${CMAKE_NM} ${MUSL_OUT} ${UROS_LIBC_CANARY1} ${UROS_LIBC_CANARY2}
+            ${UROS_LIBC_CANARY3}
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh ${CMAKE_NM} ${MUSL_OUT} ${_part_files}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${UROS_LIBC_A}
     COMMAND sh -c "${CMAKE_AR} -M < ${UROS_LIBC_MRI}"
