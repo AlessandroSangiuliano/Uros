@@ -5,7 +5,8 @@ project(flipc_bench C)
 # from the shell after boot (quiescent system) instead of running during
 # the disk suite while every server contends for the CPU.  Reports the
 # median of N runs per chunk so the FLIPC-vs-Mach ratio is stable.
-# Same static-musl link recipe as hello_world; links libvfs + libflipc2.
+# Same static-musl link recipe as hello_world: uros_libc, whose libvfs-musl
+# and libflipc2 it measures.
 if(NOT UROS_BUILD_MUSL)
   return()
 endif()

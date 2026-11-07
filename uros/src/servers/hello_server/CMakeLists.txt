@@ -31,8 +31,6 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-# libgcc.a for compiler builtins (__udivdi3 etc.) once we drop gcc.s
-# from the libmach path.
 target_compile_options(hello_server_server PRIVATE
   -std=gnu11
   ${UROS_ARCH_FLAGS} -msse -msse2
