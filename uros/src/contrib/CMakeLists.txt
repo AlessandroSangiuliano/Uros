@@ -202,8 +202,9 @@ if(UROS_BUILD_MUSL)
   # has.  So no part may define a name musl defines, and uros_libc_check.sh
   # fails the build on one before the archive is made: a second strchr went
   # on for months, and which of the two a program got was the order of the
-  # archive.  The order is the second line: ADDLIB puts each library in
-  # front of what is there already, so the last named, musl, comes first.
+  # archive.  The order is the second line: ADDLIB puts each member in
+  # front of what is there already, so each library comes out reversed and
+  # the last named, musl, comes first.
   set(_mri "CREATE ${UROS_LIBC_A}\n")
   set(_part_files "")
   foreach(_part IN LISTS UROS_LIBC_PARTS)

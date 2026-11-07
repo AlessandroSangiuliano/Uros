@@ -283,7 +283,7 @@ vfs_fd_get(vfs_fd_t fd)
 int
 vfs_init(void)
 {
-    VFS_ABI_GUARD();	/* from code: no --gc-sections can drop it */
+    VFS_ABI_GUARD();	/* a reference from code, kept while vfs_init is */
     pthread_mutex_lock(&vfs_lock);
     if (!vfs_initialised) {
         memset(vfs_fds, 0, sizeof(vfs_fds));

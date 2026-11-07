@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 project(fd_exec_test C)
 
 # musl-linked target for the execve fd-inheritance smoke (#262 step 3).
-# Same link recipe as hello_server (uros_libc: musl, libposix-uros,
-# libvfs-musl, libmach_core), but a tiny program: read an inherited fd and exit with
+# Same link recipe as hello_server (uros_libc: musl and everything of ours
+# under it), but a tiny program: read an inherited fd and exit with
 # a status the parent checks.  Static ET_EXEC so exec_server can load it.
 if(NOT UROS_BUILD_MUSL)
   return()
@@ -45,9 +45,6 @@ target_include_directories(fd_exec_test_bin PRIVATE
 
 target_link_libraries(fd_exec_test_bin PRIVATE
   uros_libc
-  # #288: force-pull the real syscall dispatcher + TLS installer, otherwise
-  # musl's WEAK -ENOSYS stubs win the link for this minimal static binary.
-  uros_musl_dispatcher
 )
 
 target_link_options(fd_exec_test_bin PRIVATE

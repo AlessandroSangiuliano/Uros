@@ -10,10 +10,11 @@
  *
  * Recipe:
  *   1. thread_create(self) — suspended kernel-side thread.
- *   2. install_thread_tls (posix_tls.c) for CLONE_SETTLS — LDT
- *      descriptor at slot 4, selector 0x27 = TLS for the new thread.
- *   3. thread_set_state with eip=__uros_clone_trampoline,
- *      uesp=stack top with arg already pushed, ebp=fn, gs=selector.
+ *   2. The TLS for CLONE_SETTLS, set up by the parent: on i386 an LDT
+ *      descriptor (posix_tls.c), on x86-64 the FS base in the state.
+ *   3. thread_set_state: the trampoline, the stack top, and the
+ *      bootstrap's arguments, on the stack on i386 and in rdi, rsi,
+ *      rdx and rcx on x86-64.
  *   4. The thread port name is the new tid, written to *ptid for
  *      CLONE_PARENT_SETTID BEFORE the thread runs (#733): musl owns
  *      mutexes and the thread list by it.
@@ -156,18 +157,16 @@ __uros_clone(int (*fn)(void *),
      *                  for further calls; we never return through it)
      *   [low / uesp]
      *
-     * The trampoline just `call __uros_thread_bootstrap` — no register
-     * juggling needed.  TLS install happens on the new thread itself
-     * (same mechanism as the main thread in __uros_main_tls_init),
-     * which sidesteps the kernel's "i386_set_ldt for a non-current
-     * thread" code path that doesn't activate LDTR until the next
-     * context switch.
+     * The trampoline jumps to __uros_thread_bootstrap.  The TLS is
+     * installed by the parent before thread_resume (#258), so the new
+     * thread reaches it from its first instruction.
      */
     /*
      * The word the kernel zeroes at the thread's end, for
      * CLONE_CHILD_CLEARTID only: posix_spawn() and faccessat() call
      * __clone() with four arguments, and the kernel would have zeroed
-     * whatever address was left in a register (#733).
+     * whatever address was in the seventh argument's slot on the
+     * caller's stack (#733).
      */
     uintptr_t ctid_addr = (flags & UROS_CLONE_CHILD_CLEARTID)
                             ? (uintptr_t)ctid
@@ -301,9 +300,10 @@ __uros_clone(int (*fn)(void *),
     }
     TRACE("thread_resume ok");
 
-    /* ctid is passed through to the bootstrap on the new thread's
-     * stack — it registers it with urmach_thread_set_cleartid so the
-     * kernel clears *ctid on thread_terminate (#257). */
+    /* ctid_addr, for CLONE_CHILD_CLEARTID, reached the bootstrap in the
+     * new thread's state (rcx on x86-64, the stack on i386), and the
+     * bootstrap registers it with urmach_thread_set_cleartid so the
+     * kernel clears it on thread_terminate (#257). */
 
     return tid;
 }

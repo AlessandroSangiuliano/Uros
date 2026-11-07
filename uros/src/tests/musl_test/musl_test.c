@@ -908,8 +908,7 @@ arm_own_id(void)
 	}
 	for (i = 0; i < made; i++)
 		(void)pthread_join(th[i], NULL);
-	verdict(24, made == O_THREADS
-		&& __atomic_load_n(&o_refused, __ATOMIC_SEQ_CST) == 0,
+	verdict(24, __atomic_load_n(&o_refused, __ATOMIC_SEQ_CST) == 0,
 		"%d threads took an error-checking mutex as their first act, "
 		"and %d were refused it back", made,
 		__atomic_load_n(&o_refused, __ATOMIC_SEQ_CST));

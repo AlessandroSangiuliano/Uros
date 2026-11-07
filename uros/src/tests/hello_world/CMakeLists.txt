@@ -46,9 +46,6 @@ target_include_directories(hello_world_bin PRIVATE
 
 target_link_libraries(hello_world_bin PRIVATE
   uros_libc
-  # #288: force-pull the real syscall dispatcher + TLS installer (shadowed
-  # otherwise by musl's WEAK -ENOSYS stubs in a printf-only static binary).
-  uros_musl_dispatcher
 )
 
 target_link_options(hello_world_bin PRIVATE

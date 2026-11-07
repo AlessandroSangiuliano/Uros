@@ -78,7 +78,7 @@ target_link_options(hello_server_server PRIVATE
   # weakly (so legacy libmach servers link without it), and a weak ref
   # does not pull an object out of a static archive.  -u makes the
   # linker treat it as an undefined-strong symbol, pulling
-  # uros_main_thread.o from libc-musl.a so crt0's call resolves.
+  # uros_main_thread.o from libc-uros.a so crt0's call resolves.
   -Wl,-u,__uros_libc_init
   -Wl,--build-id=none
 )

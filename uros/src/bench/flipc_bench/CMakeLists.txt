@@ -50,9 +50,9 @@ target_link_libraries(flipc_bench_bin PRIVATE
   uros_libc
 )
 
-# #291: no -Wl,-u — the weak musl syscall/clone stubs were stripped from
-# the static libc-musl.a, so the strong libposix-uros dispatcher is pulled
-# automatically.
+# The weak musl syscall/clone stubs were stripped from libc-musl.a (#291),
+# so the dispatcher needs no -u.  __uros_libc_init does: crt0 names it weakly,
+# and a weak reference does not pull an object out of an archive.
 target_link_options(flipc_bench_bin PRIVATE
   ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
