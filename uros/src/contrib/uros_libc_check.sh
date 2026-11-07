@@ -7,16 +7,21 @@
 # So no part may define a name that musl defines: a second strchr in
 # libmach_core went on for months, and which of the two a program got was the
 # order of an archive.  Nor may two members of ours both define one for good,
-# weak beside strong and two commons being the pairs a link settles by itself:
+# a pair with a weak or a common member being one a link settles by itself:
 # the first reference would pull whichever the index lists first, and a link
 # that came to need the other as well would stop.  Fails, naming each name and
 # where it is.
 #
-# uros_libc_check.sh --must-refuse NM MUSL_ARCHIVE CANARY_ARCHIVE -- the same
-# check, on an archive made to fail both halves of it, every build: it must say
-# so, or the check has gone blind and the build stops.  The canary holds
-# uros_libc_check_canary.c's object twice under one name, which defines strchr
-# and uros_libc_check_canary.
+# uros_libc_check.sh --must-refuse NM MUSL_ARCHIVE CANARY_1 CANARY_2 -- the same
+# check, every time libc-uros.a is made, on two parts made to fail it:
+# uros_libc_check_canary.c's object once in each, and in the second
+# uros_libc_check_canary_pair.c's twice under one member name.  Each part must
+# be named for strchr (T) and environ (B), which musl defines; those two and
+# uros_libc_check_canary (D) must each be found in its two members, one a part,
+# and uros_libc_check_canary_pair (D) in its two that share a name.  A check
+# that has stopped reading one of those types, or a part after the first, or a
+# pair across parts, or a member that shares a name, or that wants more than a
+# pair, gets the canary through, and the build stops.
 #
 # The i386 PIC thunks (__x86.get_pc_thunk.*) are in COMDAT groups that the
 # linker folds into one, so two definitions of them are not two functions.
@@ -24,15 +29,18 @@ if [ "$1" = --must-refuse ]; then
 	shift
 	said=$(sh "$0" "$@" 2>&1 >/dev/null)
 	rc=$?
-	case $said in
-	*"defines what musl defines: "*"strchr "*) ;;
-	*) rc=0 ;;
-	esac
-	case $said in
-	*"two of ours define uros_libc_check_canary for good"*) ;;
-	*) rc=0 ;;
-	esac
-	if [ "$rc" != 1 ]; then
+	if [ "$rc" = 2 ]; then
+		echo "uros_libc_check: the check could not run on the canary: $said" >&2
+		exit 2
+	fi
+	seen=$(printf '%s\n' "$said" | awk '
+		/defines what musl defines: / && / environ / && / strchr / { musl++ }
+		/two of ours define (environ|strchr|uros_libc_check_canary|uros_libc_check_canary_pair) for good:/ {
+			if (gsub(/\.a:/, "&") == 2)
+				twice++
+		}
+		END { print musl + 0, twice + 0 }')
+	if [ "$rc" != 1 ] || [ "$seen" != "2 4" ]; then
 		echo "uros_libc_check: the canary got through, so the check is blind: $said" >&2
 		exit 2
 	fi
@@ -42,6 +50,10 @@ fi
 nm=$1
 musl=$2
 shift 2
+if [ $# -eq 0 ]; then
+	echo "uros_libc_check: no parts to check" >&2
+	exit 2
+fi
 # nm -A puts the archive's path in front of each line it prints, and a path
 # with a space in it would split that line into other fields.
 tab=$(printf '\t')
