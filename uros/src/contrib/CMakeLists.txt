@@ -197,18 +197,25 @@ if(UROS_BUILD_MUSL)
   set(UROS_LIBC_MRI  ${CMAKE_CURRENT_BINARY_DIR}/libc-uros.mri)
   set(UROS_LIBC_PARTS libcap libnetname libvfs-musl libflipc2 libmach_core libposix-uros)
 
-  set(_mri "CREATE ${UROS_LIBC_A}\n")
-  foreach(_part IN LISTS UROS_LIBC_PARTS)
+  # 🔴 ADDLIB PUTS A LIBRARY IN FRONT OF WHAT IS THERE ALREADY.  So the
+  # script names them from the last the linker should meet to the first:
+  # written in the order above, musl came first in the archive and won every
+  # symbol it shares with us -- strchr over libmach's, and whatever
+  # libposix-uros means to put in musl's place.  Found in review.
+  set(_parts ${UROS_LIBC_PARTS})
+  list(REVERSE _parts)
+  set(_mri "CREATE ${UROS_LIBC_A}\nADDLIB ${MUSL_OUT}\n")
+  foreach(_part IN LISTS _parts)
     string(APPEND _mri "ADDLIB $<TARGET_FILE:${_part}>\n")
   endforeach()
-  string(APPEND _mri "ADDLIB ${MUSL_OUT}\nSAVE\nEND\n")
+  string(APPEND _mri "SAVE\nEND\n")
   file(GENERATE OUTPUT ${UROS_LIBC_MRI} CONTENT "${_mri}")
 
   add_custom_command(
     OUTPUT ${UROS_LIBC_A}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${UROS_LIBC_A}
     COMMAND sh -c "${CMAKE_AR} -M < ${UROS_LIBC_MRI}"
-    DEPENDS musl_extproj ${UROS_LIBC_PARTS} ${MUSL_OUT}
+    DEPENDS musl_extproj ${UROS_LIBC_PARTS} ${MUSL_OUT} ${UROS_LIBC_MRI}
     COMMENT "Archiving libc-uros.a (musl + posix-uros/vfs/flipc/mach/netname/cap)"
     VERBATIM
   )
