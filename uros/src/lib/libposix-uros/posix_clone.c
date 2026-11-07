@@ -163,6 +163,16 @@ __uros_clone(int (*fn)(void *),
      * thread" code path that doesn't activate LDTR until the next
      * context switch.
      */
+    /*
+     * The word the kernel zeroes at the thread's end, for
+     * CLONE_CHILD_CLEARTID only: posix_spawn() and faccessat() call
+     * __clone() with four arguments, and the kernel would have zeroed
+     * whatever address was left in a register (#733).
+     */
+    uintptr_t ctid_addr = (flags & UROS_CLONE_CHILD_CLEARTID)
+                            ? (uintptr_t)ctid
+                            : 0;
+
     uintptr_t tls_base = (flags & UROS_CLONE_SETTLS)
                             ? (uintptr_t)newtls
                             : 0;
@@ -182,7 +192,7 @@ __uros_clone(int (*fn)(void *),
     ((uintptr_t *)sp)[1] = (uintptr_t)fn;
     ((uintptr_t *)sp)[2] = (uintptr_t)arg;
     ((uintptr_t *)sp)[3] = 0;     /* tls_base — installed below by parent */
-    ((uintptr_t *)sp)[4] = (uintptr_t)ctid;
+    ((uintptr_t *)sp)[4] = ctid_addr;
 #endif
 
     /*
@@ -216,7 +226,7 @@ __uros_clone(int (*fn)(void *),
     state.rsp     = sp;
     state.rdi     = (uintptr_t)fn;
     state.rsi     = (uintptr_t)arg;
-    state.rcx     = (uintptr_t)ctid;
+    state.rcx     = ctid_addr;
     state.fs_base = tls_base;
 
     kr = thread_set_state(new_thread, x86_64_THREAD_STATE,
