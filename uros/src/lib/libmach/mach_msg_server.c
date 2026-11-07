@@ -87,8 +87,14 @@ mach_msg_server_once(
 		     TRUE)) != KERN_SUCCESS)
       return kr;    
 
+    /*
+     * #716: the limit is the buffer, trailer room included.  The kernel
+     * counts the trailer it appends against the size it is given
+     * (ipc_mqueue_receive()), and this passed max_size alone: a request of
+     * max_size bytes was destroyed unread, in a buffer allocated to hold it.
+     */
     mr = mach_msg_overwrite_trap(&bufRequest->Head, MACH_RCV_MSG|options,
-				 0, max_size, rcv_name,
+				 0, max_size + MAX_TRAILER_SIZE, rcv_name,
 				 MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,
 				 (mach_msg_header_t *) 0, 0);
     if (mr == MACH_MSG_SUCCESS) {
@@ -202,8 +208,10 @@ mach_msg_server(
       return kr;    
 
     for (;;) {
+	/* #716: the limit is the buffer, trailer room included; see
+	 * mach_msg_server_once(). */
 	mr = mach_msg_overwrite_trap(&bufRequest->Head, MACH_RCV_MSG|options,
-		      0, max_size, rcv_name,
+		      0, max_size + MAX_TRAILER_SIZE, rcv_name,
 		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,
 		      (mach_msg_header_t *) 0, 0);
 	while (mr == MACH_MSG_SUCCESS) {
@@ -265,7 +273,8 @@ mach_msg_server(
 						MACH_MSG_TYPE_MOVE_SEND_ONCE) ?
 			  MACH_SEND_MSG|MACH_RCV_MSG|options :
 			  MACH_SEND_MSG|MACH_SEND_TIMEOUT|MACH_RCV_MSG|options,
-			  bufRequest->Head.msgh_size, max_size, rcv_name,
+			  bufRequest->Head.msgh_size,
+			  max_size + MAX_TRAILER_SIZE, rcv_name,
 			  0, MACH_PORT_NULL, (mach_msg_header_t *) 0, 0);
 	}
 	if (mr == MACH_MSG_SUCCESS)
