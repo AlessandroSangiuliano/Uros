@@ -894,8 +894,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # and its log has to go to a disk: one partition, an ext2 labelled
   # UROS_LOG_LABEL, on a machine whose other disks are somebody's.  So this is
   # the bundle above and the block server, started with -W: a write right only
-  # for the partition with that label (blk_write_label_test checks it).  The
-  # AHCI driver alone, as lapsus has no virtio.
+  # for the partition with that label (blk_write_label_test checks it), and
+  # ext_server mounting that partition at /log by its label, under a manifest
+  # that grants it that partition and that path alone; and bootlog, second
+  # after the name server so that it reads the kernel's log as early as it can,
+  # writing it to /log/boot-N.txt.  The AHCI driver alone, as lapsus has no
+  # virtio.
   #
   # 🔑 The block server LAST, and its clients ahead of it, waiting for the
   # names they want: with a line after it bootstrap enters stage 2 and waits
@@ -908,8 +912,23 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_LOG_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-log.conf)
   set(_BWL_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/blk_write_label_test.cmf")
+  # ext_server under a name of its own, ext_server_log, so that cap_server
+  # reads a manifest of its own: the partition with the label, and /log.
+  set(_EXT_LOG_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/ext_server_log.manifest)
+  configure_file(${CMAKE_SOURCE_DIR}/src/servers/ext_server/ext_server_log.manifest.in
+                 ${_EXT_LOG_MANIFEST} @ONLY)
+  set(_EXT_LOG_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/ext_server_log.cmf")
+  add_custom_command(
+    OUTPUT ${_EXT_LOG_CMF}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+    COMMAND $<TARGET_FILE:mkmanifest> -o ${_EXT_LOG_CMF} ${_EXT_LOG_MANIFEST}
+    DEPENDS mkmanifest ${_EXT_LOG_MANIFEST}
+    COMMENT "mkmanifest: ext_server_log.manifest -> ext_server_log.cmf"
+    VERBATIM)
   file(GENERATE OUTPUT ${_LOG_CONF}
-       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\nexec_server exec_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}blk_write_label_test blk_write_label_test ${UROS_LOG_LABEL}\n-D block_device_server block_device_server -W ${UROS_LOG_LABEL}\n")
+       CONTENT "name_server name_server\nbootlog bootlog /log\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\nexec_server exec_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}-D ext_server_log ext_server -p label:${UROS_LOG_LABEL}:/log\nblk_write_label_test blk_write_label_test ${UROS_LOG_LABEL}\n-D block_device_server block_device_server -W ${UROS_LOG_LABEL}\n")
   add_custom_command(
     OUTPUT ${_LOG_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_LOG_BUNDLE}
@@ -919,6 +938,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             proc_server.cmf:${_PROC_CMF}
             block_device_server.cmf:${_BDS_CMF}
             blk_write_label_test.cmf:${_BWL_CMF}
+            ext_server_log.cmf:${_EXT_LOG_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             boot_ports_test:${_SBIN}/boot_ports_test
@@ -937,12 +957,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             sig_test:${_SBIN}/sig_test
             taskpanic_load:${_SBIN}/taskpanic_load
             blk_write_label_test:${_SBIN}/blk_write_label_test
+            ext_server:${_SBIN}/ext_server
+            bootlog:${_SBIN}/bootlog
             block_device_server:${_SBIN}/block_device_server
             modules/block/ahci.so:${_MOD}/block/ahci.so
             ${_CHAR_FILES}
             ${_MUSL_FILES}
     DEPENDS mkbundle ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_PROC_CMF} ${_BDS_CMF}
-            ${_BWL_CMF}
+            ${_BWL_CMF} ${_EXT_LOG_CMF} ext_server_bin bootlog_bin
             name_server_bin netname_test_bin boot_ports_test_bin cap_server_bin pthread_test_server
             msg_server_test_bin dl_test_bin fault_test_bin fperr_test_bin
             act_test_bin cow_test_bin hal_server hal_pci_scan_module
