@@ -93,7 +93,6 @@ function(uros_add_libmach_core LIB_SOURCES)
   target_compile_options(libmach_core PRIVATE
     $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin 
                             -mstack-protector-guard=global -include stdint.h>
-    -DLIBMACH_CORE
   )
   target_compile_options(libmach_core PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
   target_compile_options(libmach_core PRIVATE
