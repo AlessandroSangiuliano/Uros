@@ -50,7 +50,16 @@ extern int main(int, char **, char **, char **);
 
 #define MACH3
 
+/*
+ * A program of musl gets musl's environ, which is its __environ by another
+ * name, so writing it here sets the one getenv() reads.  libmach in full has
+ * no libc under it and defines its own (#733).
+ */
+#ifdef LIBMACH_CORE
+extern char **environ;
+#else
 char **environ;
+#endif
 char **_auxv;
 
 int errno;
