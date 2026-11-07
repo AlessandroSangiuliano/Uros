@@ -161,13 +161,11 @@ def session(a, build):
         rc = 0
         for command, want in COMMANDS:
             os.write(fd_in, (command + "\r").encode("latin-1"))
-            # The echo of the command first: an answer read before it would
-            # be the name of the command, and /hello_world has `hello' in it.
-            if not wait_for(command, 30.0):
-                print(f"ush-x86_64: typed {command!r} and it was not echoed",
-                      file=sys.stderr)
-                rc = 1
-                break
+            # Not the echo.  It comes a character at a time and the kernel's
+            # own lines can land in the middle of it: "/hello_", a census,
+            # "dyn_world", and the command read as one that never answered
+            # when it had.  `want' is a whole line, so the echo cannot pass
+            # for it.
             if not wait_for(want, 60.0):
                 print(f"ush-x86_64: {command!r} never said {want!r}",
                       file=sys.stderr)
