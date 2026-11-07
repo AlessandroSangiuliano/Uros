@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #414
+Takes out: argc as a word on a boot task's entry stack in build_args_and_stack() -- it goes back to four bytes, with argv's pointers at offset 4; crt0 reads words, finds argc implausible and leaves argv empty, and boot_probe, which the kernel starts with no bootstrap in front of it, reads argv[0] at address 0 and is terminated, so entry 0 never says it ran.  Seen before the fix in every boot of entries 0, 1, 7 and 8 of the union's merge test at fef82e45, on omen and OMEGA, under TCG and KVM, and at 28a2d0ff on victus
+Run: --entry 0 120 -smp 1
+Expect: exception_no_server: terminating task .* exception 1, code\[0\]=0x2 code\[1\]=0x0$
+
+diff --git a/uros/src/mach_kernel/kern/bootstrap.c b/uros/src/mach_kernel/kern/bootstrap.c
+index b89048f5..6e53f9ab 100644
+--- a/uros/src/mach_kernel/kern/bootstrap.c
++++ b/uros/src/mach_kernel/kern/bootstrap.c
+@@ -977,11 +977,11 @@ build_args_and_stack(char **argv, char **envp)
+ 	/*
+ 	 * first the argument count
+ 	 */
+-	argc_word = arg_count;
+-	(void) copyout((char *)&argc_word,
++	argc_word = arg_count;	/* 414-boot-argc-not-a-word: four bytes again */
++	(void) copyout((char *)&arg_count,
+ 			arg_pos,
+-			sizeof(long));
+-	arg_pos += sizeof(long);
++			sizeof(integer_t));
++	arg_pos += sizeof(integer_t);
+ 
+ 	/*
+ 	 * Then the strings and string pointers for each argument
