@@ -16,55 +16,67 @@
 # the same check, every time libc-uros.a is made, on parts made to fail it.
 # uros_libc_check_canary.c's object goes once into the first and the second,
 # and uros_libc_check_canary_pair.c's twice under one member name into the
-# second and the third.  On the first two, each part must be named for exactly
-# the four musl names the canary holds -- strong, weak object and weak only --
-# and the check must say six names of ours are defined twice, each in exactly
-# two members: five as pairs across the parts, and the pair's name as two
-# members that share a name.  The canary's look-alike of a PIC thunk is not one
-# of the six.  On the first alone, only the musl half may speak, and on the
-# third alone only the other, and each must fail the check by itself.  A check
-# that has stopped reading one of T, B, D, V or W, or a part after the first,
-# or a pair across parts, or a member that shares a name, that wants more than
-# a pair, that has widened or lost the thunk filter, or with a half that prints
-# and no longer fails, gets the canary through, and the build stops.  The
-# canary has no R, A, I, i or u symbol: no part defines one today.
+# second and three times into the third.  On the first two, each part must be
+# named in a musl line holding all six of the canary's musl names -- strong,
+# weak only, weak object, read-only, data -- and the check must say seven names
+# of ours are defined twice, each in exactly two members: six as pairs across
+# the parts, the pair's name as two members that share a name.  Neither the
+# common nor the canary's look-alike of a PIC thunk is among them.  On the
+# first alone only the musl half may speak; on the third alone only the other,
+# for the pair's name in its three members; each must fail the check by
+# itself.  A check that has stopped reading one of T, B, D, R, C, V or W, or a
+# part after the first, or a pair across parts, or a member that shares a name,
+# that wants more than two or exactly two, that counts commons as strong, that
+# has widened or lost the thunk filter, or with a half that prints and no
+# longer fails, gets the canary through, and the build stops.  The canary has
+# no A, I, i or u symbol: no part defines one today.
 #
 # The i386 PIC thunks (__x86.get_pc_thunk.*) are in COMDAT groups that the
 # linker folds into one, so two definitions of them are not two functions.
 if [ "$1" = --must-refuse ]; then
 	shift
 	nm=$1 musl=$2 c1=$3 c2=$4 c3=$5
-	# run PART... -- "status, musl lines naming all four, other musl lines,
-	# lines of ours defined twice, those that are the canary's six names in
-	# exactly two members", for the check on musl and those parts.
+	# run WHERE PART... -- "status, musl lines holding all six names, other
+	# musl lines, lines of ours defined twice, those that are one of the
+	# canary's seven names in exactly WHERE members", for the check on musl
+	# and those parts.
 	run() {
+		where=$1
+		shift
 		said=$(sh "$0" "$nm" "$musl" "$@" 2>&1 >/dev/null)
 		rc=$?
-		[ "$rc" = 2 ] && printf '%s\n' "$said" >&2
-		printf '%s\n' "$said" | awk -v rc="$rc" '
+		case $rc in
+		0 | 1) ;;
+		*) printf '%s\n' "$said" >&2 ;;
+		esac
+		printf '%s\n' "$said" | awk -v rc="$rc" -v where="$where" '
 			/defines what musl defines: / {
-				if (/ __errno_location / && / environ / && / malloc / && / strchr /)
+				if (/ __errno_location / && / environ / && / in6addr_any / &&
+				    / malloc / && / optind / && / strchr /)
 					musl++
 				else
 					other++
 			}
 			/two of ours define / {
 				dup++
-				if (/two of ours define (__errno_location|environ|malloc|strchr|uros_libc_check_canary|uros_libc_check_canary_pair) for good:/ &&
-				    gsub(/\.a:/, "&") == 2)
+				if (/two of ours define (__errno_location|environ|in6addr_any|malloc|strchr|uros_libc_check_canary|uros_libc_check_canary_pair) for good:/ &&
+				    gsub(/\.a:/, "&") == where)
 					named++
 			}
 			END { print rc, musl + 0, other + 0, dup + 0, named + 0 }'
 	}
-	both=$(run "$c1" "$c2")
-	musl_half=$(run "$c1")
-	ours_half=$(run "$c3")
-	case "$both/$musl_half/$ours_half" in
-	2\ * | */2\ *)
-		echo "uros_libc_check: the check could not run on the canary" >&2
-		exit 2 ;;
-	esac
-	if [ "$both" != "1 2 0 6 6" ] || [ "$musl_half" != "1 1 0 0 0" ] ||
+	both=$(run 2 "$c1" "$c2")
+	musl_half=$(run 2 "$c1")
+	ours_half=$(run 3 "$c3")
+	for r in "$both" "$musl_half" "$ours_half"; do
+		case $r in
+		0\ * | 1\ *) ;;
+		*)
+			echo "uros_libc_check: the check could not run on the canary" >&2
+			exit 2 ;;
+		esac
+	done
+	if [ "$both" != "1 2 0 7 7" ] || [ "$musl_half" != "1 1 0 0 0" ] ||
 	   [ "$ours_half" != "1 0 0 1 1" ]; then
 		echo "uros_libc_check: the canary got through, so the check is blind:" \
 		     "both parts $both, musl half $musl_half, half of ours $ours_half" >&2

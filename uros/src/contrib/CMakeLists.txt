@@ -203,11 +203,11 @@ if(UROS_BUILD_MUSL)
   # one name for good, and uros_libc_check.sh fails the build on either
   # before the archive is made: a second strchr went on for months, and which
   # of the two a program got was the order of the archive.  It first has to
-  # refuse a canary, three parts made to fail it with T, B and D definitions of
-  # ours against musl's strong, weak-object and weak-only names, across parts
-  # and between members that share a name, and each half alone, as
-  # uros_libc_check.sh lists; so a check gone blind in one of those ways stops
-  # the build too.  The order is a second line of defence behind the check:
+  # refuse a canary, three parts made to fail it with T, B, R, C and D
+  # definitions of ours against musl's strong, weak-only, weak-object,
+  # read-only and data names, across parts, between two and three members that
+  # share a name, and each half alone, as uros_libc_check.sh lists; so a check
+  # gone blind in one of those ways stops the build too.  The order is a second line of defence behind the check:
   # ADDLIB puts each member in front of what is there already, so each library
   # comes out reversed and the last named, musl, comes first.
   add_library(uros_libc_check_canary OBJECT uros_libc_check_canary.c)
@@ -238,6 +238,7 @@ if(UROS_BUILD_MUSL)
             $<TARGET_OBJECTS:uros_libc_check_canary_pair>
             $<TARGET_OBJECTS:uros_libc_check_canary_pair>
     COMMAND ${CMAKE_AR} qc ${UROS_LIBC_CANARY3}
+            $<TARGET_OBJECTS:uros_libc_check_canary_pair>
             $<TARGET_OBJECTS:uros_libc_check_canary_pair>
             $<TARGET_OBJECTS:uros_libc_check_canary_pair>
     COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh --must-refuse
