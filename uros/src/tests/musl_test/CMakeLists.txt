@@ -16,12 +16,6 @@ add_dependencies(musl_test_bin mig_mach_public_headers musl_extproj)
 
 set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
 
-execute_process(
-  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
-  OUTPUT_VARIABLE _LIBGCC_A
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
 target_compile_options(musl_test_bin PRIVATE
   -std=gnu11
   ${UROS_ARCH_FLAGS} -msse -msse2
@@ -36,16 +30,7 @@ target_include_directories(musl_test_bin BEFORE PRIVATE
 )
 
 target_link_libraries(musl_test_bin PRIVATE
-  -Wl,--start-group
-  libcap
-  libnetname
-  libvfs
-  libflipc2
-  libmach_core
-  libposix-uros
-  ${MUSL_PREFIX}/lib/libc-musl.a
-  ${_LIBGCC_A}
-  -Wl,--end-group
+  uros_libc
 )
 
 target_link_options(musl_test_bin PRIVATE

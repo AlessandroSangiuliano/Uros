@@ -22,12 +22,6 @@ execute_process(
   OUTPUT_VARIABLE _GCC_INCLUDE
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-execute_process(
-  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
-  OUTPUT_VARIABLE _LIBGCC_A
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
 target_compile_options(fd_exec_test_bin PRIVATE
   -std=gnu11
   ${UROS_ARCH_FLAGS} -msse -msse2
@@ -50,16 +44,7 @@ target_include_directories(fd_exec_test_bin PRIVATE
 )
 
 target_link_libraries(fd_exec_test_bin PRIVATE
-  -Wl,--start-group
-  libcap
-  libnetname
-  libvfs
-  libflipc2
-  libmach_core
-  libposix-uros
-  ${MUSL_PREFIX}/lib/libc-musl.a
-  ${_LIBGCC_A}
-  -Wl,--end-group
+  uros_libc
   # #288: force-pull the real syscall dispatcher + TLS installer, otherwise
   # musl's WEAK -ENOSYS stubs win the link for this minimal static binary.
   uros_musl_dispatcher
