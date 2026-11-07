@@ -20,11 +20,13 @@
 #     in it (blk_write_label_test's count).
 #
 # Usage:  scripts/boot-log-disk-x86_64.sh [-o DIR] [--kvm] [-smp N]
-#             [--ports A,B,C] [BUDGET]
+#             [--ports A,B,C] [--boots N] [BUDGET]
 #   -o DIR   where the image, the disks and the log go (a NEW directory;
 #            default: the build's log-disk/<date-time>)
 #   --ports  the AHCI ports of the three disks, in order (default 0,1,2);
 #            lapsus has them on 0, 3 and 5, with the ports between empty
+#   --boots  boots one after another on the same disks (default 1): the Nth
+#            must leave /log/boot-N.txt and every earlier file as it was
 #   --kvm    under KVM; the default is TCG
 #   -smp N   processors (default 4)
 #   BUDGET   seconds the boot may take before -b restarts it (default 600)
@@ -44,6 +46,7 @@ KVM=0
 SMP=4
 BUDGET=600
 PORTS=0,1,2
+BOOTS=1
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -51,8 +54,9 @@ while [ $# -gt 0 ]; do
 	--kvm)	KVM=1; shift ;;
 	-smp)	SMP=${2:?-smp needs a number}; shift 2 ;;
 	--ports) PORTS=${2:?--ports needs three port numbers}; shift 2 ;;
+	--boots) BOOTS=${2:?--boots needs a number}; shift 2 ;;
 	[0-9]*)	BUDGET=$1; shift ;;
-	*)	echo "usage: $0 [-o DIR] [--kvm] [-smp N] [--ports A,B,C] [BUDGET]" >&2; exit 2 ;;
+	*)	echo "usage: $0 [-o DIR] [--kvm] [-smp N] [--ports A,B,C] [--boots N] [BUDGET]" >&2; exit 2 ;;
 	esac
 done
 IFS=, read -r P0 P1 P2 <<< "$PORTS"
@@ -123,80 +127,99 @@ md5sum "$OUT"/disk*.img > "$OUT/md5-before.txt"
 
 ACCEL="-accel tcg"
 [ "$KVM" = 1 ] && ACCEL="-enable-kvm"
-LOG=$OUT/serial.log
-# shellcheck disable=SC2086
-qemu-system-x86_64 -cpu max $ACCEL -smp "$SMP" -m 1G \
-	-cdrom "$OUT/log.iso" -boot d \
-	-device ich9-ahci,id=ahci0 \
-	-drive if=none,id=d0,file="$OUT/disk0-ntfs.img",format=raw \
-	-device ide-hd,drive=d0,bus=ahci0.$P0 \
-	-drive if=none,id=d1,file="$OUT/disk1-linux.img",format=raw \
-	-device ide-hd,drive=d1,bus=ahci0.$P1 \
-	-drive if=none,id=d2,file="$OUT/disk2-log.img",format=raw \
-	-device ide-hd,drive=d2,bus=ahci0.$P2 \
-	-display none -monitor none -serial file:"$LOG" -no-reboot \
-	> "$OUT/qemu.out" 2>&1 &
-QPID=$!
-# -b restarts the machine after the census, or at BUDGET; a minute more for the
-# restart, and then qemu is stopped as a run that did not end.
-t0=$(date +%s)
-while kill -0 "$QPID" 2>/dev/null; do
-	if [ $(( $(date +%s) - t0 )) -gt $(( BUDGET + 60 )) ]; then
-		kill "$QPID" 2>/dev/null
-		echo "boot-log-disk: qemu still running after $(( BUDGET + 60 )) s: stopped" | tee -a "$OUT/verdict.txt"
-		break
+rc=0
+say() { echo "boot-log-disk: $*" | tee -a "$OUT/verdict.txt"; }
+
+# The boots, one after another on the same disks: the Nth leaves the Nth file,
+# and every file an earlier boot left is byte for byte what it was (#915).
+b=1
+while [ $b -le "$BOOTS" ]; do
+	LOG=$OUT/serial-$b.log
+	# shellcheck disable=SC2086
+	qemu-system-x86_64 -cpu max $ACCEL -smp "$SMP" -m 1G \
+		-cdrom "$OUT/log.iso" -boot d \
+		-device ich9-ahci,id=ahci0 \
+		-drive if=none,id=d0,file="$OUT/disk0-ntfs.img",format=raw \
+		-device ide-hd,drive=d0,bus=ahci0.$P0 \
+		-drive if=none,id=d1,file="$OUT/disk1-linux.img",format=raw \
+		-device ide-hd,drive=d1,bus=ahci0.$P1 \
+		-drive if=none,id=d2,file="$OUT/disk2-log.img",format=raw \
+		-device ide-hd,drive=d2,bus=ahci0.$P2 \
+		-display none -monitor none -serial file:"$LOG" -no-reboot \
+		> "$OUT/qemu-$b.out" 2>&1 &
+	QPID=$!
+	# -b restarts the machine after the census, or at BUDGET; a minute more for
+	# the restart, and then qemu is stopped as a run that did not end.
+	t0=$(date +%s)
+	while kill -0 "$QPID" 2>/dev/null; do
+		if [ $(( $(date +%s) - t0 )) -gt $(( BUDGET + 60 )) ]; then
+			kill "$QPID" 2>/dev/null
+			say "boot $b: qemu still running after $(( BUDGET + 60 )) s: stopped"
+			break
+		fi
+		sleep 1
+	done
+	wait "$QPID" 2>/dev/null
+	say "boot $b took $(( $(date +%s) - t0 )) s ($([ "$KVM" = 1 ] && echo KVM || echo TCG), -smp $SMP, disks on AHCI ports $PORTS)"
+
+	grep -a -E '^blk: (-W|  [a-z_0-9]+ \()|^blk_write_label_test: ' "$LOG" | tee -a "$OUT/verdict.txt"
+	if grep -aq '^blk_write_label_test: 3 of 3 arms passed' "$LOG"; then
+		say "boot $b: blk_write_label_test 3 of 3 arms passed"
+	else
+		say "WRONG -- boot $b: blk_write_label_test did not pass all three arms (or said nothing)"
+		rc=1
 	fi
-	sleep 1
+
+	# The log partition as the boot left it, read as Linux would: e2fsck, and
+	# the file bootlog made.  The partition is mounted AT /log, so bootlog's
+	# /log/boot-N.txt is the partition's /boot-N.txt.
+	dd if="$OUT/disk2-log.img" of="$OUT/log-after-$b" bs=$SECT skip=$START status=none
+	e2fsck -fn "$OUT/log-after-$b" > "$OUT/e2fsck-$b.txt" 2>&1
+	erc=$?
+	if [ $erc -lt 4 ]; then
+		say "boot $b: e2fsck -fn on the log partition: exit $erc, no error"
+	else
+		say "WRONG -- boot $b: e2fsck -fn on the log partition: exit $erc, see $OUT/e2fsck-$b.txt"
+		rc=1
+	fi
+	debugfs -R 'ls -l /' "$OUT/log-after-$b" > "$OUT/log-ls-$b.txt" 2>/dev/null
+	debugfs -R "cat /boot-$b.txt" "$OUT/log-after-$b" > "$OUT/boot-$b.txt" 2>/dev/null
+	if grep -aq "^bootlog: boot $b, " "$OUT/boot-$b.txt" &&
+	   grep -aq '^blk_write_label_test: 3 of 3 arms passed' "$OUT/boot-$b.txt"; then
+		say "boot $b: /log/boot-$b.txt is on the disk, $(wc -c < "$OUT/boot-$b.txt") bytes, $(wc -l < "$OUT/boot-$b.txt") lines, with bootlog's head and blk_write_label_test's count"
+	else
+		say "WRONG -- boot $b: no /log/boot-$b.txt with bootlog's head and blk_write_label_test's count ($(wc -c < "$OUT/boot-$b.txt") bytes read)"
+		rc=1
+	fi
+	k=1
+	while [ $k -lt $b ]; do
+		debugfs -R "cat /boot-$k.txt" "$OUT/log-after-$b" > "$OUT/boot-$k-after-$b.txt" 2>/dev/null
+		if cmp -s "$OUT/boot-$k.txt" "$OUT/boot-$k-after-$b.txt"; then
+			say "boot $b: /log/boot-$k.txt byte for byte as boot $k left it"
+		else
+			say "WRONG -- boot $b: /log/boot-$k.txt is not as boot $k left it"
+			rc=1
+		fi
+		k=$(( k + 1 ))
+	done
+	b=$(( b + 1 ))
 done
-wait "$QPID" 2>/dev/null
-echo "boot-log-disk: the boot took $(( $(date +%s) - t0 )) s ($([ "$KVM" = 1 ] && echo KVM || echo TCG), -smp $SMP, disks on AHCI ports $PORTS)" | tee -a "$OUT/verdict.txt"
 
 md5sum "$OUT"/disk*.img > "$OUT/md5-after.txt"
-rc=0
-grep -a -E '^blk: (-W|  [a-z_0-9]+ \()|^blk_write_label_test: ' "$LOG" | tee -a "$OUT/verdict.txt"
-if grep -aq '^blk_write_label_test: 3 of 3 arms passed' "$LOG"; then
-	echo "boot-log-disk: blk_write_label_test 3 of 3 arms passed" | tee -a "$OUT/verdict.txt"
-else
-	echo "boot-log-disk: WRONG -- blk_write_label_test did not pass all three arms (or said nothing)" | tee -a "$OUT/verdict.txt"
-	rc=1
-fi
 for d in disk0-ntfs disk1-linux; do
 	if [ "$(grep "/$d.img" "$OUT/md5-before.txt" | cut -d' ' -f1)" = \
 	     "$(grep "/$d.img" "$OUT/md5-after.txt" | cut -d' ' -f1)" ]; then
-		echo "boot-log-disk: $d.img byte for byte as before the boot" | tee -a "$OUT/verdict.txt"
+		say "$d.img byte for byte as before the first boot"
 	else
-		echo "boot-log-disk: WRONG -- $d.img was written" | tee -a "$OUT/verdict.txt"
+		say "WRONG -- $d.img was written"
 		rc=1
 	fi
 done
 if [ "$(grep '/disk2-log.img' "$OUT/md5-before.txt" | cut -d' ' -f1)" = \
      "$(grep '/disk2-log.img' "$OUT/md5-after.txt" | cut -d' ' -f1)" ]; then
-	echo "boot-log-disk: disk2-log.img unchanged" | tee -a "$OUT/verdict.txt"
+	say "disk2-log.img unchanged"
 else
-	echo "boot-log-disk: disk2-log.img written" | tee -a "$OUT/verdict.txt"
+	say "disk2-log.img written"
 fi
-
-# The log partition as the boot left it, read as Linux would: e2fsck, and the
-# file bootlog made, which has to be there and hold this boot (#915).
-dd if="$OUT/disk2-log.img" of="$OUT/log.after" bs=$SECT skip=$START status=none
-e2fsck -fn "$OUT/log.after" > "$OUT/e2fsck.txt" 2>&1
-erc=$?
-if [ $erc -lt 4 ]; then
-	echo "boot-log-disk: e2fsck -fn on the log partition: exit $erc, no error" | tee -a "$OUT/verdict.txt"
-else
-	echo "boot-log-disk: WRONG -- e2fsck -fn on the log partition: exit $erc, see $OUT/e2fsck.txt" | tee -a "$OUT/verdict.txt"
-	rc=1
-fi
-# The partition is mounted AT /log, so bootlog's /log/boot-1.txt is the
-# partition's /boot-1.txt.
-debugfs -R 'ls -l /' "$OUT/log.after" > "$OUT/log-ls.txt" 2>/dev/null
-debugfs -R 'cat /boot-1.txt' "$OUT/log.after" > "$OUT/boot-1.txt" 2>/dev/null
-if grep -aq '^bootlog: boot 1, ' "$OUT/boot-1.txt" &&
-   grep -aq '^blk_write_label_test: 3 of 3 arms passed' "$OUT/boot-1.txt"; then
-	echo "boot-log-disk: /log/boot-1.txt is on the disk, $(wc -c < "$OUT/boot-1.txt") bytes, $(wc -l < "$OUT/boot-1.txt") lines, with bootlog's head and blk_write_label_test's count" | tee -a "$OUT/verdict.txt"
-else
-	echo "boot-log-disk: WRONG -- no /log/boot-1.txt with bootlog's head and blk_write_label_test's count ($(wc -c < "$OUT/boot-1.txt") bytes read)" | tee -a "$OUT/verdict.txt"
-	rc=1
-fi
-echo "boot-log-disk: $([ $rc = 0 ] && echo PASSED || echo WRONG), in $OUT" | tee -a "$OUT/verdict.txt"
+say "$([ $rc = 0 ] && echo PASSED || echo WRONG), in $OUT"
 exit $rc
