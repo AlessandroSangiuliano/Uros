@@ -274,6 +274,9 @@ netname_remove(mach_port_t name)
 	    (this->sig == name)) {
 	    register name_record_t last = this;
 
+	    /* #574: what a server's death takes out of the registry, said. */
+	    printf("%s: \"%.80s\" is gone with the port it named or was "
+		   "signed by\n", program, last->key);
 	    this = *prev = this->next;
 	    free(last);
 	} else
