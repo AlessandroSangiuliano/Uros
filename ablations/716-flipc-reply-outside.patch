@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #716
+Takes out: the second half of the bound on a FLIPC read's answer (efdd55ad), the data region -- a reply that fits in length is copied from wherever its offset points
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[19\] WRONG .*[0-9]+ FLIPC and 0 Mach reads
+
+diff --git a/uros/src/lib/libvfs/vfs_flipc.c b/uros/src/lib/libvfs/vfs_flipc.c
+index dbf0e469..d8c2676f 100644
+--- a/uros/src/lib/libvfs/vfs_flipc.c
++++ b/uros/src/lib/libvfs/vfs_flipc.c
+@@ -169,8 +169,8 @@ vfs_flipc_read(struct vfs_flipc_conn *c, vfs_u64_t handle,
+     if (rep->status == VFS_FLIPC_OK) {
+         uint64_t n   = rep->data_length;
+         uint64_t off = rep->data_offset;
+-        if (n <= want && off <= c->fwd_data_size &&
+-            n <= c->fwd_data_size - off) {
++        if (n <= want && (1 || (off <= c->fwd_data_size &&
++            n <= c->fwd_data_size - off))) {
+             if (n > 0)
+                 memcpy(buf, flipc2_data_ptr(c->fwd, off), (size_t)n);
+             ret = (ssize_t)n;
