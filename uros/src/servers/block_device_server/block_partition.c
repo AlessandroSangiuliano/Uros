@@ -32,6 +32,7 @@
 #include <mach/mach_port.h>
 #include <servers/netname.h>
 #include <stdio.h>
+#include <string.h>
 #include "block_server.h"
 
 /* ================================================================
@@ -299,5 +300,43 @@ blk_register_partitions(void)
 				printf("blk: registered alias '%s' -> '%s'\n",
 				       part->stable_name, part->name);
 		}
+	}
+
+	/*
+	 * #915: and a partition by its label, "label:UROSLOG" -- a name that
+	 * does not move when the disks do, as "ahci2a" does.  After every
+	 * partition's own name, so a client that waits for a label knows the
+	 * table is all published when it comes.  Only a label no other
+	 * partition carries: two would make the name a choice.  The labels
+	 * are read with -W alone (blk_write_label_read()), so without it
+	 * there is none to publish.
+	 */
+	for (i = 0; i < n_partitions; i++) {
+		struct blk_partition *part = &partitions[i];
+		char lname[sizeof("label:") + sizeof(part->label)];
+		int j, same = 0;
+
+		if (!part->is_ext2 || part->label[0] == '\0'
+		    || part->payload == 0)
+			continue;
+		for (j = 0; j < n_partitions; j++)
+			if (partitions[j].is_ext2
+			    && strcmp(partitions[j].label, part->label) == 0)
+				same++;
+		if (same != 1) {
+			printf("blk: label \"%s\" is on %d partitions, so it "
+			       "names none of them (#915)\n", part->label,
+			       same);
+			continue;
+		}
+		snprintf(lname, sizeof(lname), "label:%s", part->label);
+		kr = netname_check_in(name_server_port, lname, sig,
+				      part->recv_port);
+		if (kr != KERN_SUCCESS)
+			printf("blk: netname_check_in(%s) failed (kr=%d)\n",
+			       lname, kr);
+		else
+			printf("blk: registered '%s' -> '%s' (#915)\n", lname,
+			       part->name);
 	}
 }
