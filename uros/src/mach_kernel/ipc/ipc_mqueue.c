@@ -747,7 +747,7 @@ ipc_mqueue_deliver(
 	enable_preemption();
 	if (direct) {
 		counter(c_ipc_mqueue_deliver_direct++);
-		thread_run((void (*)(void)) 0, receiver);
+		thread_run((void (*)(void)) 0, receiver, 0);
 		/* Sender resumes here when rescheduled */
 		splx(s);
 	}

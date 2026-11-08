@@ -381,7 +381,25 @@ syscall_thread_switch(
 					if (option == SWITCH_OPTION_WAIT)
 						thread_will_wait_with_timeout(
 							cur_thread, option_time);
-					thread_run((void(*)(void))SAFE_THR_DEPRESS, thread);
+					/*
+					 * 🔴 AST_QUANTUM, so that this thread goes
+					 * to the TAIL of its run queue, as the
+					 * thread_block_reason() below puts it when
+					 * there is no hint (#889).  It gave the rest
+					 * of its quantum away; with reason 0,
+					 * thread_dispatch() took it for a thread
+					 * preempted by a better one and put it at the
+					 * HEAD.  At one processor a thread that hands
+					 * off to a spinner in a loop was then always
+					 * the next to run when the spinner's quantum
+					 * ended, and every other thread at its
+					 * priority waited for ever: act_test [48],
+					 * whose killer never came back to end the
+					 * spinner, stopped a boot of entry 37 at
+					 * -smp 1 under TCG for 20 minutes.
+					 */
+					thread_run((void(*)(void))SAFE_THR_DEPRESS,
+						   thread, AST_QUANTUM);
 
 					did_handoff = 1;
 				} else {

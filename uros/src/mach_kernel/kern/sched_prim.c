@@ -2390,7 +2390,8 @@ thread_block(
 void
 thread_run(
 	void			(*continuation)(void),
-	register thread_t	new_thread)
+	register thread_t	new_thread,
+	int			reason)		/* #889: as thread_invoke()'s */
 {
 	register thread_t thread = current_thread();
 	spl_t	s;
@@ -2428,7 +2429,7 @@ thread_run(
 	}
 	thread_unlock(thread);
 	thread->continuation = continuation;
-	thread_invoke(thread, new_thread, 0);
+	thread_invoke(thread, new_thread, reason);
 	splx(s);
 
 #if	MACH_ASSERT
@@ -3948,7 +3949,7 @@ idle_thread_continue(void)
 			counter(c_idle_thread_handoff++);
 	
 			ETAP_SET_REASON(idle_self, BLOCKED_ON_IDLE_DONE);
-			thread_run((void(*)(void))0, new_thread);
+			thread_run((void(*)(void))0, new_thread, 0);
 		}
 #if	FAST_IDLE
 		else if (state == PROCESSOR_RUNNING) {
