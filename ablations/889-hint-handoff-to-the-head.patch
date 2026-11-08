@@ -2,7 +2,13 @@ Kind: ablation
 Issue: #889
 Over: 889-widen-a48-round-robin.patch
 Takes out: AST_QUANTUM from thread_switch()'s hand-off -- the thread that gave its quantum away goes back at the head of its run queue, as one preempted by a better thread does; at one processor, with every thread of act_test [48] at one priority, the hint thread is the next to run each time the thread it handed off to stops, and the arm's main thread, behind it, never runs again: act_test never gives its count, and the boot goes quiet until the harness cuts it
-Run: --entry 14 300 -smp 1
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 300
+Script: -smp
+Script: 1
+Note: run-x86_64.sh is run as a Script so that Expect is read in what the harness printed: "still waiting for:" is its line for a boot that stopped gaining lines, and it is not in the console log, where a Run: boot's Expect is read -- the first version of this patch had Run: and could never have been caught; ablate.sh puts --kvm in front under KVM
 Expect: still waiting for: act_test: \[0-9\]\* of \[0-9\]\* arms passed
 
 diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
