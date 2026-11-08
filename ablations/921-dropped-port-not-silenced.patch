@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #921
+Takes out: the silencing of a dropped port -- PxIE, PxIS and its bit in IS are left as they were, so the empty CD drive on ahci0's port 2 keeps the PxIS.DHRS its first D2H Register FIS set, with PxIE enabling it, and the line is asserted again each time the handler unmasks it once GHC.IE is on; the drop's own readback shows the enable still set.  Under KVM -smp 4 on victus the storm also cost the processor taking it half the ticks of window 1, five boots of five
+Run: --entry 14 600 -smp 4
+Expect: ahci: port 2 dropped, its interrupts off: PxIE 0x0*[1-9A-F]
+
+diff --git a/uros/src/servers/block_device_server/ahci/ahci_module.c b/uros/src/servers/block_device_server/ahci/ahci_module.c
+index 9569692b..54ac00f5 100644
+--- a/uros/src/servers/block_device_server/ahci/ahci_module.c
++++ b/uros/src/servers/block_device_server/ahci/ahci_module.c
+@@ -584,9 +584,6 @@ ahci_port_drop(struct ahci_state *st, int port_idx)
+ 	 * whose submission happens to clear PxIS).  PxIE off, PxIS cleared,
+ 	 * then IS's bit, in that order (AHCI 1.3.1 §10.1.2, step 7).
+ 	 */
+-	port_write(st, pi->hba_port, PORT_IE, 0);
+-	port_write(st, pi->hba_port, PORT_IS, ~0u);
+-	ahci_write(st, AHCI_IS, 1u << pi->hba_port);
+ 	/* read back, not assumed: what the port will interrupt with now */
+ 	printf("ahci: port %d dropped, its interrupts off: PxIE 0x%08X, PxIS "
+ 	       "0x%08X (#921)\n", pi->hba_port,
