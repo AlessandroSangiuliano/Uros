@@ -81,6 +81,21 @@ struct vfs_mount_cache_entry {
 /* fd table is shared with vfs_flipc.c → not static (see libvfs_internal.h). */
 struct vfs_fd_entry                 vfs_fds[VFS_MAX_FDS];
 pthread_mutex_t                     vfs_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#ifdef _PTHREAD_MUTEX_SIG_init
+/*
+ * 🔴 BUILT AGAINST libpthreads, SO FOR A PROGRAM THAT LINKS IT (#733).
+ *
+ * The header gave vfs_lock its first word and the link chooses who locks it,
+ * and a program of musl has a pthread_mutex_lock() too, so the link did not
+ * mind.  Asking for a name only libpthreads has makes it mind.  A program of
+ * musl gets libvfs-musl, through uros_libc.
+ */
+extern const char		__uros_libpthreads_abi;
+#define	VFS_ABI_GUARD()	__asm__ volatile("" : : "r"(&__uros_libpthreads_abi))
+#else
+#define	VFS_ABI_GUARD()	((void)0)
+#endif
 static struct vfs_mount_cache_entry vfs_mounts[VFS_MAX_CACHED_MOUNTS];
 static int                          vfs_initialised;
 
@@ -268,6 +283,7 @@ vfs_fd_get(vfs_fd_t fd)
 int
 vfs_init(void)
 {
+    VFS_ABI_GUARD();	/* a reference from code, kept while vfs_init is */
     pthread_mutex_lock(&vfs_lock);
     if (!vfs_initialised) {
         memset(vfs_fds, 0, sizeof(vfs_fds));

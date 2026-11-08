@@ -35,9 +35,11 @@
  * libmach ships two competing mach_init implementations in distinct
  * TUs (mach_init.c and mach_init_sa.c, tracked by
  * [[project_unify_libmach]]).  Naming mach_init from outside libmach
- * pulls both TUs into the umbrella link and explodes on multiple
- * definitions of mach_task_self_/vm_page_size/NDR_record/etc.  We
- * sidestep by invoking the primitives directly — each lives in its
+ * pulled both TUs into the umbrella link and exploded on multiple
+ * definitions of mach_task_self_/vm_page_size/NDR_record/etc.  Since
+ * #733 libmach_core carries only mach_init.c, whose mach_init is static,
+ * so the name would not link at all.  The primitives are invoked
+ * directly — each lives in its
  * own unambiguous TU: mach_task_self_init() in mig_support.c, which
  * seeds mach_task_self_ through the trap and gives the reply port back
  * to the task (#645), and mach_init_ports() in mach_init_ports.c.

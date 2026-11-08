@@ -5,7 +5,8 @@ project(flipc_bench C)
 # from the shell after boot (quiescent system) instead of running during
 # the disk suite while every server contends for the CPU.  Reports the
 # median of N runs per chunk so the FLIPC-vs-Mach ratio is stable.
-# Same static-musl link recipe as hello_world; links libvfs + libflipc2.
+# Same static-musl link recipe as hello_world: uros_libc, whose libvfs-musl
+# and libflipc2 it measures.
 if(NOT UROS_BUILD_MUSL)
   return()
 endif()
@@ -23,12 +24,6 @@ execute_process(
   OUTPUT_VARIABLE _GCC_INCLUDE
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-execute_process(
-  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
-  OUTPUT_VARIABLE _LIBGCC_A
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
 target_compile_options(flipc_bench_bin PRIVATE
   -std=gnu11
   ${UROS_ARCH_FLAGS} -msse -msse2
@@ -52,21 +47,12 @@ target_include_directories(flipc_bench_bin PRIVATE
 )
 
 target_link_libraries(flipc_bench_bin PRIVATE
-  -Wl,--start-group
-  libcap
-  libnetname
-  libvfs
-  libflipc2
-  libmach_core
-  libposix-uros
-  ${MUSL_PREFIX}/lib/libc-musl.a
-  ${_LIBGCC_A}
-  -Wl,--end-group
+  uros_libc
 )
 
-# #291: no -Wl,-u — the weak musl syscall/clone stubs were stripped from
-# the static libc-musl.a, so the strong libposix-uros dispatcher is pulled
-# automatically.
+# The weak musl syscall/clone stubs were stripped from libc-musl.a (#291),
+# so the dispatcher needs no -u.  __uros_libc_init does: crt0 names it weakly,
+# and a weak reference does not pull an object out of an archive.
 target_link_options(flipc_bench_bin PRIVATE
   ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach

@@ -32,6 +32,12 @@
 #include <sys/timers.h>		/* For struct timespec and getclock(). */
 
 /*
+ * Named by libvfs.c when it is compiled against this pthread.h, so that only a
+ * program that links this library can link that build of it (#733).
+ */
+const char	__uros_libpthreads_abi = 1;
+
+/*
  * Destroy a mutex variable.
  */
 int

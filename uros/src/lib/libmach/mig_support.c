@@ -159,10 +159,11 @@ mig_put_reply_port(
  * alone.
  *
  * It lives here and not in mach_init.c, where it was.  A caller outside libmach
- * that names a function in mach_init.c pulls that file into libc.so beside
- * mach_init_sa.c, which defines the same globals, and the link fails.
+ * that named a function in mach_init.c pulled that file into libc.so beside
+ * mach_init_sa.c, which defines the same globals, and the link failed.
  * mig_reset_after_fork() was put here for that reason, reset only libmach's
- * copy of the reply port, and is gone (#645).
+ * copy of the reply port, and is gone (#645).  libmach_core has had only
+ * mach_init.c since #733.
  *
  * mach_task_self() in <mach_init.h> is a macro that reads the cached global, so
  * it is undefined here and the trap stub runs, returning a name that is valid

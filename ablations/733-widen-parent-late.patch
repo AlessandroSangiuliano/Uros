@@ -1,0 +1,22 @@
+Kind: widen
+Issue: #733
+Holds open: the parent takes 5 ms by the TSC to come back from thread_resume(), so that a new thread runs, and takes its first mutex, before the parent has gone on
+Run: --entry 14 120 -smp 4
+
+diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
+index 3175a931..f4be1200 100644
+--- a/uros/src/lib/libposix-uros/posix_clone.c
++++ b/uros/src/lib/libposix-uros/posix_clone.c
+@@ -299,6 +299,12 @@ __uros_clone(int (*fn)(void *),
+         return -11;
+     }
+     TRACE("thread_resume ok");
++    {
++        unsigned long long t0 = __builtin_ia32_rdtsc();
++
++        while (__builtin_ia32_rdtsc() - t0 < 15000000ull)
++            ;
++    }
+ 
+     /* ctid_addr, for CLONE_CHILD_CLEARTID, reached the bootstrap in the
+      * new thread's state (rcx on x86-64, the stack on i386), and the

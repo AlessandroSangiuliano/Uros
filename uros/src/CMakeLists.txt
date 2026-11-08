@@ -114,25 +114,6 @@ file(CREATE_LINK
   "${GEN_MACH_MACHINE}"
   SYMBOLIC)
 
-# uros_musl_dispatcher — kept as a no-op INTERFACE for backward
-# compatibility (a few targets still link it).
-#
-# History: musl's libc-musl.a used to carry WEAK -ENOSYS stubs
-# (__uros_syscall0..6, __uros_set_thread_area_tp, __uros_clone;
-# uros_syscall_stub.c, #234) that exist only so the standalone libc.so /
-# ld-musl links under --no-undefined.  Those weak defs leaked into the
-# STATIC archive too, where they shadowed the strong libposix-uros
-# dispatcher unless every binary force-pulled them with -Wl,-u (#286, #288).
-#
-# #291 strips uros_syscall_stub.lo from the static libc-musl.a entirely (see
-# contrib/CMakeLists.txt), so the strong __uros_syscallN / TLS / clone defs
-# are now the only ones in the static link and get pulled automatically —
-# no -Wl,-u anywhere.  __uros_clone is safe to pull into forking binaries
-# since #292 (fork's post-fork reinit moved to a pthread_atfork handler).
-if(UROS_BUILD_MUSL)
-  add_library(uros_musl_dispatcher INTERFACE)
-endif()
-
 # For now we build only the host tools we need (mig/migcom, base libraries).
 
 # #406: the userland — host tools, libraries, servers, tests, commands — is

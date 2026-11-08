@@ -31,14 +31,6 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-# libgcc.a for compiler builtins (__udivdi3 etc.) once we drop gcc.s
-# from the libmach path.
-execute_process(
-  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
-  OUTPUT_VARIABLE _LIBGCC_A
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
 target_compile_options(hello_server_server PRIVATE
   -std=gnu11
   ${UROS_ARCH_FLAGS} -msse -msse2
@@ -76,16 +68,7 @@ target_include_directories(hello_server_server PRIVATE
 )
 
 target_link_libraries(hello_server_server PRIVATE
-  -Wl,--start-group
-  libcap
-  libnetname
-  libvfs
-  libflipc2
-  libmach_core
-  libposix-uros
-  ${MUSL_PREFIX}/lib/libc-musl.a
-  ${_LIBGCC_A}
-  -Wl,--end-group
+  uros_libc
 )
 
 target_link_options(hello_server_server PRIVATE
@@ -95,7 +78,7 @@ target_link_options(hello_server_server PRIVATE
   # weakly (so legacy libmach servers link without it), and a weak ref
   # does not pull an object out of a static archive.  -u makes the
   # linker treat it as an undefined-strong symbol, pulling
-  # uros_main_thread.o from libc-musl.a so crt0's call resolves.
+  # uros_main_thread.lo from libc-uros.a so crt0's call resolves.
   -Wl,-u,__uros_libc_init
   -Wl,--build-id=none
 )

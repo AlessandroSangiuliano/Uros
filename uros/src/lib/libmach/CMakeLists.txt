@@ -62,6 +62,17 @@ function(uros_add_libmach_core LIB_SOURCES)
     "/i386/fork\\.s$"       # fork() syscall stub
     # What x86-64 builds from C where i386 has the assembly above.
     "/bcopy\\.c$"    "/memcpy\\.c$"   "/memmove\\.c$"   "/memset\\.c$"
+    # musl's strchr is the one in a program of musl (#733).
+    "/strchr\\.c$"
+    # The second crt0, i386's own, whose entry is __start: __start_mach comes
+    # from crt0.c.  This one defines environ, strong over musl's weak alias
+    # of __environ, which is the name the check stopped the i386 build on,
+    # and _mach_init_routine, which mach_init.c defines as well (#733).
+    "/i386/crt0\\.c$"
+    # The second mach_init, which no image links: mach_init.c is the one in
+    # all of them, libc.so's and the static programs'.  The two define the
+    # same globals, and a link that met this one first got it (#733).
+    "/mach_init_sa\\.c$"
   )
 
   set(LIBMACH_CORE_SOURCES ${LIB_SOURCES})

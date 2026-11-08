@@ -121,6 +121,40 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_SOURCE_DIR}/include
   )
   set_target_properties(libvfs-pic PROPERTIES OUTPUT_NAME "vfs-pic")
+
+  # -------------------------------------------------------------------------
+  # What a static program of musl gets, inside libc-uros.a (#733).
+  #
+  # The sources of the static libvfs above, FLIPC included, against musl's
+  # headers.  That libvfs is for the servers, and the header decides what a
+  # mutex is: built against libpthreads vfs_lock starts as 0x32AAABA7, which
+  # musl reads as a mutex's type, robust and owner-tracked, and every stat() of
+  # a threaded program then went by the robust list.
+  # -------------------------------------------------------------------------
+  add_library(libvfs-musl STATIC
+    libvfs.c
+    vfs_flipc.c
+    ${VFS_USER_C}
+  )
+  add_dependencies(libvfs-musl mig_mach_public_headers musl_extproj)
+  target_compile_options(libvfs-musl PRIVATE
+    -std=gnu11
+    ${UROS_ARCH_FLAGS} -msse -msse2
+    -fno-builtin
+    -mstack-protector-guard=global
+    -include stdint.h
+  )
+  target_include_directories(libvfs-musl PUBLIC
+    ${_MUSL_INC}                                   # musl headers FIRST
+    ${CMAKE_CURRENT_SOURCE_DIR}                    # vfs_types.h (public API)
+    ${CMAKE_CURRENT_BINARY_DIR}                    # vfs.h (MIG user header)
+    ${CMAKE_BINARY_DIR}/generated/include          # mach/machine -> i386
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, mach.h
+    ${UROS_ARCH_INCLUDE}
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel
+    ${CMAKE_SOURCE_DIR}/include
+  )
+  set_target_properties(libvfs-musl PROPERTIES OUTPUT_NAME "vfs-musl")
 endif()
 
 # #434: <pthread.h> pulls <machine/pthread_impl.h>, which libpthreads

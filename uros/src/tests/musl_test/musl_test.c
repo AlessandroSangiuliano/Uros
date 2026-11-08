@@ -6,14 +6,16 @@
  *
  * This is the box "a static musl binary runs", and it is written as a program
  * and not as a test of libposix-uros: nothing here knows it is on Mach, there
- * is no Mach header and no trap, only POSIX.  An arm that passes says the
- * whole path holds, from the libc call through musl's patched syscall_arch.h
- * and the dispatch table to the kernel, on the numbers and the structure
- * layouts of this target.
+ * is no Mach header and no trap, only POSIX and musl's gettid() (arm 24).
+ * An arm that passes says the whole path holds, from the libc call through
+ * musl's patched syscall_arch.h and the dispatch table to the kernel, on the
+ * numbers and the structure layouts of this target.
  *
  * Each arm reads back what it did.  Where an arm needs something this boot may
  * not have -- a disk, a process server -- it says NOT ASKED and does not count.
  */
+
+#define _GNU_SOURCE		/* gettid() */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -850,6 +852,92 @@ arm_proc(void)
 }
 
 /*
+ * ── [24] A thread knows who it is from its first instruction ───────────
+ *
+ * musl owns a mutex by the thread's id, so a thread that took one before it
+ * had an id could not give it back once it had: an error-checking mutex says
+ * so, EPERM, where the others let it pass.  So the first thing each of these
+ * does is to ask for its id, and the next to take a mutex, which it holds
+ * until it has one.  It runs before the arms that make threads in earnest,
+ * because what this leaves behind stops them.  A mutex each: one refused and
+ * left on a thread's robust list, then taken by the next thread, ties the two
+ * lists in a knot, and the first of them never gets out to let this arm answer.
+ *
+ * And none of them ends before the arm has answered.  A thread that ends goes
+ * through the thread list, which one with no id can tear: in 3 boots of 8 of
+ * 733-tid-after-resume, under KVM and TCG, this program died in pthread_exit,
+ * at a null pointer, before this arm had said a word.
+ */
+#define O_THREADS	8
+
+static pthread_mutex_t	o_lock[O_THREADS];
+static int		o_nameless, o_refused, o_answered, o_go;
+
+static void *
+own_id_thread(void *arg)
+{
+	pthread_mutex_t	*m = arg;
+	pid_t		first = gettid();
+	int		i, rc;
+
+	rc = pthread_mutex_lock(m);
+	if (rc == 0) {
+		pause_a_little();
+		for (i = 0; i < WAIT_STEPS && gettid() == 0; i++)
+			pause_a_little();
+		rc = pthread_mutex_unlock(m);
+	}
+	if (first == 0)
+		__atomic_add_fetch(&o_nameless, 1, __ATOMIC_SEQ_CST);
+	if (rc != 0)
+		__atomic_add_fetch(&o_refused, 1, __ATOMIC_SEQ_CST);
+	__atomic_add_fetch(&o_answered, 1, __ATOMIC_SEQ_CST);
+	while (!__atomic_load_n(&o_go, __ATOMIC_SEQ_CST))
+		pause_a_little();
+	return NULL;
+}
+
+static void
+arm_own_id(void)
+{
+	pthread_mutexattr_t	attr;
+	pthread_t		th[O_THREADS];
+	int			i, rc = 0, made = 0, waited;
+	int			answered, nameless, refused;
+
+	(void)pthread_mutexattr_init(&attr);
+	(void)pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+	for (i = 0; i < O_THREADS; i++)
+		(void)pthread_mutex_init(&o_lock[i], &attr);
+	(void)pthread_mutexattr_destroy(&attr);
+	for (i = 0; i < O_THREADS && rc == 0; i++) {
+		rc = pthread_create(&th[i], NULL, own_id_thread, &o_lock[i]);
+		if (rc == 0)
+			made++;
+	}
+	for (waited = 0; waited < WAIT_STEPS &&
+	     __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made; waited++)
+		pause_a_little();
+	answered = __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST);
+	nameless = __atomic_load_n(&o_nameless, __ATOMIC_SEQ_CST);
+	refused = __atomic_load_n(&o_refused, __ATOMIC_SEQ_CST);
+	if (rc != 0)
+		verdict(24, 0, "pthread_create %d said %d", made, rc);
+	else if (answered < made)
+		verdict(24, 0, "of %d threads, %d had answered after %d "
+			"sleeps of 10 ms asked", made, answered, waited);
+	else
+		verdict(24, nameless == 0 && refused == 0,
+			"%d threads asked for their id as their first act, %d "
+			"got none, and %d were refused back the error-checking "
+			"mutex they took next", made, nameless, refused);
+	/* Only now may they end. */
+	__atomic_store_n(&o_go, 1, __ATOMIC_SEQ_CST);
+	for (i = 0; i < made; i++)
+		(void)pthread_join(th[i], NULL);
+}
+
+/*
  * ── [22] Threads in the servers at once ─────────────────────────────────
  *
  * Four kinds of request to two servers, from four threads, so that a reply that
@@ -1092,6 +1180,7 @@ main(int argc, char **argv)
 	arm_malloc();
 	arm_mmap();
 	arm_tls();
+	arm_own_id();
 	arm_threads();
 	arm_detached();
 	arm_signals();
