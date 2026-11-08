@@ -8,6 +8,7 @@ Screen: --freeze
 Screen: --absent=quiet_census: passes=
 Screen: --budget=300
 Expect: texts the kernel printed for its log only are ON THE SCREEN
+Note: 4 of 4 caught and 4 of 4 passed at aa6dc6a1 on victus, TCG and KVM, two boots each: the ablated readback found "quiet_census: passes=" on the panel, the fixed one on the wire and not on the panel.  Measured at c460dc21, full boots of entry 14 under KVM -smp 4, the trees alternated: the census's own count said 286681 and 271146 glyphs drawn, against 321393 and 321208 with this patch, for serial logs of 187644 and 185440 bytes against 188804 and 187706 -- the wire the same, the screen 11 to 16 per cent lighter on a boot this short, where the reports come at the doublings and the windows few
 
 diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
 index cfe7f86b..0cf2212f 100644
