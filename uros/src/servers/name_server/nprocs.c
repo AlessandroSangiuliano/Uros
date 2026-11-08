@@ -53,6 +53,8 @@
 #include <mach.h>
 #include <mach/message.h>
 #include <mach/notify.h>
+#include <mach/mach_traps.h>	/* #716: urmach_cap_verify */
+#include <mach/cap_types.h>	/* #716: a mount's capability */
 #include <sa_mach.h>
 #include <mach_error.h>
 
@@ -341,12 +343,13 @@ notify_watchers_for(netname_name_in_t key, mach_port_t service_port)
 }
 
 /*
- * Whether `sig' can sign for `port' (#744).
+ * Whether `sig' can sign for `port' (#744), for a name and for a mount (#716).
  *
  * A name is its server's because nobody else can present the signature it was
  * checked in with, and this is the check of the half of that the name server
  * can see.  MACH_PORT_NULL is what every task can present: four servers passed
- * it, so their names were anyone's to check in again or out.  A dead name is
+ * it, so their names were anyone's to check in again or out, and ext_server
+ * and proc_server passed it for every mount, "/" among them.  A dead name is
  * the same for everyone too.  And the port being registered cannot sign for
  * itself, since everyone who looks the name up holds a send right to it.
  *
@@ -531,19 +534,62 @@ mount_prefix_match(const char *path, const char *prefix)
     return 0;
 }
 
+/*
+ * Whether `token' lets its bearer check a mount in under `prefix' (#716).
+ *
+ * The kernel verifies it: urmach_cap_verify() checks the MAC with the key
+ * cap_server installed, the type, the id, the operation, and whether it was
+ * revoked.  The id is the prefix's as the caller spelled it, so a capability
+ * for "/mnt/disk2" is not one for "/mnt" or for "/etc".  The copy is because
+ * the token arrives as bytes inside the message, which promises nothing of
+ * the alignment a struct uros_cap wants.
+ */
+static kern_return_t
+mount_capability(netname_name_in_t prefix, const char *token,
+		 mach_msg_type_number_t count)
+{
+    struct uros_cap t;
+
+    if (count != sizeof t)
+	return CAP_ERR_INVALID_TOKEN;
+    memcpy(&t, token, sizeof t);
+    return urmach_cap_verify(&t, RESOURCE_MOUNT_POINT, CAP_OP_MOUNT_REGISTER,
+			     cap_name_hash(prefix));
+}
+
 kern_return_t
 do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
-			  mach_port_t sig, mach_port_t port)
+			  mach_port_t sig, mach_port_t port,
+			  cap_token_t token, mach_msg_type_number_t tokenCnt)
 {
     mount_record_t this;
+    kern_return_t kr;
 
     if (Debug)
 	printf("%s: netname_check_in_mount('%.80s', port=%x, sig=%x)\n",
 	       program, prefix, port, sig);
 
+    /*
+     * #716: a mount is its server's on the same terms as a name, and the
+     * signature is asked before the prefix is looked at, as do_netname_check_in
+     * asks it.  The rights in the request go back with the refusal.
+     */
+    if (!signature_can_sign(sig, port))
+	return NETNAME_INVALID_PORT;
+
     /* Validate: must be absolute. */
     if (prefix[0] != '/')
 	return NETNAME_NOT_YOURS;
+
+    /*
+     * #716: and the prefix is the caller's to mount under only with a
+     * capability for it.  Asked before the registry is, so that a refusal
+     * says nothing of whether the prefix is taken; the kernel's answer goes
+     * back as it is, a CAP_ERR_* that names why.
+     */
+    kr = mount_capability(prefix, token, tokenCnt);
+    if (kr != KERN_SUCCESS)
+	return kr;
 
     /* Reject duplicates (caller should check_out_mount first). */
     for (this = mounts; this != NULL; this = this->next)
@@ -574,6 +620,9 @@ do_netname_check_out_mount(mach_port_t server, netname_name_in_t prefix,
     if (Debug)
 	printf("%s: netname_check_out_mount('%.80s', sig=%x)\n",
 	       program, prefix, sig);
+
+    if (!signature_can_sign(sig, MACH_PORT_NULL))
+	return NETNAME_INVALID_PORT;		/* #716 */
 
     for (prev = &mounts, this = mounts;
 	 this != NULL;

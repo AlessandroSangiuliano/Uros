@@ -658,7 +658,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-H proc_server proc_server\n-D char_server char_server\nush ush\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nexec_server exec_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nmount_test mount_test\nexec_server exec_server\n-H proc_server proc_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
   endif()
 
@@ -705,6 +705,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # it the block device, and the mount never happens.
   set(_EXT_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/ext_server.cmf")
+  # #716: the task that mounts /mount_test and nothing else, which is what its
+  # arms about "/" and "/etc" are refused by.
+  set(_MOUNT_TEST_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/mount_test.cmf")
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
@@ -716,6 +720,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             hal_server.cmf:${_HAL_CMF}
             irq_claim_test.cmf:${_IRQ_CMF}
             ext_server.cmf:${_EXT_CMF}
+            mount_test.cmf:${_MOUNT_TEST_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             boot_ports_test:${_SBIN}/boot_ports_test
@@ -760,6 +765,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # ⚠️ One entry for two configuration lines, like dma_reclaim_test:
             # the roles differ by argv, not by image.
             xfile_test:${_SBIN}/xfile_test
+            # #716: after ext_server and the two xfile_test lines, so that "/"
+            # is there to be refused to it; it waits for "/" itself as well.
+            mount_test:${_SBIN}/mount_test
             exec_server:${_SBIN}/exec_server
             proc_server:${_SBIN}/proc_server
             sig_test:${_SBIN}/sig_test
@@ -798,19 +806,20 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # line the source file plainly contained.
     DEPENDS mkbundle ${_CAPTEST_CMF} ${_DMARECLAIM_CMF} ${_BDS_CMF}
             ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_IRQ_CMF} ${_EXT_CMF}
+            ${_MOUNT_TEST_CMF}
             name_server_bin netname_test_bin boot_ports_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             msg_server_test_bin
             block_device_server virtio_blk_module ahci_module
             hal_bar_test_server io_claim_race_bin ext_server_bin xfile_test_bin
-            taskpanic_load_bin
+            mount_test_bin taskpanic_load_bin
             ${_CHAR_DEP}
             ${_MUSL_DEP}
             exec_server_bin proc_server_bin sig_test_bin
             ${_IPC_BENCH_DEP}
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + 14 tasks + hal_server + block_device_server + ext_server"
+    COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

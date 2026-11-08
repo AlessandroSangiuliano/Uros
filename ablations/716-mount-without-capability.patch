@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #716
+Takes out: the capability a mount is checked in on (8262a0ed) -- the token is still verified and its answer ignored, so any signed task mounts any prefix that has no mount, a longer one than "/" included
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[4\] WRONG .*"/etc" checked in with no capability: 0, not CAP_ERR_INVALID_TOKEN
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+index d49a839c..bc8041bf 100644
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -588,7 +588,7 @@ do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
+      * back as it is, a CAP_ERR_* that names why.
+      */
+     kr = mount_capability(prefix, token, tokenCnt);
+-    if (kr != KERN_SUCCESS)
++    if (0 && kr != KERN_SUCCESS)
+ 	return kr;
+ 
+     /* Reject duplicates (caller should check_out_mount first). */

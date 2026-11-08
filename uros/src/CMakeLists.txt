@@ -556,6 +556,13 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/xfile_test)
 endif()
 
+# Who may mount where, and what a reader takes from a mount's server (#716):
+# a libvfs client that serves its own mount, so it needs everything xfile_test
+# does and cap_server's library besides.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/mount_test)
+endif()
+
 # A right a server kept must survive the server's next message (#583): the
 # loop in libmach every server runs, asked directly.  Also built in the i386
 # half below -- the loop is the same code on both.

@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
+#include <libcap.h>            /* #716: the /proc mount's capability */
 #include <vfs_types.h>
 #include <char/char_module_abi.h>  /* CHAR_CTTY_RELEASE_MSGH_ID (#365) */
 #include <stdio.h>
@@ -2151,10 +2152,27 @@ main(int argc, char **argv)
     }
 
     /* Register /proc as a vfs mount point — libvfs in any task will
-     * route open("/proc/...") to mount_port. */
-    kr = netname_check_in_mount(name_server_port,
-                                (char *)PROC_MOUNT_PATH,
-                                MACH_PORT_NULL, mount_port);
+     * route open("/proc/...") to mount_port.  Signed with the name's
+     * port (#716): under MACH_PORT_NULL any task could check it out. */
+    /* #716: and with a capability for the prefix, which the name server
+     * asks for; proc_server.manifest grants /proc and nothing else. */
+    {
+        struct uros_cap mtok;
+        char mtok_blob[CAP_TOKEN_MAX];
+
+        kr = cap_request(RESOURCE_MOUNT_POINT, cap_name_hash(PROC_MOUNT_PATH),
+                         CAP_OP_MOUNT_REGISTER, 0 /* no expiry */, &mtok);
+        if (kr != KERN_SUCCESS)
+            printf("proc: cap_request(mount %s) failed (%d)\n",
+                   PROC_MOUNT_PATH, kr);
+        else {
+            memcpy(mtok_blob, &mtok, sizeof(mtok));
+            kr = netname_check_in_mount(name_server_port,
+                                        (char *)PROC_MOUNT_PATH,
+                                        sig, mount_port, mtok_blob,
+                                        (mach_msg_type_number_t)sizeof(mtok));
+        }
+    }
     if (kr != NETNAME_SUCCESS) {
         printf("proc: netname_check_in_mount(/proc) failed kr=%d\n",
                kr);

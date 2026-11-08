@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #716
+Takes out: the name server's buffer sized by MIG (38486a64) -- it receives into 256 bytes again, and the kernel destroys a longer request unread: a mount's check-in with its capability, and a long path's look-up
+Run: --entry 14 1200 -smp 1
+Expect: ext2: netname_check_in_mount\(/\) failed \(kr=-308\)
+
+diff --git a/uros/src/servers/name_server/netname.c b/uros/src/servers/name_server/netname.c
+index fbaa97b3..60786b42 100644
+--- a/uros/src/servers/name_server/netname.c
++++ b/uros/src/servers/name_server/netname.c
+@@ -282,7 +282,7 @@ main(int argc, char **argv)
+ 
+ 	if (do_notify_subsystem.maxsize > max)
+ 	    max = do_notify_subsystem.maxsize;
+-	kr = mach_msg_server(snames_demux, max, pset, MACH_MSG_OPTION_NONE);
++	kr = mach_msg_server(snames_demux, 0 ? max : 256, pset, MACH_MSG_OPTION_NONE);
+     }
+     panic("%s: mach_msg_server: %s\n",
+ 	    program, mach_error_string(kr));

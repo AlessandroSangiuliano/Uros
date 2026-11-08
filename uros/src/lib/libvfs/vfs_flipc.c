@@ -38,6 +38,7 @@ struct vfs_flipc_conn {
     flipc2_channel_t    rev;        /* client -> server (we produce) */
     pthread_mutex_t     io_lock;    /* serialises one in-flight request */
     uint64_t            seq;
+    uint64_t            fwd_data_size;  /* #716: kept at connect */
 };
 
 #define VFS_FLIPC_MAX_CONN  8
@@ -106,6 +107,7 @@ vfs_flipc_get(mach_port_t fs_port)
                 == FLIPC2_SUCCESS) {
                 c->fwd = fwd;
                 c->rev = rev;
+                c->fwd_data_size = fwd->hdr->data_size;    /* #716 */
                 c->state = 1;
             } else {
                 c->state = 2;
@@ -150,12 +152,29 @@ vfs_flipc_read(struct vfs_flipc_conn *c, vfs_u64_t handle,
 
     rep = flipc2_consume_wait(c->fwd, FLIPC2_SPIN_DEFAULT);
     if (!rep) { c->state = 2; goto out; }
+    /*
+     * 🔴 NEVER MORE THAN WAS ASKED FOR, AND FROM NOWHERE BUT THE DATA REGION
+     * (#716).  The length and the offset are the server's to say, and both
+     * were used as said: a reply could copy any length into the prefetch
+     * window and from any address in this task.  The region is measured
+     * against the size this end kept when it connected -- the header holds
+     * one too, and the server writes the header.  A reply that breaks either
+     * bound is refused as a reply with an error status is, and the read goes
+     * the Mach way.
+     *
+     * ⚠️ What this stops is a server that answers wrong, not one that means
+     * harm: a server is handed this task's port when the channel is set up,
+     * so it does not need a bad reply to reach this task's memory (#911).
+     */
     if (rep->status == VFS_FLIPC_OK) {
         uint64_t n   = rep->data_length;
         uint64_t off = rep->data_offset;
-        if (n > 0)
-            memcpy(buf, flipc2_data_ptr(c->fwd, off), (size_t)n);
-        ret = (ssize_t)n;
+        if (n <= want && off <= c->fwd_data_size &&
+            n <= c->fwd_data_size - off) {
+            if (n > 0)
+                memcpy(buf, flipc2_data_ptr(c->fwd, off), (size_t)n);
+            ret = (ssize_t)n;
+        }
     }
     flipc2_consume_release(c->fwd);
 

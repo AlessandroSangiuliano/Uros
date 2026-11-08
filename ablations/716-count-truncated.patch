@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #716
+Takes out: VFS_RW_MAX (ecc88d46) -- a count of 4 GiB goes to the server in 32 bits, as zero, and the zero comes back as the end of the file
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[16\] WRONG .*returned 0,
+
+diff --git a/uros/src/lib/libvfs/libvfs.c b/uros/src/lib/libvfs/libvfs.c
+index 3e1c4cb2..9c47dcb7 100644
+--- a/uros/src/lib/libvfs/libvfs.c
++++ b/uros/src/lib/libvfs/libvfs.c
+@@ -442,7 +442,7 @@ vfs_read(vfs_fd_t fd, void *buf, size_t count)
+     mach_msg_type_number_t data_count = 0;
+     kern_return_t kr;
+ 
+-    if (count > VFS_RW_MAX)
++    if (0 && count > VFS_RW_MAX)
+         count = VFS_RW_MAX;             /* #716: a short read, said */
+ 
+     pthread_mutex_lock(&vfs_lock);
+@@ -517,7 +517,7 @@ vfs_write(vfs_fd_t fd, const void *buf, size_t count)
+     vfs_u32_t written = 0;
+     kern_return_t kr;
+ 
+-    if (count > VFS_RW_MAX)
++    if (0 && count > VFS_RW_MAX)
+         count = VFS_RW_MAX;             /* #716: a short write, said */
+ 
+     pthread_mutex_lock(&vfs_lock);

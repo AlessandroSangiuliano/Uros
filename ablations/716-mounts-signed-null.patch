@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #716
+Takes out: ext_server's signature on its mounts (9c8b0e39) -- it checks "/" in with MACH_PORT_NULL again, as before #716, and the name server refuses it
+Run: --entry 14 1200 -smp 1
+Expect: ext2: netname_check_in_mount\(/\) failed \(kr=1004\)
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+index 42e59c16..9e3b05f0 100644
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -1978,7 +1978,7 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
+ 			memcpy(mtok_blob, &mtok, sizeof(mtok));
+ 			kr = netname_check_in_mount(name_server_port,
+ 						    (char *)mount_path,
+-						    sig, mnt->port, mtok_blob,
++						    MACH_PORT_NULL, mnt->port, mtok_blob,
+ 						    (mach_msg_type_number_t)
+ 						    sizeof(mtok));
+ 			if (kr != KERN_SUCCESS)

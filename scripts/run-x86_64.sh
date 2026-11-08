@@ -672,6 +672,12 @@ must_report '=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==
 	'ipc_bench started and never finished, so whatever it printed is the suites that happened to run before the end (#744).' \
 	ipc_bench
 
+# #716: who may mount where, and what libvfs takes from a mount's server.  It
+# serves a mount of its own and reads through it, so its silence is a reader
+# or a server that stopped -- a wedge in libvfs's FLIPC path included.
+must_report 'mount_test: started' 'mount_test: [0-9]* of [0-9]* arms passed' \
+	'It reads through libvfs from a mount it serves itself, so a start with no end is a read that never came back, on the Mach path or through FLIPC (#716).'
+
 must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
 
@@ -1652,6 +1658,7 @@ expected_reports() {
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
 		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
 		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='

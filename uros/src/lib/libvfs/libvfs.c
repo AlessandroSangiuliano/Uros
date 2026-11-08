@@ -458,6 +458,9 @@ vfs_read(vfs_fd_t fd, void *buf, size_t count)
     mach_msg_type_number_t data_count = 0;
     kern_return_t kr;
 
+    if (count > VFS_RW_MAX)
+        count = VFS_RW_MAX;             /* #716: a short read, said */
+
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
     if (!e || e->dead) {
@@ -493,6 +496,19 @@ vfs_read(vfs_fd_t fd, void *buf, size_t count)
     }
     if (kr != KERN_SUCCESS)
         return -1;
+    /*
+     * 🔴 NEVER MORE THAN WAS ASKED FOR (#716).  How much came back is the
+     * server's to say, and it was copied as said, into a buffer the caller
+     * sized for `count': whichever task held the mount wrote past the end of
+     * every reader's buffer.  The mount registry decides who answers, not
+     * what an answer may hold, so this holds whoever the server is.  The
+     * region is given back, and the read fails as one the server refused.
+     */
+    if (data_count > count) {
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)data,
+                            (vm_size_t)data_count);
+        return -1;
+    }
     if (data_count > 0 && data) {
         memcpy(buf, (void *)data, data_count);
         vm_deallocate(mach_task_self(), (vm_address_t)data,
@@ -516,6 +532,9 @@ vfs_write(vfs_fd_t fd, const void *buf, size_t count)
     vfs_u64_t offset;
     vfs_u32_t written = 0;
     kern_return_t kr;
+
+    if (count > VFS_RW_MAX)
+        count = VFS_RW_MAX;             /* #716: a short write, said */
 
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
@@ -550,6 +569,14 @@ vfs_write(vfs_fd_t fd, const void *buf, size_t count)
         return -1;
     }
     if (kr != KERN_SUCCESS)
+        return -1;
+    /*
+     * #716: and no more written than was sent.  The count is the server's to
+     * say, and the caller's offset moved by it: a server that answered more
+     * put the next write past bytes nobody wrote, and told the caller they
+     * were written.
+     */
+    if (written > count)
         return -1;
 
     pthread_mutex_lock(&vfs_lock);

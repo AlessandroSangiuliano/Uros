@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# mount_test manifest -- the policy for a task that mounts one prefix of its
+# own and nothing else (#716).
+#
+# 🔑 The grant is the test.  The task is unprivileged everywhere but
+# /mount_test: what it is refused under "/" and "/etc" is refused to a task
+# that holds a mount capability, the wrong one -- which is a closer miss than
+# holding none, and the one a capability for any prefix would not refuse.
+
+name mount_test
+
+# RESOURCE_MOUNT_POINT (3), "/mount_test" alone, REGISTER (0x1).
+required 3 name:/mount_test 0x1
