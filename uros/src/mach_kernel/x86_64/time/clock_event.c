@@ -976,11 +976,13 @@ tick_window_print(void)
 		put_s(&l, "; windows were dropped while one waited to be "
 			  "printed");
 	put_s(&l, " (#593)");
-	printf("%s\n", l.b);
+	/* #920: for the log, not the screen: no verdict in this line */
+	printf_log_only("%s\n", l.b);
 
 	for (c = 0; c < NCPUS; c++) {
 		uint64_t	t = tw_report.ticks[c];
 		int		judged = 0;
+		int		wrong = 1;
 		uint64_t	permille = 0;
 
 		/*
@@ -1042,7 +1044,10 @@ tick_window_print(void)
 		else if (judged && tw_report.index > 0 && permille < 500)
 			put_s(&l, " -- WRONG: fewer than half the ticks the "
 				  "window holds, the clock stopped (#593)");
-		printf("%s\n", l.b);
+		else
+			wrong = 0;
+		/* #920: a verdict is drawn, a count is for the log */
+		printf_log_only_if(!wrong, "%s\n", l.b);
 	}
 
 	handoff_release(&tw_pending);
