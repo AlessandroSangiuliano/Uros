@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #919
+Takes out: the release of the reference syscall_thread_create() now keeps across convert_act_to_port() -- pthread_create() comes through this trap, so every thread a boot creates keeps its activation, and the quiet census counts the activations held in the hundreds where a boot holds some thirty-five: the reference is taken on the path every boot runs, and given back once
+Run: --entry 14 600 -smp 4
+Expect: quiet_census: floating-point areas taken [0-9]+, given back [0-9]+, so [0-9]{3,} held
+
+diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
+index 50fac47b..22f4a8da 100644
+--- a/uros/src/mach_kernel/kern/ipc_mig.c
++++ b/uros/src/mach_kernel/kern/ipc_mig.c
+@@ -1975,7 +1975,6 @@ syscall_thread_create(
+ 				result = KERN_INVALID_ADDRESS;
+ 			}
+ 		}
+-		act_deallocate(c);
+ 	}
+ 	task_deallocate(t);
+ 
