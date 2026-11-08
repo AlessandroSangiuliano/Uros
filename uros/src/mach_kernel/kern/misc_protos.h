@@ -143,6 +143,17 @@ extern integer_t sprintf(char *buf, const char *fmt, ...)
 extern void printf(const char *format, ...)
 	__attribute__((format(printf, 1, 2)));
 
+/*
+ * #920: a line for the kernel's log and the wire and not for the screen
+ * (kern/printf.c), and the console's question, byte by byte, whether the
+ * byte it is queuing is one.
+ */
+extern void printf_log_only(const char *format, ...)
+	__attribute__((format(printf, 1, 2)));
+extern void printf_log_only_if(int log_only, const char *format, ...)
+	__attribute__((format(printf, 2, 3)));
+extern int printf_log_only_here(void);
+
 extern void printf_init(void);
 
 /*
