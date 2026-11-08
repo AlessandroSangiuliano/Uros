@@ -811,6 +811,12 @@ must_report 'iommu fault records decoded' 'fault-log cases' \
 must_report '=== ext2 filesystem server' 'ext2: .*page-cache cases' \
 	'ext_server asks the page cache about small caches of its own (#599).  No line means it was never asked.'
 
+# #921: the CD drive DISK_ARGS puts on ahci0's port 2 is told apart by its
+# signature.  A module that took it for a disk fails the board check as well,
+# with three disks for two; this pair is what says why.
+must_report 'ahci: HBA reset OK' 'ahci: port 2: an ATAPI device' \
+	'The AHCI module reads each port'"'"'s signature once the device is ready, and the empty CD drive on port 2 is an ATAPI device, which it does not drive (#921).  No line means the drive was never told apart: taken for a disk, or never found.' 'ahci'
+
 must_report '=== ext2 filesystem server' 'ext2: ready, entering message loop' \
 	'It mounts ahci0a and serves it (#498).  Every way out of main() before that line is a failure -- a device it could not open, a capability it was refused, a superblock it could not read -- and each of them ends the task rather than printing a verdict.'
 
@@ -1437,6 +1443,12 @@ fi
 # The disk on port 1 is ahci1a, which ext_server mounts at /mnt/disk2 -- the
 # disk xfile_test writes and the host reads back after the run (#498).  Named
 # once, because the check below has to open the same file qemu was given.
+#
+# #921: and on port 2 an empty CD drive, an ATAPI device as lapsus's Marvell
+# had one on port 7, which the AHCI module took for a disk.  It is not one, and
+# two checks say so: the board check below counts ide-hd only, so it requires
+# exactly two disks of this controller, and a must_report pair requires the
+# module's own line about port 2.
 AHCI_DISK2=${UROS_X86_64_AHCI2_IMAGE:-$BUILD/disk-x86_64-ahci2.img}
 DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device virtio-blk-pci,drive=urosdisk,bootindex=0
@@ -1444,7 +1456,8 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-drive file=$BUILD/disk-x86_64-ahci.img,if=none,id=ahcidisk0,format=raw
 	-device ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1
 	-drive file=$AHCI_DISK2,if=none,id=ahcidisk1,format=raw
-	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
+	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2
+	-device ide-cd,bus=ahci0.2"
 
 # 🔴 AND EACH OF THEM MUST ATTACH, which nothing asked (#591): eight boots that
 # lost the AHCI controller were passed.  What this command line puts on the
