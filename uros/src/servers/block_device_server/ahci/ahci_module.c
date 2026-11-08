@@ -1450,6 +1450,34 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		i++;
 	}
 
+	/*
+	 * Identify disks and detect batch slots.
+	 *
+	 * 🔴 #921: A PORT WHOSE IDENTIFY FAILS IS NOT A DISK.  Its answer was
+	 * dropped, so the port stayed in the table -- a disk of no sectors and
+	 * no model to everything above, whose MBR the block server then tried
+	 * to read.  It leaves the table now; and a controller left with no
+	 * disk fails its probe instead of being bound with none.  IDENTIFY is
+	 * polled -- GHC.IE is set at the end of the probe -- so the interrupt
+	 * line is registered after this, and a probe that fails here holds
+	 * none.
+	 */
+	for (i = 0; i < st->n_ports; ) {
+		if (ahci_identify(st, i) < 0) {
+			printf("ahci: port %d: no answer to IDENTIFY DEVICE -- "
+			       "not a disk, not used (#921)\n",
+			       st->ports[i].hba_port);
+			ahci_port_drop(st, i);
+			continue;
+		}
+		i++;
+	}
+	if (st->n_ports == 0) {
+		printf("ahci: no disk on this controller among the devices "
+		       "its ports answered with -- not driving it (#921)\n");
+		return -1;
+	}
+
 	/* Register IRQ */
 	if (st->ahci_irq > 0 && st->ahci_irq < 16) {
 		kr = device_intr_register(master_dev, st->ahci_irq, irq,
@@ -1457,10 +1485,6 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		if (kr == KERN_SUCCESS)
 			printf("ahci: IRQ %u registered\n", st->ahci_irq);
 	}
-
-	/* Identify disks and detect batch slots */
-	for (i = 0; i < st->n_ports; i++)
-		ahci_identify(st, i);
 
 	st->batch_data_size = st->batch_slots * SLOT_DATA_SIZE;
 	st->ra_sectors = st->batch_slots * SECTORS_PER_SLOT;
