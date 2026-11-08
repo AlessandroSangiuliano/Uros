@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #921
+Takes out: the signature's question -- every port whose device became ready goes on to IDENTIFY, the ATAPI one too: the empty CD drive run-x86_64.sh puts on ahci0's port 2 is refused only there, by IDENTIFY's own failure, and the module never says it is an ATAPI device, which the harness requires (must_report, 'ahci: port 2: an ATAPI device'); the serial log has the later refusal instead; the function left without a caller is marked unused, as -Werror refuses it otherwise
+Run: --entry 14 600 -smp 4
+Expect: ahci: port 2: no answer to IDENTIFY DEVICE
+Note: 4 of 4 caught and 4 of 4 passed at 2e690366 on victus, TCG and KVM, two boots each: the ablated tree refused the drive only at IDENTIFY, the fixed one by its signature, 0xEB140101; the harness failed every ablated boot on the must_report pair.  An earlier run at 79131dcd passed the fixed tree 2 of 4: both KVM boots lost half of window 1's ticks, the storm 921-dropped-port-not-silenced is about, fixed since
+
+diff --git a/uros/src/servers/block_device_server/ahci/ahci_module.c b/uros/src/servers/block_device_server/ahci/ahci_module.c
+index 221fe6af..d3fc5e09 100644
+--- a/uros/src/servers/block_device_server/ahci/ahci_module.c
++++ b/uros/src/servers/block_device_server/ahci/ahci_module.c
+@@ -649,7 +649,7 @@ ahci_probe_fail(struct ahci_state *st)
+  * port could receive a FIS at all, and printed 0xFFFFFFFF for every port on
+  * QEMU.  1 for an ATA device; 0, said, for anything else.
+  */
+-static int
++static int __attribute__((unused))
+ ahci_port_is_ata(struct ahci_state *st, int port_idx)
+ {
+ 	int		port = st->ports[port_idx].hba_port;
+@@ -1590,7 +1590,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
+ 
+ 		if (r < 0)
+ 			return ahci_probe_fail(st);
+-		if (r > 0 || !ahci_port_is_ata(st, i)) {
++		if (r > 0) {
+ 			ahci_port_drop(st, i);
+ 			continue;
+ 		}

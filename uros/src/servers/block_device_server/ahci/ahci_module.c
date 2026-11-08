@@ -31,6 +31,10 @@
 #include <mach.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_port.h>
+#include <mach/thread_switch.h>	/* #921: a link waited for asleep */
+#include <mach/mach_host.h>
+#include <mach/clock.h>
+#include <mach/clock_types.h>
 #include <sa_mach.h>
 #include <device/device.h>
 #include <device/device_types.h>
@@ -102,41 +106,95 @@ ahci_match(unsigned int vendor_device, unsigned int class_rev)
  * Port start / stop helpers
  * ================================================================ */
 
-static void
+static int ahci_wait_port(struct ahci_state *st, int port,
+			  unsigned int deadline_ms,
+			  int (*cond)(struct ahci_state *, int));
+
+/*
+ * #921: how long a port is given to stop, and its device to be ready.  The
+ * first is the specification's: "software should wait at least 500
+ * milliseconds" for PxCMD.CR, and as long for PxCMD.FR (AHCI 1.3.1 §10.1.2,
+ * step 3).  These were 500 reads each, and the device wait 500000 -- counts,
+ * which last what a read costs and on a real controller far less than that.
+ * The second is chosen: a disk at rest clears BSY once it has spun up, in
+ * seconds.
+ */
+#define AHCI_STOP_MS		500
+#define AHCI_READY_MS		10000
+
+static int
+ahci_cmd_not_running(struct ahci_state *st, int port)
+{
+	return !(port_read(st, port, PORT_CMD) & PORT_CMD_CR);
+}
+
+static int
+ahci_fis_not_running(struct ahci_state *st, int port)
+{
+	return !(port_read(st, port, PORT_CMD) & PORT_CMD_FR);
+}
+
+static int
+ahci_device_ready(struct ahci_state *st, int port)
+{
+	return !(port_read(st, port, PORT_TFD) &
+		 (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ));
+}
+
+/*
+ * The port idle: ST cleared and CR gone, then FRE cleared and FR gone.
+ * 0 when it is; -1, said, when either did not clear in time -- and then the
+ * controller may still write the port's FIS area, so nothing it was given may
+ * be freed (#921).
+ */
+static int
 ahci_port_stop(struct ahci_state *st, int port)
 {
-	int i;
 	uint32_t cmd;
 
 	cmd = port_read(st, port, PORT_CMD);
 	port_write(st, port, PORT_CMD, cmd & ~PORT_CMD_ST);
-	for (i = 0; i < 500; i++)
-		if (!(port_read(st, port, PORT_CMD) & PORT_CMD_CR))
-			break;
+	if (ahci_wait_port(st, port, AHCI_STOP_MS, ahci_cmd_not_running) != 1) {
+		printf("ahci: port %d: CR still set %u ms after ST was cleared "
+		       "(PxCMD 0x%08X) (#921)\n", port, (unsigned)AHCI_STOP_MS,
+		       port_read(st, port, PORT_CMD));
+		return -1;
+	}
 
 	cmd = port_read(st, port, PORT_CMD);
 	port_write(st, port, PORT_CMD, cmd & ~PORT_CMD_FRE);
-	for (i = 0; i < 500; i++)
-		if (!(port_read(st, port, PORT_CMD) & PORT_CMD_FR))
-			break;
+	if (ahci_wait_port(st, port, AHCI_STOP_MS, ahci_fis_not_running) != 1) {
+		printf("ahci: port %d: FR still set %u ms after FRE was cleared "
+		       "(PxCMD 0x%08X) (#921)\n", port, (unsigned)AHCI_STOP_MS,
+		       port_read(st, port, PORT_CMD));
+		return -1;
+	}
+	return 0;
 }
 
-static void
+/*
+ * FIS receive on, the device waited for until it is ready, then the command
+ * list started.  0 when it started; -1, said, when the device never cleared
+ * BSY and DRQ -- the port is not started (#921).
+ */
+static int
 ahci_port_start(struct ahci_state *st, int port)
 {
 	uint32_t cmd;
-	int i;
 
 	cmd = port_read(st, port, PORT_CMD);
 	port_write(st, port, PORT_CMD, cmd | PORT_CMD_FRE | PORT_CMD_SUD);
 
-	for (i = 0; i < 500000; i++)
-		if (!(port_read(st, port, PORT_TFD) &
-		      (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ)))
-			break;
+	if (ahci_wait_port(st, port, AHCI_READY_MS, ahci_device_ready) != 1) {
+		printf("ahci: port %d: the device was not ready in %u ms "
+		       "(PxTFD 0x%08X) -- not used (#921)\n", port,
+		       (unsigned)AHCI_READY_MS, port_read(st, port, PORT_TFD));
+		return -1;
+	}
 
 	cmd = port_read(st, port, PORT_CMD);
 	port_write(st, port, PORT_CMD, cmd | PORT_CMD_ST);
+	return 0;
 }
 
 /* ================================================================
@@ -175,14 +233,181 @@ ahci_hba_reset(struct ahci_state *st)
 }
 
 /* ================================================================
+ * Waiting for a port, on the clock (#921)
+ * ================================================================ */
+
+/*
+ * A port's register waited for against the kernel's REALTIME_CLOCK, with a
+ * millisecond's sleep between two looks -- never on a count of reads, as
+ * virtio's requests are not since #697: a count lasts what a read costs on
+ * this bus under this hypervisor.  On QEMU a link is up before the first read;
+ * on a real controller it takes milliseconds after the COMRESET, and a disk
+ * spinning up from rest keeps BSY for seconds.
+ *
+ * 1 when cond() held within deadline_ms, 0 when it did not, -1 -- said --
+ * when there was no clock to bound the wait with.
+ */
+#define AHCI_LOOK_MS		1
+
+static int
+ahci_clock_ms(mach_port_t clk, uint64_t *ms)
+{
+	tvalspec_t	t;
+
+	if (clock_get_time(clk, &t) != KERN_SUCCESS)
+		return -1;
+	*ms = (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+	return 0;
+}
+
+static int
+ahci_wait_port(struct ahci_state *st, int port, unsigned int deadline_ms,
+	       int (*cond)(struct ahci_state *, int))
+{
+	mach_port_t	host, clk = MACH_PORT_NULL;
+	uint64_t	start, now;
+	kern_return_t	kr;
+	int		r;
+
+	if (cond(st, port))
+		return 1;
+	host = mach_host_self();
+	kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (kr == KERN_SUCCESS && ahci_clock_ms(clk, &start) != 0)
+		kr = KERN_FAILURE;
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: port %d: no clock to bound a wait with (kr=%d) "
+		       "-- the port is not used rather than waited for without "
+		       "end (#921)\n", port, (int)kr);
+		r = -1;
+	} else {
+		for (;;) {
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, AHCI_LOOK_MS);
+			if (cond(st, port)) {
+				r = 1;
+				break;
+			}
+			if (ahci_clock_ms(clk, &now) != 0) {
+				printf("ahci: port %d: the clock stopped "
+				       "answering during a wait (#921)\n",
+				       port);
+				r = -1;
+				break;
+			}
+			if (now - start >= deadline_ms) {
+				r = 0;
+				break;
+			}
+		}
+	}
+	if (clk != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), clk);
+	return r;
+}
+
+/*
+ * 🔴 A CONTROLLER WITHOUT 64-BIT ADDRESSING IS NEVER HANDED MEMORY ABOVE
+ * 4 GiB (#921).
+ *
+ * With CAP.S64A clear "the 32-bit upper bits of the port DMA Descriptor, the
+ * PRD Base, and each PRD entry ... are read-only and treated as '0' by the
+ * HBA" (AHCI 1.3.1, CAP in §3.1.1).  So the upper halves #520 writes are
+ * dropped, and a buffer above 4 GiB is reached at the same offset in the
+ * bottom 4 GiB -- a DMA into memory that belongs to somebody else.  Nothing
+ * asked: a machine with more than 4 GiB, as lapsus with 12, can be handed
+ * such a buffer.  1 when the controller reaches all of [pa, pa + len).
+ */
+static int
+ahci_dma_reachable(struct ahci_state *st, vm_address_t pa, vm_size_t len)
+{
+	if (ahci_read(st, AHCI_CAP) & CAP_S64A)
+		return 1;
+	return (uint64_t)pa + (uint64_t)len <= 0x100000000ull;
+}
+
+/* ================================================================
  * Port discovery
  * ================================================================ */
+
+/*
+ * #921: how long a port is given.  The specification bounds none of these
+ * ("software should wait for communication to be re-established as indicated
+ * by PxSSTS.DET being set to 3h", AHCI 1.3.1 §10.4.2), so they are chosen, and
+ * each well past what a device takes: a device answers a COMRESET in a few
+ * milliseconds, its link is up in some tens, and a disk at rest spins up in
+ * seconds, which is when it clears BSY.  An empty port costs the first, once.
+ */
+#define AHCI_LINK_SEEN_MS	50	/* anything on the wire at all */
+#define AHCI_LINK_UP_MS		1000	/* and its link up, DET = 3 */
+
+static int
+ahci_link_seen(struct ahci_state *st, int port)
+{
+	return (port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
+	    != SSTS_DET_NONE;
+}
+
+static int
+ahci_link_up(struct ahci_state *st, int port)
+{
+	return (port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
+	    == SSTS_DET_PRESENT;
+}
+
+/*
+ * 🔴 THE LINK IS BROUGHT UP BEFORE THE PORT IS ASKED WHETHER A DEVICE IS
+ * THERE (#921).
+ *
+ * The HBA reset resets every port.  On an HBA that supports staggered spin-up
+ * it also clears PxCMD.SUD, and such a port sends no COMRESET, so has no link,
+ * until software sets SUD again: "If staggered spin-up is supported, then it
+ * is the responsibility of software to spin-up each port after the reset has
+ * completed" (AHCI 1.3.1, GHC.HR in §3.1.2; and §10.4.3, "software is
+ * responsible for setting the PxCMD.SUD and PxSCTL.DET fields").  SUD going
+ * from 0 to 1 starts the COMRESET (§3.3.7); PxSCTL.DET is 0 after the reset,
+ * and SUD set over it is the spin-up of §10.10.1's table.
+ *
+ * The scan read DET once, straight after the reset, and set SUD only in
+ * ahci_port_start(), for the ports it had already found.  On lapsus's ICH10,
+ * CAP 0xEF20FFC5 with SSS set, no port could ever be found -- its three disks
+ * among them: "no device found (PI=0x0000003F)", the probe failed, and the
+ * block server, with no partition anywhere, exited by design.  QEMU's
+ * ich9-ahci has no SSS and answers DET = 3 from the first read, so no QEMU
+ * boot could see it.  Without SSS the reset's own COMRESET still takes the
+ * link some milliseconds to come back, and one read straight after it was a
+ * race that only an emulator never loses.
+ *
+ * 1 with the link up, 0 with nothing on the wire or a link that never came
+ * up (said), -1 with no clock (said).
+ */
+static int
+ahci_port_link(struct ahci_state *st, int port)
+{
+	int r;
+
+	if (ahci_read(st, AHCI_CAP) & CAP_SSS)
+		port_write(st, port, PORT_CMD,
+			   port_read(st, port, PORT_CMD) | PORT_CMD_SUD);
+
+	r = ahci_wait_port(st, port, AHCI_LINK_SEEN_MS, ahci_link_seen);
+	if (r != 1)
+		return r;
+	r = ahci_wait_port(st, port, AHCI_LINK_UP_MS, ahci_link_up);
+	if (r == 0)
+		printf("ahci: port %d: something is on the wire and its link "
+		       "did not come up in %u ms (SStatus 0x%08X) -- not used "
+		       "(#921)\n", port, (unsigned)AHCI_LINK_UP_MS,
+		       port_read(st, port, PORT_SSTS));
+	return r;
+}
 
 static int
 ahci_port_scan(struct ahci_state *st)
 {
 	uint32_t pi = ahci_read(st, AHCI_PI);
-	int port;
+	int port, link;
 
 	st->n_ports = 0;
 	for (port = 0; port < AHCI_MAX_PORTS; port++) {
@@ -211,8 +436,11 @@ ahci_port_scan(struct ahci_state *st)
 			continue;
 		}
 
-		if ((port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
-		    != SSTS_DET_PRESENT)
+		/* #921: the link first, then the question */
+		link = ahci_port_link(st, port);
+		if (link < 0)
+			return -1;
+		if (link == 0)
 			continue;
 		if (st->n_ports >= MAX_AHCI_PORTS) {
 			/*
@@ -229,8 +457,11 @@ ahci_port_scan(struct ahci_state *st)
 			break;
 		}
 
-		printf("ahci: device on port %d  sig=0x%08X\n",
-		       port, port_read(st, port, PORT_SIG));
+		/* #921: the link, and not the signature yet: PxSIG holds what
+		 * the device's first D2H Register FIS said (§3.3.9), which
+		 * comes once the port receives FISes -- after its start */
+		printf("ahci: device on port %d, link up (SStatus 0x%08X)\n",
+		       port, port_read(st, port, PORT_SSTS));
 		st->ports[st->n_ports].hba_port = port;
 		st->n_ports++;
 	}
@@ -276,9 +507,19 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	pi->fb_uva  = dma_uva + 1024;
 	pi->dma_kva = dma_kva;
 
+	/* #921: given back by the probe's failure, as the page is recorded */
+	if (!ahci_dma_reachable(st, dma_pa, 4096)) {
+		printf("ahci: port %d: its command list page is at 0x%llX, past "
+		       "the 4 GiB this controller can address (no CAP.S64A) -- "
+		       "refused (#921)\n", hba_port, (unsigned long long)dma_pa);
+		return -1;
+	}
+
 	memset((void *)dma_uva, 0, 4096);
 
-	ahci_port_stop(st, hba_port);
+	/* #921: the port must be idle before CLB and FB change under it */
+	if (ahci_port_stop(st, hba_port) < 0)
+		return 1;
 
 	/*
 	 * 🔴 THE UPPER HALVES ARE WRITTEN, not zeroed (#520).  They were
@@ -303,12 +544,160 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	port_write(st, hba_port, PORT_IE,
 		   PORT_IE_DHRE | PORT_IE_SDBE | PORT_IE_TFEE);
 
-	ahci_port_start(st, hba_port);
+	if (ahci_port_start(st, hba_port) < 0)
+		return 1;
 
 	printf("ahci: port %d initialised  cmd=0x%08X  tfd=0x%08X\n",
 	       hba_port,
 	       port_read(st, hba_port, PORT_CMD),
 	       port_read(st, hba_port, PORT_TFD));
+	return 0;
+}
+
+/*
+ * 🔴 A PORT THAT IS NOT A DISK THIS DRIVER DRIVES LEAVES THE TABLE (#921).
+ *
+ * ports[] is what get_disks() hands out, one disk per entry, so a port left in
+ * it is a disk to everything above: lapsus's Marvell has one device, an ATAPI
+ * one on port 7, and the controller came up as "1 disk(s)" whose MBR read the
+ * device refused.  Taken out here, the port stopped first and, only once it is
+ * idle, its command list and FIS area given back -- a port that would not stop
+ * may still write there, and keeps them.  The table is compacted, so the
+ * entries stay in port order.
+ */
+static int
+ahci_port_drop(struct ahci_state *st, int port_idx)
+{
+	struct ahci_port_info *pi = &st->ports[port_idx];
+	int i, kept = 0;
+
+	/*
+	 * 🔴 SILENCED FIRST (#921).  After its start the device's first D2H
+	 * Register FIS set PxIS.DHRS, which PxIE enables, and nothing cleared
+	 * it: the interrupt handler clears PxIS only for the ports in the
+	 * table, and IS's bit for a port comes back while that port's PxIS and
+	 * PxIE meet.  Once GHC.IE came on at the end of the probe the line was
+	 * asserted again as soon as the handler unmasked it -- a storm on the
+	 * processor taking it, which under KVM lost half its ticks of a
+	 * ten-second window ("the clock stopped", five boots out of five with
+	 * the CD drive on port 2, and none where the drive was sent IDENTIFY,
+	 * whose submission happens to clear PxIS).  PxIE off, PxIS cleared,
+	 * then IS's bit, in that order (AHCI 1.3.1 §10.1.2, step 7).
+	 */
+	port_write(st, pi->hba_port, PORT_IE, 0);
+	port_write(st, pi->hba_port, PORT_IS, ~0u);
+	ahci_write(st, AHCI_IS, 1u << pi->hba_port);
+	/* read back, not assumed: what the port will interrupt with now */
+	printf("ahci: port %d dropped, its interrupts off: PxIE 0x%08X, PxIS "
+	       "0x%08X (#921)\n", pi->hba_port,
+	       port_read(st, pi->hba_port, PORT_IE),
+	       port_read(st, pi->hba_port, PORT_IS));
+
+	if (pi->clb_uva != 0 && ahci_port_stop(st, pi->hba_port) == 0) {
+		(void) vm_deallocate(mach_task_self(), pi->clb_uva, 4096);
+		(void) device_dma_free(st->master_device, AHCI_BDF(st),
+				       pi->dma_kva, 4096);
+	} else if (pi->clb_uva != 0) {
+		printf("ahci: port %d did not stop: its command list and FIS "
+		       "area stay held (#921)\n", pi->hba_port);
+		kept = 1;
+	}
+	for (i = port_idx; i + 1 < st->n_ports; i++)
+		st->ports[i] = st->ports[i + 1];
+	st->n_ports--;
+	memset(&st->ports[st->n_ports], 0, sizeof(st->ports[0]));
+	return kept ? -1 : 0;
+}
+
+/*
+ * 🔴 A PROBE THAT FAILS GIVES BACK WHAT IT WAS LENT (#921).
+ *
+ * Every failure after the shared buffers were allocated returned with them
+ * held, and with the command list and FIS area of each port it had set up:
+ * the DMA region table is shared and finite, and the block server kept the
+ * regions of a controller it was not driving until it died.  lapsus's ICH10
+ * failed its probe so, and the kernel took its two regions back only at the
+ * server's exit: "died holding DMA region 1 (4096 bytes, lent to 0
+ * devices...)".  Each port is stopped and dropped first; if one would not
+ * stop, the controller may still read the command table or write the data
+ * buffer, and those stay held as well, said.  -1, for the caller to return.
+ */
+static int
+ahci_probe_fail(struct ahci_state *st)
+{
+	int		kept = 0;
+	unsigned	given = 0;
+
+	while (st->n_ports > 0) {
+		if (st->ports[0].clb_uva != 0)
+			given++;
+		if (ahci_port_drop(st, 0) < 0) {
+			kept = 1;
+			given--;
+		}
+	}
+	if (kept) {
+		printf("ahci: a port would not stop, so the command table and "
+		       "the data buffer stay held too (#921)\n");
+		return -1;
+	}
+	if (st->ct_uva != 0)
+		(void) vm_deallocate(mach_task_self(), st->ct_uva,
+				     AHCI_PROBE_BUF_BYTES);
+	if (st->ct_kva != 0) {
+		(void) device_dma_free(st->master_device, AHCI_BDF(st),
+				       st->ct_kva, AHCI_PROBE_BUF_BYTES);
+		given++;
+	}
+	if (st->data_uva != 0)
+		(void) vm_deallocate(mach_task_self(), st->data_uva,
+				     AHCI_PROBE_BUF_BYTES);
+	if (st->data_kva != 0) {
+		(void) device_dma_free(st->master_device, AHCI_BDF(st),
+				       st->data_kva, AHCI_PROBE_BUF_BYTES);
+		given++;
+	}
+	st->ct_uva = st->ct_kva = st->ct_dma = 0;
+	st->data_uva = st->data_kva = st->data_dma = 0;
+	printf("ahci: the probe failed, and gave back the %u DMA buffer(s) it "
+	       "had been lent (#921)\n", given);
+	return -1;
+}
+
+/*
+ * #921: what the device on a started port is.  PxSIG holds what its first
+ * D2H Register FIS said (AHCI 1.3.1 §3.3.9), so it is read here, after the
+ * start has waited for the device to be ready -- the scan read it before the
+ * port could receive a FIS at all, and printed 0xFFFFFFFF for every port on
+ * QEMU.  1 for an ATA device; 0, said, for anything else.
+ */
+static int
+ahci_port_is_ata(struct ahci_state *st, int port_idx)
+{
+	int		port = st->ports[port_idx].hba_port;
+	uint32_t	sig = port_read(st, port, PORT_SIG);
+	const char	*what;
+
+	switch (sig) {
+	case AHCI_SIG_ATA:
+		printf("ahci: port %d: an ATA device (sig=0x%08X)\n",
+		       port, sig);
+		return 1;
+	case AHCI_SIG_ATAPI:
+		what = "an ATAPI device";
+		break;
+	case AHCI_SIG_PM:
+		what = "a port multiplier, which this driver does not drive";
+		break;
+	case AHCI_SIG_SEMB:
+		what = "an enclosure management bridge";
+		break;
+	default:
+		what = "a device whose signature this driver does not know";
+		break;
+	}
+	printf("ahci: port %d: %s (sig=0x%08X) -- not a disk this driver "
+	       "drives, not used (#921)\n", port, what, sig);
 	return 0;
 }
 
@@ -457,8 +846,23 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	unsigned int	new_pages = 0;
 	mach_msg_type_number_t pa_count = 0;
 
-	if (st->batch_slots <= 1)
+	/*
+	 * 🔴 ONE SLOT KEEPS THE PROBE'S BUFFERS, AND SO THEIR SIZES (#921).
+	 *
+	 * The caller sets the sizes from the slot count before this: 128 KB of
+	 * data and 256 sectors of readahead for one slot.  This returned with
+	 * the probe's buffers still in place, AHCI_PROBE_BUF_BYTES of data, and
+	 * the sizes left as they were -- so a read of a whole slot had the
+	 * controller write 124 KB past the buffer, a DMA into whatever memory
+	 * follows it.  An HBA with one command slot (CAP.NCS = 0) is allowed,
+	 * and lapsus's Marvell reached this with no IDENTIFY answered:
+	 * "batch_slots=1  data=128 KB" over a buffer of 4 KB.
+	 */
+	if (st->batch_slots <= 1) {
+		st->batch_data_size = AHCI_PROBE_BUF_BYTES;
+		st->ra_sectors = AHCI_PROBE_SECTORS;
 		return 0;
+	}
 
 	ct_size = st->batch_slots * CT_STRIDE;
 	ct_size = (ct_size + 4095u) & ~4095u;
@@ -510,6 +914,40 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 		for (unsigned p = 0; p < pa_count; p++)
 			new_list[p] = pa_list[p];
 		new_pages = (unsigned int) pa_count;
+
+		/* #921: every page, and the command table, reachable */
+		{
+			unsigned p, far = 0;
+
+			for (p = 0; p < new_pages; p++)
+				if (!ahci_dma_reachable(st, new_list[p], 4096))
+					far++;
+			if (far != 0 ||
+			    !ahci_dma_reachable(st, new_ct_dma, ct_size)) {
+				printf("ahci: %u of %u batch pages, or the "
+				       "command table, are past the 4 GiB this "
+				       "controller can address (no CAP.S64A) -- "
+				       "keeping the buffers it already had "
+				       "(#921)\n", far, new_pages);
+				(void) vm_deallocate(mach_task_self(),
+						     (vm_address_t)pa_list,
+						     (vm_size_t)pa_count
+						     * sizeof(vm_address_t));
+				(void) vm_deallocate(mach_task_self(),
+						     new_data_uva,
+						     n_pages * 4096u);
+				(void) device_dma_free(st->master_device,
+						       AHCI_BDF(st),
+						       new_data_kva,
+						       n_pages * 4096u);
+				(void) vm_deallocate(mach_task_self(),
+						     new_ct_uva, ct_size);
+				(void) device_dma_free(st->master_device,
+						       AHCI_BDF(st),
+						       new_ct_kva, ct_size);
+				return -1;
+			}
+		}
 
 		/*
 		 * ⚠️ Released whatever happens next.  Out-of-line memory a
@@ -1116,7 +1554,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 				 mach_task_self(), &st->ct_uva);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: CT map of 4096 bytes failed (kr=%d)\n", (int)kr);
-		return -1;
+		st->ct_uva = 0;
+		return ahci_probe_fail(st);
 	}
 
 	/* Initial data buffer (1 page) */
@@ -1125,7 +1564,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: data alloc of %u bytes failed (kr=%d)\n",
 		       (unsigned)AHCI_PROBE_BUF_BYTES, (int)kr);
-		return -1;
+		st->data_kva = 0;
+		return ahci_probe_fail(st);
 	}
 	kr = device_dma_map_user(master_dev, st->data_kva,
 				 AHCI_PROBE_BUF_BYTES,
@@ -1133,11 +1573,22 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: data map of %u bytes failed (kr=%d)\n",
 		       (unsigned)AHCI_PROBE_BUF_BYTES, (int)kr);
-		return -1;
+		st->data_uva = 0;
+		return ahci_probe_fail(st);
 	}
 
 	st->data_dma_list[0] = st->data_dma;
 	st->data_n_pages = 1;
+
+	if (!ahci_dma_reachable(st, st->ct_dma, 4096) ||
+	    !ahci_dma_reachable(st, st->data_dma, AHCI_PROBE_BUF_BYTES)) {
+		printf("ahci: the command table (0x%llX) or the data buffer "
+		       "(0x%llX) is past the 4 GiB this controller can address "
+		       "(no CAP.S64A) -- refused (#921)\n",
+		       (unsigned long long)st->ct_dma,
+		       (unsigned long long)st->data_dma);
+		return ahci_probe_fail(st);
+	}
 
 	printf("ahci: DMA: ct at 0x%08lX, data at 0x%08lX — the addresses\n\t       the CONTROLLER is programmed with, not where the memory is\n",
 	       (unsigned long) st->ct_dma,
@@ -1145,15 +1596,55 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	/* HBA reset + AHCI enable */
 	if (ahci_hba_reset(st) < 0)
-		return -1;
+		return ahci_probe_fail(st);
 
 	/* Find and init ports */
 	if (ahci_port_scan(st) < 0)
-		return -1;
+		return ahci_probe_fail(st);
 
-	for (i = 0; i < st->n_ports; i++) {
-		if (ahci_port_init(st, i) < 0)
-			return -1;
+	/*
+	 * #921: a port whose device never became ready, or that is not an ATA
+	 * device, leaves the table; an allocation that fails still fails the
+	 * probe, as it did.
+	 */
+	for (i = 0; i < st->n_ports; ) {
+		int r = ahci_port_init(st, i);
+
+		if (r < 0)
+			return ahci_probe_fail(st);
+		if (r > 0 || !ahci_port_is_ata(st, i)) {
+			ahci_port_drop(st, i);
+			continue;
+		}
+		i++;
+	}
+
+	/*
+	 * Identify disks and detect batch slots.
+	 *
+	 * 🔴 #921: A PORT WHOSE IDENTIFY FAILS IS NOT A DISK.  Its answer was
+	 * dropped, so the port stayed in the table -- a disk of no sectors and
+	 * no model to everything above, whose MBR the block server then tried
+	 * to read.  It leaves the table now; and a controller left with no
+	 * disk fails its probe instead of being bound with none.  IDENTIFY is
+	 * polled -- GHC.IE is set at the end of the probe -- so the interrupt
+	 * line is registered after this, and a probe that fails here holds
+	 * none.
+	 */
+	for (i = 0; i < st->n_ports; ) {
+		if (ahci_identify(st, i) < 0) {
+			printf("ahci: port %d: no answer to IDENTIFY DEVICE -- "
+			       "not a disk, not used (#921)\n",
+			       st->ports[i].hba_port);
+			ahci_port_drop(st, i);
+			continue;
+		}
+		i++;
+	}
+	if (st->n_ports == 0) {
+		printf("ahci: no disk on this controller among the devices "
+		       "its ports answered with -- not driving it (#921)\n");
+		return ahci_probe_fail(st);
 	}
 
 	/* Register IRQ */
@@ -1164,14 +1655,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 			printf("ahci: IRQ %u registered\n", st->ahci_irq);
 	}
 
-	/* Identify disks and detect batch slots */
-	for (i = 0; i < st->n_ports; i++)
-		ahci_identify(st, i);
-
 	st->batch_data_size = st->batch_slots * SLOT_DATA_SIZE;
 	st->ra_sectors = st->batch_slots * SECTORS_PER_SLOT;
-	printf("ahci: batch_slots=%u  data=%u KB  readahead=%u sectors\n",
-	       st->batch_slots, st->batch_data_size / 1024, st->ra_sectors);
 
 	if (ahci_realloc_batch_buffers(st) < 0) {
 		/*
@@ -1197,6 +1682,9 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		st->ra_sectors = AHCI_PROBE_SECTORS;
 		st->data_n_pages = 1;
 	}
+	/* #921: the sizes the buffers have, said after they have them */
+	printf("ahci: batch_slots=%u  data=%u KB  readahead=%u sectors\n",
+	       st->batch_slots, st->batch_data_size / 1024, st->ra_sectors);
 
 	/*
 	 * Enable AHCI global interrupt delivery (#222).  Safe now that the
