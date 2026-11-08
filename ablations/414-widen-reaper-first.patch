@@ -1,0 +1,20 @@
+Kind: widen
+Issue: #414
+Holds open: holds a thread 2 ms in task_wait_locked() after the thread it waited for has stopped, which lets the reaper give up that activation's references first, so that the reference taken here is the last one, every time
+Run: --entry 14 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1474,6 +1474,11 @@
+ 				task_unlock(task);
+ 				act_deallocate(last_thr_act);
+ 				(void)thread_wait(thread);
++				{
++					extern void delay(int);
++
++					delay(2000);	/* the reaper gets there first */
++				}
+ 				task_lock(task);
+ 				thread = act_lock_thread(thr_act);
+ 				if (!thr_act->active) {

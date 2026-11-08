@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #414
-Takes out: the load of a thread's FS base when it comes onto a processor -- the base stays in the pcb, as it did, the trap still writes the register for the caller, and the next thread on that processor runs with the last caller's base
+Takes out: the load of a thread's FS base when it comes onto a processor -- the base stays in the pcb, and a thread reads through whatever was last there
 Accel: tcg,kvm
 Run: --entry 14 300 -smp 4
 Expect: act_test: \[52\] a thread read 0x[0-9a-f]+ through %fs where its own word is
@@ -8,12 +8,12 @@ Expect: act_test: \[52\] a thread read 0x[0-9a-f]+ through %fs where its own wor
 diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
 --- a/uros/src/mach_kernel/x86_64/thread/machine.c
 +++ b/uros/src/mach_kernel/x86_64/thread/machine.c
-@@ -217,7 +217,7 @@
- 	if (thr_act->task != kernel_task) {
- 		struct percpu	*p = percpu();
+@@ -229,7 +229,7 @@
+ 	 * that lets ring 3 write its own GS base, which the entry's test of
+ 	 * who owns GS cannot stand: deny_user_segment_bases() in cpu/percpu.c.
+ 	 */
+-	if (thr_act->task != kernel_task)
++	if (0 && thr_act->task != kernel_task)	/* 414-fs-base-not-loaded */
+ 		fs_base_load(pcb);
+ }
  
--		if (p->fs_base != pcb->fs_base) {
-+		if (0) {	/* 414-fs-base-not-loaded */
- 			wrmsr(MSR_FS_BASE, pcb->fs_base);
- 			p->fs_base = pcb->fs_base;
- 		}

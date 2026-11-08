@@ -1,0 +1,39 @@
+Kind: ablation
+Issue: #414
+Over: 414-widen-reaper-first.patch
+Takes out: the drop of the reference with the task unlocked, in the loop: it goes back where it was, on the way to the next activation with that activation locked too, where the last reference takes task_lock() again from act_free(), and the mutex says so
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: mutex_lock: thread 0x[0-9a-f]+ asks for mutex 0x[0-9a-f]+, which it took at 0x[0-9a-f]+ and holds
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1429,7 +1429,7 @@
+ 	register task_t		task)
+ {
+ 	register queue_head_t	*list;
+-	register thread_act_t	thr_act, refd_thr_act, last_thr_act;
++	register thread_act_t	thr_act, refd_thr_act;
+ 	register thread_t	thread, cur_thr;
+ 
+ 	cur_thr = current_thread();
+@@ -1465,14 +1465,16 @@
+ 				break;
+ 			}
+ 			thread = act_lock_thread(thr_act);
++			if (refd_thr_act != THR_ACT_NULL) {
++				act_deallocate(refd_thr_act);
++				refd_thr_act = THR_ACT_NULL;
++			}
+ 			if (thread &&
+ 				thr_act == thread->top_act && thread != cur_thr) {
+-				last_thr_act = refd_thr_act;
+ 				refd_thr_act = thr_act;
+ 				act_locked_act_reference(thr_act);
+ 				act_unlock_thread(thr_act);
+ 				task_unlock(task);
+-				act_deallocate(last_thr_act);
+ 				(void)thread_wait(thread);
+ 				{
+ 					extern void delay(int);

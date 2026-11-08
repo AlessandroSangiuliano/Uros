@@ -1408,14 +1408,28 @@ task_suspend(
 }
 
 /*
- * Wait for all threads in task to stop.  Called with task locked.
+ * Wait for all threads in task to stop.  Called with task locked, and returns
+ * so; the lock is let go of and taken again on the way.
+ *
+ * 🔴 THE REFERENCE TAKEN HERE GOES WITH THE TASK UNLOCKED (#414).
+ *
+ * It keeps an activation for as long as this waits for it, and it can be the
+ * last there is: a thread that dies meanwhile takes its activation off the list
+ * and gives up the reference for being active, and the reaper, woken by the
+ * same switch that wakes this thread, gives up the two of a rooted activation
+ * with a shuttle.  If the reaper is first, act_deallocate() goes on to
+ * act_free(), and that to task_deallocate(), which takes the lock this thread
+ * has.  It slept on its own mutex for ever, and the reaper slept behind it in
+ * the task's next task_deallocate(), so that no thread of any task was freed
+ * again in that boot, and nothing said so.  task_terminate() comes here, and
+ * task_suspend() too.
  */
 void
 task_wait_locked(
 	register task_t		task)
 {
 	register queue_head_t	*list;
-	register thread_act_t	thr_act, refd_thr_act;
+	register thread_act_t	thr_act, refd_thr_act, last_thr_act;
 	register thread_t	thread, cur_thr;
 
 	cur_thr = current_thread();
@@ -1451,16 +1465,14 @@ task_wait_locked(
 				break;
 			}
 			thread = act_lock_thread(thr_act);
-			if (refd_thr_act != THR_ACT_NULL) {
-				act_deallocate(refd_thr_act);
-				refd_thr_act = THR_ACT_NULL;
-			}
 			if (thread &&
 				thr_act == thread->top_act && thread != cur_thr) {
+				last_thr_act = refd_thr_act;
 				refd_thr_act = thr_act;
 				act_locked_act_reference(thr_act);
 				act_unlock_thread(thr_act);
 				task_unlock(task);
+				act_deallocate(last_thr_act);
 				(void)thread_wait(thread);
 				task_lock(task);
 				thread = act_lock_thread(thr_act);
@@ -1476,8 +1488,9 @@ task_wait_locked(
 			break;
 	}
 	if (refd_thr_act != THR_ACT_NULL) {
+		task_unlock(task);
 		act_deallocate(refd_thr_act);
-		refd_thr_act = THR_ACT_NULL;
+		task_lock(task);
 	}
 }
 

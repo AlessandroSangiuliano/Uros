@@ -90,14 +90,15 @@ RUN_ID=${GITHUB_RUN_ID:-local}
 JOB=${JOB_INDEX:-0}
 
 # What the build and the boots call that the image may not have.  gcc,
-# binutils, cmake and ninja build; bison and flex make migcom; python runs the
+# binutils, cmake and ninja build; make builds musl, whose own build it is
+# (#414); bison and flex make migcom; python runs the
 # build's own checks and xfile-verify.py; git names the tree; grub, e2fsprogs
 # and util-linux are make-disk-x86_64.sh's grub-mkimage, mke2fs, debugfs and
 # sfdisk; iproute2 is merge-test's look at port 1234, gdb walks the threads of
 # a run cut short with the stub on, and lib32-glibc and lib32-gcc-libs let the
 # host tests build for -m32 as well.  No psmisc: it was there for
 # run-x86_64.sh's killall, and the harness kills nothing by name since #618.
-PACKAGES=(gcc binutils cmake ninja bison flex python git qemu-system-x86
+PACKAGES=(gcc binutils cmake ninja make bison flex python git qemu-system-x86
 	grub e2fsprogs util-linux iproute2 gdb lib32-glibc lib32-gcc-libs)
 
 die() {

@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #414
+Over: 414-widen-reaper-first.patch
+Takes out: the drop of the last reference with the task unlocked, at the end of task_wait_locked()
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: mutex_lock: thread 0x[0-9a-f]+ asks for mutex 0x[0-9a-f]+, which it took at 0x[0-9a-f]+ and holds
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1492,11 +1492,8 @@
+ 	    	if (queue_end(list, (queue_entry_t)thr_act))
+ 			break;
+ 	}
+-	if (refd_thr_act != THR_ACT_NULL) {
+-		task_unlock(task);
++	if (refd_thr_act != THR_ACT_NULL)
+ 		act_deallocate(refd_thr_act);
+-		task_lock(task);
+-	}
+ }
+ 
+ kern_return_t 

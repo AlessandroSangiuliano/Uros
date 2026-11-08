@@ -1,0 +1,80 @@
+Kind: ablation
+Issue: #414
+Over: 414-widen-reaper-first.patch
+Takes out: both drops with the task unlocked, and the mutex's word about it, so that the thread terminating a task sleeps on its own lock, the reaper sleeps behind it, and no thread is freed again; the arm has to see that from the zone, where the port had said the task was gone
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[53\] [0-9]+ tasks of 4 threads faulted together, and the zone of tasks read [0-9]+ before and [0-9]+ after [0-9]+ waits: they are still there
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1429,7 +1429,7 @@
+ 	register task_t		task)
+ {
+ 	register queue_head_t	*list;
+-	register thread_act_t	thr_act, refd_thr_act, last_thr_act;
++	register thread_act_t	thr_act, refd_thr_act;
+ 	register thread_t	thread, cur_thr;
+ 
+ 	cur_thr = current_thread();
+@@ -1465,14 +1465,16 @@
+ 				break;
+ 			}
+ 			thread = act_lock_thread(thr_act);
++			if (refd_thr_act != THR_ACT_NULL) {
++				act_deallocate(refd_thr_act);
++				refd_thr_act = THR_ACT_NULL;
++			}
+ 			if (thread &&
+ 				thr_act == thread->top_act && thread != cur_thr) {
+-				last_thr_act = refd_thr_act;
+ 				refd_thr_act = thr_act;
+ 				act_locked_act_reference(thr_act);
+ 				act_unlock_thread(thr_act);
+ 				task_unlock(task);
+-				act_deallocate(last_thr_act);
+ 				(void)thread_wait(thread);
+ 				{
+ 					extern void delay(int);
+@@ -1492,11 +1494,8 @@
+ 	    	if (queue_end(list, (queue_entry_t)thr_act))
+ 			break;
+ 	}
+-	if (refd_thr_act != THR_ACT_NULL) {
+-		task_unlock(task);
++	if (refd_thr_act != THR_ACT_NULL)
+ 		act_deallocate(refd_thr_act);
+-		task_lock(task);
+-	}
+ }
+ 
+ kern_return_t 
+diff --git a/uros/src/mach_kernel/x86_64/sync/mutex.c b/uros/src/mach_kernel/x86_64/sync/mutex.c
+--- a/uros/src/mach_kernel/x86_64/sync/mutex.c
++++ b/uros/src/mach_kernel/x86_64/sync/mutex.c
+@@ -140,24 +140,6 @@
+ 		MUTEX_TRACE(m, MTR_LOCK_FAST, 0);
+ 		return;
+ 	}
+-
+-#if	MUTEX_OWNER_TRACK
+-	/*
+-	 * 🔴 NOBODY WAKES A THREAD FROM ITS OWN MUTEX (#414).
+-	 *
+-	 * It would sleep for ever and take what depends on the lock with it,
+-	 * with nothing said: task_wait_locked()'s reference did that to a task
+-	 * and then to the thread asking about the task, and all that showed in
+-	 * a boot was that a test stopped.  The census cannot see such a stop
+-	 * while any task polls.  Asked here, where a thread is about to sleep
+-	 * and a load costs nothing.  own_thr names this thread only if this
+-	 * thread wrote it, and a release clears it before it frees the word.
+-	 */
+-	if (m->own_thr != 0 && m->own_thr == (vm_offset_t) current_thread())
+-		panic("mutex_lock: thread %p asks for mutex %p, which it took "
+-		      "at %p and holds (#414)", (void *) m->own_thr, (void *) m,
+-		      (void *) m->own_pc);
+-#endif	/* MUTEX_OWNER_TRACK */
+ 
+ 	for (;;) {
+ 		/*

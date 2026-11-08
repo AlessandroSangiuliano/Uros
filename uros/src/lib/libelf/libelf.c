@@ -77,6 +77,46 @@ shdr_at(const elf_image_t *img, int idx)
     return &base[idx];
 }
 
+/*
+ * One section header at the width of the wider class (#421).  The two
+ * structures hold the same ten fields at different sizes and offsets, so what
+ * reads a section reads it here and names neither.
+ */
+struct section_fields {
+    uint32_t name, type, link, info;
+    uint64_t flags, addr, offset, size, entsize;
+};
+
+static void
+section_read(const elf_image_t *img, int idx, struct section_fields *f)
+{
+    if (img->_is_64) {
+        const Elf64_Shdr *s = (const Elf64_Shdr *)img->_shdr + idx;
+
+        f->name    = s->sh_name;
+        f->type    = s->sh_type;
+        f->flags   = s->sh_flags;
+        f->addr    = s->sh_addr;
+        f->offset  = s->sh_offset;
+        f->size    = s->sh_size;
+        f->link    = s->sh_link;
+        f->info    = s->sh_info;
+        f->entsize = s->sh_entsize;
+    } else {
+        const Elf32_Shdr *s = shdr_at(img, idx);
+
+        f->name    = s->sh_name;
+        f->type    = s->sh_type;
+        f->flags   = s->sh_flags;
+        f->addr    = s->sh_addr;
+        f->offset  = s->sh_offset;
+        f->size    = s->sh_size;
+        f->link    = s->sh_link;
+        f->info    = s->sh_info;
+        f->entsize = s->sh_entsize;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  elf_open — validate, populate elf_image_t                           */
 /* ------------------------------------------------------------------ */
@@ -90,19 +130,16 @@ shdr_at(const elf_image_t *img, int idx)
  * bodies that each say one thing are shorter than one body that says which
  * thing at every step, and neither can quietly read the other's layout.
  *
- * ⚠️ It is the PROGRAM headers this handles, and deliberately not the
- * sections.  Loading an image needs PT_LOAD and nothing else, and that is
- * what the bootstrap server and exec_server ask for.  Sections, symbols and
- * the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn, which
- * <mach/elf.h> does not define yet -- so _shnum stays zero and the accessors
- * refuse by class instead of reporting an image with no sections, which is a
- * different and false statement.
+ * Program headers and sections.  exec_server reads a section as well as the
+ * segments: an image carries its capability manifest in one (#421).  Symbols
+ * and the dynamic table refuse by class, further down.
  */
 static int
 elf_open64(elf_image_t *img)
 {
     const Elf64_Ehdr *e;
     uint64_t phdr_off, phdr_span;
+    uint64_t shdr_off, shdr_span;
 
     if (img->_len < sizeof(Elf64_Ehdr))
         return ELF_ERR_TRUNCATED;
@@ -117,6 +154,8 @@ elf_open64(elf_image_t *img)
         return ELF_ERR_BAD_VERSION;
     if (e->e_phnum != 0 && e->e_phentsize != sizeof(Elf64_Phdr))
         return ELF_ERR_BAD_VERSION;
+    if (e->e_shnum != 0 && e->e_shentsize != sizeof(Elf64_Shdr))
+        return ELF_ERR_BAD_VERSION;
 
     if (e->e_phnum > 0) {
         phdr_off  = e->e_phoff;
@@ -125,6 +164,25 @@ elf_open64(elf_image_t *img)
             return ELF_ERR_TRUNCATED;
         img->_phdr  = img->_buf + phdr_off;
         img->_phnum = (int)e->e_phnum;
+    }
+
+    /* Section headers + shstrtab: both optional, as in elf_open(). */
+    if (e->e_shnum > 0) {
+        shdr_off  = e->e_shoff;
+        shdr_span = (uint64_t)e->e_shnum * sizeof(Elf64_Shdr);
+        if (!range_ok(img, shdr_off, shdr_span))
+            return ELF_ERR_TRUNCATED;
+        img->_shdr  = img->_buf + shdr_off;
+        img->_shnum = (int)e->e_shnum;
+
+        if (e->e_shstrndx != SHN_UNDEF && e->e_shstrndx < e->e_shnum) {
+            const Elf64_Shdr *s = (const Elf64_Shdr *)img->_shdr + e->e_shstrndx;
+
+            if (range_ok(img, s->sh_offset, s->sh_size)) {
+                img->_shstrtab    = (const char *)(img->_buf + s->sh_offset);
+                img->_shstrtab_sz = s->sh_size;
+            }
+        }
     }
 
     return ELF_OK;
@@ -380,16 +438,6 @@ elf_phdr_get(const elf_image_t *img, int idx, elf_phdr_view_t *out)
 int
 elf_shdr_count(const elf_image_t *img)
 {
-    /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
-     */
-    if (img->_is_64)
-        return ELF_ERR_BAD_CLASS;
-
     return img->_shnum;
 }
 
@@ -404,38 +452,28 @@ shstr(const elf_image_t *img, uint32_t name_off)
 int
 elf_shdr_get(const elf_image_t *img, int idx, elf_shdr_view_t *out)
 {
-    /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
-     */
-    if (img->_is_64)
-        return ELF_ERR_BAD_CLASS;
-
-    const Elf32_Shdr *s;
+    struct section_fields s;
 
     if (idx < 0 || idx >= img->_shnum || !out)
         return ELF_ERR_OUT_OF_RANGE;
 
-    s = shdr_at(img, idx);
-    out->name    = shstr(img, s->sh_name);
-    out->type    = s->sh_type;
-    out->flags   = s->sh_flags;
-    out->addr    = (uintptr_t)s->sh_addr;
-    out->offset  = s->sh_offset;
-    out->size    = s->sh_size;
-    out->link    = s->sh_link;
-    out->info    = s->sh_info;
-    out->entsize = s->sh_entsize;
+    section_read(img, idx, &s);
+    out->name    = shstr(img, s.name);
+    out->type    = s.type;
+    out->flags   = (uint32_t)s.flags;
+    out->addr    = (uintptr_t)s.addr;
+    out->offset  = s.offset;
+    out->size    = s.size;
+    out->link    = s.link;
+    out->info    = s.info;
+    out->entsize = s.entsize;
 
     /* SHT_NOBITS sections have a meaningful sh_size but no on-disk
      * footprint; report data == NULL for them rather than pretending
      * it points somewhere safe. */
-    if (s->sh_type != SHT_NOBITS &&
-        range_ok(img, s->sh_offset, s->sh_size))
-        out->data = img->_buf + s->sh_offset;
+    if (s.type != SHT_NOBITS &&
+        range_ok(img, s.offset, s.size))
+        out->data = img->_buf + s.offset;
     else
         out->data = NULL;
 
@@ -446,16 +484,6 @@ int
 elf_shdr_find(const elf_image_t *img, const char *name,
               elf_shdr_view_t *out)
 {
-    /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
-     */
-    if (img->_is_64)
-        return ELF_ERR_BAD_CLASS;
-
     int i;
 
     if (!name || !out)
@@ -464,8 +492,11 @@ elf_shdr_find(const elf_image_t *img, const char *name,
         return ELF_ERR_NOT_PRESENT;
 
     for (i = 0; i < img->_shnum; i++) {
-        const Elf32_Shdr *s = shdr_at(img, i);
-        const char *n = shstr(img, s->sh_name);
+        struct section_fields s;
+        const char *n;
+
+        section_read(img, i, &s);
+        n = shstr(img, s.name);
         if (n && strcmp(n, name) == 0)
             return elf_shdr_get(img, i, out);
     }
@@ -518,11 +549,10 @@ int
 elf_sym_count(const elf_image_t *img)
 {
     /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  The image has
+     * them.  This is the one thing still ELF32 here: bootstrap's symbol push
+     * to the kernel debugger is what would ask, and it stops at this answer
+     * (#421).
      */
     if (img->_is_64)
         return ELF_ERR_BAD_CLASS;
@@ -548,11 +578,10 @@ int
 elf_sym_get(const elf_image_t *img, int idx, elf_sym_view_t *out)
 {
     /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  The image has
+     * them.  This is the one thing still ELF32 here: bootstrap's symbol push
+     * to the kernel debugger is what would ask, and it stops at this answer
+     * (#421).
      */
     if (img->_is_64)
         return ELF_ERR_BAD_CLASS;
@@ -585,11 +614,10 @@ elf_sym_lookup(const elf_image_t *img, const char *name,
                elf_sym_view_t *out)
 {
     /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  The image has
+     * them.  This is the one thing still ELF32 here: bootstrap's symbol push
+     * to the kernel debugger is what would ask, and it stops at this answer
+     * (#421).
      */
     if (img->_is_64)
         return ELF_ERR_BAD_CLASS;
@@ -650,11 +678,10 @@ int
 elf_dyn_count(const elf_image_t *img)
 {
     /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  The image has
+     * them.  This is the one thing still ELF32 here: bootstrap's symbol push
+     * to the kernel debugger is what would ask, and it stops at this answer
+     * (#421).
      */
     if (img->_is_64)
         return ELF_ERR_BAD_CLASS;
@@ -669,11 +696,10 @@ int
 elf_dyn_get(const elf_image_t *img, int idx, elf_dyn_view_t *out)
 {
     /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  The image has
+     * them.  This is the one thing still ELF32 here: bootstrap's symbol push
+     * to the kernel debugger is what would ask, and it stops at this answer
+     * (#421).
      */
     if (img->_is_64)
         return ELF_ERR_BAD_CLASS;
@@ -699,11 +725,10 @@ int
 elf_dyn_find(const elf_image_t *img, int64_t tag, uint64_t *value)
 {
     /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  The image has
+     * them.  This is the one thing still ELF32 here: bootstrap's symbol push
+     * to the kernel debugger is what would ask, and it stops at this answer
+     * (#421).
      */
     if (img->_is_64)
         return ELF_ERR_BAD_CLASS;
@@ -736,30 +761,26 @@ elf_dyn_find(const elf_image_t *img, int64_t tag, uint64_t *value)
 const char *
 elf_interp(const elf_image_t *img)
 {
-    /*
-     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
-     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
-     * which <mach/elf.h> does not define yet -- program headers are all a
-     * loader needs and all that was added.  Reporting zero sections would be
-     * a different statement, and a false one: the image has them.
-     */
-    if (img->_is_64)
-        return 0;
-
     int i;
 
+    /*
+     * Through the program headers' view, which reads both classes.  It
+     * answered "no interpreter" for every ELF64 image, and a dynamic program
+     * was then started at its own entry with nothing relocated (#421).
+     */
     for (i = 0; i < img->_phnum; i++) {
-        const Elf32_Phdr *p = phdr_at(img, i);
-        if (p->p_type != PT_INTERP)
+        elf_phdr_view_t ph;
+        const char *path;
+
+        if (elf_phdr_get(img, i, &ph) != ELF_OK || ph.type != PT_INTERP)
             continue;
-        if (!range_ok(img, p->p_offset, p->p_filesz))
-            return NULL;
-        if (p->p_filesz == 0)
+        if (!ph.data || ph.filesz == 0)
             return NULL;
         /* PT_INTERP must contain a NUL-terminated string. */
-        if (img->_buf[p->p_offset + p->p_filesz - 1] != '\0')
+        path = (const char *)ph.data;
+        if (path[ph.filesz - 1] != '\0')
             return NULL;
-        return (const char *)(img->_buf + p->p_offset);
+        return path;
     }
     return NULL;
 }

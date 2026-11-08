@@ -58,6 +58,11 @@ struct pthread {
 	volatile int killlock[1];
 	char *dlerror_buf;
 	void *stdio_locks;
+	/* Uros (#414): libmach's struct mach_thread_state, per thread. */
+	struct {
+		unsigned reply_port;
+		int err_no;
+	} uros_mach_state;
 
 	/* Part 3 -- the positions of these fields relative to
 	 * the end of the structure is external and internal ABI. */

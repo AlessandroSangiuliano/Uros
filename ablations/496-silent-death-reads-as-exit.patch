@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #414
+Takes out: proc_server's answer for a task that went without saying how, so that a fault reads as an exit with 0
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[18\] WRONG -- a program with no library that faulted left status 0
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -1964,10 +1964,6 @@
+          * ended from outside, by a fault with nothing to catch it or by
+          * a task_terminate of somebody's, and left at the 0 it was born
+          * with that read "exited normally" (#496, the class of #580). */
+-        if (!e->exit_declared) {
+-            e->exit_code = 128 + PROC_SIGKILL;
+-            e->exit_declared = 1;
+-        }
+         subscriber    = e->exit_notify;
+         e->exit_notify = MACH_PORT_NULL;
+         pid           = e->pid;

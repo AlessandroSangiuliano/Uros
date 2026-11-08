@@ -492,7 +492,10 @@ for i in $(seq 1 "$BOOTS"); do
 				die 3 "$arm, $acc, boot $i: the harness could not run it (status $rc), see $RUNDIR/$arm-$acc-$i.out" ;;
 			esac
 			hit=0
-			grep -Eqf "$RUNDIR/expect" "$log" && hit=1
+			# In UTF-8 wherever this runs: over ssh a machine can have no
+			# LANG at all, and in the C locale the . that a patch writes
+			# for an em dash is one byte of three.
+			LC_ALL=C.UTF-8 grep -Eqf "$RUNDIR/expect" "$log" && hit=1
 			if [ "$arm" = ablated ]; then
 				if [ $hit = 1 ]; then
 					verdict=CAUGHT

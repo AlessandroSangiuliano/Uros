@@ -64,8 +64,9 @@ extern __uros_kern_return_t  syscall_vm_protect(__uros_port_t task,
                                                 int set_max,
                                                 int new_prot);
 extern __uros_kern_return_t  syscall_task_terminate(__uros_port_t task);
-extern __uros_kern_return_t  thread_terminate(__uros_port_t thread);
+extern __uros_kern_return_t  syscall_thread_terminate(__uros_port_t thread);
 extern __uros_port_t         mach_thread_self(void);
+extern void                  __uros_thread_leaving(void);
 
 /*
  * POSIX fd layer (#262) — implemented in posix_fd.c, which owns the
@@ -293,7 +294,8 @@ static long h_exit_thread(long status, long a2, long a3,
                           long a4, long a5, long a6)
 {
     (void)status; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
-    (void)thread_terminate(mach_thread_self());
+    __uros_thread_leaving();
+    (void)syscall_thread_terminate(mach_thread_self());
     for (;;) { /* unreachable */ }
     return 0;
 }

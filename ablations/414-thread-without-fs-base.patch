@@ -3,7 +3,7 @@ Issue: #414
 Takes out: the FS base in a new pthread's state, so that the thread starts with none and its first read of %fs:0 is a read of address 0
 Accel: tcg,kvm
 Run: --entry 14 300 -smp 4
-Expect: exception_no_server: terminating task 0x[0-9a-f]+ . exception 1, code\[0\]=0x[12] code\[1\]=0x0[^0-9a-f]*$
+Expect: musl_test: \[4\] WRONG -- a new thread never got as far as its own word
 
 diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
 --- a/uros/src/lib/libposix-uros/posix_clone.c

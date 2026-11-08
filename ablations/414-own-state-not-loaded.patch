@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #414
+Over: 414-widen-own-state.patch
+Takes out: the load of a base a thread gives itself, so that a thread started by thread_create_running() goes to ring 3 with the base it had when it came onto the processor
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[12\] WRONG -- child [0-9]+ left status 0x9|musl_test: \[21\] WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -880,12 +880,6 @@
+ 		 * its suspension it goes back to ring 3 with no further switch.
+ 		 * One forked child in a hundred read %fs:0 at address 0.
+ 		 */
+-		if (thr_act == current_act()) {
+-			spl_t	s = splsched();
+-
+-			fs_base_load(pcb);
+-			splx(s);
+-		}
+ 		return KERN_SUCCESS;
+ 
+ 	case x86_64_FLOAT_STATE:

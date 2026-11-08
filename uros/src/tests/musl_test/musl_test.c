@@ -65,6 +65,14 @@ not_asked(int arm, const char *why)
 /* The longest a thread is given to do what an arm waits for, in 10 ms steps. */
 #define WAIT_STEPS	500
 
+static int
+access_by_stat(const char *path)
+{
+	struct stat	st;
+
+	return stat(path, &st);
+}
+
 static void
 pause_a_little(void)
 {
@@ -188,6 +196,7 @@ struct tls_report {
 	long	first_zero;
 	int	errno_kept;
 	int	word_kept;
+	int	done;
 };
 
 static void *
@@ -202,15 +211,16 @@ tls_thread(void *arg)
 	pause_a_little();		/* a processor, and back */
 	r->errno_kept = (errno == ERANGE);
 	r->word_kept = (tls_word == 0x1111);
+	__atomic_store_n(&r->done, 1, __ATOMIC_SEQ_CST);
 	return NULL;
 }
 
 static void
 arm_tls(void)
 {
-	struct tls_report	r;
+	static struct tls_report	r;	/* the thread may never get to it */
 	pthread_t		th;
-	int			rc;
+	int			rc, i;
 
 	if (tls_word != 0x5a5a || tls_zero != 0) {
 		verdict(4, 0, "the main thread's __thread variables read %#x "
@@ -223,6 +233,19 @@ arm_tls(void)
 	rc = pthread_create(&th, NULL, tls_thread, &r);
 	if (rc != 0) {
 		verdict(4, 0, "pthread_create said %d", rc);
+		return;
+	}
+	/*
+	 * Waited for by hand and not by pthread_join() alone: a thread with no
+	 * thread pointer dies on its first read of it, and the arm has to say
+	 * so and not stop here for good.  pause_a_little() keeps errno, and
+	 * the check below reads it.
+	 */
+	for (i = 0; i < WAIT_STEPS && !__atomic_load_n(&r.done, __ATOMIC_SEQ_CST);
+	     i++)
+		pause_a_little();
+	if (!__atomic_load_n(&r.done, __ATOMIC_SEQ_CST)) {
+		verdict(4, 0, "a new thread never got as far as its own word");
 		return;
 	}
 	(void)pthread_join(th, NULL);
@@ -644,9 +667,424 @@ arm_file_map(void)
 		"%s", same ? "the same" : "not the same");
 }
 
-int
-main(void)
+/*
+ * ── [14], [15], [16] Another program, through exec_server ───────────────
+ *
+ * A static C program and a dynamic one, each of which returns from main, and
+ * hello_exec, which has nothing under it and waits to be killed.  The status
+ * waitpid reads back is the whole of what the parent can see here: what each
+ * of them printed on its way is the harness's to read.
+ */
+/*
+ * No disk is a boot this arm has nothing to say about.  A disk with the file
+ * the other arms read and without this program is an image built wrong, and it
+ * said NOT ASKED about that too, in a boot that looked clean.
+ */
+static int
+program_is_there(int arm, const char *path)
 {
+	if (access_by_stat(path) == 0)
+		return 1;
+	if (access_by_stat(F_PATH) == 0)
+		verdict(arm, 0, "a disk is mounted, and %s is not on it", path);
+	else
+		not_asked(arm, "no disk mounted on this boot");
+	return 0;
+}
+
+static pid_t
+start_program(const char *path)
+{
+	char	*argv[2];
+	char	*envp[1];
+	pid_t	pid;
+
+	argv[0] = (char *)path;
+	argv[1] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid == 0) {
+		(void)execve(path, argv, envp);
+		_exit(127);
+	}
+	return pid;
+}
+
+static void
+arm_program(int arm, const char *path)
+{
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (!program_is_there(arm, path))
+		return;
+	pid = start_program(path);
+	if (pid < 0) {
+		not_asked(arm, "fork refused: no process server on this boot");
+		return;
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(arm, got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		"%s ended with status %#x", path, (unsigned)status);
+}
+
+static void
+arm_parked_program(int arm, const char *path)
+{
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (!program_is_there(arm, path))
+		return;
+	pid = start_program(path);
+	if (pid < 0) {
+		not_asked(arm, "fork refused: no process server on this boot");
+		return;
+	}
+	(void)sleep(1);
+	(void)kill(pid, SIGKILL);
+	got = waitpid(pid, &status, 0);
+	verdict(arm, got == pid && WIFSIGNALED(status)
+		&& WTERMSIG(status) == SIGKILL, "%s was killed, status %#x",
+		path, (unsigned)status);
+}
+
+/*
+ * ── [17], [18] What waitpid says about a task that did not exit ─────────
+ *
+ * The address is the one the harness knows to be asked for.  A program with
+ * this library under it catches the exception and says what it was; hello_exec
+ * has nothing, and proc_server sees only that it has gone.  Either way the
+ * status must not read as an exit.
+ */
+#define FAULT_ADDRESS	0x5300000
+
+static void
+arm_fault(void)
+{
+	pid_t	pid, got;
+	int	status = 0;
+
+	pid = fork();
+	if (pid < 0) {
+		not_asked(17, "fork refused: no process server on this boot");
+		return;
+	}
+	if (pid == 0) {
+		*(volatile int *)FAULT_ADDRESS = 1;
+		_exit(0);
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(17, got == pid && WIFSIGNALED(status)
+		&& WTERMSIG(status) == SIGSEGV, "a child that wrote to a page "
+		"nobody mapped left status %#x", (unsigned)status);
+}
+
+static void
+arm_fault_with_no_libc(void)
+{
+	char	*argv[3];
+	char	*envp[1];
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (!program_is_there(18, "/hello_exec"))
+		return;
+	argv[0] = (char *)"/hello_exec";
+	argv[1] = (char *)"fault";
+	argv[2] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid < 0) {
+		not_asked(18, "fork refused: no process server on this boot");
+		return;
+	}
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(127);
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(18, got == pid && WIFSIGNALED(status), "a program with no "
+		"library that faulted left status %#x", (unsigned)status);
+}
+
+/*
+ * ── [19] An exec'd program and page zero ────────────────────────────────
+ *
+ * This program again, through exec_server, with an argument.  Everything here
+ * so far is a task bootstrap loaded, and bootstrap keeps page zero out of a
+ * task's reach; what exec_server starts has to have it kept out as well.
+ */
+/*
+ * ── [20] /proc/N/stat ───────────────────────────────────────────────────
+ *
+ * The one surface of proc_server a program reads as a file.  It is text, so
+ * what can go wrong on this target is where it is served from and whether the
+ * numbers in it are the process that asked (#496).
+ */
+static void
+arm_proc(void)
+{
+	char	path[32], buf[256];
+	char	state = 0;
+	int	fd, pid = 0;
+	ssize_t	n;
+
+	snprintf(path, sizeof path, "/proc/%d/stat", (int)getpid());
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		verdict(20, 0, "open(%s) failed, errno %d", path, errno);
+		return;
+	}
+	n = read(fd, buf, sizeof buf - 1);
+	(void)close(fd);
+	if (n <= 0) {
+		verdict(20, 0, "reading %s answered %ld, errno %d", path,
+			(long)n, errno);
+		return;
+	}
+	buf[n] = '\0';
+	(void)sscanf(buf, "%d (%*[^)]) %c", &pid, &state);
+	verdict(20, pid == (int)getpid() && state == 'R', "%s says pid %d, "
+		"state %c", path, pid, state);
+}
+
+/*
+ * ── [22] Threads in the servers at once ─────────────────────────────────
+ *
+ * Four kinds of request to two servers, from four threads, so that a reply that
+ * reached the wrong thread is a reply of the wrong shape, and a thread whose
+ * reply was taken never comes back.
+ *
+ * They go at the pace of the slowest.  A stat takes 3.8 ms under KVM and 31 ms
+ * under TCG, and a thousand of each of the others take 30 ms between them, so
+ * with a thousand rounds each those three were over after three stats, and
+ * stat went on alone, where nothing could take its reply, past this arm's 15 s
+ * on every boot under TCG.
+ *
+ * And it waits for them.  On one processor stat and its server keep it for a
+ * quantum, and under KVM the 20 were over before any of the others had
+ * finished a call.
+ */
+#define R_THREADS	4
+#define R_ROUNDS	1000	/* the least of each of the fast three */
+#define R_STAT		3	/* the kind that goes to the file server */
+#define R_STATS		20	/* and how many of it, which ends all four */
+
+static const char *const r_kind[R_THREADS] = {
+	"getsid", "getpgid", "kill", "stat"
+};
+static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done, r_over;
+
+static int
+rpc_others_under_way(void)
+{
+	int	k;
+
+	for (k = 0; k < R_STAT; k++)
+		if (__atomic_load_n(&r_round[k], __ATOMIC_SEQ_CST) == 0)
+			return 0;
+	return 1;
+}
+
+static void *
+rpc_thread(void *arg)
+{
+	int	kind = (int)(uintptr_t)arg;
+	int	least = kind == R_STAT ? R_STATS : R_ROUNDS;
+	int	i, ok;
+
+	while (kind == R_STAT && !rpc_others_under_way()
+	       && !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST))
+		pause_a_little();
+	for (i = 0; i < least || !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST);
+	     i++) {
+		struct stat	st;
+
+		switch (kind) {
+		case 0:
+			ok = getsid(0) > 0;
+			break;
+		case 1:
+			ok = getpgid(0) > 0;
+			break;
+		case 2:
+			ok = kill(getpid(), 0) == 0;
+			break;
+		default:
+			ok = stat(F_PATH, &st) == 0;
+			break;
+		}
+		if (!ok)
+			__atomic_add_fetch(&r_wrong[kind], 1, __ATOMIC_SEQ_CST);
+		__atomic_store_n(&r_round[kind], i + 1, __ATOMIC_SEQ_CST);
+		if (kind == R_STAT && i + 1 == R_STATS)
+			__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST);
+	}
+	__atomic_add_fetch(&r_done, 1, __ATOMIC_SEQ_CST);
+	return NULL;
+}
+
+static void
+arm_threads_in_servers(void)
+{
+	pthread_attr_t	attr;
+	pthread_t	th;
+	int		i, rc, done;
+
+	if (access_by_stat(F_PATH) != 0) {
+		not_asked(22, "no disk mounted on this boot");
+		return;
+	}
+	(void)pthread_attr_init(&attr);
+	(void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	for (i = 0; i < R_THREADS; i++) {
+		rc = pthread_create(&th, &attr, rpc_thread,
+				    (void *)(uintptr_t)i);
+		if (rc != 0) {
+			verdict(22, 0, "pthread_create %d said %d", i, rc);
+			return;
+		}
+	}
+	(void)pthread_attr_destroy(&attr);
+
+	for (i = 0; i < 3 * WAIT_STEPS
+	     && __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS; i++)
+		pause_a_little();
+	done = __atomic_load_n(&r_done, __ATOMIC_SEQ_CST);
+	__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST); /* if stat never came back */
+	verdict(22, done == R_THREADS
+		&& r_wrong[0] + r_wrong[1] + r_wrong[2] + r_wrong[3] == 0,
+		"%d of %d threads ended, at once in two servers: %s %d made "
+		"and %d wrong, %s %d and %d, %s %d and %d, %s %d and %d",
+		done, R_THREADS,
+		r_kind[0], r_round[0], r_wrong[0],
+		r_kind[1], r_round[1], r_wrong[1],
+		r_kind[2], r_round[2], r_wrong[2],
+		r_kind[3], r_round[3], r_wrong[3]);
+}
+
+/*
+ * ── [23] The null signal ────────────────────────────────────────────────
+ *
+ * kill(pid, 0) sends nothing and asks whether the process is there.  A child
+ * that has ended and has not been waited for still is, and once it has been
+ * the pid is nobody's.
+ */
+static void
+arm_null_signal(void)
+{
+	pid_t	child;
+	int	self, before, after, saved, status = 0;
+
+	self = kill(getpid(), 0);
+	child = fork();
+	if (child < 0) {
+		verdict(23, 0, "fork failed, errno %d", errno);
+		return;
+	}
+	if (child == 0)
+		_exit(0);
+	before = kill(child, 0);
+	(void)waitpid(child, &status, 0);
+	errno = 0;
+	after = kill(child, 0);
+	saved = errno;
+	verdict(23, self == 0 && before == 0 && after == -1 && saved == ESRCH,
+		"kill(pid, 0) answered %d for this process, %d for a child not "
+		"yet waited for, and %d with errno %d once it was", self, before,
+		after, saved);
+}
+
+/*
+ * ── [21] Many forks ─────────────────────────────────────────────────────
+ *
+ * Each child has a whole personality to bring up, with two threads of its own,
+ * in the time it takes to answer, so a race there is met about once in a
+ * hundred forks and no single fork shows it.  Each child leaves its own number,
+ * so that a status that came from somewhere else is not taken for the answer.
+ */
+#define FORKS		200
+
+static void
+arm_many_forks(void)
+{
+	int	i, wrong = 0, last = 0;
+
+	for (i = 0; i < FORKS; i++) {
+		int	status = 0;
+		pid_t	pid = fork();
+
+		if (pid < 0) {
+			verdict(21, 0, "fork %d failed, errno %d", i, errno);
+			return;
+		}
+		if (pid == 0)
+			_exit(i & 0x7f);
+		if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status)
+		    || WEXITSTATUS(status) != (i & 0x7f)) {
+			wrong++;
+			last = status;
+		}
+	}
+	verdict(21, wrong == 0, "%d children, each its number back, and %d "
+		"wrong, the last with status %#x", FORKS, wrong,
+		(unsigned)last);
+}
+
+static int
+as_exec_child(void)
+{
+	void	*anywhere, *at_zero;
+
+	anywhere = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	at_zero = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
+		       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+	/* 0 for "as it should be": what the status can carry is one byte. */
+	if (anywhere == MAP_FAILED || anywhere == NULL)
+		return 1;
+	if (at_zero != MAP_FAILED)
+		return 2;
+	return 0;
+}
+
+static void
+arm_page_zero(void)
+{
+	char	*argv[3];
+	char	*envp[1];
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (!program_is_there(19, "/musl_test"))
+		return;
+	argv[0] = (char *)"/musl_test";
+	argv[1] = (char *)"child";
+	argv[2] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid < 0) {
+		not_asked(19, "fork refused: no process server on this boot");
+		return;
+	}
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(127);
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(19, got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		"an exec'd program was refused page zero, by an allocation "
+		"that could land anywhere and by asking for it: status %#x",
+		(unsigned)status);
+}
+
+int
+main(int argc, char **argv)
+{
+	if (argc > 1 && strcmp(argv[1], "child") == 0)
+		return as_exec_child();
+
 	printf("musl_test: started -- a static C program, on %zu-bit "
 	       "pointers (#414)\n", sizeof(void *) * 8);
 
@@ -663,6 +1101,16 @@ main(void)
 	arm_jump();
 	arm_fork();
 	arm_file_map();
+	arm_program(14, "/hello_world");
+	arm_parked_program(15, "/hello_exec");
+	arm_program(16, "/hello_dyn_world");
+	arm_fault();
+	arm_fault_with_no_libc();
+	arm_page_zero();
+	arm_proc();
+	arm_many_forks();
+	arm_threads_in_servers();
+	arm_null_signal();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;

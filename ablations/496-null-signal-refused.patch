@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #496
+Takes out: the null signal in proc_server's kill, which it refused as a bad number, so that kill(pid, 0) said EINVAL of a process that was there
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[23\] WRONG -- kill\(pid, 0\) answered -1 for this process
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -736,7 +736,7 @@
+ 
+     (void)server_port;
+ 
+-    if (signo != 0 && !signo_valid(signo)) {
++    if (!signo_valid(signo)) {
+         *result = PROC_ERR_BAD_SIGNO;
+         return KERN_SUCCESS;
+     }

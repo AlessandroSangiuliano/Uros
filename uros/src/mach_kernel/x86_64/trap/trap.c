@@ -1923,6 +1923,7 @@ void trap_dispatch(struct trap_frame *frame)
 	 * attempted, so a non-page-fault carries a code that means "not this".
 	 */
 	kern_return_t	fault_kr = KERN_SUCCESS;
+	uint64_t	fault_addr = 0;
 
 	/*
 	 * #482, and it is the first statement for a reason: "trap entry" is one
@@ -2277,6 +2278,7 @@ void trap_dispatch(struct trap_frame *frame)
 		vm_map_t	map;
 		vm_prot_t	prot;
 
+		fault_addr = addr;
 		if (va_is_kernel(addr) && (frame->cs & 3) == USER_RPL) {
 			map = VM_MAP_NULL;
 			fault_kr = KERN_INVALID_ADDRESS;
@@ -2357,10 +2359,14 @@ void trap_dispatch(struct trap_frame *frame)
 			 * resolved and the address that could not be reached --
 			 * exactly what i386 passes from
 			 * user_page_fault_continue().
+			 *
+			 * ⚠️ The address read on the way in, and not CR2 now:
+			 * vm_fault() may have blocked, and the register holds
+			 * the last fault this processor took, of anybody.
 			 */
 			user_frame_is_saved(frame);
 			x86_64_exception(EXC_BAD_ACCESS, (int) fault_kr,
-					 (int) read_cr2());
+					 (int) fault_addr);
 			/*NOTREACHED*/
 		}
 

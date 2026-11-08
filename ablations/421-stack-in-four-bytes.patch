@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #414
+Takes out: the word of the initial stack: four bytes, as on i386
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[16\] WRONG -- /hello_dyn_world ended with status 0x9
+
+diff --git a/uros/src/servers/exec_server/exec_stack.c b/uros/src/servers/exec_server/exec_stack.c
+--- a/uros/src/servers/exec_server/exec_stack.c
++++ b/uros/src/servers/exec_server/exec_stack.c
+@@ -47,7 +47,7 @@
+ #define EXEC_RANDOM_LEN 16U
+ 
+ /* One item of the layout: the target's word, which is what a pointer is. */
+-typedef uintptr_t exec_word_t;
++typedef uint32_t exec_word_t;
+ 
+ /* ------------------------------------------------------------------ */
+ /*  Helpers — count NUL-separated strings in a blob                    */

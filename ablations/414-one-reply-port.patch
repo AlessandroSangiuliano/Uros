@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #414
+Takes out: the hand-over of each thread's reply port, so that every thread of a musl program receives on one
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[22\] WRONG
+
+diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
+--- a/uros/src/lib/libposix-uros/posix_clone.c
++++ b/uros/src/lib/libposix-uros/posix_clone.c
+@@ -192,7 +192,6 @@
+      * it is done already, and a forked child goes back to the task's state
+      * and hands over again here.
+      */
+-    mig_init(__uros_mach_thread_state);
+ 
+     /* 1. Create the kernel thread, suspended. */
+     mach_port_t new_thread = MACH_PORT_NULL;

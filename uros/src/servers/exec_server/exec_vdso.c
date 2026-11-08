@@ -25,76 +25,73 @@
 #include "exec_internal.h"
 
 #include <mach.h>
+#include <mach/elf.h>
 #include <mach/mach_interface.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
-/*  Minimal Elf32 header (no dependency on a system elf.h)             */
+/*  A minimal ELF image of this target                                 */
 /* ------------------------------------------------------------------ */
 
-#define EI_MAG0          0
-#define EI_MAG1          1
-#define EI_MAG2          2
-#define EI_MAG3          3
-#define EI_CLASS         4
-#define EI_DATA          5
-#define EI_VERSION       6
-#define EI_OSABI         7
-#define EI_NIDENT       16
-
-#define ELFMAG0       0x7f
-#define ELFMAG1       'E'
-#define ELFMAG2       'L'
-#define ELFMAG3       'F'
-#define ELFCLASS32       1
-#define ELFDATA2LSB      1
-#define EV_CURRENT       1
-#define ELFOSABI_NONE    0
-
-#define ET_DYN           3
-#define EM_386           3
-
 /*
- * 52-byte Elf32_Ehdr laid out by hand — no struct alignment surprises
- * across compilers.  Fields not interesting to a consumer that only
- * needs to confirm "this is an ELF" are left at 0.
+ * What musl's dynamic linker reads of an AT_SYSINFO_EHDR: the program headers,
+ * and from them PT_LOAD for the base and PT_DYNAMIC for a dynamic table, which
+ * it walks without asking whether there is one.  So the placeholder has one,
+ * with nothing in it.  It had no program headers, ld-musl read a table at
+ * address 0, and that went unnoticed for as long as page zero was mapped in an
+ * exec'd task, which it was (#421).
+ *
+ * <mach/elf.h> names this target's pair, so the widths and the field order are
+ * the compiler's to get right.
  */
+struct vdso_image {
+    Elf_Ehdr ehdr;
+    Elf_Phdr phdr[2];
+    Elf_Dyn  dyn[1];
+};
+
+_Static_assert(sizeof(struct vdso_image) <= EXEC_VDSO_SIZE,
+               "the placeholder vDSO does not fit its page");
+
 static void
 build_vdso_blob(uint8_t *page, vm_size_t page_size)
 {
+    struct vdso_image *v = (struct vdso_image *)page;
+
     memset(page, 0, page_size);
 
-    /* e_ident */
-    page[EI_MAG0]    = ELFMAG0;
-    page[EI_MAG1]    = ELFMAG1;
-    page[EI_MAG2]    = ELFMAG2;
-    page[EI_MAG3]    = ELFMAG3;
-    page[EI_CLASS]   = ELFCLASS32;
-    page[EI_DATA]    = ELFDATA2LSB;
-    page[EI_VERSION] = EV_CURRENT;
-    page[EI_OSABI]   = ELFOSABI_NONE;
-    /* e_ident[8..15] reserved -> zero */
+    v->ehdr.e_ident[EI_MAG0]    = ELFMAG0;
+    v->ehdr.e_ident[EI_MAG1]    = ELFMAG1;
+    v->ehdr.e_ident[EI_MAG2]    = ELFMAG2;
+    v->ehdr.e_ident[EI_MAG3]    = ELFMAG3;
+    v->ehdr.e_ident[EI_CLASS]   = ELF_TARGET_CLASS;
+    v->ehdr.e_ident[EI_DATA]    = ELFDATA2LSB;
+    v->ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+    v->ehdr.e_type      = ET_DYN;
+    v->ehdr.e_machine   = ELF_TARGET_MACHINE;
+    v->ehdr.e_version   = EV_CURRENT;
+    v->ehdr.e_phoff     = offsetof(struct vdso_image, phdr);
+    v->ehdr.e_ehsize    = sizeof(v->ehdr);
+    v->ehdr.e_phentsize = sizeof(v->phdr[0]);
+    v->ehdr.e_phnum     = 2;
 
-    /* e_type = ET_DYN (uint16, little-endian) */
-    page[16] = (uint8_t)ET_DYN;
-    page[17] = (uint8_t)(ET_DYN >> 8);
+    v->phdr[0].p_type   = PT_LOAD;
+    v->phdr[0].p_flags  = PF_R | PF_X;
+    v->phdr[0].p_filesz = EXEC_VDSO_SIZE;
+    v->phdr[0].p_memsz  = EXEC_VDSO_SIZE;
+    v->phdr[0].p_align  = EXEC_VDSO_SIZE;
 
-    /* e_machine = EM_386 */
-    page[18] = (uint8_t)EM_386;
-    page[19] = (uint8_t)(EM_386 >> 8);
+    v->phdr[1].p_type   = PT_DYNAMIC;
+    v->phdr[1].p_flags  = PF_R;
+    v->phdr[1].p_offset = offsetof(struct vdso_image, dyn);
+    v->phdr[1].p_vaddr  = offsetof(struct vdso_image, dyn);
+    v->phdr[1].p_filesz = sizeof(v->dyn);
+    v->phdr[1].p_memsz  = sizeof(v->dyn);
+    v->phdr[1].p_align  = sizeof(void *);
 
-    /* e_version = EV_CURRENT (uint32) */
-    page[20] = (uint8_t)EV_CURRENT;
-    page[21] = 0;
-    page[22] = 0;
-    page[23] = 0;
-
-    /* e_entry / e_phoff / e_shoff / e_flags stay 0 — no segments
-     * exported in v0.4.0.  e_ehsize = 52 (sizeof Elf32_Ehdr). */
-    page[40] = 52;
-    page[41] = 0;
-    /* e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx all 0. */
+    /* dyn[0] is DT_NULL, by the memset. */
 }
 
 /* ------------------------------------------------------------------ */

@@ -2131,6 +2131,11 @@ act_disable_task_locked(
 	thread_t	thread = thr_act->thread;
 	task_t		task = thr_act->task;
 
+#if	MUTEX_OWNER_TRACK
+	/* #414: the comment above was a promise, and one caller did not keep it */
+	assert(thr_act->lock.own_thr == (vm_offset_t) current_thread());
+#endif	/* MUTEX_OWNER_TRACK */
+
 #if	MACH_ASSERT
 	if (watchacts & WA_EXIT) {
 		printf("act_%p: act_disable_tl(thr_act=%p(%d))%sactive task=%p(%d)",

@@ -270,7 +270,7 @@ jobs:
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q gcc binutils cmake ninja-build bison flex \
+          sudo apt-get install -y -q gcc binutils cmake ninja-build make bison flex \
             python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
             iproute2 gdb
           if [ -n "$SWEEP" ]; then

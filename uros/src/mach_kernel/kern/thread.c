@@ -1068,9 +1068,18 @@ thread_terminate_self(void)
 			time_value_add(&task->total_system_time, &system_time);
 		}
 
-		/* Make act inactive iff it was born as a base activation */
+		/*
+		 * Make act inactive iff it was born as a base activation.
+		 *
+		 * #414: with the locks act_disable_task_locked() says it wants.
+		 * It drops a reference, and with none held that was a plain
+		 * decrement beside task_terminate(), which references this
+		 * activation under them.
+		 */
+		(void) act_lock_thread(thr_act);
 		if( thr_act->active && (thr_act->pool_port == IP_NULL))
 			act_disable_task_locked( thr_act );
+		act_unlock_thread(thr_act);
 		task_unlock( task );
 	}
 

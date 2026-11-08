@@ -84,8 +84,8 @@ typedef struct elf_image {
     size_t         _len;
 
     /* --- Header pointers, validated at elf_open --- */
-    const void    *_ehdr;       /* Elf32_Ehdr * (or future Elf64_Ehdr *) */
-    int            _is_64;      /* 1 == ELF64; v0.1 always 0 */
+    const void    *_ehdr;       /* Elf32_Ehdr * or Elf64_Ehdr * */
+    int            _is_64;      /* 1 == ELF64 */
 
     /* --- Program headers --- */
     const void    *_phdr;       /* base of PHDR table */
