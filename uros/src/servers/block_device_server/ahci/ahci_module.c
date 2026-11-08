@@ -31,6 +31,10 @@
 #include <mach.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_port.h>
+#include <mach/thread_switch.h>	/* #921: a link waited for asleep */
+#include <mach/mach_host.h>
+#include <mach/clock.h>
+#include <mach/clock_types.h>
 #include <sa_mach.h>
 #include <device/device.h>
 #include <device/device_types.h>
@@ -175,14 +179,161 @@ ahci_hba_reset(struct ahci_state *st)
 }
 
 /* ================================================================
+ * Waiting for a port, on the clock (#921)
+ * ================================================================ */
+
+/*
+ * A port's register waited for against the kernel's REALTIME_CLOCK, with a
+ * millisecond's sleep between two looks -- never on a count of reads, as
+ * virtio's requests are not since #697: a count lasts what a read costs on
+ * this bus under this hypervisor.  On QEMU a link is up before the first read;
+ * on a real controller it takes milliseconds after the COMRESET, and a disk
+ * spinning up from rest keeps BSY for seconds.
+ *
+ * 1 when cond() held within deadline_ms, 0 when it did not, -1 -- said --
+ * when there was no clock to bound the wait with.
+ */
+#define AHCI_LOOK_MS		1
+
+static int
+ahci_clock_ms(mach_port_t clk, uint64_t *ms)
+{
+	tvalspec_t	t;
+
+	if (clock_get_time(clk, &t) != KERN_SUCCESS)
+		return -1;
+	*ms = (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+	return 0;
+}
+
+static int
+ahci_wait_port(struct ahci_state *st, int port, unsigned int deadline_ms,
+	       int (*cond)(struct ahci_state *, int))
+{
+	mach_port_t	host, clk = MACH_PORT_NULL;
+	uint64_t	start, now;
+	kern_return_t	kr;
+	int		r;
+
+	if (cond(st, port))
+		return 1;
+	host = mach_host_self();
+	kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (kr == KERN_SUCCESS && ahci_clock_ms(clk, &start) != 0)
+		kr = KERN_FAILURE;
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: port %d: no clock to bound a wait with (kr=%d) "
+		       "-- the port is not used rather than waited for without "
+		       "end (#921)\n", port, (int)kr);
+		r = -1;
+	} else {
+		for (;;) {
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, AHCI_LOOK_MS);
+			if (cond(st, port)) {
+				r = 1;
+				break;
+			}
+			if (ahci_clock_ms(clk, &now) != 0) {
+				printf("ahci: port %d: the clock stopped "
+				       "answering during a wait (#921)\n",
+				       port);
+				r = -1;
+				break;
+			}
+			if (now - start >= deadline_ms) {
+				r = 0;
+				break;
+			}
+		}
+	}
+	if (clk != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), clk);
+	return r;
+}
+
+/* ================================================================
  * Port discovery
  * ================================================================ */
+
+/*
+ * #921: how long a port is given.  The specification bounds none of these
+ * ("software should wait for communication to be re-established as indicated
+ * by PxSSTS.DET being set to 3h", AHCI 1.3.1 §10.4.2), so they are chosen, and
+ * each well past what a device takes: a device answers a COMRESET in a few
+ * milliseconds, its link is up in some tens, and a disk at rest spins up in
+ * seconds, which is when it clears BSY.  An empty port costs the first, once.
+ */
+#define AHCI_LINK_SEEN_MS	50	/* anything on the wire at all */
+#define AHCI_LINK_UP_MS		1000	/* and its link up, DET = 3 */
+
+static int
+ahci_link_seen(struct ahci_state *st, int port)
+{
+	return (port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
+	    != SSTS_DET_NONE;
+}
+
+static int
+ahci_link_up(struct ahci_state *st, int port)
+{
+	return (port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
+	    == SSTS_DET_PRESENT;
+}
+
+/*
+ * 🔴 THE LINK IS BROUGHT UP BEFORE THE PORT IS ASKED WHETHER A DEVICE IS
+ * THERE (#921).
+ *
+ * The HBA reset resets every port.  On an HBA that supports staggered spin-up
+ * it also clears PxCMD.SUD, and such a port sends no COMRESET, so has no link,
+ * until software sets SUD again: "If staggered spin-up is supported, then it
+ * is the responsibility of software to spin-up each port after the reset has
+ * completed" (AHCI 1.3.1, GHC.HR in §3.1.2; and §10.4.3, "software is
+ * responsible for setting the PxCMD.SUD and PxSCTL.DET fields").  SUD going
+ * from 0 to 1 starts the COMRESET (§3.3.7); PxSCTL.DET is 0 after the reset,
+ * and SUD set over it is the spin-up of §10.10.1's table.
+ *
+ * The scan read DET once, straight after the reset, and set SUD only in
+ * ahci_port_start(), for the ports it had already found.  On lapsus's ICH10,
+ * CAP 0xEF20FFC5 with SSS set, no port could ever be found -- its three disks
+ * among them: "no device found (PI=0x0000003F)", the probe failed, and the
+ * block server, with no partition anywhere, exited by design.  QEMU's
+ * ich9-ahci has no SSS and answers DET = 3 from the first read, so no QEMU
+ * boot could see it.  Without SSS the reset's own COMRESET still takes the
+ * link some milliseconds to come back, and one read straight after it was a
+ * race that only an emulator never loses.
+ *
+ * 1 with the link up, 0 with nothing on the wire or a link that never came
+ * up (said), -1 with no clock (said).
+ */
+static int
+ahci_port_link(struct ahci_state *st, int port)
+{
+	int r;
+
+	if (ahci_read(st, AHCI_CAP) & CAP_SSS)
+		port_write(st, port, PORT_CMD,
+			   port_read(st, port, PORT_CMD) | PORT_CMD_SUD);
+
+	r = ahci_wait_port(st, port, AHCI_LINK_SEEN_MS, ahci_link_seen);
+	if (r != 1)
+		return r;
+	r = ahci_wait_port(st, port, AHCI_LINK_UP_MS, ahci_link_up);
+	if (r == 0)
+		printf("ahci: port %d: something is on the wire and its link "
+		       "did not come up in %u ms (SStatus 0x%08X) -- not used "
+		       "(#921)\n", port, (unsigned)AHCI_LINK_UP_MS,
+		       port_read(st, port, PORT_SSTS));
+	return r;
+}
 
 static int
 ahci_port_scan(struct ahci_state *st)
 {
 	uint32_t pi = ahci_read(st, AHCI_PI);
-	int port;
+	int port, link;
 
 	st->n_ports = 0;
 	for (port = 0; port < AHCI_MAX_PORTS; port++) {
@@ -211,8 +362,11 @@ ahci_port_scan(struct ahci_state *st)
 			continue;
 		}
 
-		if ((port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
-		    != SSTS_DET_PRESENT)
+		/* #921: the link first, then the question */
+		link = ahci_port_link(st, port);
+		if (link < 0)
+			return -1;
+		if (link == 0)
 			continue;
 		if (st->n_ports >= MAX_AHCI_PORTS) {
 			/*
@@ -229,8 +383,11 @@ ahci_port_scan(struct ahci_state *st)
 			break;
 		}
 
-		printf("ahci: device on port %d  sig=0x%08X\n",
-		       port, port_read(st, port, PORT_SIG));
+		/* #921: the link, and not the signature yet: PxSIG holds what
+		 * the device's first D2H Register FIS said (§3.3.9), which
+		 * comes once the port receives FISes -- after its start */
+		printf("ahci: device on port %d, link up (SStatus 0x%08X)\n",
+		       port, port_read(st, port, PORT_SSTS));
 		st->ports[st->n_ports].hba_port = port;
 		st->n_ports++;
 	}

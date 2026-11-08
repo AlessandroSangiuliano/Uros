@@ -66,6 +66,7 @@
 #define CAP_NCS_SHIFT		8		/* Number of Command Slots - 1 */
 #define CAP_NCS_MASK		0x1F
 #define CAP_S64A		(1u << 31)	/* 64-bit Addressing */
+#define CAP_SSS			(1u << 27)	/* Supports Staggered Spin-up */
 
 /* CAP2 bits */
 #define CAP2_BOH		(1u << 0)	/* BIOS/OS Handoff supported */
@@ -141,6 +142,7 @@
 
 /* PORT_SSTS bits */
 #define SSTS_DET_MASK		0x0F
+#define SSTS_DET_NONE		0x00	/* no device detected, no phy */
 #define SSTS_DET_PRESENT	0x03	/* device present + phy established */
 
 /* ================================================================
