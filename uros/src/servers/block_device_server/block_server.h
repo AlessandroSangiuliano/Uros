@@ -480,6 +480,7 @@ extern mach_port_t	port_set;
 
 int  blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		   const char *prefix, int stable_disk_idx);
+void blk_mbr_selftest(void);	/* #711: the entry check on made-up tables */
 void blk_register_partitions(void);
 
 /*
