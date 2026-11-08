@@ -739,8 +739,23 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	unsigned int	new_pages = 0;
 	mach_msg_type_number_t pa_count = 0;
 
-	if (st->batch_slots <= 1)
+	/*
+	 * 🔴 ONE SLOT KEEPS THE PROBE'S BUFFERS, AND SO THEIR SIZES (#921).
+	 *
+	 * The caller sets the sizes from the slot count before this: 128 KB of
+	 * data and 256 sectors of readahead for one slot.  This returned with
+	 * the probe's buffers still in place, AHCI_PROBE_BUF_BYTES of data, and
+	 * the sizes left as they were -- so a read of a whole slot had the
+	 * controller write 124 KB past the buffer, a DMA into whatever memory
+	 * follows it.  An HBA with one command slot (CAP.NCS = 0) is allowed,
+	 * and lapsus's Marvell reached this with no IDENTIFY answered:
+	 * "batch_slots=1  data=128 KB" over a buffer of 4 KB.
+	 */
+	if (st->batch_slots <= 1) {
+		st->batch_data_size = AHCI_PROBE_BUF_BYTES;
+		st->ra_sectors = AHCI_PROBE_SECTORS;
 		return 0;
+	}
 
 	ct_size = st->batch_slots * CT_STRIDE;
 	ct_size = (ct_size + 4095u) & ~4095u;
@@ -1488,8 +1503,6 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	st->batch_data_size = st->batch_slots * SLOT_DATA_SIZE;
 	st->ra_sectors = st->batch_slots * SECTORS_PER_SLOT;
-	printf("ahci: batch_slots=%u  data=%u KB  readahead=%u sectors\n",
-	       st->batch_slots, st->batch_data_size / 1024, st->ra_sectors);
 
 	if (ahci_realloc_batch_buffers(st) < 0) {
 		/*
@@ -1515,6 +1528,9 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		st->ra_sectors = AHCI_PROBE_SECTORS;
 		st->data_n_pages = 1;
 	}
+	/* #921: the sizes the buffers have, said after they have them */
+	printf("ahci: batch_slots=%u  data=%u KB  readahead=%u sectors\n",
+	       st->batch_slots, st->batch_data_size / 1024, st->ra_sectors);
 
 	/*
 	 * Enable AHCI global interrupt delivery (#222).  Safe now that the
