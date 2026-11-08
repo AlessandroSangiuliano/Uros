@@ -655,15 +655,29 @@ futexv_init(void)
 /*
  * A single-key wake may belong to one or more registered multi-waiters.
  * Under futexv_lock, mark each matching waiter (record which key fired)
- * and remember its park event; wake them AFTER dropping futexv_lock, so
- * futexv_lock always sits above the scheduler wait-queue locks.  The
- * caller gates this on a lock-free futexv_active test.
+ * and wake it on its slot.
+ *
+ * 🔴 WOKEN UNDER THE LOCK, BECAUSE THE SLOT IS THE EVENT (#924).  A waiter
+ * parks on its slot's address, and the slots are reused.  This used to note
+ * the slots under the lock and wake them after dropping it: in between, the
+ * owner could leave on its own -- its timeout -- and free the slot, and the
+ * next multi-waiter take it and park on the same address.  The late wake then
+ * woke that one, which answered KERN_SUCCESS to a wait on words nobody had
+ * changed, with no index recorded for it: cap_test's [30] said WRONG once in a
+ * campaign under TCG at -smp 4, while ext_server's FLIPC reactor was taking
+ * and freeing slots beside it.  Held, the lock keeps the slot its owner's
+ * until the wake is done; an owner that already left is not on the slot's
+ * wait queue, and the wake finds nobody.
+ *
+ * ⚠️ Safe to hold here: futexv_lock is only ever taken with no other lock
+ * held, the waiter already asserts its wait under it (futexv_lock, then the
+ * wait-queue lock), and the IPI a wake may send to another processor waits
+ * for no acknowledgement (ipi_ast_check()).  The caller gates this on a
+ * lock-free futexv_active test.
  */
 static void
 futexv_wake_key(event_t key)
 {
-	event_t		to_wake[FUTEXV_MAX_WAITERS];
-	int		nwake = 0;
 	int		i;
 	unsigned int	k;
 	spl_t		s;
@@ -679,16 +693,13 @@ futexv_wake_key(event_t key)
 			if (w->keys[k] == key) {
 				if (w->woken_index < 0)
 					w->woken_index = (int) k;
-				to_wake[nwake++] = (event_t) w;
+				thread_wakeup_one((event_t) w);
 				break;
 			}
 		}
 	}
 	simple_unlock(&futexv_lock);
 	splx(s);
-
-	for (i = 0; i < nwake; i++)
-		thread_wakeup_one(to_wake[i]);
 }
 
 /*
