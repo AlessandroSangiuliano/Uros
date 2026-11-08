@@ -113,7 +113,10 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             on, since nothing asks for them there (#765)
 #   stop13    the name server stops at service_checkin, which grub.cfg says is
 #             the designed end: a boot task that IS the name server has nothing
-#             above it to answer the check-in
+#             above it to answer the check-in.  Since #744 it checks in on its
+#             own bootstrap port, which for a boot task is the kernel's master
+#             port, and the answer is MIG's bad request ID, no longer an
+#             invalid destination
 #   ioapic    -Y's own line: "ioapic_race: PASS"
 #   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
@@ -490,7 +493,7 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aq "char_server: forwarding the kernel's klog to the tty it now owns" "$f" &&
 		out=$(grep -aoE 'char_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		[ -n "$out" ] && NOTE=$out ;;
-	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
+	stop13) grep -aq 'name_server: service_checkin: (ipc/mig) bad request message ID' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ||
 		alone_ok "$n" "$h" "$f" 'ioapic_race: NOT ASKED — alone' ;;
 	# #663: numbered with gaps -- APIC ids 0-2 and 4-6, as pavillion's are
