@@ -301,7 +301,9 @@ static int outside(const struct watched *w, uint64_t bound, int vm,
 
 /*
  * One printf per line, whatever the line holds (#578): two calls can be
- * separated by another processor's output.
+ * separated by another processor's output.  #920: for the log and not the
+ * screen, once a minute and never a verdict -- the WRONGs are said where the
+ * windows are judged.
  */
 static void summary(struct watched *w, unsigned n, unsigned windows,
 		    unsigned aside, uint64_t bound)
@@ -318,7 +320,7 @@ static void summary(struct watched *w, unsigned n, unsigned windows,
 		}
 
 	if (b != 0)
-		printf("UrMach x86-64: the TSC watchdog, %u windows: from the "
+		printf_log_only("UrMach x86-64: the TSC watchdog, %u windows: from the "
 		       "%s %ld..%ld ppm (mean %ld), time kept %lld ms over %lu "
 		       "s; from the %s %ld..%ld ppm (mean %ld), %lld ms over %lu "
 		       "s; the bound %lu ppm, %u set aside (#594)\n", windows,
@@ -331,7 +333,7 @@ static void summary(struct watched *w, unsigned n, unsigned windows,
 		       (long long) (b->lag_sum / 1000000),
 		       b->len_sum / WATCH_NS_PER_S, bound, aside);
 	else if (a != 0)
-		printf("UrMach x86-64: the TSC watchdog, %u windows: from the "
+		printf_log_only("UrMach x86-64: the TSC watchdog, %u windows: from the "
 		       "%s %ld..%ld ppm (mean %ld), time kept %lld ms over %lu "
 		       "s; the bound %lu ppm, %u set aside (#594)\n", windows,
 		       a->name, (long) a->dev_min, (long) a->dev_max,
@@ -339,7 +341,7 @@ static void summary(struct watched *w, unsigned n, unsigned windows,
 		       (long long) (a->lag_sum / 1000000),
 		       a->len_sum / WATCH_NS_PER_S, bound, aside);
 	else
-		printf("UrMach x86-64: the TSC watchdog, %u windows: none "
+		printf_log_only("UrMach x86-64: the TSC watchdog, %u windows: none "
 		       "judged; %u set aside (#594)\n", windows, aside);
 
 	for (i = 0; i < n; i++) {
