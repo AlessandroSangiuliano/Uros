@@ -875,6 +875,9 @@ main(int argc, char **argv)
 
 	printf("\n=== Block device server (HAL-driven) ===\n");
 
+	/* #711: the MBR entry check, asked about bad tables on every boot. */
+	blk_mbr_selftest();
+
 	kr = mach_port_allocate(mach_task_self(),
 		MACH_PORT_RIGHT_PORT_SET, &port_set);
 	if (kr != KERN_SUCCESS) {

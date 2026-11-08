@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #711
+Takes out: the MBR entry check -- every entry is published as it is again, one that starts on the table, runs past the disk, wraps or overlaps another included; blk_mbr_selftest() asks it about such tables on every boot
+Run: --entry 14 600 -smp 4
+Expect: blk: \[#711\] the MBR check refused [0-5] of 6 .* WRONG
+
+diff --git a/uros/src/servers/block_device_server/block_partition.c b/uros/src/servers/block_device_server/block_partition.c
+index fe98c878..2c665827 100644
+--- a/uros/src/servers/block_device_server/block_partition.c
++++ b/uros/src/servers/block_device_server/block_partition.c
+@@ -113,6 +113,8 @@ blk_mbr_entry_refused(const struct mbr_part_entry *parts, int i,
+ 	uint64_t	end = start + parts[i].numsect;
+ 	int		j;
+ 
++	if (parts != NULL)
++		return NULL;	/* 711-mbr-entries-unchecked */
+ 	if (start == 0)
+ 		return "it starts at LBA 0, on the partition table itself";
+ 	if (end > 0xFFFFFFFFull)

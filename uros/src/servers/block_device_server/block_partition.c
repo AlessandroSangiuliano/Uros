@@ -95,6 +95,114 @@ blk_payload_release(natural_t payload)
  * If no valid MBR is found, exposes the whole disk.
  * ================================================================ */
 
+/*
+ * #711: why MBR entry i may not become a partition, or NULL when it may.  It
+ * must start past the table itself and end on the disk -- start + size in 64
+ * bits, so that a sum past 2^32 is seen as one -- and overlap no other entry of
+ * the table, of any type: a Linux entry over a Windows one would hand a write
+ * right on Windows' sectors, and two Linux entries over each other give one
+ * partition's capability the other's sectors, with the read-ahead cache, keyed
+ * by partition, then serving one of them what was written through the other.
+ */
+static const char *
+blk_mbr_entry_refused(const struct mbr_part_entry *parts, int i,
+		      uint64_t disk_sectors)
+{
+	uint64_t	start = parts[i].relsect;
+	uint64_t	end = start + parts[i].numsect;
+	int		j;
+
+	if (start == 0)
+		return "it starts at LBA 0, on the partition table itself";
+	if (end > 0xFFFFFFFFull)
+		return "its start and size add up past 2^32 sectors";
+	if (end > disk_sectors)
+		return "it runs past the end of the disk";
+	for (j = 0; j < MBR_NUMPART; j++) {
+		uint64_t	s = parts[j].relsect;
+		uint64_t	e = s + parts[j].numsect;
+
+		if (j == i || parts[j].numsect == 0 || parts[j].systid == 0)
+			continue;
+		if (start < e && s < end)
+			return "it overlaps another entry of the table";
+	}
+	return NULL;
+}
+
+/* One entry of a table blk_mbr_selftest() makes up. */
+static void
+blk_mbr_entry_set(struct mbr_part_entry *p, unsigned char systid,
+		  uint32_t start, uint32_t size)
+{
+	memset(p, 0, sizeof(*p));
+	p->systid = systid;
+	p->relsect = start;
+	p->numsect = size;
+}
+
+/*
+ * #711: blk_mbr_entry_refused() on tables made up to break it, before any
+ * disk is read: a check that is never asked about a bad table says nothing on
+ * a boot whose disks are all sound.  Six Linux entries it must refuse -- one
+ * that starts on the table, one that runs past the disk, one whose sum passes
+ * 2^32, two that overlap each other, one over a Windows entry -- and two sound
+ * ones it must take.  WRONG is a check that refuses too little or too much.
+ */
+void
+blk_mbr_selftest(void)
+{
+	struct mbr_part_entry	t[MBR_NUMPART];
+	unsigned int		refused = 0, taken = 0;
+	int			i;
+
+	/* Two sound entries side by side, on a disk of 10000 sectors. */
+	memset(t, 0, sizeof(t));
+	blk_mbr_entry_set(&t[0], MBR_TYPE_LINUX, 2048, 2000);
+	blk_mbr_entry_set(&t[1], MBR_TYPE_LINUX, 4096, 2000);
+	for (i = 0; i < 2; i++)
+		if (blk_mbr_entry_refused(t, i, 10000) == NULL)
+			taken++;
+
+	/* On the table itself. */
+	memset(t, 0, sizeof(t));
+	blk_mbr_entry_set(&t[0], MBR_TYPE_LINUX, 0, 100);
+	if (blk_mbr_entry_refused(t, 0, 10000) != NULL)
+		refused++;
+
+	/* Past the end of the disk. */
+	memset(t, 0, sizeof(t));
+	blk_mbr_entry_set(&t[0], MBR_TYPE_LINUX, 9000, 2000);
+	if (blk_mbr_entry_refused(t, 0, 10000) != NULL)
+		refused++;
+
+	/* A start and a size whose 32-bit sum wraps to 0x1000. */
+	memset(t, 0, sizeof(t));
+	blk_mbr_entry_set(&t[0], MBR_TYPE_LINUX, 0xFFFFF000u, 0x2000u);
+	if (blk_mbr_entry_refused(t, 0, 0xFFFFFFFFull) != NULL)
+		refused++;
+
+	/* Two Linux entries over each other: both refused. */
+	memset(t, 0, sizeof(t));
+	blk_mbr_entry_set(&t[0], MBR_TYPE_LINUX, 2048, 2000);
+	blk_mbr_entry_set(&t[1], MBR_TYPE_LINUX, 3000, 1000);
+	for (i = 0; i < 2; i++)
+		if (blk_mbr_entry_refused(t, i, 10000) != NULL)
+			refused++;
+
+	/* A Linux entry over an NTFS one (type 7), which is never published. */
+	memset(t, 0, sizeof(t));
+	blk_mbr_entry_set(&t[0], 0x07, 2048, 4000);
+	blk_mbr_entry_set(&t[1], MBR_TYPE_LINUX, 4000, 1000);
+	if (blk_mbr_entry_refused(t, 1, 10000) != NULL)
+		refused++;
+
+	printf("blk: [#711] the MBR check refused %u of 6 entries that start on "
+	       "the table, run past the disk, wrap or overlap, and took %u of 2 "
+	       "sound ones — %s\n", refused, taken,
+	       refused == 6 && taken == 2 ? "OK" : "WRONG");
+}
+
 int
 blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 	     const char *prefix, int stable_disk_idx)
@@ -173,6 +281,18 @@ blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		if (p->systid != MBR_TYPE_LINUX &&
 		    p->systid != MBR_TYPE_LINUX_SWAP)
 			continue;
+		{
+			const char *why = blk_mbr_entry_refused(mbr->parts, i,
+				ctrl->disks[disk_idx].total_sectors);
+
+			if (why != NULL) {
+				printf("blk: %s disk %d partition %d (start %u, "
+				       "size %u) is NOT being published: %s "
+				       "(#711)\n", prefix, disk_idx, i + 1,
+				       p->relsect, p->numsect, why);
+				continue;
+			}
+		}
 		if (n_partitions >= MAX_PARTITIONS) {
 			/*
 			 * 🔴 Said, not skipped.  The limit is real and this

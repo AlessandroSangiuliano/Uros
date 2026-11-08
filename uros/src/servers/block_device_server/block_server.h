@@ -293,6 +293,42 @@ struct blk_partition {
 };
 
 /*
+ * #711: whether a transfer of nsectors from recnum stays inside the partition.
+ * Every data path asks here before it computes an LBA: read, write, each entry
+ * of a batch, and the two physical paths.  In 64 bits and in the order that
+ * cannot wrap: recnum first, then what is left of the partition after it.  The
+ * sum it replaces, recnum + nsectors > num_sectors, was taken in 32 bits, and
+ * on a partition at LBA 2048 a recnum of 0xFFFFF800 with 1 MiB summed to 0,
+ * passed, and put the transfer on LBA 0.
+ */
+static inline int
+blk_part_range_ok(const struct blk_partition *part, uint64_t recnum,
+		  uint64_t nsectors)
+{
+	return recnum <= part->num_sectors &&
+	       nsectors <= (uint64_t)part->num_sectors - recnum;
+}
+
+/*
+ * #711: whether a batch entry of sz bytes at data_off lies inside the
+ * data_count bytes the client sent.  The server asks it of every entry before
+ * the batch goes to a module, and the AHCI module asks it again before it
+ * copies.  In the order that cannot wrap -- data_off + sz did, and an entry of
+ * 0xFFFFFE00 bytes after one of 512 passed and was copied from past the
+ * client's buffer -- and in whole sectors: an entry is written as whole sectors
+ * from its own offset, so one that is not was read past its end, into the page
+ * after the client's data when that ended near a page's end, a page nobody had
+ * mapped.
+ */
+static inline int
+blk_batch_entry_fits(unsigned int data_off, unsigned int sz,
+		     unsigned int data_count)
+{
+	return data_off <= data_count && sz <= data_count - data_off &&
+	       sz % SECTOR_SIZE == 0;
+}
+
+/*
  * Per-(client, partition) authenticated handle.  Allocated by
  * ds_device_open_cap after a successful urmach_cap_verify; lives until
  * the client drops the last send right (cleanup via no-senders
@@ -444,6 +480,7 @@ extern mach_port_t	port_set;
 
 int  blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		   const char *prefix, int stable_disk_idx);
+void blk_mbr_selftest(void);	/* #711: the entry check on made-up tables */
 void blk_register_partitions(void);
 
 /*

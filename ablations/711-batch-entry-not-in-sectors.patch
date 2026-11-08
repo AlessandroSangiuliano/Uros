@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #711
+Takes out: the whole-sector rule for a batch entry -- an entry of part of a sector is taken again, and the server's fallback writes it as whole sectors from its own offset, past its end
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[36\] WRONG — [a-z_0-9]+: device_write_batch of 100 bytes at a block number inside it
+
+diff --git a/uros/src/servers/block_device_server/block_server.h b/uros/src/servers/block_device_server/block_server.h
+index 13c176ca..90ac5444 100644
+--- a/uros/src/servers/block_device_server/block_server.h
++++ b/uros/src/servers/block_device_server/block_server.h
+@@ -344,8 +344,7 @@ static inline int
+ blk_batch_entry_fits(unsigned int data_off, unsigned int sz,
+ 		     unsigned int data_count)
+ {
+-	return data_off <= data_count && sz <= data_count - data_off &&
+-	       sz % SECTOR_SIZE == 0;
++	return data_off <= data_count && sz <= data_count - data_off;	/* 711-batch-entry-not-in-sectors */
+ }
+ 
+ /*

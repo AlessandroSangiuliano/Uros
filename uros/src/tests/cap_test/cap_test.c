@@ -1885,6 +1885,213 @@ a_handle_moves_data_only_its_way(mach_port_t device_port,
 }
 
 /*
+ * ── [36] A handle stays inside its partition (#711) ─────────────────────
+ *
+ * Requests outside the partition, through a handle that may read and write
+ * it, on every path the block server has -- device_read, device_write,
+ * device_write_batch, device_read_phys, device_write_phys -- each with a block
+ * number just past the partition's end and with one that wraps: 2^32 - 128,
+ * which with 136 sectors sums to 8 in 32 bits, the sum the server used to
+ * check.  Each must be answered D_INVALID_SIZE, the server's refusal of a
+ * range.  Anything else is WRONG, an I/O error included: that is the disk
+ * refusing what the server let through.
+ *
+ * ⚠️ Where a tree without the check would write: the number past the end,
+ * past the end of the disk, as the partition is its disk's last; the wrapped
+ * one 128 sectors before the partition, which on x86-64's first AHCI disk is
+ * the megabyte no partition holds before `c' (make-disk-x86_64.sh).  So the
+ * writes are offered there only, on x86-64's ahci0c; elsewhere the reads
+ * alone, and the line says so.  The writes carry zeros.
+ */
+#define CT36_BACK	128u			/* how far before the start */
+#define CT36_SECTS	(CT36_BACK + 8u)	/* + CT36_BACK sums to 8 */
+#define CT36_BYTES	(CT36_SECTS * 512u)
+#define CT36_PAGES	((CT36_BYTES + 4095u) / 4096u)
+
+/* The partition's sectors, asked through `h' (DEV_GET_SIZE): 1, or 0. */
+static int
+ct36_sectors(mach_port_t h, recnum_t *sectors)
+{
+    int                    info[DEV_GET_SIZE_COUNT];
+    mach_msg_type_number_t cnt = DEV_GET_SIZE_COUNT;
+
+    if (device_get_status(h, DEV_GET_SIZE, (dev_status_t)info, &cnt)
+            != KERN_SUCCESS || cnt < DEV_GET_SIZE_COUNT
+        || info[DEV_GET_SIZE_RECORD_SIZE] != 512
+        || info[DEV_GET_SIZE_DEVICE_SIZE] < 4096)
+        return 0;
+    *sectors = (recnum_t)(info[DEV_GET_SIZE_DEVICE_SIZE] / 512);
+    return 1;
+}
+
+/* One request's answer: 1 when it is the range's refusal, else said. */
+static int
+ct36_refused(kern_return_t kr, const char *path, const char *which,
+             const char *name)
+{
+    if (kr == D_INVALID_SIZE)
+        return 1;
+    printf("cap_test: [36] WRONG — %s: %s at a block number %s was answered "
+           "%d, not D_INVALID_SIZE (#711)\n", name, path, which, (int)kr);
+    return 0;
+}
+
+/* CT36_PAGES scatter-gather pages handed over to `handle', as ct27_buffer(). */
+static kern_return_t
+ct36_buffer(mach_port_t device_port, mach_port_t handle, vm_address_t *kva,
+            vm_address_t **pa_list, mach_msg_type_number_t *pa_cnt)
+{
+    struct uros_cap buf_cap;
+    vm_address_t    uva = 0;
+    uint64_t        region_id = 0;
+    kern_return_t   kr;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, CT36_PAGES,
+                             mach_task_self(), kva, &uva, pa_list, pa_cnt,
+                             &region_id);
+    if (kr != KERN_SUCCESS)
+        return kr;
+    memset(&buf_cap, 0, sizeof(buf_cap));
+    kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
+                     &buf_cap);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+    return kr;
+}
+
+static int
+a_handle_stays_inside_its_partition(mach_port_t device_port,
+                                    mach_port_t tport, const char *tname)
+{
+    mach_port_t            h = MACH_PORT_NULL;
+    recnum_t               sectors = 0, rec[2];
+    const char            *which[2] = { "past its end", "that wraps" };
+    io_buf_len_t           len[2] = { 4096, (io_buf_len_t)CT36_BYTES };
+    vm_address_t           zeros = 0, kva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    int                    no_cap = 0, writes = 0, ok = 1, i;
+    unsigned               asked = 0;
+    kern_return_t          kr;
+
+#if defined(__x86_64__)
+    writes = strcmp(tname, "ahci0c") == 0;
+#endif
+    kr = ct27_open(tport, tname, CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
+                   D_READ | D_WRITE, &h, &no_cap);
+    if (no_cap || kr != KERN_SUCCESS || h == MACH_PORT_NULL) {
+        printf("cap_test: [36] WRONG — %s: no handle that may read and write "
+               "it to ask with (kr=%d%s)\n", tname, (int)kr,
+               no_cap ? ", no capability" : "");
+        return 0;
+    }
+    if (!ct36_sectors(h, &sectors)) {
+        printf("cap_test: [36] WRONG — %s did not say its size in 512-byte "
+               "sectors, so nothing is past its end to ask for\n", tname);
+        ct27_close(h);
+        return 0;
+    }
+    rec[0] = sectors;
+    rec[1] = (recnum_t)(0u - CT36_BACK);
+
+    for (i = 0; i < 2; i++) {
+        io_buf_ptr_t           data = NULL;
+        mach_msg_type_number_t cnt = 0;
+
+        kr = device_read(h, D_READ, rec[i], len[i], &data, &cnt);
+        if (kr == KERN_SUCCESS && data != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)data, cnt);
+        ok &= ct36_refused(kr, "device_read", which[i], tname);
+        asked++;
+    }
+    kr = ct36_buffer(device_port, h, &kva, &pa_list, &pa_cnt);
+    if (kr != KERN_SUCCESS || pa_cnt < CT36_PAGES) {
+        printf("cap_test: [36] WRONG — %s: no %u pages for the physical paths "
+               "(kr=%d, %u pages)\n", tname, CT36_PAGES, (int)kr,
+               (unsigned)pa_cnt);
+        ok = 0;
+    } else
+        for (i = 0; i < 2; i++) {
+            io_buf_len_t got = 0;
+
+            kr = device_read_phys(h, D_READ, rec[i], len[i], pa_list,
+                                  i == 0 ? 1 : CT36_PAGES, &got);
+            ok &= ct36_refused(kr, "device_read_phys", which[i], tname);
+            asked++;
+        }
+
+    if (writes && vm_allocate(mach_task_self(), &zeros, CT36_BYTES, TRUE)
+                      != KERN_SUCCESS) {
+        printf("cap_test: [36] WRONG — %s: no buffer for the writes\n", tname);
+        writes = 0;
+        ok = 0;
+    }
+    for (i = 0; writes && i < 2; i++) {
+        io_buf_len_t wr = 0;
+        unsigned32   size = 4096;
+        recnum_t     r = rec[i];
+
+        kr = device_write(h, D_WRITE, rec[i], (io_buf_ptr_t)zeros,
+                          (mach_msg_type_number_t)len[i], &wr);
+        ok &= ct36_refused(kr, "device_write", which[i], tname);
+        kr = device_write_batch(h, D_WRITE, &r, 1, &size, 1,
+                                (io_buf_ptr_t)zeros, 4096, &wr);
+        ok &= ct36_refused(kr, "device_write_batch", which[i], tname);
+        asked += 2;
+        if (pa_cnt >= CT36_PAGES) {
+            kr = device_write_phys(h, D_WRITE, rec[i], len[i], pa_list,
+                                   i == 0 ? 1 : CT36_PAGES, &wr);
+            ok &= ct36_refused(kr, "device_write_phys", which[i], tname);
+            asked++;
+        }
+    }
+    /*
+     * And a batch entry inside the partition that is not a whole number of
+     * sectors: an entry is written as whole sectors from its own offset, so
+     * the server's fallback read past it, into the page after the client's
+     * data when that ended near a page's end.  Refused as a size; without the
+     * check the AHCI module writes it padded, to c's first sector, the boot
+     * block an ext2 partition leaves unused.
+     */
+    if (writes) {
+        io_buf_len_t wr = 0;
+        unsigned32   size = 100;
+        recnum_t     r = 0;
+
+        kr = device_write_batch(h, D_WRITE, &r, 1, &size, 1,
+                                (io_buf_ptr_t)zeros, 4096, &wr);
+        ok &= ct36_refused(kr, "device_write_batch of 100 bytes", "inside it",
+                           tname);
+        asked++;
+    }
+    if (zeros != 0)
+        (void)vm_deallocate(mach_task_self(), zeros, CT36_BYTES);
+    if (kva != 0)
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva,
+                              CT36_PAGES * 4096);
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+    ct27_close(h);
+
+    if (ok && writes)
+        printf("cap_test: [36] %s: %u requests outside its %u sectors, past "
+               "its end and at a block number that wraps, on every path -- "
+               "read, write, batch, both physical ones -- and a batch entry "
+               "of part of a sector, each refused (#711)\n", tname, asked,
+               (unsigned)sectors);
+    else if (ok)
+        printf("cap_test: [36] %s: %u reads outside its %u sectors, past its "
+               "end and at a block number that wraps, copying and physical, "
+               "each refused as a range -- the writes are offered on x86-64's "
+               "ahci0c only, where a missing check would land them in a "
+               "megabyte nobody holds (#711)\n", tname, asked,
+               (unsigned)sectors);
+    return ok;
+}
+
+/*
  * ── [25] Many pages in one request (#537) ─────────────────────────────
  *
  * Every physical request the bundle made was one page -- 649 of 649 lines of
@@ -4127,6 +4334,10 @@ main(int argc, char **argv)
                                                   candidates[i], tport,
                                                   tname))
                 pass = 0;		/* #614 */
+            if (tport != MACH_PORT_NULL &&
+                !a_handle_stays_inside_its_partition(device_port, tport,
+                                                     tname))
+                pass = 0;		/* #711 */
             if (tport != MACH_PORT_NULL && tport != p)
                 (void)mach_port_deallocate(mach_task_self(), tport);
         }

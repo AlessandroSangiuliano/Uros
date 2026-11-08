@@ -575,7 +575,7 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors)
+	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
 	lba = part->start_lba + recnum;
@@ -741,7 +741,7 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors) {
+	if (!blk_part_range_ok(part, recnum, nsectors)) {	/* #711 */
 		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 		return D_INVALID_SIZE;
 	}
@@ -801,8 +801,40 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 	}
 	struct blk_controller *ctrl = part->ctrl;
 
-	if (recnumsCnt != sizesCnt || recnumsCnt == 0)
+	/*
+	 * #711: every return releases the data -- this one used to keep it, and
+	 * mach_msg_destroy() frees out-of-line memory only when the sender asked
+	 * for that, which io_buf_ptr_t does not.
+	 */
+	if (recnumsCnt != sizesCnt || recnumsCnt == 0) {
+		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 		return D_INVALID_SIZE;
+	}
+
+	/*
+	 * #711: the whole batch is checked before any of it is written, and
+	 * before a module sees it: each entry inside the data the client sent
+	 * and in whole sectors (blk_batch_entry_fits()), and inside the
+	 * partition (blk_part_range_ok()).  Neither path below compared a
+	 * recnum with the partition, and neither driver compares an LBA with
+	 * the disk, so a write handle on any partition wrote any sector of the
+	 * disk: the MBR, the boot gap, another partition.
+	 */
+	{
+		unsigned int i, data_off = 0;
+
+		for (i = 0; i < recnumsCnt; i++) {
+			if (!blk_batch_entry_fits(data_off, sizes[i],
+						  data_count) ||
+			    !blk_part_range_ok(part, recnums[i],
+					       sizes[i] / SECTOR_SIZE)) {
+				vm_deallocate(mach_task_self(),
+					      (vm_offset_t)data, data_count);
+				return D_INVALID_SIZE;
+			}
+			data_off += sizes[i];
+		}
+	}
 
 	ra_invalidate(part);
 
@@ -847,13 +879,8 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 
 			if (sz == 0)
 				continue;
-			if (data_off + sz > data_count) {
-				vm_deallocate(mach_task_self(),
-					      (vm_offset_t)data, data_count);
-				return D_INVALID_SIZE;
-			}
-
-			wr_total = (sz + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+			/* Inside the data and whole sectors: checked above. */
+			wr_total = sz;
 			lba = part->start_lba + recnums[i];
 			max_xfer = ctrl->disks[part->disk_index].max_transfer_bytes;
 			if (max_xfer == 0)
@@ -1544,13 +1571,18 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 	if (!ctrl->ops->read_sectors_phys)
 		return D_INVALID_OPERATION;
 
-	if (bytes_wanted == 0 || phys_addrsCnt == 0)
+	/*
+	 * #711: io_buf_len_t is signed, and a negative count rounded up in
+	 * unsigned arithmetic came out as 0 sectors, which any range passes.
+	 */
+	if (bytes_wanted <= 0 || phys_addrsCnt == 0)
 		return D_INVALID_SIZE;
 
-	total = (bytes_wanted + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	total = ((unsigned int)bytes_wanted + SECTOR_SIZE - 1) &
+		~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors)
+	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
 	if (!blk_pages_cover(phys_addrsCnt, total, "read"))
@@ -1622,13 +1654,15 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 	if (!ctrl->ops->write_sectors_phys)
 		return D_INVALID_OPERATION;
 
-	if (bytes_to_write == 0 || phys_addrsCnt == 0)
+	/* #711: as in ds_device_read_phys(), a negative count was 0 sectors. */
+	if (bytes_to_write <= 0 || phys_addrsCnt == 0)
 		return D_INVALID_SIZE;
 
-	total = (bytes_to_write + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	total = ((unsigned int)bytes_to_write + SECTOR_SIZE - 1) &
+		~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors)
+	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
 	if (!blk_pages_cover(phys_addrsCnt, total, "write"))
