@@ -19,16 +19,28 @@
  * tls_size/tls_align/list seeding that earlier phases used as a bridge
  * before real TLS landed.
  *
- * These binaries carry no PT_TLS segment, so __init_tls skips its phdr
- * walk (AT_PHNUM==0) and computes the no-TLS-segment tls_size itself —
- * a zeroed auxv is sufficient.  When dynamic linking / real __thread
- * arrives (Phase 7), crt must instead pass a true auxv with AT_PHDR/
- * AT_PHENT/AT_PHNUM (now emitted by exec_server, #248).
+ * #414: __init_tls finds a program's __thread variables through its program
+ * headers, and a task bootstrap loaded has no auxv to say where they are.  The
+ * linker does: __ehdr_start is the ELF header of this image, in the first
+ * segment it loads.  So the auxv below carries the three entries that walk
+ * reads, and a program with no PT_TLS walks past nothing, as before.  Without
+ * them a __thread variable read its initial value from whatever lay under the
+ * thread pointer, in silence.
  */
 
 #include <elf.h>
+#include <limits.h>
 #include "pthread_impl.h"
 #include "libc.h"
+
+#if ULONG_MAX == 0xffffffff
+typedef Elf32_Ehdr Ehdr;
+#else
+typedef Elf64_Ehdr Ehdr;
+#endif
+
+/* Weak because a linker defines it only when the headers are in a segment. */
+extern const Ehdr __ehdr_start __attribute__((__weak__, __visibility__("hidden")));
 
 /* Provided by libposix-uros (#252); weak so musl still links for the
  * Phase 1 host-only smoke that doesn't pull in the archive. */
@@ -42,10 +54,14 @@ extern void __uros_absorb_inherited_fds(void) __attribute__((__weak__));
 void __uros_libc_init(void)
 {
 	/* Minimal synthetic auxv.  Indexed up to AT_RANDOM; everything
-	 * not set stays zero — notably AT_PHNUM, so __init_tls takes its
-	 * no-PT_TLS branch. */
+	 * not set stays zero. */
 	size_t aux[AT_RANDOM + 1] = { 0 };
 	aux[AT_PAGESZ] = 4096;
+	if (&__ehdr_start) {
+		aux[AT_PHDR]  = (size_t)&__ehdr_start + __ehdr_start.e_phoff;
+		aux[AT_PHENT] = __ehdr_start.e_phentsize;
+		aux[AT_PHNUM] = __ehdr_start.e_phnum;
+	}
 
 	/* 16 bytes of canary entropy from the cycle counter — boot- and
 	 * call-site-unique.  Not cryptographic (that waits on a kernel
@@ -59,6 +75,24 @@ void __uros_libc_init(void)
 	canary_seed[2] = lo ^ 0x9e3779b9u;
 	canary_seed[3] = hi ^ (size_t)&canary_seed;
 	aux[AT_RANDOM] = (size_t)canary_seed;
+
+	/*
+	 * #414: libc.auxv, for what reads it after this.  It is a list of
+	 * pairs ending in a zero, as Linux leaves it on the stack, and aux[]
+	 * above is a table by type, which is what __init_tls wants.  mallocng
+	 * walks it for AT_RANDOM on the first malloc(); left NULL, that was a
+	 * read of address 0, which went unnoticed on i386 for as long as page
+	 * zero was mapped.
+	 */
+	static size_t auxv[2 * (AT_RANDOM + 1)];
+	size_t type, used = 0;
+
+	for (type = 1; type <= AT_RANDOM; type++)
+		if (aux[type]) {
+			auxv[used++] = type;
+			auxv[used++] = aux[type];
+		}
+	libc.auxv = auxv;
 
 	__init_tls(aux);
 	__init_ssp((void *)aux[AT_RANDOM]);

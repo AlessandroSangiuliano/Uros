@@ -335,8 +335,8 @@ __get_environment(void)
 }
 
 /*
- * Parse argc/argv/envp from the System V i386 entry stack that
- * exec_server builds for execve'd images:
+ * Parse argc/argv/envp from the System V entry stack that exec_server
+ * builds for execve'd images, in which every item is a word (#414):
  *
  *   entry_sp -> [ argc ][ argv[0..argc-1] ][ NULL ][ envp[0..] ][ NULL ]...
  *
@@ -347,14 +347,14 @@ __get_environment(void)
 static void
 __setup_args_from_stack(unsigned long entry_sp)
 {
-	int *frame;
-	int argc;
+	long *frame;
+	long argc;
 	char **argv;
 
 	if (entry_sp == 0)
 		return;
 
-	frame = (int *)entry_sp;
+	frame = (long *)entry_sp;
 	argc  = frame[0];
 	/* A zeroed (bootstrap set_regs) or implausible frame -> leave the
 	 * defaults so we don't dereference garbage. */

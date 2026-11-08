@@ -101,11 +101,9 @@ typedef struct pcb {
 	 * i386 never needed to: the name server entered ring 3 with the whole
 	 * frame still zero, at rip 0.
 	 *
-	 * ⚠️ Stored and reported, but NOT yet loaded on a context switch --
-	 * that is the second half of TLS on this machine and is not here.  So
-	 * a thread that sets a base does not get it applied; what it gets is a
-	 * consistent answer when it reads back, which is what the round trip
-	 * needs and what the loader was silently failing.
+	 * fs_base is what act_machine_switch_pcb() loads (#414).  gs_base is
+	 * stored and reported and goes no further: ring 3 has no use for it
+	 * yet, and swapgs keeps the kernel's value where a thread's would go.
 	 */
 	uint64_t		fs_base;
 	uint64_t		gs_base;

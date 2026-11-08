@@ -894,7 +894,7 @@ set_user_regs(vm_offset_t stack_base, vm_size_t stack_size,
 {
     vm_offset_t arg_addr;
 
-    arg_size = (arg_size + sizeof(int) - 1) & ~(sizeof(int)-1);
+    arg_size = (arg_size + sizeof(long) - 1) & ~(sizeof(long)-1);	/* #414 */
     arg_addr = stack_base + stack_size - arg_size;
 
     machine_bootstrap_thread_sp(arg_addr);
@@ -915,6 +915,7 @@ build_args_and_stack(char **argv, char **envp)
 	int		arg_item_len;
 	char *		string_pos;
 	char *		zero = (char *)0;
+	long		argc_word;	/* #414: a word, as System V has it */
 	int i;
 
 	/*
@@ -938,11 +939,20 @@ build_args_and_stack(char **argv, char **envp)
 	 *	trailing 0 pointer
 	 *	pointers to environment variables
 	 *	trailing 0 pointer
-	 *	and align to integer boundary
+	 *	and align to a word
+	 *
+	 * 🔴 argc is a WORD, and so is everything after it (#414): this is the
+	 * System V entry stack, which exec_server builds for an execve'd image
+	 * and crt0 reads (__setup_args_from_stack()).  It was an integer_t,
+	 * four bytes on x86-64 too, with the pointers straight after it at
+	 * offset 4: crt0, reading words since 1791e908, took the low half of
+	 * argv[0] for the high half of argc, called the frame implausible, and
+	 * a boot task -- boot_probe -- ran with no argv and read argv[0] at
+	 * address 0.  On i386 a long is an integer_t, and nothing moves there.
 	 */
-	arg_len += (sizeof(integer_t)
+	arg_len += (sizeof(long)
 		    + (arg_count + 1 + envc + 1) * sizeof(char *));
-	arg_len = (arg_len + sizeof(integer_t) - 1) & ~(sizeof(integer_t)-1);
+	arg_len = (arg_len + sizeof(long) - 1) & ~(sizeof(long)-1);
 
 	/*
 	 * Allocate the stack.
@@ -954,8 +964,6 @@ build_args_and_stack(char **argv, char **envp)
 			stack_size,
 			FALSE);
 
-    arg_len = (arg_len + sizeof(int) - 1) & ~(sizeof(int)-1);
-    
 	arg_pos = (char *)
 		set_user_regs(stack_base, stack_size, arg_len);
 
@@ -963,16 +971,17 @@ build_args_and_stack(char **argv, char **envp)
 	 * Start the strings after the arg-count and pointers
 	 */
 	string_pos = (arg_pos
-		      + sizeof(integer_t)
+		      + sizeof(long)
 		      + (arg_count + 1 + envc + 1) * sizeof(char *));
 
 	/*
 	 * first the argument count
 	 */
-	(void) copyout((char *)&arg_count,
+	argc_word = arg_count;
+	(void) copyout((char *)&argc_word,
 			arg_pos,
-			sizeof(integer_t));
-	arg_pos += sizeof(integer_t);
+			sizeof(long));
+	arg_pos += sizeof(long);
 
 	/*
 	 * Then the strings and string pointers for each argument

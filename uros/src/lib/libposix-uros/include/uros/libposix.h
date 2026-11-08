@@ -3,8 +3,8 @@
  *
  * libposix-uros is the POSIX-personality shim that sits between musl
  * libc and the Uros multiserver: it owns the __uros_syscallN dispatcher
- * called by musl's patched syscall_arch.h, translating Linux i386 SVR4
- * syscall numbers into Mach traps and (eventually) MIG RPCs to
+ * called by musl's patched syscall_arch.h, translating Linux syscall
+ * numbers, the target's own, into Mach traps and MIG RPCs to
  * proc_server / vfs / cap_server / exec_server.
  *
  * Phase 2 status (#250): infrastructure + ~15 handlers (write/writev/exit/
@@ -29,9 +29,9 @@ extern "C" {
 
 /*
  * Dispatcher entrypoints invoked by musl's patched
- * uros/src/contrib/musl/arch/i386/syscall_arch.h.  Arity matches the
+ * uros/src/contrib/musl/arch/<target>/syscall_arch.h.  Arity matches the
  * static inline __syscallN shims musl uses; the n argument carries the
- * Linux i386 syscall number (see musl arch/i386/bits/syscall.h.in).
+ * target's Linux syscall number (see musl's arch/<target>/bits/syscall.h.in).
  *
  * Return is a `long` following Linux convention: nonnegative on success,
  * negative errno on failure (NOT the POSIX -1 + errno pattern — musl

@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #414
+Takes out: the count of program headers, so that __init_tls walks none and never finds PT_TLS
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[4\] WRONG -- the main thread's __thread variables read
+
+diff --git a/uros/src/contrib/musl/src/internal/uros_main_thread.c b/uros/src/contrib/musl/src/internal/uros_main_thread.c
+--- a/uros/src/contrib/musl/src/internal/uros_main_thread.c
++++ b/uros/src/contrib/musl/src/internal/uros_main_thread.c
+@@ -60,7 +60,6 @@
+ 	if (&__ehdr_start) {
+ 		aux[AT_PHDR]  = (size_t)&__ehdr_start + __ehdr_start.e_phoff;
+ 		aux[AT_PHENT] = __ehdr_start.e_phentsize;
+-		aux[AT_PHNUM] = __ehdr_start.e_phnum;
+ 	}
+ 
+ 	/* 16 bytes of canary entropy from the cycle counter — boot- and

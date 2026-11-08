@@ -199,6 +199,63 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 */
 	desc_set_rsp0(cpu_number(),
 		      pcb->ctx.user_frame + sizeof(struct trap_frame));
+
+	/*
+	 * #414: the thread pointer.  Here, with the stack, because every way
+	 * onto a processor passes through this routine, a new thread's first
+	 * return to user space included.
+	 *
+	 * Not for a thread of the kernel, which never reads %fs: the idle
+	 * thread between two turns of the same user thread would otherwise
+	 * cost two writes for nothing.  And not when the base is already there:
+	 * `wrmsr' is serialising.
+	 *
+	 * ⚠️ `wrmsr' and not WRFSBASE.  The instruction needs CR4.FSGSBASE, and
+	 * that lets ring 3 write its own GS base, which the entry's test of
+	 * who owns GS cannot stand: deny_user_segment_bases() in cpu/percpu.c.
+	 */
+	if (thr_act->task != kernel_task) {
+		struct percpu	*p = percpu();
+
+		if (p->fs_base != pcb->fs_base) {
+			wrmsr(MSR_FS_BASE, pcb->fs_base);
+			p->fs_base = pcb->fs_base;
+		}
+	}
+}
+
+/*
+ *	Routine:	urmach_thread_set_fs_base [mach trap]
+ *	Purpose:
+ *		#414: this thread's FS base.  thread_set_state() does it for a
+ *		thread that is stopped and refuses the caller, and musl's main
+ *		thread has nobody else to set it: __init_tp() calls for it from
+ *		the thread itself, as i386 installs its LDT entry.
+ *	Conditions:
+ *		Nothing locked.  At splsched, so that a switch between the two
+ *		writes cannot leave the pcb and the processor disagreeing.
+ *	Returns:
+ *		KERN_SUCCESS
+ *		KERN_INVALID_ARGUMENT	The base is not an address a thread may
+ *					have, which `wrmsr' would fault on or
+ *					hand ring 3 the kernel's half (#440).
+ */
+kern_return_t
+urmach_thread_set_fs_base(
+	vm_offset_t	base)
+{
+	pcb_t		pcb = current_act()->mact.pcb;
+	spl_t		s;
+
+	if (!va_is_canonical(base) || !va_is_user(base))
+		return KERN_INVALID_ARGUMENT;
+
+	s = splsched();
+	pcb->fs_base = base;
+	wrmsr(MSR_FS_BASE, base);
+	percpu()->fs_base = base;
+	splx(s);
+	return KERN_SUCCESS;
 }
 
 /*

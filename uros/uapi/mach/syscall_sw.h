@@ -147,6 +147,12 @@ kernel_trap(urmach_cap_register,-40,1)
 kernel_trap(urmach_cap_epoch,-45,0)
 
 /*
+ *	urmach_thread_set_fs_base (#414) — this thread's FS base on x86-64,
+ *	where thread_set_state() refuses the caller.  Not implemented on i386.
+ */
+kernel_trap(urmach_thread_set_fs_base,-46,1)
+
+/*
  *	urmach_thread_set_cleartid (#257) — register a user-space address
  *	the kernel zeroes when the calling thread terminates.  Kernel half
  *	of Linux CLONE_CHILD_CLEARTID; used by libposix-uros to wake a

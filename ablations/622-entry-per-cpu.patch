@@ -63,8 +63,8 @@ index f36ac8ca..586993ed 100644
 +	uint64_t syscall_tsc;
 +	void	*syscall_tsc_thread;
  
- #if	CONTEXT_FPU_COUNT
  	/*
+ 	 * #414: what MSR_FS_BASE holds on this processor, so that a switch can
 @@ -453,6 +457,10 @@ _Static_assert(__builtin_offsetof(struct percpu, frame_ret_count)
  	       == PERCPU_FRAME_RET_CNT, "percpu frame_ret_count moved");
  _Static_assert(__builtin_offsetof(struct percpu, frame_ret_mark)

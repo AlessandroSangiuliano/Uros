@@ -227,7 +227,7 @@ __uros_exceptions_init(void)
                                   EXC_MASK_ALL,
                                   __uros_exc_port,
                                   EXCEPTION_DEFAULT,
-                                  i386_THREAD_STATE);
+                                  MACHINE_THREAD_STATE);
     if (kr != KERN_SUCCESS) {
         (void)mach_port_destroy(mach_task_self(), __uros_exc_port);
         __uros_exc_port = MACH_PORT_NULL;

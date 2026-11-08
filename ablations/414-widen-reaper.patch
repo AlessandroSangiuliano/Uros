@@ -1,0 +1,16 @@
+Kind: widen
+Issue: #414
+Holds open: the moment between the reaper's unlinking a shuttle's top_act and its dropping the activation's references -- 2 ms, so that a task_terminate() walking the task's list meets an activation in that state whenever one is still listed.  On a good kernel none is
+Run: --entry 14 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1995,6 +1995,7 @@
+ 			rpc_unlock(thread);
+ 			if (pool_port != IP_NULL) ip_unlock(pool_port);
+ 			act_unlock(thr_act);
++			{ extern void delay(int); delay(2000); }	/* 414-widen-reaper */
+ 
+ 			/* Remove the reference held by a rooted thread */
+ 			if (pool_port == IP_NULL) act_deallocate(thr_act);

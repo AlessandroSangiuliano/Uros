@@ -19,8 +19,10 @@ if(UROS_BUILD_MUSL)
   # musl dynamic linker, entry _dlstart) and the ld-musl-i386.so.1 symlink.
   # --syslibdir below keeps the symlink inside our install tree instead of
   # the host's absolute /lib.
+  # #414: this name and --target below follow the target; --target is what
+  # tells musl which arch/ directory to build.
   set(MUSL_SO       ${MUSL_PREFIX}/lib/libc.so)
-  set(MUSL_LDSO     ${MUSL_PREFIX}/lib/ld-musl-i386.so.1)
+  set(MUSL_LDSO     ${MUSL_PREFIX}/lib/ld-musl-${UROS_TARGET_ARCH}.so.1)
 
   # i386 freestanding-ish build.  We still rely on the host gcc with -m32
   # for now; cross-toolchain comes in a later phase.  Shared is enabled
@@ -46,7 +48,7 @@ if(UROS_BUILD_MUSL)
                         --srcdir=${MUSL_SRC}
                         --prefix=${MUSL_PREFIX}
                         --syslibdir=${MUSL_PREFIX}/lib
-                        --target=i386-linux-gnu
+                        --target=${UROS_TARGET_ARCH}-linux-gnu
                         --enable-shared
                         CC=cc
                         "CFLAGS=${UROS_ARCH_FLAGS_STR} -Os -pipe -fno-stack-protector"
@@ -71,6 +73,26 @@ if(UROS_BUILD_MUSL)
     LOG_CONFIGURE     ON
     LOG_BUILD         ON
     LOG_INSTALL       ON
+  )
+
+  # ExternalProject knows of a build it has made, and nothing of what went into
+  # it: a patch to a file under musl/ left libc-musl.a as it was, the next link
+  # took the old archive, and the program ran the code from before the patch
+  # with nothing to say so (#414).  This step depends on the files, so that the
+  # build runs when one of them changes, and musl's own Makefile then decides
+  # what to compile.
+  file(GLOB_RECURSE MUSL_SOURCES CONFIGURE_DEPENDS
+    ${MUSL_SRC}/src/*
+    ${MUSL_SRC}/arch/*
+    ${MUSL_SRC}/crt/*
+    ${MUSL_SRC}/ldso/*
+    ${MUSL_SRC}/include/*
+  )
+  ExternalProject_Add_Step(musl_extproj sources_changed
+    COMMENT "musl: its sources are newer than its last build"
+    DEPENDEES configure
+    DEPENDERS build
+    DEPENDS ${MUSL_SOURCES}
   )
 
   # Imported target so consumers can do: target_link_libraries(x musl::c)

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #414
+Takes out: the trap that gives a detached thread's stack back
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[6\] WRONG -- 16 detached threads ended and 0 of their stacks were given back
+
+diff --git a/uros/src/lib/libposix-uros/x86_64/unmap_and_exit.S b/uros/src/lib/libposix-uros/x86_64/unmap_and_exit.S
+--- a/uros/src/lib/libposix-uros/x86_64/unmap_and_exit.S
++++ b/uros/src/lib/libposix-uros/x86_64/unmap_and_exit.S
+@@ -26,8 +26,6 @@
+ 	.type	__uros_unmap_and_exit, @function
+ __uros_unmap_and_exit:
+ 	movq	%rcx, %rbx
+-	movl	$TRAP_syscall_vm_deallocate, %eax
+-	syscall
+ 	movq	%rbx, %rdi
+ 	movl	$TRAP_syscall_thread_terminate, %eax
+ 	syscall

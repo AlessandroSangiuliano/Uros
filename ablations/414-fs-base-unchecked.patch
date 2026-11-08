@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #414
+Takes out: the trap's look at the base it is given -- a kernel address goes into the pcb and the register, and a thread holds a base no thread may have (#440)
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[52\] a base in the kernel half answered 0x0
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -247,9 +247,6 @@
+ 	pcb_t		pcb = current_act()->mact.pcb;
+ 	spl_t		s;
+ 
+-	if (!va_is_canonical(base) || !va_is_user(base))
+-		return KERN_INVALID_ARGUMENT;
+-
+ 	s = splsched();
+ 	pcb->fs_base = base;
+ 	wrmsr(MSR_FS_BASE, base);

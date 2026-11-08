@@ -294,6 +294,12 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libfspager)
 endif()
 
+# libposix-uros, the POSIX personality under musl (#414).  After libvfs, which
+# it links; its own CMakeLists does nothing without UROS_BUILD_MUSL.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libposix-uros)
+endif()
+
 # ipc_bench on x86-64 (#552), beside the tests rather than behind
 # OSFMK_BUILD_IPC_BENCH, which is the i386 switch.
 #
@@ -600,6 +606,13 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND OSFMK_BUILD_CHAR_SERVER)
   # none on this target: char_server publishes "char" and nobody looked it up,
   # so "the server starts" was the whole of what a boot could show.
   add_subdirectory(tests/char_test)
+endif()
+
+# The textbook program, static against musl, the first of the kind on this
+# target (#414).
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
+  add_subdirectory(tests/hello_world)
+  add_subdirectory(tests/musl_test)
 endif()
 
 # Everything below is userland; skip it wholesale on a non-i386 target.

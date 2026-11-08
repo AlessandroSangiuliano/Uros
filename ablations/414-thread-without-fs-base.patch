@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #414
+Takes out: the FS base in a new pthread's state, so that the thread starts with none and its first read of %fs:0 is a read of address 0
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: exception_no_server: terminating task 0x[0-9a-f]+ . exception 1, code\[0\]=0x[12] code\[1\]=0x0[^0-9a-f]*$
+
+diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
+--- a/uros/src/lib/libposix-uros/posix_clone.c
++++ b/uros/src/lib/libposix-uros/posix_clone.c
+@@ -183,7 +183,7 @@
+     state.rdi     = (uintptr_t)fn;
+     state.rsi     = (uintptr_t)arg;
+     state.rcx     = (uintptr_t)ctid;
+-    state.fs_base = tls_base;
++    state.fs_base = tls_base & 0;
+ 
+     kr = thread_set_state(new_thread, x86_64_THREAD_STATE,
+                           (thread_state_t)&state,

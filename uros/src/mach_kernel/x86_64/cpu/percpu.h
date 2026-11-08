@@ -388,6 +388,13 @@ struct percpu {
 	} pcid_slot[PCID_SLOTS];
 	uint32_t pcid_victim;		/* the slot the next miss takes */
 
+	/*
+	 * #414: what MSR_FS_BASE holds on this processor, so that a switch can
+	 * tell without reading it.  After intr_level, for the reason the block
+	 * below gives: no assembly knows this offset.
+	 */
+	uint64_t fs_base;
+
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is

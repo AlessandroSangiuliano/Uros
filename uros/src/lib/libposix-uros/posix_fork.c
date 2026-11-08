@@ -56,7 +56,25 @@
 
 #define UROS_FORK_MARKER  0xCAFEBABEu
 
-extern int  __uros_capture_state(struct i386_thread_state *state);
+#if defined(__x86_64__)
+typedef struct x86_64_thread_state uros_fork_state_t;
+#define UROS_FORK_FLAVOR        x86_64_THREAD_STATE
+#define UROS_FORK_FLAVOR_COUNT  x86_64_THREAD_STATE_COUNT
+
+/* The four numbers x86_64/fork_capture.S is written with, of its eight. */
+_Static_assert(offsetof(uros_fork_state_t, rbx) == 8
+               && offsetof(uros_fork_state_t, rsp) == 56
+               && offsetof(uros_fork_state_t, r15) == 120
+               && offsetof(uros_fork_state_t, rip) == 128,
+               "fork_capture.S and struct x86_64_thread_state disagree");
+#else
+typedef struct i386_thread_state uros_fork_state_t;
+#define UROS_FORK_FLAVOR        i386_THREAD_STATE
+#define UROS_FORK_FLAVOR_COUNT  i386_THREAD_STATE_COUNT
+#endif
+
+extern int  __uros_capture_state(uros_fork_state_t *state)
+    __attribute__((returns_twice));
 
 extern mach_port_t  __uros_proc_port;
 extern mach_port_t  __uros_exec_port;     /* defined as static — fwd here via getter */
@@ -71,6 +89,7 @@ extern void          __uros_post_fork_init(void);
 mach_port_t __uros_get_exec_port(void);
 void        __uros_set_exec_port(mach_port_t p);
 
+#if defined(__i386__)
 /* posix_tls.c: install the per-thread LDT TLS descriptor for the
  * calling thread with base = tp, and load %gs.  Returns 0 on success. */
 extern int  __uros_set_thread_area_tp(void *tp);
@@ -86,6 +105,7 @@ extern int  __uros_set_thread_area_tp(void *tp);
  * reinstalls.
  */
 static unsigned int __uros_fork_saved_tp;
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Port inheritance                                                    */
@@ -130,7 +150,7 @@ extern mach_port_t bootstrap_port;        /* libmach_core */
 int
 __uros_fork(void)
 {
-    struct i386_thread_state state;
+    uros_fork_state_t state = {0};
     kern_return_t kr;
     int magic = __uros_capture_state(&state);
 
@@ -155,11 +175,13 @@ __uros_fork(void)
          * LDT via the i386_set_ldt MIG RPC, so the reset must precede it.
          * __uros_post_fork_init re-runs this (idempotent). */
         mach_task_self_init();
+#if defined(__i386__)
         /* Reinstall our TLS: thread_create_running forced %gs to USER_DS,
          * so the canary, errno and stdio locks are unusable until the LDT
          * descriptor is back.  The TP was captured by the parent below
          * and CoW'd into our address space. */
         (void)__uros_set_thread_area_tp((void *)__uros_fork_saved_tp);
+#endif
         /*
          * #292: do NOT run __uros_post_fork_init() here.  It spawns the
          * signal handler pthread, which must happen AFTER musl's __post_Fork
@@ -172,12 +194,21 @@ __uros_fork(void)
 
     /* ===== Parent path =========================================== */
 
+#if defined(__x86_64__)
+    /*
+     * 0. The FS base is a field of the state, and the TCB is at the same
+     *    address in the child, so the child has its TLS from its first
+     *    instruction.  musl keeps the thread's own address at %fs:0.
+     */
+    __asm__ __volatile__("movq %%fs:0, %0" : "=r"(state.fs_base));
+#else
     /*
      * 0. Capture the calling thread's TLS pointer (%gs:0) before
      *    task_create snapshots the VM, so the child can reinstall its
      *    LDT descriptor (the child resumes with %gs = USER_DS).
      */
     __asm__ __volatile__("movl %%gs:0, %0" : "=r"(__uros_fork_saved_tp));
+#endif
 
     /*
      * 1. task_create with inherit_memory=TRUE.  The kernel makes a
@@ -259,17 +290,22 @@ __uros_fork(void)
     }
 
     /*
-     * 4. Hand the child our captured state, EAX bumped to FORK_MARKER
-     *    so it picks up at the child branch above.  thread_create_running
-     *    both creates the thread and starts it atomically.
+     * 4. Hand the child our captured state, the return register bumped
+     *    to FORK_MARKER so it picks up at the child branch above.
+     *    thread_create_running both creates the thread and starts it
+     *    atomically.
      */
+#if defined(__x86_64__)
+    state.rax = UROS_FORK_MARKER;
+#else
     state.eax = UROS_FORK_MARKER;
+#endif
 
     mach_port_t child_thread = MACH_PORT_NULL;
     kr = thread_create_running(child_task,
-                               i386_THREAD_STATE,
+                               UROS_FORK_FLAVOR,
                                (thread_state_t)&state,
-                               i386_THREAD_STATE_COUNT,
+                               UROS_FORK_FLAVOR_COUNT,
                                &child_thread);
     if (kr != KERN_SUCCESS) {
         (void)task_terminate(child_task);

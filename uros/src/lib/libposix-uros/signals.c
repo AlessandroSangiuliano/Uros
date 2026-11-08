@@ -48,6 +48,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/syscall.h>
 
 #include <mach.h>
 #include <mach/mach_traps.h>
@@ -163,7 +164,7 @@ __uros_sig_loop(void)
             case 'I':   /* ignore */
                 continue;
             case 'T':   /* terminate */
-                __uros_syscall1(252 /* SYS_exit_group */, 128 + signo);
+                __uros_syscall1(SYS_exit_group, 128 + signo);
                 continue;     /* unreachable */
             case 'S':   /* stop — Phase 4b will handle properly */
             default:
@@ -401,9 +402,9 @@ __uros_sigaction(int signo, const void *act_, void *old_)
 }
 
 /*
- * rt_sigprocmask carries the *kernel* sigset, which on i386 is two words
- * — musl passes exactly _NSIG/8 bytes and hands us that size in the
- * fourth argument.  The POSIX sigset_t stored above is 128 bytes, so
+ * rt_sigprocmask carries the *kernel* sigset: eight bytes on both targets,
+ * two words on i386 and one on x86-64 -- musl passes exactly _NSIG/8 bytes
+ * and hands us that size in the fourth argument.  The POSIX sigset_t stored above is 128 bytes, so
  * declaring the parameters as sigset_t read and wrote 128 bytes through
  * pointers to 8-byte objects: the .rodata masks behind musl's
  * __block_all_sigs / __block_app_sigs, and a struct field on the new
@@ -413,7 +414,8 @@ __uros_sigaction(int signo, const void *act_, void *old_)
  * the two declarations of this function disagreed across translation
  * units, so the compiler could never say so.  Convert explicitly.
  */
-#define UROS_K_SIGSET_WORDS 2
+#define UROS_K_SIGSET_BYTES 8
+#define UROS_K_SIGSET_WORDS (UROS_K_SIGSET_BYTES / sizeof(unsigned long))
 
 int
 __uros_sigprocmask(int how, const void *set_, void *old_, unsigned setsize)
@@ -422,7 +424,7 @@ __uros_sigprocmask(int how, const void *set_, void *old_, unsigned setsize)
     unsigned long       *old = old_;
     unsigned long       *cur = (unsigned long *)&__sig_mask;
 
-    if (setsize != UROS_K_SIGSET_WORDS * sizeof(unsigned long))
+    if (setsize != UROS_K_SIGSET_BYTES)
         return -EINVAL;
 
     if (old)

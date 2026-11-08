@@ -351,7 +351,11 @@ mach_trap_t	mach_trap_table[] = {
 
 	MACH_TRAP(not_implemented, 0),		/* 44 */
 	MACH_TRAP(urmach_cap_epoch, 0),		/* 45 (#537) */
+#if	defined(__x86_64__)
+	MACH_TRAP(urmach_thread_set_fs_base, 1),	/* 46 (#414) */
+#else
 	MACH_TRAP(not_implemented, 0),		/* 46 */
+#endif
 	MACH_TRAP(not_implemented, 0),		/* 47 */
 	MACH_TRAP(not_implemented, 0),		/* 48 */
 	MACH_TRAP(not_implemented, 0),		/* 49 */

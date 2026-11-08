@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #414
+Takes out: the kernel's sigset as eight bytes: two longs is sixteen here, and every call is refused
+Accel: tcg,kvm
+Run: --entry 14 300 -smp 4
+Expect: musl_test: \[7\] WRONG -- sigprocmask failed, errno 22
+
+diff --git a/uros/src/lib/libposix-uros/signals.c b/uros/src/lib/libposix-uros/signals.c
+--- a/uros/src/lib/libposix-uros/signals.c
++++ b/uros/src/lib/libposix-uros/signals.c
+@@ -424,7 +424,7 @@
+     unsigned long       *old = old_;
+     unsigned long       *cur = (unsigned long *)&__sig_mask;
+ 
+-    if (setsize != UROS_K_SIGSET_BYTES)
++    if (setsize != 2 * sizeof(unsigned long))
+         return -EINVAL;
+ 
+     if (old)

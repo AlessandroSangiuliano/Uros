@@ -45,9 +45,11 @@ extern void __uros_clone_trampoline(void);
 extern void mach_print(const char *);
 #endif
 
-/* From posix_tls.c. */
+#if defined(__i386__)
+/* From i386/posix_tls.c. */
 extern int __uros_install_thread_tls_at(mach_port_t target_thread,
                                         unsigned int base_addr);
+#endif
 
 /* Linux switch_thread_switch options.  Matches kern/syscall_subr.h. */
 #define UROS_SWITCH_OPTION_NONE 0
@@ -75,13 +77,13 @@ extern int    urmach_thread_set_cleartid(unsigned long addr);
  */
 void
 __uros_thread_bootstrap(int (*fn)(void *), void *arg,
-                        unsigned int tls_base, unsigned int ctid_addr)
+                        uintptr_t tls_base, uintptr_t ctid_addr)
 {
     BOOT_TRACE("bootstrap enter");
 
-    (void)tls_base;     /* LDT is installed + selector preloaded by the
-                         * parent in __uros_clone (#258).  By the time
-                         * we run, %gs already references the TLS. */
+    (void)tls_base;     /* The parent in __uros_clone has set this thread's
+                         * TLS up (#258): by the time we run, %gs or the FS
+                         * base already reaches it. */
 
     /* Register the ctid so the kernel zeroes it atomically on
      * thread_terminate — closes the join-side race that the Phase 6b
@@ -141,13 +143,23 @@ __uros_clone(int (*fn)(void *),
                             ? (uintptr_t)newtls
                             : 0;
 
-    uintptr_t sp = ((uintptr_t)stack) & ~0xFu;
+    uintptr_t sp = ((uintptr_t)stack) & ~(uintptr_t)0xF;
+#if defined(__x86_64__)
+    /*
+     * The arguments travel in registers here, so the stack holds only the
+     * return address a call would have left, which is also what puts the
+     * stack pointer where the ABI wants it at a function's first instruction.
+     */
+    sp -= sizeof(uintptr_t);
+    *(uintptr_t *)sp = 0;                           /* fake return addr */
+#else
     sp -= 32;                                       /* 16-byte align */
     ((uintptr_t *)sp)[0] = 0;                       /* fake return addr */
     ((uintptr_t *)sp)[1] = (uintptr_t)fn;
     ((uintptr_t *)sp)[2] = (uintptr_t)arg;
     ((uintptr_t *)sp)[3] = 0;     /* tls_base — installed below by parent */
     ((uintptr_t *)sp)[4] = (uintptr_t)ctid;
+#endif
 
     /* 1. Create the kernel thread, suspended. */
     mach_port_t new_thread = MACH_PORT_NULL;
@@ -160,6 +172,23 @@ __uros_clone(int (*fn)(void *),
     }
     TRACE("thread_create ok");
 
+#if defined(__x86_64__)
+    /*
+     * 2 and 3 are one step here: the FS base is a field of the state, so the
+     * new thread has its TLS from its first instruction (#414).
+     */
+    struct x86_64_thread_state state = {0};
+    state.rip     = (uintptr_t)__uros_clone_trampoline;
+    state.rsp     = sp;
+    state.rdi     = (uintptr_t)fn;
+    state.rsi     = (uintptr_t)arg;
+    state.rcx     = (uintptr_t)ctid;
+    state.fs_base = tls_base;
+
+    kr = thread_set_state(new_thread, x86_64_THREAD_STATE,
+                          (thread_state_t)&state,
+                          x86_64_THREAD_STATE_COUNT);
+#else
     /*
      * 2. Install per-thread TLS BEFORE thread_resume.  This is the
      * #258 attempt: the kernel's act_machine_switch_pcb loads LDTR
@@ -195,6 +224,7 @@ __uros_clone(int (*fn)(void *),
     kr = thread_set_state(new_thread, i386_REGS_SEGS_STATE,
                           (thread_state_t)&state,
                           i386_THREAD_STATE_COUNT);
+#endif
     if (kr != KERN_SUCCESS) {
         TRACE("thread_set_state failed");
         (void)thread_terminate(new_thread);
@@ -221,3 +251,22 @@ __uros_clone(int (*fn)(void *),
 
     return tid;
 }
+
+#if defined(__x86_64__)
+/*
+ * musl's __unmapself.s jumps here, from a detached thread that is about to
+ * lose its stack (#414).  The two ports are read while there still is one, and
+ * mach_task_self() is the cached name: the trap would add a user reference to
+ * the task's port for every thread that ever ended this way.
+ */
+extern void __uros_unmap_and_exit(mach_port_t task, vm_offset_t base,
+                                  vm_size_t size, mach_port_t thread)
+    __attribute__((noreturn));
+
+void
+__uros_unmapself(void *base, size_t size)
+{
+    __uros_unmap_and_exit(mach_task_self(), (vm_offset_t)base,
+                          (vm_size_t)size, mach_thread_self());
+}
+#endif
