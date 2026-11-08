@@ -7,7 +7,7 @@ Expect: musl_test: \[22\] WRONG -- [0-9] of 4 threads ended
 Note: 4 of 4 caught and 4 of 4 passed at 2da2af09 on victus, TCG and KVM: over the widen the fixed arm ended its stat thread on its time, 11 and 12 calls, and passed; the ablated one ran out at 16 with 0 wrong in every thread, as the campaign's three boots
 
 diff --git a/uros/src/tests/musl_test/musl_test.c b/uros/src/tests/musl_test/musl_test.c
-index 5a8bc6e7..490e5262 100644
+index de6c3971..490e5262 100644
 --- a/uros/src/tests/musl_test/musl_test.c
 +++ b/uros/src/tests/musl_test/musl_test.c
 @@ -953,38 +953,16 @@ arm_own_id(void)
@@ -42,8 +42,8 @@ index 5a8bc6e7..490e5262 100644
 -/*
 - * #922: the stat thread's time is up -- raised by the wait, which counts it in
 - * the same 10 ms sleeps as everything else here.  Not clock_gettime(): no
-- * handler serves it in libposix-uros, and the first version of this read a
-- * timespec the call had never written, so the time never ran out.
+- * handler serves it in libposix-uros (#923), and the first version of this
+- * read a timespec the call had never written, so the time never ran out.
 - */
 -static int	r_stat_time_up;
 +static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done, r_over;
