@@ -145,6 +145,15 @@
 #define SSTS_DET_NONE		0x00	/* no device detected, no phy */
 #define SSTS_DET_PRESENT	0x03	/* device present + phy established */
 
+/*
+ * PxSIG: what the device's first D2H Register FIS said it is (AHCI 1.3.1
+ * §3.3.9).  Only the ATA one is a disk this driver drives (#921).
+ */
+#define AHCI_SIG_ATA		0x00000101u
+#define AHCI_SIG_ATAPI		0xEB140101u
+#define AHCI_SIG_SEMB		0xC33C0101u	/* enclosure management bridge */
+#define AHCI_SIG_PM		0x96690101u	/* port multiplier */
+
 /* ================================================================
  * Command structures (in DMA memory)
  * ================================================================ */
