@@ -981,8 +981,8 @@ static int	r_done, r_over;
 /*
  * #922: the stat thread's time is up -- raised by the wait, which counts it in
  * the same 10 ms sleeps as everything else here.  Not clock_gettime(): no
- * handler serves it in libposix-uros, and the first version of this read a
- * timespec the call had never written, so the time never ran out.
+ * handler serves it in libposix-uros (#923), and the first version of this
+ * read a timespec the call had never written, so the time never ran out.
  */
 static int	r_stat_time_up;
 
