@@ -4,6 +4,7 @@ Over: 922-widen-slow-stat.patch
 Takes out: the wait that follows progress -- arm 22 as it was, 15 s for the whole arm and 20 stats to end it, so over the widen's second-long stats the arm runs out and says WRONG with no wrong answer in any thread, as the campaign's three boots did
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[22\] WRONG -- [0-9] of 4 threads ended
+Note: 4 of 4 caught and 4 of 4 passed at 2da2af09 on victus, TCG and KVM: over the widen the fixed arm ended its stat thread on its time, 11 and 12 calls, and passed; the ablated one ran out at 16 with 0 wrong in every thread, as the campaign's three boots
 
 diff --git a/uros/src/tests/musl_test/musl_test.c b/uros/src/tests/musl_test/musl_test.c
 index 5a8bc6e7..490e5262 100644

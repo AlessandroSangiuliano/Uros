@@ -3,6 +3,7 @@ Issue: #922
 Takes out: one reply -- proc_server answers its 2000th getsid with MIG_NO_REPLY, which mach_msg_server takes for a reply the routine kept, so none is ever sent and the caller waits for good: a reply lost, the defect musl_test's arm [22] is for, and the 2000th falls inside the arm, whose fast threads make thousands.  The arm must name the thread that stopped, which on 414-one-reply-port it never reached: that ablation stops pthread_create first
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[22\] WRONG -- the getsid thread completed no call in 15 s
+Note: 4 of 4 caught and 4 of 4 passed at 2da2af09 on victus, TCG and KVM: "the getsid thread completed no call in 15 s, after 1996: a reply that never came back", the other three having ended
 
 diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
 index 4d8ab385..163dc538 100644
