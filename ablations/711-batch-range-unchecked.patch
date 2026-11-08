@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #711
+Takes out: the batch's range check -- device_write_batch compares no recnum with the partition again, as before, and an entry past the partition's end or at a block number that wraps is written wherever start + recnum falls
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[36\] WRONG — [a-z_0-9]+: device_write_batch at a block number (past its end|that wraps)
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index be3d970f..bc4a3763 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -849,9 +849,7 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
+ 
+ 		for (i = 0; i < recnumsCnt; i++) {
+ 			if (!blk_batch_entry_fits(data_off, sizes[i],
+-						  data_count) ||
+-			    !blk_part_range_ok(part, recnums[i],
+-					       sizes[i] / SECTOR_SIZE)) {
++						  data_count)) {	/* 711-batch-range-unchecked */
+ 				vm_deallocate(mach_task_self(),
+ 					      (vm_offset_t)data, data_count);
+ 				return D_INVALID_SIZE;

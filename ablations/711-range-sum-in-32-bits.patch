@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #711
+Takes out: the range check's 64-bit order -- blk_part_range_ok() takes the 32-bit sum recnum + nsectors again, as read, write and both physical paths did, and a block number of 2^32 - 128 with 136 sectors sums to 8 and passes
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[36\] WRONG — [a-z_0-9]+: device_(read|write|read_phys|write_phys) at a block number that wraps
+
+diff --git a/uros/src/servers/block_device_server/block_server.h b/uros/src/servers/block_device_server/block_server.h
+index 13c176ca..44106356 100644
+--- a/uros/src/servers/block_device_server/block_server.h
++++ b/uros/src/servers/block_device_server/block_server.h
+@@ -325,8 +325,7 @@ static inline int
+ blk_part_range_ok(const struct blk_partition *part, uint64_t recnum,
+ 		  uint64_t nsectors)
+ {
+-	return recnum <= part->num_sectors &&
+-	       nsectors <= (uint64_t)part->num_sectors - recnum;
++	return (uint32_t)(recnum + nsectors) <= part->num_sectors;	/* 711-range-sum-in-32-bits */
+ }
+ 
+ /*
