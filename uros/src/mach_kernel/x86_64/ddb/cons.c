@@ -15,6 +15,7 @@
 #include <ddb/ramoops.h>	/* #373: the third keeper of what is said */
 #include <kern/lock.h>
 #include <kern/klog.h>	/* #497: the cursor the forwarder starts from */
+#include <kern/misc_protos.h>	/* #920: printf_log_only_here() */
 #include <time/tsc.h>
 
 /*
@@ -73,7 +74,7 @@ decl_simple_lock_data(extern, printf_lock)
  * second write path used only by tests -- would verify a copy of the code
  * rather than the code.
  */
-static void	cons_queue(char c);
+static void	cons_queue(char c, int log_only);
 static void	cons_wire_byte(char c);
 
 /*
@@ -227,6 +228,12 @@ static unsigned	cons_tx_spins_peak;	/* most polls one byte needed since reset */
 #define CONS_RING_FULL_TRIES	4
 
 static char		cons_ring[CONS_RING_SIZE];
+/*
+ * #920: one bit a slot, set for a byte a printf_log_only() queued -- the
+ * wire and the zone are handed it, the screen is not.  Written and read under
+ * cons_ring_lock, with the byte it describes.
+ */
+static uint8_t		cons_ring_log_only[CONS_RING_SIZE / 8];
 static unsigned		cons_ring_head;		/* bytes queued,  modular */
 static unsigned		cons_ring_tail;		/* bytes emitted, modular */
 static hw_lock_data_t	cons_ring_lock;		/* the two indices */
@@ -306,7 +313,7 @@ void cons_putc(char c)
 	}
 
 	if (cons_async_on) {
-		cons_queue(c);
+		cons_queue(c, printf_log_only_here());
 		return;
 	}
 
@@ -434,11 +441,26 @@ static unsigned cons_tx_room(int may_wait)
 /* The last byte said, for a report to know whether it starts a line (#702). */
 static volatile char	cons_last_said;
 
-static inline void cons_said(char c)
+static inline void cons_said_but(char c, int log_only)
 {
 	cons_last_said = c;
-	fbcons_putc(c);
+	if (!log_only)
+		fbcons_putc(c);
 	ramoops_putc(c);
+}
+
+static inline void cons_said(char c)
+{
+	cons_said_but(c, 0);
+}
+
+/*
+ * #920: the byte in the ring's slot i, and whether a printf_log_only()
+ * queued it.  Under cons_ring_lock.
+ */
+static inline int cons_ring_slot_log_only(unsigned i)
+{
+	return (cons_ring_log_only[i / 8] >> (i % 8)) & 1;
 }
 
 /*
@@ -815,6 +837,7 @@ static int cons_tx_one(int may_wait)
 {
 	char	c = 0;
 	int	went = 0;
+	int	log_only = 0;
 
 	/*
 	 * Not inside another processor's report (#659): a drain that may wait
@@ -860,8 +883,10 @@ static int cons_tx_one(int may_wait)
 			 */
 			hw_lock_lock(&cons_ring_lock);
 			while (cons_ring_head != cons_ring_tail) {
-				cons_said(cons_ring[cons_ring_tail++ %
-						      CONS_RING_SIZE]);
+				unsigned i = cons_ring_tail++ % CONS_RING_SIZE;
+
+				cons_said_but(cons_ring[i],
+					      cons_ring_slot_log_only(i));
 				cons_tx_dropped_count++;
 			}
 			hw_lock_unlock(&cons_ring_lock);
@@ -872,13 +897,17 @@ static int cons_tx_one(int may_wait)
 
 	hw_lock_lock(&cons_ring_lock);
 	if (cons_ring_head != cons_ring_tail) {
-		c = cons_ring[cons_ring_tail++ % CONS_RING_SIZE];
+		unsigned i = cons_ring_tail++ % CONS_RING_SIZE;
+
+		c = cons_ring[i];
+		log_only = cons_ring_slot_log_only(i);
 		went = 1;
 	}
 	hw_lock_unlock(&cons_ring_lock);
 
 	if (went) {
-		cons_said(c);			/* the screen, the zone (#568, #373) */
+		/* the screen unless log-only (#920), the zone (#568, #373) */
+		cons_said_but(c, log_only);
 		/* And not to the port, if it is no longer ours (#497). */
 		if (!cons_port_given_away) {
 			outb(COM1 + UART_DATA, (uint8_t)c);
@@ -1156,14 +1185,23 @@ int cons_port_is_ours(void)
  * pays it often has a ring that is too small and that is a fact about this
  * ring rather than a guess about it.
  */
-static void cons_queue(char c)
+static void cons_queue(char c, int log_only)
 {
 	unsigned tries;
 
 	for (tries = 0; ; tries++) {
 		hw_lock_lock(&cons_ring_lock);
 		if (cons_ring_head - cons_ring_tail < CONS_RING_SIZE) {
-			cons_ring[cons_ring_head++ % CONS_RING_SIZE] = c;
+			unsigned i = cons_ring_head++ % CONS_RING_SIZE;
+			uint8_t bit = (uint8_t) (1u << (i % 8));
+
+			cons_ring[i] = c;
+			/* #920: a slot is reused, so the bit is written
+			 * either way */
+			if (log_only)
+				cons_ring_log_only[i / 8] |= bit;
+			else
+				cons_ring_log_only[i / 8] &= (uint8_t) ~bit;
 			hw_lock_unlock(&cons_ring_lock);
 			return;
 		}

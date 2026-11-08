@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #920
+Over: 920-widen-stacks-verdict.patch
+Takes out: the stacks line's exemption -- printf_log_only_if() is asked for the log only whatever the line says, so the WRONG the widen forces goes to the wire and not to the screen: the census's first report, the machine stopped on the moment the wire has it, must not show it on the panel.  The line is under 160 characters at the first report, so the WRONG is in one row
+Expect: expected texts are NOT ON THE SCREEN
+Note: 4 of 4 caught and 4 of 4 passed at c460dc21 on victus, TCG and KVM, two boots each: the fixed readback found "WRONG, a kernel stack outlived its thread" on the panel, the ablated one said it was not on the screen
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+index c798e959..1c88a52a 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
++++ b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+@@ -684,7 +684,7 @@ quiet_stacks_so_far(int periodic)
+ 	held = taken - given_back;
+ 	held = (uint64_t) shuttles + 1;	/* the widen: a verdict to draw */
+ 
+-	printf_log_only_if(periodic && held <= (uint64_t) shuttles,
++	printf_log_only_if(periodic,
+ 	       "quiet_census: kernel stacks taken %llu, given back %llu, so "
+ 	       "%llu held, by %d thread shuttles and %d threads alive%s "
+ 	       "(#749)\n",

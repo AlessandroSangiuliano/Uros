@@ -672,7 +672,7 @@ quiet_census_walk(int *had, unsigned int *unreadable)
 extern struct zone	*thread_shuttle_zone;	/* kern/thread.c */
 
 static void
-quiet_stacks_so_far(void)
+quiet_stacks_so_far(int periodic)
 {
 	uint64_t	taken, given_back, held;
 	int		shuttles;
@@ -683,7 +683,8 @@ quiet_stacks_so_far(void)
 	simple_unlock(&thread_shuttle_zone->lock);
 	held = taken - given_back;
 
-	printf("quiet_census: kernel stacks taken %llu, given back %llu, so "
+	printf_log_only_if(periodic && held <= (uint64_t) shuttles,
+	       "quiet_census: kernel stacks taken %llu, given back %llu, so "
 	       "%llu held, by %d thread shuttles and %d threads alive%s "
 	       "(#749)\n",
 	       (unsigned long long) taken, (unsigned long long) given_back,
@@ -715,7 +716,7 @@ quiet_stacks_so_far(void)
 extern struct zone	*thr_act_zone;	/* kern/thread_act.c */
 
 static void
-quiet_fpu_areas_so_far(void)
+quiet_fpu_areas_so_far(int periodic)
 {
 	uint64_t	taken, given_back, held;
 	int		activations;
@@ -726,7 +727,8 @@ quiet_fpu_areas_so_far(void)
 	simple_unlock(&thr_act_zone->lock);
 	held = taken - given_back;
 
-	printf("quiet_census: floating-point areas taken %llu, given back %llu, "
+	printf_log_only_if(periodic && held <= (uint64_t) activations,
+	       "quiet_census: floating-point areas taken %llu, given back %llu, "
 	       "so %llu held, by %d activations%s (#749)\n",
 	       (unsigned long long) taken, (unsigned long long) given_back,
 	       (unsigned long long) held, activations,
@@ -744,7 +746,7 @@ quiet_fpu_areas_so_far(void)
  * each report as the machine goes idle, for the reason quiet_stacks_so_far()
  * gives.
  */
-static void quiet_handoff_so_far(void);
+static void quiet_handoff_so_far(int periodic);
 
 /*
  * #771: which way the returns through a thread's frame went (cpu/percpu.h).
@@ -760,12 +762,13 @@ static void quiet_handoff_so_far(void);
  * goes idle, for the reason quiet_stacks_so_far() gives.
  */
 static void
-quiet_frame_returns_so_far(void)
+quiet_frame_returns_so_far(int periodic)
 {
 	uint64_t	sysrets, iretqs, syscalls;
 
 	percpu_frame_returns(&sysrets, &iretqs, &syscalls);
-	printf("quiet_census: returns to ring 3 through a thread's frame: %llu "
+	printf_log_only_if(periodic && !(syscalls != 0 && sysrets == 0),
+	       "quiet_census: returns to ring 3 through a thread's frame: %llu "
 	       "by SYSRET, %llu by iretq; %llu were system calls that slept%s "
 	       "(#771)\n",
 	       (unsigned long long) sysrets, (unsigned long long) iretqs,
@@ -776,7 +779,7 @@ quiet_frame_returns_so_far(void)
 }
 
 static void
-quiet_handoff_so_far(void)
+quiet_handoff_so_far(int periodic)
 {
 	unsigned long	same, other, fenced;
 	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE];
@@ -785,7 +788,9 @@ quiet_handoff_so_far(void)
 		return;
 
 	sched_rpc_handoff_counts(&same, &other, &fenced);
-	printf("quiet_census: the hand-off has queued %lu woken thread(s) on their "
+	printf_log_only_if(periodic &&
+	       !(sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK && fenced != 0),
+	       "quiet_census: the hand-off has queued %lu woken thread(s) on their "
 	       "waker's processor, %lu of them of another task; %lu of another "
 	       "task sent to an idle processor by the same-task fence (#446)%s\n",
 	       same + other, other, fenced,
@@ -793,7 +798,8 @@ quiet_handoff_so_far(void)
 	       " -- WRONG: the hand-off reaches any task here" : "");
 	/* #777: on a line of its own, under the console's 256 bytes (#802) */
 	sched_rpc_handoff_undone(undone);
-	printf("quiet_census: of those, %lu bet(s) lost and undone -- %lu at a "
+	printf_log_only_if(periodic,
+	       "quiet_census: of those, %lu bet(s) lost and undone -- %lu at a "
 	       "receive that found a message, %lu at a return to user space "
 	       "without a block, %lu when the waker left for another thread, "
 	       "%lu at a tick (#777)\n",
@@ -858,14 +864,14 @@ quiet_census_pass(int mycpu)
 	quiet_passes++;
 	if (++quiet_all_passes == quiet_next_report) {
 		quiet_next_report *= 2;
-		printf("quiet_census: passes=%lu peak=%lu resets=%lu (after %lu "
-		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
-		       quiet_resets, quiet_all_passes);
-		cons_ring_so_far("quiet_census: ");
-		quiet_stacks_so_far();
-		quiet_fpu_areas_so_far();
-		quiet_frame_returns_so_far();
-		quiet_handoff_so_far();
+		printf_log_only("quiet_census: passes=%lu peak=%lu resets=%lu "
+		       "(after %lu idle passes of cpu 0)\n", quiet_passes,
+		       quiet_peak, quiet_resets, quiet_all_passes);
+		cons_ring_so_far("quiet_census: ", 1);
+		quiet_stacks_so_far(1);
+		quiet_fpu_areas_so_far(1);
+		quiet_frame_returns_so_far(1);
+		quiet_handoff_so_far(1);
 	}
 
 	if (quiet_passes < QUIET_PASSES)
@@ -894,7 +900,7 @@ quiet_census_pass(int mycpu)
 	 * The console's counts first (#567): the census below is what a reader
 	 * of a stopped boot looks at, and the bytes still queued are part of it.
 	 */
-	cons_ring_so_far("quiet_census: ");
+	cons_ring_so_far("quiet_census: ", 0);
 
 	printf("quiet_census (#476): the machine has been idle for %lu idle "
 	       "passes; %d tasks and %d threads, walked under the processor "
@@ -902,9 +908,9 @@ quiet_census_pass(int mycpu)
 	       quiet_passes, default_pset.task_count, default_pset.thread_count,
 	       quiet_lock_busy);
 
-	quiet_stacks_so_far();
-	quiet_fpu_areas_so_far();
-	quiet_frame_returns_so_far();
+	quiet_stacks_so_far(0);
+	quiet_fpu_areas_so_far(0);
+	quiet_frame_returns_so_far(0);
 
 	/*
 	 * #615: whether the scheduler ever queued a bound thread on a run queue
@@ -919,7 +925,7 @@ quiet_census_pass(int mycpu)
 		       "to processor %d -- WRONG (#615)\n",
 		       sched_bound_displaced, sched_bound_displaced_slot);
 
-	quiet_handoff_so_far();
+	quiet_handoff_so_far(0);
 
 	(void) census_threads();
 	pset_unlock(&default_pset);

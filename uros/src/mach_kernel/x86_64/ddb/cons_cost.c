@@ -341,10 +341,12 @@ cons_ring_report(void)
  * after the last copy that no copy counts.
  */
 void
-cons_ring_so_far(const char *lead)
+cons_ring_so_far(const char *lead, int log_only)
 {
+	/* #920: log_only for the census's reports as the machine goes idle,
+	 * which nobody reads on a healthy boot; the census proper is drawn */
 	if (!fbcons_present())
-		printf("%sconsole so far: ring handed over %u/%u/%u times "
+		printf_log_only_if(log_only, "%sconsole so far: ring handed over %u/%u/%u times "
 		       "(writer/tick or idle/way down), %u writers paid for "
 		       "room, %u bytes queued; no framebuffer (#567)\n", lead,
 		       cons_drains(CONS_DRAIN_WRITER),
@@ -357,7 +359,8 @@ cons_ring_so_far(const char *lead)
 
 		/* #661: the count above, for the reader; the harness reads the log. */
 		if (n == 0)
-			printf("%sconsole so far: ring handed over %u/%u/%u "
+			printf_log_only_if(log_only,
+			       "%sconsole so far: ring handed over %u/%u/%u "
 			       "times (writer/tick or idle/way down), %u "
 			       "writers paid for room, %u bytes queued; "
 			       "framebuffer %llu glyphs, %llu scrolls, 0 without "
@@ -370,7 +373,8 @@ cons_ring_so_far(const char *lead)
 			       (unsigned long long) fbcons_scrolls(),
 			       fbcons_not_utf8());
 		else
-			printf("%sconsole so far: ring handed over %u/%u/%u "
+			printf_log_only_if(log_only,
+			       "%sconsole so far: ring handed over %u/%u/%u "
 			       "times (writer/tick or idle/way down), %u "
 			       "writers paid for room, %u bytes queued; "
 			       "framebuffer %llu glyphs, %llu scrolls, %u "

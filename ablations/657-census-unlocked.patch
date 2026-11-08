@@ -8,7 +8,7 @@ Expect: <quiet_census_walk\+0x
 Expect: census_test: WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
-index f5d24a4c..e046609c 100644
+index d8cb4c62..ce865dea 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
 @@ -648,12 +648,10 @@ quiet_census_walk(int *had, unsigned int *unreadable)
@@ -24,7 +24,7 @@ index f5d24a4c..e046609c 100644
  	return n;
  }
  
-@@ -803,10 +801,6 @@ quiet_census_pass(int mycpu)
+@@ -899,10 +897,6 @@ quiet_census_pass(int mycpu)
  	 * it is tried, and a busy lock puts the census off to the next idle
  	 * pass, counted and said in the census's first line.
  	 */
@@ -35,8 +35,8 @@ index f5d24a4c..e046609c 100644
  	quiet_said = 1;
  
  	/*
-@@ -839,7 +833,6 @@ quiet_census_pass(int mycpu)
- 	quiet_handoff_so_far();
+@@ -937,7 +931,6 @@ quiet_census_pass(int mycpu)
+ 	quiet_handoff_so_far(0);
  
  	(void) census_threads();
 -	pset_unlock(&default_pset);

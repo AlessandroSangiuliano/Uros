@@ -492,6 +492,12 @@ def main():
                          "than once.  Matching the serial log says the panel "
                          "and the wire agree, not that the panel shows a "
                          "given line (#666)")
+    ap.add_argument("--absent", action="append", default=[],
+                    help="text that must be ON THE WIRE and NOT ON THE "
+                         "SCREEN; may be given more than once.  A line the "
+                         "kernel prints for its log only (#920): on the "
+                         "wire first, or its absence from the screen would "
+                         "prove nothing")
     ap.add_argument("--no-uart", action="store_true",
                     help="boot with no UART at COM1 (-serial none), as on a "
                          "machine without a serial port: --wait-for is looked "
@@ -516,6 +522,10 @@ def main():
     signal.pthread_sigmask(signal.SIG_BLOCK, STOP | {signal.SIGCONT})
     if a.no_uart and a.send is not None:
         ap.error("--send types at the serial line, and --no-uart has none")
+    if a.absent and (a.no_uart or a.all_lines):
+        ap.error("--absent asks the wire for a line before the screen, and "
+                 "is not given with --no-uart, which has no wire, or with "
+                 "--all-lines, which compares every line")
     if a.all_lines and (a.no_uart or a.send is not None or a.freeze):
         ap.error("--all-lines compares the whole boot with the serial line, "
                  "and is not given with --no-uart, --send or --freeze")
@@ -1064,6 +1074,29 @@ def main():
             return 1
         for t in a.expect:
             print(f"fbcons-readback: on screen as expected | {t}")
+
+        # #920: and what the wire has and the screen must not -- a line the
+        # kernel printed for its log only.  Asked of the wire first: a text
+        # the wire does not have either is a run that judged nothing, 2, and
+        # not a pass.
+        unsaid = [t for t in a.absent if fold(t) not in wire]
+        if unsaid:
+            print(f"fbcons-readback: {len(unsaid)} of {len(a.absent)} texts "
+                  f"to be kept off the screen are not on the wire either -- "
+                  f"nothing was judged:", file=sys.stderr)
+            for t in unsaid:
+                print(f"  not on the wire | {t}", file=sys.stderr)
+            return 2
+        shown = [t for t in a.absent if any(fold(t) in l for l in lines)]
+        if shown:
+            print(f"fbcons-readback: {len(shown)} of {len(a.absent)} texts "
+                  f"the kernel printed for its log only are ON THE SCREEN:")
+            for t in shown:
+                print(f"  on screen | {t}")
+            return 1
+        for t in a.absent:
+            print(f"fbcons-readback: on the wire and not on the screen, as "
+                  f"asked | {t}")
 
         if a.no_uart:
             print("fbcons-readback: PASS — read off the screen of a machine "

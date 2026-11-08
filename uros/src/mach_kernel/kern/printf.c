@@ -1527,11 +1527,38 @@ safe_gets(
 }
 
 #include <mach_assert.h>
-/*VARARGS1*/
-void
-printf(const char *fmt, ...)
+
+/*
+ * #920: whether the printf() this processor is in is a printf_log_only().
+ *
+ * Set once the call holds the console -- printf_lock, or the raw writer's
+ * place with preemption off -- and put back as it was before it lets go, so
+ * that what this processor hands the console in between is that call's own:
+ * under printf_lock x86-64 takes no interrupt (#528).  One slot a processor,
+ * each written only by its own, because the raw writer holds no lock: the
+ * debugger on another processor, printing at the same moment, is not that
+ * call.  Put back rather than cleared, because a printf() nested in one (the
+ * raw writer, #757) is not a log-only line, and the one it is nested in has
+ * not ended.
+ *
+ * The console asks printf_log_only_here() for each byte it queues (x86-64's
+ * ring, x86_64/ddb/cons.c), and the screen is not handed a byte queued so.
+ * The wire, the kernel's log and the zone Linux reads after a reset have
+ * every byte as before.  Only the queued path asks: a panic and the debugger
+ * take the ring away first, and what is said without it is always drawn.
+ */
+static volatile char	printf_log_only_on[NCPUS];
+
+int
+printf_log_only_here(void)
 {
-	va_list	listp;
+	return printf_log_only_on[cpu_number()];
+}
+
+static void
+printf_va(int log_only, const char *fmt, va_list *listp)
+{
+	char	outer;
 	extern int db_active;		/* #346: while a CPU is in DDB, skip
 					 * printf_lock -- it may be held by the
 					 * faulting context or a stopped peer CPU,
@@ -1597,7 +1624,6 @@ printf(const char *fmt, ...)
 	 * interrupts as the caller had them, which for a trap is on.
 	 */
 	disable_preemption();
-	va_start(listp, fmt);
 #if	MP_PRINTF
 	if (cpu_data[master_cpu].active_thread && !db_active &&
 	    !printf_nested()) {
@@ -1608,6 +1634,8 @@ printf(const char *fmt, ...)
 		 * leaves a line open.
 		 */
 		printf_writer_take();
+		outer = printf_log_only_on[cpu_number()];
+		printf_log_only_on[cpu_number()] = (char) log_only;
 		if (cpu_number() != master_cpu)
 			new_printf_cpu_number = TRUE;
 		if (MP_PRINTF_CPU_PREFIX && new_printf_cpu_number) {
@@ -1627,7 +1655,8 @@ printf(const char *fmt, ...)
 			printf_turn_putc('}');
 			printf_turn_putc(' ');
 		}
-		_doprnt(fmt, &listp, printf_turn_putc, 16);
+		_doprnt(fmt, listp, printf_turn_putc, 16);
+		printf_log_only_on[cpu_number()] = outer;
 		printf_writer_give(printf_turn_n, printf_turn_last);
       } else
 #endif	/* MP_PRINTF */
@@ -1643,11 +1672,13 @@ printf(const char *fmt, ...)
 		printf_raw_last = '\0';
 		printf_lines_turn_begin(&printf_console_lines, PRINTF_WRITER_RAW,
 					klog_cnputc);
-		_doprnt(fmt, &listp, printf_raw_putc, 16);
+		outer = printf_log_only_on[cpu_number()];
+		printf_log_only_on[cpu_number()] = (char) log_only;
+		_doprnt(fmt, listp, printf_raw_putc, 16);
+		printf_log_only_on[cpu_number()] = outer;
 		printf_lines_turn_end(&printf_console_lines, PRINTF_WRITER_RAW,
 				      printf_raw_n, printf_raw_last);
 	}
-	va_end(listp);
 	enable_preemption();
 
 	/*
@@ -1675,6 +1706,49 @@ printf(const char *fmt, ...)
 	 */
 	if (printf_block_owner != printf_writer_self())
 		cnflush();
+}
+
+/*VARARGS1*/
+void
+printf(const char *fmt, ...)
+{
+	va_list	listp;
+
+	va_start(listp, fmt);
+	printf_va(0, fmt, &listp);
+	va_end(listp);
+}
+
+/*
+ * #920: a line for the kernel's log and the wire, and not for the screen --
+ * a periodic report nobody reads while the machine is healthy.  On a machine
+ * whose only output is the screen such lines pushed the ones that mattered
+ * off it.  A verdict is never printed so: the caller asks printf() for it.
+ */
+/*VARARGS1*/
+void
+printf_log_only(const char *fmt, ...)
+{
+	va_list	listp;
+
+	va_start(listp, fmt);
+	printf_va(1, fmt, &listp);
+	va_end(listp);
+}
+
+/*
+ * #920: the same, when the caller decides by the line -- a report whose
+ * line carries a verdict when it has one, and is drawn then.
+ */
+/*VARARGS2*/
+void
+printf_log_only_if(int log_only, const char *fmt, ...)
+{
+	va_list	listp;
+
+	va_start(listp, fmt);
+	printf_va(log_only != 0, fmt, &listp);
+	va_end(listp);
 }
 
 static char *copybyte_str;
