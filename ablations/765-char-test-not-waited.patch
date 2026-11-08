@@ -13,16 +13,14 @@ Expect: merge-test: entry 14 kvm -smp 4 \(@char\) -- WRONG \(char\)
 Note: under KVM, asked of the merge test with -a kvm, as 765-char-test-uncounted is. The fixed arm is the tree with the widen only and passes.
 
 diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
-index dc0f7508..caedc3d5 100755
+index 97aebde9..5477ee95 100755
 --- a/scripts/run-x86_64.sh
 +++ b/scripts/run-x86_64.sh
-@@ -1542,8 +1542,7 @@ expected_reports() {
- 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
- 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
- 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
--		'taskpanic_load: started' 'taskpanic_load: .*no load' \
--		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed'
-+		'taskpanic_load: started' 'taskpanic_load: .*no load'
+@@ -1664,7 +1664,6 @@ expected_reports() {
+ 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
+ 		'mount_test (die): started' 'mount_test (die): dying' \
+ 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
+-		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
+ 		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='
  }
  
- # #579: the clock the run gets, asked once a second of the cores qemu's

@@ -369,12 +369,20 @@ WriteGlobalDecls(FILE *file)
      * -304 from somewhere, with nothing naming the routine; that is the
      * same dead end this issue is undoing in the kernel, and there is no
      * reason to leave it standing on the larger half of the tree.
+     *
+     * #574: and the message, by its id and the size it said it had.  The
+     * notification the kernel sent bootstrap when the name server died was
+     * refused for its size -- 52 bytes, where the stub reads 48 -- and the
+     * line said neither, so which message it was had to be worked out.
+     * Every check is inside a stub, where InHeadP is the request.
      */
     fprintf(file, "#define MIG_CHECK_FAILED(rtn, what)\t{\\\n");
     fprintf(file, "\t\t\t\tstatic int _mig_seen;\\\n");
     fprintf(file, "\t\t\t\tif (_mig_seen++ < 3)\\\n");
-    fprintf(file, "\t\t\t\t\tprintf(\"mig: %%s refused a message: %%s\\n\", \\\n");
-    fprintf(file, "\t\t\t\t\t       rtn, what);\\\n");
+    fprintf(file, "\t\t\t\t\tprintf(\"mig: %%s refused a message: %%s \"\\\n");
+    fprintf(file, "\t\t\t\t\t       \"(id %%d, %%u bytes)\\n\", rtn, what,\\\n");
+    fprintf(file, "\t\t\t\t\t       (int)InHeadP->msgh_id,\\\n");
+    fprintf(file, "\t\t\t\t\t       (unsigned)InHeadP->msgh_size);\\\n");
     fprintf(file, "\t\t\t\t}\n");
     fprintf(file, "\n");
 }

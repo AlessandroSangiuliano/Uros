@@ -1,6 +1,6 @@
 Kind: widen
 Issue: #765
-Holds open: the race the run's end had with char_test. char_test waits 8 seconds after its start line before its first arm, so ipc_bench has started by then -- its start line is the run's terminator -- and the run ends one second later unless the loop waits for char_test's count. The fixed tree waits for it (expected_reports lists the pair) and passes; the ablation that takes the pair out of that list is cut with char_test between its arms.
+Holds open: the race the run's end had with char_test. char_test waits 60 seconds after its start line before its first arm, so every other test the run waits for has reported by then, and the run ends once the last of them has unless the loop waits for char_test's count. The fixed tree waits for it (expected_reports lists the pair) and passes; the ablation that takes the pair out of that list is cut with char_test between its arms. The hold was 8 seconds, made when ipc_bench's start line was the run's end: in the union of #414, #496, #421 and #733 with #744, #716 and #574 entry 14's char build runs no ipc_bench, act_test's count came after char_test's, and the ablation was caught in no boot of 2 under KVM on OMEGA. A time and not a count, and 60 seconds against a whole run of about 17 there.
 Accel: tcg
 Script: scripts/merge-test-x86_64.sh
 Script: -a
@@ -18,9 +18,9 @@ index ae2033ed..35539778 100644
  
  	printf("char_test: started (#497)\n");
  
-+	/* 765-widen: the arms start late, after ipc_bench has started and the run
-+	 * has its terminator. */
-+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 8000);
++	/* 765-widen: the arms start late, after every other test the run waits
++	 * for has reported. */
++	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 60000);
 +
  	if (name_server_port == MACH_PORT_NULL) {
  		printf("char_test: WRONG — no name server port in this task's "

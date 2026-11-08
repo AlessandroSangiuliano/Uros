@@ -154,6 +154,17 @@ sub_reference(mach_port_t port)
 	if (this->port == port)
 	    break;
 
+    /*
+     * #574: and if it does not, it says so.  It was a mount whose server had
+     * died: the dead-name notification took the port record and left the
+     * mount, and the next look-up of the mount read this->next at address 0.
+     * The mount goes with its server now; a record that outlives its port is
+     * still a defect, and it is named here rather than read through.
+     */
+    if (this == NULL)
+	panic("%s: sub_reference: port %x is in a record and not in the "
+	      "port list (#574)\n", program, port);
+
     /* move it to the front */
 
     *last = this->next;
@@ -274,6 +285,9 @@ netname_remove(mach_port_t name)
 	    (this->sig == name)) {
 	    register name_record_t last = this;
 
+	    /* #574: what a server's death takes out of the registry, said. */
+	    printf("%s: \"%.80s\" is gone with the port it named or was "
+		   "signed by\n", program, last->key);
 	    this = *prev = this->next;
 	    free(last);
 	} else
@@ -557,6 +571,31 @@ mount_capability(netname_name_in_t prefix, const char *token,
 			     cap_name_hash(prefix));
 }
 
+/*
+ * The mounts of a port that died (#574): every record whose port or signature
+ * is `name'.
+ *
+ * The dead-name notification removed a server's names and its port record,
+ * and left its mounts: the next look-up of one handed sub_reference() a port
+ * it no longer knew, and the name server died on a NULL.  And since #716 a
+ * left record could not be checked out by anyone -- its signature was dead --
+ * so a server started again could never mount its prefix either.
+ */
+static void
+mount_remove(mach_port_t name)
+{
+    mount_record_t *prev = &mounts, this;
+
+    while ((this = *prev) != NULL)
+	if (this->port == name || this->sig == name) {
+	    printf("%s: mount \"%.80s\" is gone with the port it named or "
+		   "was signed by\n", program, this->prefix);
+	    *prev = this->next;
+	    free(this);
+	} else
+	    prev = &this->next;
+}
+
 kern_return_t
 do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
 			  mach_port_t sig, mach_port_t port,
@@ -744,6 +783,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 	printf("%s: do_mach_notify_dead_name: %x\n", program, name);
 
     netname_remove(name);
+    mount_remove(name);		/* #574 */
     remove_port(name);
     return KERN_SUCCESS;
 }

@@ -366,12 +366,17 @@ WriteDispatcher(FILE *file)
 {
     register statement_t *stat;
     int descr_count = 0;
+    u_int max_request = 0, max_reply = 0;
 
     for (stat = stats; stat != stNULL; stat = stat->stNext)
 	if (stat->stKind == skRoutine)
 	{
 	    register routine_t *rt = stat->stRoutine;
 	    descr_count += rtCountArgDescriptors(rt->rtArgs, (int *) 0);
+	    if (rt->rtRequestMaxSize > max_request)
+		max_request = rt->rtRequestMaxSize;
+	    if (rt->rtReplyMaxSize > max_reply)
+		max_reply = rt->rtReplyMaxSize;
 	}
     fprintf(file, "\n");
     fprintf(file, "extern boolean_t %s(\n", ServerDemux);
@@ -393,6 +398,24 @@ WriteDispatcher(FILE *file)
     fprintf(file, "\tstruct routine_arg_descriptor\t/*Array of arg descriptors */\n");
     fprintf(file, "\t\targ_descriptor[%d];\n", descr_count);
     fprintf(file, "} %s;\n", ServerSubsys);
+    fprintf(file, "\n");
+
+    /*
+     * #716: and the largest REQUEST, which maxsize is not.  maxsize is the
+     * largest reply -- the kernel sizes its reply buffers by it
+     * (ipc_kobject.c) -- and a server receives requests: the name server
+     * sized its buffer by maxsize and was right by the accident that its
+     * largest reply and its largest request both carry a path.  All three
+     * as constants, so that a buffer can be sized in an initializer; a
+     * server's is _MAX_MESSAGE, the larger, and mach_msg_server() adds the
+     * room for the trailer.
+     */
+    fprintf(file, "/* The largest request and reply this subsystem's routines take, and\n");
+    fprintf(file, " * the larger of the two: what a server's buffer for it must hold. */\n");
+    fprintf(file, "#define\t%s_MAX_REQUEST\t%u\n", ServerSubsys, max_request);
+    fprintf(file, "#define\t%s_MAX_REPLY\t%u\n", ServerSubsys, max_reply);
+    fprintf(file, "#define\t%s_MAX_MESSAGE\t%u\n", ServerSubsys,
+	    max_request > max_reply ? max_request : max_reply);
     fprintf(file, "\n");
 }
 

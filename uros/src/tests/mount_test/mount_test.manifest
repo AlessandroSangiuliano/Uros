@@ -13,3 +13,7 @@ name mount_test
 
 # RESOURCE_MOUNT_POINT (3), "/mount_test" alone, REGISTER (0x1).
 required 3 name:/mount_test 0x1
+
+# And "/mount_test_dead" (#574): `mount_test die' mounts it and dies with it
+# mounted, and the main run mounts it again once the registry has let it go.
+required 3 name:/mount_test_dead 0x1

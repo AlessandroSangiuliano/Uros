@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #574
+Takes out: the mounts a dead port takes with it (f6a3729e) -- the dead-name notification removes the names and the port record and leaves the mount, as before, and the next look-up of it reaches sub_reference() with a port it no longer knows, which now panics naming it
+Run: --entry 14 1200 -smp 1
+Expect: name_server: sub_reference: port [0-9a-f]+ is in a record and not in the port list
+Expect: mount_test: \[22\] WRONG .*after its server.s death
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+index fdbe48a0..c5adeb33 100644
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -783,7 +783,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
+ 	printf("%s: do_mach_notify_dead_name: %x\n", program, name);
+ 
+     netname_remove(name);
+-    mount_remove(name);		/* #574 */
++    if (0) mount_remove(name);		/* #574 */
+     remove_port(name);
+     return KERN_SUCCESS;
+ }
