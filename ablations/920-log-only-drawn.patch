@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #920
+Takes out: the console's question -- printf_log_only_here() answers no for every byte, so the ring never marks one and the screen draws every line printf_log_only() printed; the quiet census's first report, stopped on the moment the wire has it, is then on the screen
+Screen: --entry=14
+Screen: --smp=4
+Screen: --wait-for=quiet_census: passes=
+Screen: --freeze
+Screen: --absent=quiet_census: passes=
+Screen: --budget=300
+Expect: texts the kernel printed for its log only are ON THE SCREEN
+
+diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
+index cfe7f86b..0cf2212f 100644
+--- a/uros/src/mach_kernel/kern/printf.c
++++ b/uros/src/mach_kernel/kern/printf.c
+@@ -1552,7 +1552,7 @@ static volatile char	printf_log_only_on[NCPUS];
+ int
+ printf_log_only_here(void)
+ {
+-	return printf_log_only_on[cpu_number()];
++	return 0;
+ }
+ 
+ static void
