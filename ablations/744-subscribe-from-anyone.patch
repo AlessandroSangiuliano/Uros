@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #744
+Takes out: the permission cap_subscribe_revoke asks for (29614677) -- any task, on any port, is subscribed to revocation notices, as before, and cap_test, whose manifest does not grant them, is subscribed on both ports in [35]
+Run: --entry 14 1200 -smp 1
+Expect: cap_test: \[35\] WRONG .*on this task's port: 0, on the well-known one: 0, not CAP_ERR_NOT_IN_MANIFEST
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 0fd77c61..b43a0a0a 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -622,11 +622,11 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
+     if (notify_port == MACH_PORT_NULL)
+         return CAP_ERR_INVALID_TOKEN;
+ 
+-    if (g_request_local_port == MACH_PORT_NULL ||
++    if (0 && (g_request_local_port == MACH_PORT_NULL ||
+         g_request_local_port == cap_port ||
+         !cap_manifest_allows(cap_manifest_table_get(g_request_local_port),
+                              RESOURCE_REVOKE_NOTICES, CAP_MANIFEST_ANY_ID,
+-                             CAP_OP_REVOKE_SUBSCRIBE)) {
++                             CAP_OP_REVOKE_SUBSCRIBE))) {
+         printf("cap: DENY subscribe_revoke on port 0x%x -- no manifest grants "
+                "it (#744)\n", (unsigned)g_request_local_port);
+         return CAP_ERR_NOT_IN_MANIFEST;

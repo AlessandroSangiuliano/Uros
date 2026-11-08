@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #744
+Takes out: the processor's random source, by reading both CPUID bits as clear -- the key comes from the TSC alone, as before 8cc6647e, and cap_server must say so rather than call it random
+Run: --entry 14 1200 -smp 1
+Expect: cap: hmac key from the TSC alone -- this processor has no RDSEED or RDRAND that answers, so the key can be guessed \(#744\)
+
+diff --git a/uros/src/servers/cap_server/cap_table.c b/uros/src/servers/cap_server/cap_table.c
+index b1a81fdd..82c37425 100644
+--- a/uros/src/servers/cap_server/cap_table.c
++++ b/uros/src/servers/cap_server/cap_table.c
+@@ -242,13 +242,13 @@ const char *cap_key_init(void) {
+     cap_cpuid(0, 0, r);
+     if (r[0] >= 7) {
+         cap_cpuid(7, 0, r);
+-        if ((r[1] & (1u << 18))
++        if ((r[1] & 0)
+             && cap_random_words(seed.random, CAP_KEY_WORDS, 1))
+             source = "RDSEED";
+     }
+     if (source == NULL) {
+         cap_cpuid(1, 0, r);
+-        if ((r[2] & (1u << 30))
++        if ((r[2] & 0)
+             && cap_random_words(seed.random, CAP_KEY_WORDS, 0))
+             source = "RDRAND";
+     }

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #744
+Takes out: the kernel's refusal of a setup token from a task bootstrap did not name, while no key is set (4f4f73e7) -- the first task to send one installs its key, as before; netname_test runs before cap_server exists and its 0xCC key must be taken, which [9] says
+Run: --entry 14 1200 -smp 1
+Expect: netname_test: \[9\] WRONG .*the kernel took its key from the first task to ask \(#744\)
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index c565369e..65ae965b 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -874,7 +874,7 @@ urmach_cap_register(const struct uros_cap *user_token)
+      * every token, which is the answer for a boot with no cap_server.
+      */
+     if (t.cap_id == 0) {
+-        if (caller != cap_server_task) {
++        if (cap_key_set && caller != cap_server_task) {
+             simple_unlock(&cap_lock);
+             return CAP_ERR_UNAUTHORIZED;
+         }

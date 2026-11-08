@@ -218,7 +218,21 @@ void
 blk_register_partitions(void)
 {
 	kern_return_t kr;
+	mach_port_t sig = MACH_PORT_NULL;
 	int i;
+
+	/*
+	 * #744: every name is signed with a port only this task holds --
+	 * mach_task_self() gave the name server a send right to this task's
+	 * port.  Without one nothing here can be registered, and saying so once
+	 * is better than a refusal per partition.
+	 */
+	kr = urmach_netname_signature(&sig);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: no name signature (kr=%d), no partition is "
+		       "registered\n", kr);
+		return;
+	}
 
 	for (i = 0; i < n_partitions; i++) {
 		struct blk_partition *part = &partitions[i];
@@ -257,7 +271,7 @@ blk_register_partitions(void)
 			part->recv_port, port_set);
 
 		kr = netname_check_in(name_server_port, part->name,
-				      mach_task_self(), part->recv_port);
+				      sig, part->recv_port);
 		if (kr != KERN_SUCCESS)
 			printf("blk: netname_check_in(%s) failed (kr=%d)\n",
 			       part->name, kr);
@@ -275,7 +289,7 @@ blk_register_partitions(void)
 		if (part->stable_name[0] != '\0') {
 			kr = netname_check_in(name_server_port,
 					      part->stable_name,
-					      mach_task_self(),
+					      sig,
 					      part->recv_port);
 			if (kr != KERN_SUCCESS)
 				printf("blk: netname_check_in(%s) "

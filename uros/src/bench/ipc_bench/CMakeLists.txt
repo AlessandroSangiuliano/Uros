@@ -221,6 +221,23 @@ target_link_options(ipc_bench_server PRIVATE
   -Wl,--build-id=none
 )
 
+# #744: the policy that gives the raw disk suite its capability, on the scratch
+# partition only (ipc_bench.manifest says why).  As gpu_server's.
+set(IPC_BENCH_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/ipc_bench.cmf")
+add_custom_command(
+  OUTPUT ${IPC_BENCH_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${IPC_BENCH_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/ipc_bench.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/ipc_bench.manifest
+  COMMENT "mkmanifest: ipc_bench.manifest -> ipc_bench.cmf"
+  VERBATIM
+)
+add_custom_target(ipc_bench_manifest ALL DEPENDS ${IPC_BENCH_MANIFEST_OUT})
+add_dependencies(ipc_bench_server ipc_bench_manifest)
+
 set_target_properties(ipc_bench_server PROPERTIES
   OUTPUT_NAME "ipc_bench"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"

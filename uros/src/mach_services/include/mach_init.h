@@ -104,6 +104,23 @@ extern	mach_port_t	service_port;
  *	libcap then falls back to netname_look_up("cap_server").
  */
 extern	mach_port_t	mach_cap_port;
+/*
+ *	The cap_server bootstrap started, from the registered port in
+ *	CAP_SERVER_SLOT (#744): the port its receive right is bootstrap's to
+ *	give, and only to cap_server.  libcap asks it when the task has no
+ *	per-task port, rather than whoever holds the name "cap_server".
+ */
+extern	mach_port_t	urmach_cap_server_port;
+
+/*
+ *	The port this task signs its names with at the name server: the
+ *	signature argument of netname_check_in(), netname_check_out() and their
+ *	mount forms (#744, netname_signature.c).  A port of the task's own,
+ *	made on the first call and the same on every later one.  Not
+ *	MACH_PORT_NULL, which the name server refuses, and not mach_task_self(),
+ *	which hands the name server the task.
+ */
+extern	kern_return_t	urmach_netname_signature(mach_port_t *sig);
 
 /*
  *	Where these ports occur in the "mach_ports_register"
@@ -114,8 +131,9 @@ extern	mach_port_t	mach_cap_port;
 #define	NAME_SERVER_SLOT	0
 #define	ENVIRONMENT_SLOT	1
 #define SERVICE_SLOT		2
+#define	CAP_SERVER_SLOT		3	/* #744 */
 
-#define	MACH_PORTS_SLOTS_USED	3
+#define	MACH_PORTS_SLOTS_USED	4
 #endif	/* MACH_INIT_SLOTS */
 
 /*

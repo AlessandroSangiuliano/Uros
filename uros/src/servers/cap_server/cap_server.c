@@ -54,13 +54,7 @@
 #include "cap_revoke.h"          /* MIG-generated cap_revoke_notify user stub */
 #include "gpu_console.h"         /* #209: async printf mirror */
 
-/*
- * netname_check_in: publish our service port under "cap_server".
- */
-extern kern_return_t netname_check_in(mach_port_t server_port,
-                                      char *service_name,
-                                      mach_port_t signature,
-                                      mach_port_t port);
+#include "service.h"			/* #744: service_checkin */
 
 /*
  * Bootstrap ports (standard for any Mach server).
@@ -152,6 +146,19 @@ fanout_revoke_notify(uint64_t cap_id)
     int i = 0;
     while (i < n_revoke_subscribers) {
         kern_return_t kr = cap_revoke_notify(revoke_subscribers[i], cap_id);
+        /*
+         * #744: a full queue costs that subscriber this notice and nothing
+         * else -- it stays subscribed, and it sees the revocation anyway,
+         * from the kernel's epoch, at the next use of what was revoked.  The
+         * send does not wait (cap_revoke.defs), so this server never does.
+         */
+        if (kr == MACH_SEND_TIMED_OUT) {
+            printf("cap: subscriber 0x%x missed the notice of %llu: its "
+                   "queue is full (#744)\n",
+                   (unsigned)revoke_subscribers[i], (unsigned long long)cap_id);
+            i++;
+            continue;
+        }
         if (kr != KERN_SUCCESS) {
             printf("cap: subscriber 0x%x dropped on revoke notify (kr=%d)\n",
                    (unsigned)revoke_subscribers[i], (int)kr);
@@ -285,6 +292,18 @@ cap_acquire(mach_port_t             server,
      * shape anyway: it says what the block is for.
      */
     if (resource_type < RESOURCE_TYPE_MAX) {
+
+    /*
+     * #744: a permission, not a capability.  The manifest that grants
+     * revocation notices says a task may be told of revocations; no token of
+     * this type stands for anything any server checks, and issuing one would
+     * hand out a signed claim to an authority that does not exist.
+     */
+    if (resource_type == RESOURCE_REVOKE_NOTICES) {
+        printf("cap: DENY rtype=%u -- revocation notices are a permission, "
+               "not a capability (#744)\n", resource_type);
+        return CAP_ERR_POLICY_DENIED;
+    }
 
     if (g_request_local_port == MACH_PORT_NULL ||
         g_request_local_port == cap_port) {
@@ -580,6 +599,20 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
  * cap_subscribe_revoke (Issue #183) — register a notify port.  We
  * keep the send right; subsequent cap_revoke calls fan out
  * cap_revoke_notify(notify_port, cap_id) on each subscriber.
+ *
+ * 🔴 ONLY A TASK WHOSE MANIFEST SAYS SO, ON ITS OWN PORT (#744).  It took
+ * anyone, into one of eight slots: a task could hear of every revocation, and
+ * one that filled the slots first left the block, char and gpu servers
+ * hearing of none.  The permission is RESOURCE_REVOKE_NOTICES with
+ * CAP_OP_REVOKE_SUBSCRIBE, which their manifests grant, and the request must
+ * arrive on the per-task port bootstrap provisioned -- the well-known port
+ * subscribes nobody, as it issues nothing.
+ *
+ * ⚠️ A refusal returns an error and leaves the send right alone, because
+ * mach_msg_server() destroys a request answered with an error, rights and
+ * all.  The table-full refusal used to deallocate it too, which dropped two
+ * references for the one received -- the second one the subscriber's, when
+ * this server already held a right to the port.
  */
 kern_return_t
 cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
@@ -588,6 +621,16 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
 
     if (notify_port == MACH_PORT_NULL)
         return CAP_ERR_INVALID_TOKEN;
+
+    if (g_request_local_port == MACH_PORT_NULL ||
+        g_request_local_port == cap_port ||
+        !cap_manifest_allows(cap_manifest_table_get(g_request_local_port),
+                             RESOURCE_REVOKE_NOTICES, CAP_MANIFEST_ANY_ID,
+                             CAP_OP_REVOKE_SUBSCRIBE)) {
+        printf("cap: DENY subscribe_revoke on port 0x%x -- no manifest grants "
+               "it (#744)\n", (unsigned)g_request_local_port);
+        return CAP_ERR_NOT_IN_MANIFEST;
+    }
 
     if (revoke_subscribers_contains(notify_port)) {
         /* Idempotent: already subscribed.  Drop the extra send right
@@ -599,7 +642,6 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
     if (n_revoke_subscribers >= CAP_MAX_REVOKE_SUBSCRIBERS) {
         printf("cap: subscribe_revoke FAIL — table full (%d)\n",
                n_revoke_subscribers);
-        (void)mach_port_deallocate(mach_task_self(), notify_port);
         return CAP_ERR_NO_MEMORY;
     }
 
@@ -719,6 +761,7 @@ int
 main(int argc, char **argv)
 {
     kern_return_t kr;
+    const char *key_source;
 
     kr = bootstrap_ports(bootstrap_port,
                          &host_port, &device_port,
@@ -740,10 +783,15 @@ main(int argc, char **argv)
     printf("cap: argc=%d\n", argc);
     (void)argv;
 
-    cap_key_init();
+    key_source = cap_key_init();
     cap_table_init();
     cap_manifest_table_init();
-    printf("cap: hmac key initialized, table ready\n");
+    if (key_source != NULL)
+        printf("cap: hmac key from %s, table ready (#744)\n", key_source);
+    else
+        printf("cap: hmac key from the TSC alone -- this processor has no "
+               "RDSEED or RDRAND that answers, so the key can be guessed "
+               "(#744)\n");
 
     int ekr = cap_key_export_to_kernel();
     if (ekr != KERN_SUCCESS)
@@ -751,11 +799,19 @@ main(int argc, char **argv)
     else
         printf("cap: kernel hmac key registered via urmach_cap_register\n");
 
-    kr = mach_port_allocate(mach_task_self(),
-                            MACH_PORT_RIGHT_RECEIVE,
-                            &cap_port);
+    /*
+     * 🔴 THE PORT IS BOOTSTRAP'S TO GIVE (#744).  It used to be a port of
+     * this server's making, published under a name that any task could check
+     * in first -- and six start before this one.  Bootstrap makes the port
+     * with the other registered ports, every task inherits it in
+     * CAP_SERVER_SLOT, the name server publishes it as "cap_server" before
+     * anyone can ask, and the receive right is bootstrap's to hand over, on
+     * this server's own bootstrap port, to cap_server and nobody else.
+     * Requests sent before this point wait in its queue.
+     */
+    kr = service_checkin(bootstrap_port, urmach_cap_server_port, &cap_port);
     if (kr != KERN_SUCCESS) {
-        printf("cap: mach_port_allocate failed (%d)\n", kr);
+        printf("cap: service_checkin of CAP_SERVER_SLOT failed (%d)\n", kr);
         return 1;
     }
 
@@ -785,12 +841,8 @@ main(int argc, char **argv)
         return 1;
     }
 
-    kr = netname_check_in(name_server_port, "cap_server",
-                          MACH_PORT_NULL, cap_port);
-    if (kr != KERN_SUCCESS)
-        printf("cap: netname_check_in failed (%d)\n", kr);
-    else
-        printf("cap: registered as \"cap_server\"\n");
+    printf("cap: serving CAP_SERVER_SLOT's port 0x%x, which the name server "
+           "publishes as \"cap_server\" (#744)\n", (unsigned)cap_port);
 
     /* #209: cap_server boots before gpu_server in bootstrap.conf
      * (gpu_server cap_subscribe_revoke's against us at startup), so

@@ -2183,15 +2183,22 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 	bench_clock_port = clock;
 
-	/* Discover servers via netname.
-	 * Try per-partition name (ahci0a) first, fall back to legacy name. */
-	const char *ahci_name = "ahci0a";
-	kr = netname_look_up(name_server_port, "", "ahci0a", &ahci_port);
-	if (kr != KERN_SUCCESS) {
-		ahci_name = "ahci_driver";
-		kr = netname_look_up(name_server_port, "", "ahci_driver",
-				     &ahci_port);
-	}
+	/*
+	 * 🔴 THE RAW SUITE WRITES, SO IT TAKES A PARTITION NOBODY HOLDS (#744).
+	 * It took ahci0a, falling back to the legacy whole-disk "ahci_driver",
+	 * and ext_server mounts ahci0a as / on x86-64: the writes at its end
+	 * would have landed in a mounted filesystem whenever this task was given
+	 * a capability, and it was given none -- it had no manifest -- so the
+	 * suite was skipped instead, every boot since #511.  ahci0c is the
+	 * scratch partition cap_test writes for #596's reason.  Without one, no
+	 * raw suite, said; never a partition somebody may have mounted.
+	 */
+	const char *ahci_name = "ahci0c";
+	kr = netname_look_up(name_server_port, "", "ahci0c", &ahci_port);
+	if (kr != KERN_SUCCESS)
+		printf("  raw bench: no scratch partition \"ahci0c\" (kr=%d), "
+		       "raw skipped -- it writes, and writes nowhere else "
+		       "(#744)\n", kr);
 	if (kr == KERN_SUCCESS) {
 		/*
 		 * Authenticate the partition port through the capability

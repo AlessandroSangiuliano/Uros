@@ -96,6 +96,18 @@ cap_server_port(void)
         return cached_cap_port;
     }
 
+    /*
+     * #744: the cap_server bootstrap started, from the registered port every
+     * task inherits, before any name.  The name was whoever checked it in
+     * first, and the first port found was kept for the task's life.  The name
+     * is still asked by a task outside bootstrap's lineage, which has no slot;
+     * the name server publishes it for the same port before anyone can ask.
+     */
+    if (MACH_PORT_VALID(urmach_cap_server_port)) {
+        cached_cap_port = urmach_cap_server_port;
+        return cached_cap_port;
+    }
+
     kr = netname_look_up(name_server_port, "",
                          (char *)CAP_SERVER_NETNAME, &port);
     if (kr != KERN_SUCCESS)
@@ -175,9 +187,9 @@ __attribute__((weak)) cap_subscribe_revoke(mach_port_t notify_port)
     mach_port_t srv = cap_server_port();
     if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
     /*
-     * mach_port_send_t in MIG expands to (port, type) at the wire.
-     * The user gives us a send right; pass it as MOVE_SEND so the
-     * kernel transfers ownership and we don't keep a stale copy.
+     * mach_port_send_t in MIG expands to (port, type) at the wire.  COPY_SEND:
+     * the caller keeps its right, and cap_server holds one of its own.  (This
+     * said MOVE_SEND, which the call never passed.)
      */
     return mig_cap_subscribe_revoke(srv, notify_port,
                                     MACH_MSG_TYPE_COPY_SEND);

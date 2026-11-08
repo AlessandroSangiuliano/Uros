@@ -1,0 +1,20 @@
+Kind: widen
+Issue: #744
+Holds open: a revocation no subscriber is told of -- cap_server sends no notice at all, as when a subscriber's queue is full, its slot was never had, or cap_server has stopped, and says so for every one, so that a fixed run that passes shows the notices were missing; a server must still see the revocation, at its next use, from the kernel's epoch
+Run: --entry 14 1200 -smp 1
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 0fd77c61..b2d0c5d6 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -143,7 +143,9 @@ revoke_subscribers_remove_at(int i)
+ static void
+ fanout_revoke_notify(uint64_t cap_id)
+ {
+-    int i = 0;
++    printf("cap: widen #744: the notice of %llu is sent to nobody\n",
++           (unsigned long long)cap_id);
++    int i = n_revoke_subscribers;
+     while (i < n_revoke_subscribers) {
+         kern_return_t kr = cap_revoke_notify(revoke_subscribers[i], cap_id);
+         /*

@@ -597,10 +597,9 @@ boot_open_file(const char *path, struct file *fp)
 }
 
 /*
- * cap_server_checked_in -- wait until cap_server's name is checked in with the
- * name server, or until cap_server is gone (#412).  Returns 1 once the name is
- * there; 0 when cap_server was never started, died first, or the wait could
- * not be set up, which is said.
+ * cap_server_checked_in -- wait until cap_server has taken its slot's receive
+ * right from bootstrap, or is gone (#412, #744).  Returns 1 once it has; 0 when
+ * cap_server was never started, or died first.
  *
  * 🔴 THE WAIT WAS A COUNT OF YIELDS, AND A COUNT OF YIELDS IS A DEADLINE.
  * #432 retried cap_provision two hundred times with a depressed yield between
@@ -613,82 +612,40 @@ boot_open_file(const char *path, struct file *fp)
  * yields last is what a yield costs, and that changes with the accelerator,
  * the host and the kernel: a bound that holds on one is a deadline on the next.
  *
- * 🔑 So the wait ends on a FACT, as stage 2's does (#520): the name server
- * says the name is checked in -- at once when it already is -- or cap_server
- * is gone.  STAGE2_POLL_MS is how often it looks up to ask the second
- * question, a polling period and not a verdict.  A server listed BEFORE
- * cap_server is not waited for at all, which is what the bound was for: no
- * boot hangs on a server behind it in the queue.
+ * 🔑 So the wait ends on a FACT, as stage 2's does (#520).  A server listed
+ * BEFORE cap_server is not waited for at all, which is what the bound was for:
+ * no boot hangs on a server behind it in the queue.
  *
- * ⚠️ The notify port stays out of bootstrap_set, for stage 2's reason: the
- * service thread would take the notification.  The send right it carries is
- * dropped, since libcap looks the name up itself.
+ * 🔴 AND THE FACT WAS A NAME (#744).  It was cap_server's name checked in with
+ * the name server, which any task could check in first; the name server now
+ * publishes "cap_server" before anyone can ask, so the name says nothing about
+ * cap_server.  What does is bootstrap's own: the service thread handing
+ * cap_server its slot (do_service_checkin()), or the notification of its
+ * death.  Each sets its flag and wakes this wait (bootstrap_wake()), so there
+ * is no polling period left either.  A request to the slot's port waits in its
+ * queue until cap_server serves it.
  */
 static int
 cap_server_checked_in(void)
 {
-	static int		checked_in;
-	mach_port_t		notify_port = MACH_PORT_NULL;
-	netname_notify_msg_t	nmsg;
-	kern_return_t		kr;
+	static int	checked_in;
+	int		up;
 
 	if (checked_in)
 		return 1;
-	/*
-	 * A cap_server already gone is a fact before the name server is asked:
-	 * asking would leave a watcher there that nothing ever answers, and
-	 * cost the child a polling period before the death was looked at (the
-	 * cloud audit of #412, 14/10).
-	 */
-	if (cap_server_sp == NULL || (cap_server_sp->flags & SERVER_DIED_F))
+	if (cap_server_sp == NULL)
 		return 0;
 
-	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_RECEIVE,
-				&notify_port);
-	if (kr != KERN_SUCCESS) {
-		BOOTSTRAP_IO_LOCK();
-		printf("%s: waiting for cap_server: notify port alloc "
-		       "failed (%d)\n", program_name, kr);
-		BOOTSTRAP_IO_UNLOCK();
-		return 0;
-	}
+	pthread_mutex_lock(&start_mutex);
+	while (!service_cap_server_taken() &&
+	       !(cap_server_sp->flags & SERVER_DIED_F))
+		pthread_cond_wait(&start_condition, &start_mutex);
+	up = service_cap_server_taken() &&
+	     !(cap_server_sp->flags & SERVER_DIED_F);
+	pthread_mutex_unlock(&start_mutex);
 
-	kr = netname_notify(name_server_port, (char *)"cap_server",
-			    notify_port);
-	if (kr != KERN_SUCCESS) {
-		BOOTSTRAP_IO_LOCK();
-		printf("%s: waiting for cap_server: netname_notify "
-		       "failed (%d)\n", program_name, kr);
-		BOOTSTRAP_IO_UNLOCK();
-		(void)mach_port_destroy(bootstrap_self, notify_port);
-		return 0;
-	}
-
-	for (;;) {
-		kr = mach_msg(&nmsg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-			      0, sizeof(nmsg), notify_port,
-			      STAGE2_POLL_MS, MACH_PORT_NULL);
-		if (kr == KERN_SUCCESS)
-			break;
-
-		if (kr != MACH_RCV_TIMED_OUT) {
-			BOOTSTRAP_IO_LOCK();
-			printf("%s: waiting for cap_server: notification "
-			       "recv failed (%d)\n", program_name, kr);
-			BOOTSTRAP_IO_UNLOCK();
-			(void)mach_port_destroy(bootstrap_self, notify_port);
-			return 0;
-		}
-
-		if (cap_server_sp->flags & SERVER_DIED_F) {
-			(void)mach_port_destroy(bootstrap_self, notify_port);
-			return 0;
-		}
-	}
-	(void)mach_port_deallocate(bootstrap_self, nmsg.service.name);
-	(void)mach_port_destroy(bootstrap_self, notify_port);
-	checked_in = 1;
-	return 1;
+	checked_in = up;
+	return up;
 }
 
 /*
@@ -1006,6 +963,13 @@ main(int argc, char **argv)
 	service_init();
 
 	/*
+	 * #744: libcap asks the cap_server bootstrap starts, not a name.  Every
+	 * child finds the port in its registered ports, and bootstrap, whose own
+	 * were read before it made them, is told here.
+	 */
+	urmach_cap_server_port = bootstrap_cap_server_port();
+
+	/*
 	 * task_set_exception_ports requires a send right (and
 	 * task_set_bootstrap_port too: server_bootstrap_port_make()).
 	 */
@@ -1168,6 +1132,16 @@ main(int argc, char **argv)
 			       bootstrap_service_thread, NULL);
 		pthread_detach(svc_th);
 	}
+
+	/*
+	 * #744: with no cap_server in bootstrap.conf, nobody takes its slot,
+	 * and what waits there would wait for ever.
+	 */
+	for (i = 0; i < nservers; i++)
+	    if (strcmp(servers[i].symtab_name, "cap_server") == 0)
+		break;
+	if (i == nservers)
+	    service_cap_server_refuse();
 
 	/*
 	 * Start all servers
@@ -1334,8 +1308,21 @@ main(int argc, char **argv)
 	     * finished starting, which is what the wait inside the call above
 	     * is for.
 	     */
-	    if (strcmp(sp->symtab_name, "cap_server") == 0)
+	    if (strcmp(sp->symtab_name, "cap_server") == 0) {
 		cap_server_sp = sp;
+		/*
+		 * #744: the kernel takes its HMAC key from this task and no
+		 * other, told before the task has a thread.  It used to take it
+		 * from whichever task installed a key first.
+		 */
+		kr = urmach_cap_server_set(bootstrap_master_host_port, user_task);
+		if (kr != KERN_SUCCESS) {
+		    BOOTSTRAP_IO_LOCK();
+		    printf("%s: urmach_cap_server_set failed (%d): no task may "
+			   "install the capability key\n", program_name, kr);
+		    BOOTSTRAP_IO_UNLOCK();
+		}
+	    }
 
 	    kr = thread_create(user_task, &user_thread);
 	    if (kr != KERN_SUCCESS)
@@ -1859,11 +1846,38 @@ server_by_bootstrap_port(mach_port_t port)
 	return 0;
 }
 
+/* #744: the server a bootstrap port is, by its name in bootstrap.conf. */
+const char *
+bootstrap_server_name(mach_port_t bootstrap_port)
+{
+	struct server *sp = server_by_bootstrap_port(bootstrap_port);
+
+	return sp != 0 ? sp->symtab_name : NULL;
+}
+
+/*
+ * #744: a fact somebody may be waiting for on start_condition -- a slot taken
+ * (do_service_checkin()) or a server dead (bootstrap_notify_dead_name()).  The
+ * writer sets its flag, then broadcasts under the mutex, so a waiter that read
+ * the flag clear is already waiting when the broadcast comes.
+ */
+void
+bootstrap_wake(void)
+{
+	pthread_mutex_lock(&start_mutex);
+	pthread_cond_broadcast(&start_condition);
+	pthread_mutex_unlock(&start_mutex);
+}
+
 boolean_t
 bootstrap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	/*
+	 * #744: a server's own bootstrap port also takes service_checkin(), so
+	 * that the port the request arrives on says which server wants a slot.
+	 */
 	if (server_by_bootstrap_port(in->msgh_local_port) != 0)
-		return bootstrap_server(in, out);
+		return bootstrap_server(in, out) || service_server(in, out);
 	return service_demux(in, out);
 }
 
@@ -2402,6 +2416,14 @@ bootstrap_notify_dead_name(mach_port_t name)
 	 * server is gone, and it is not serialised.
 	 */
 	sp->flags |= SERVER_DIED_F;
+
+	/*
+	 * #744: a cap_server that died before taking its slot leaves requests
+	 * waiting in the slot's queue for a server that is not coming.
+	 */
+	if (sp == cap_server_sp)
+	    service_cap_server_refuse();
+	bootstrap_wake();
 
 	if (sp->flags & SERVER_SERIALIZE_F)
 	    server_mark_completed(sp);

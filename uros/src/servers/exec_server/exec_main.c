@@ -104,6 +104,7 @@ int
 main(int argc, char **argv)
 {
     kern_return_t kr;
+    mach_port_t sig = MACH_PORT_NULL;
 
     (void)argc; (void)argv;
 
@@ -144,8 +145,11 @@ main(int argc, char **argv)
         printf("exec: insert_right failed kr=%d\n", kr);
         return 1;
     }
-    kr = netname_check_in(name_server_port, (char *)"exec_server",
-                          MACH_PORT_NULL, exec_port);
+    /* #744: signed with a port only this task holds, not MACH_PORT_NULL. */
+    kr = urmach_netname_signature(&sig);
+    if (kr == KERN_SUCCESS)
+        kr = netname_check_in(name_server_port, (char *)"exec_server",
+                              sig, exec_port);
     if (kr != NETNAME_SUCCESS) {
         printf("exec: netname_check_in failed kr=%d\n", kr);
         return 1;

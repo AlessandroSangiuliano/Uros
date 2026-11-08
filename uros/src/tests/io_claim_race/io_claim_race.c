@@ -586,6 +586,7 @@ main(int argc, char **argv)
 	mach_port_t	host = MACH_PORT_NULL, device = MACH_PORT_NULL;
 	mach_port_t	lw = MACH_PORT_NULL, lp = MACH_PORT_NULL, sec = MACH_PORT_NULL;
 	mach_port_t	mine = MACH_PORT_NULL, peer;
+	mach_port_t	sig = MACH_PORT_NULL;
 	kern_return_t	kr;
 	unsigned	round, ncpu;
 	unsigned	torn = 0, empty = 0, starved = 0, half_starved = 0, odd_refusal = 0;
@@ -616,9 +617,10 @@ main(int argc, char **argv)
 			       &mine) != KERN_SUCCESS
 	    || mach_port_insert_right(mach_task_self(), mine, mine,
 				      MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS
+	    || urmach_netname_signature(&sig) != KERN_SUCCESS	/* #744 */
 	    || netname_check_in(name_server_port, (char *)(judge ? NAME_A
 							         : NAME_B),
-				MACH_PORT_NULL, mine) != NETNAME_SUCCESS) {
+				sig, mine) != NETNAME_SUCCESS) {
 		if (judge) {
 			printf("io_claim_race: WRONG — could not register "
 			       "\"%s\"\n", judge ? NAME_A : NAME_B);

@@ -2090,6 +2090,7 @@ int
 main(int argc, char **argv)
 {
     kern_return_t kr;
+    mach_port_t sig = MACH_PORT_NULL;
     (void)argc; (void)argv;
 
     kr = bootstrap_ports(bootstrap_port,
@@ -2139,8 +2140,11 @@ main(int argc, char **argv)
     (void)mach_port_insert_right(mach_task_self(), mount_port, mount_port,
                                  MACH_MSG_TYPE_MAKE_SEND);
 
-    kr = netname_check_in(name_server_port, (char *)"proc_server",
-                          MACH_PORT_NULL, proc_port);
+    /* #744: signed with a port only this task holds, not MACH_PORT_NULL. */
+    kr = urmach_netname_signature(&sig);
+    if (kr == KERN_SUCCESS)
+        kr = netname_check_in(name_server_port, (char *)"proc_server",
+                              sig, proc_port);
     if (kr != NETNAME_SUCCESS) {
         printf("proc: netname_check_in failed kr=%d\n", kr);
         return proc_bringup_fatal(kr);

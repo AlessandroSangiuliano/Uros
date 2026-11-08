@@ -1,0 +1,34 @@
+Kind: ablation
+Issue: #744
+Takes out: both halves -- the name server's refusal of a signature that cannot sign (cb27c9c9), and the signature "cap_server" is published under (86ccc8d7), which becomes MACH_PORT_NULL -- so any task presenting MACH_PORT_NULL can check the name in again over the port bootstrap made, as it could over cap_server's own before; [33] takes the name, says so, and puts it back
+Run: --entry 14 1200 -smp 1
+Expect: cap_test: \[33\] WRONG .*no signature: 0, not NETNAME_INVALID_PORT\(1004\)
+
+diff --git a/uros/src/servers/name_server/netname.c b/uros/src/servers/name_server/netname.c
+index b99712fd..ac649b17 100644
+--- a/uros/src/servers/name_server/netname.c
++++ b/uros/src/servers/name_server/netname.c
+@@ -233,7 +233,7 @@ main(int argc, char **argv)
+ 				    MACH_PORT_RIGHT_SEND, 1);
+ 	if (kr == KERN_SUCCESS)
+ 	    kr = do_netname_check_in(netname_port, (char *)"cap_server",
+-				     mach_task_self(), urmach_cap_server_port);
++				     MACH_PORT_NULL, urmach_cap_server_port);
+ 	if (kr != KERN_SUCCESS) {
+ 	    panic("%s: netname_check_in(cap_server): %s\n",
+ 		  program, mach_error_string(kr));
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+index 46932265..eb29262d 100644
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -358,7 +358,9 @@ notify_watchers_for(netname_name_in_t key, mach_port_t service_port)
+ static boolean_t
+ signature_can_sign(mach_port_t sig, mach_port_t port)
+ {
+-    return MACH_PORT_VALID(sig) && sig != port;
++    (void)sig;
++    (void)port;
++    return TRUE;
+ }
+ 
+ kern_return_t

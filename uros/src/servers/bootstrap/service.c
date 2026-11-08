@@ -75,6 +75,7 @@
 #define MACH_INIT_SLOTS		1
 #include <mach_init.h>
 
+#include <string.h>
 #include <mach.h>
 #include <mach/message.h>
 #include <mach/notify.h>
@@ -114,6 +115,55 @@ mach_port_t
 bootstrap_name_server_port(void)
 {
 	return services[NAME_SERVER_SLOT].service;
+}
+
+/*
+ * 🔴 WHICH SERVER A SLOT'S RECEIVE RIGHT IS FOR (#744), by its name in
+ * bootstrap.conf.  service_checkin() used to give a slot to whoever asked
+ * for it first, on the service port every task inherits, and could not tell
+ * who that was: before the name server took its slot, or after it died and
+ * the port came back here, any task could have become the name server -- and
+ * the environment slot, which nothing takes, was anyone's.  A slot with no
+ * server here is nobody's.
+ */
+static const char *const slot_server[MACH_PORTS_SLOTS_USED] = {
+	[NAME_SERVER_SLOT]	= "name_server",
+	[CAP_SERVER_SLOT]	= "cap_server",
+};
+
+/* #744: the port bootstrap made for cap_server, which libcap is given. */
+mach_port_t
+bootstrap_cap_server_port(void)
+{
+	return services[CAP_SERVER_SLOT].service;
+}
+
+/* #744: whether cap_server has taken its slot's receive right. */
+boolean_t
+service_cap_server_taken(void)
+{
+	return services[CAP_SERVER_SLOT].taken;
+}
+
+/*
+ * #744: what waits on an untaken slot is refused from now on -- its server
+ * died before it took it, or bootstrap.conf does not name one.  The port goes
+ * into bootstrap_set, where service_demux() destroys what arrives without an
+ * answer, so a sender learns the server is gone (MIG_SERVER_DIED) instead of
+ * waiting for it for ever.
+ */
+void
+service_cap_server_refuse(void)
+{
+	kern_return_t kr;
+
+	if (services[CAP_SERVER_SLOT].taken)
+		return;
+	kr = mach_port_move_member(mach_task_self(),
+				   services[CAP_SERVER_SLOT].service,
+				   bootstrap_set);
+	if (kr != KERN_SUCCESS)
+		panic("%s: mach_port_move_member: %d\n", program_name, kr);
 }
 
 void
@@ -296,7 +346,20 @@ service_init(void)
 		program_name, kr);
     }
 
+    /*
+     * ⚠️ All but cap_server's (#744).  A port in bootstrap_set that its
+     * server has not taken yet has what arrives on it destroyed unanswered,
+     * and a sender gets MIG_SERVER_DIED.  The name server is first in every
+     * bootstrap.conf and takes its slot before another task starts; cap_server
+     * is not, and everyone finds its port from the start -- inherited, and
+     * under "cap_server", which the name server publishes for it.  So its
+     * port is kept out, a request waits in its queue until cap_server takes
+     * the receive right, and service_cap_server_refuse() puts it in when
+     * nobody will.
+     */
     for (i = 0; i < services_count; i++) {
+	if (i == CAP_SERVER_SLOT)
+	    continue;
 	kr = mach_port_move_member(mach_task_self(),
 				   services[i].service, bootstrap_set);
 	if (kr != KERN_SUCCESS) {
@@ -498,12 +561,30 @@ do_service_checkin(mach_port_t request,
 {
     unsigned int i;
     kern_return_t kr;
+    const char *asker;
 
     if (!MACH_PORT_VALID(requested))
 	return KERN_FAILURE;
 
+    /*
+     * #744: only the server a slot is for, asking on its own bootstrap port,
+     * which says who it is (#620) -- slot_server[] above says why.  The
+     * service port every task inherits names nobody.
+     */
+    asker = bootstrap_server_name(request);
+
     for (i = 0; i < services_count; i++)
 	if ((services[i].service == requested) && !services[i].taken) {
+	    if (asker == NULL || i >= MACH_PORTS_SLOTS_USED ||
+		slot_server[i] == NULL || strcmp(asker, slot_server[i]) != 0) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: service_checkin: slot %u refused to %s (#744)\n",
+		       program_name, i,
+		       asker != NULL ? asker : "a task asking on the shared service "
+		       "port");
+		BOOTSTRAP_IO_UNLOCK();
+		return KERN_NO_ACCESS;
+	    }
 #ifdef	DEBUG
 	    if (debug) {
 		BOOTSTRAP_IO_LOCK();
@@ -523,6 +604,7 @@ do_service_checkin(mach_port_t request,
 	    }
 
 	    *granted = requested;
+	    bootstrap_wake();		/* #744: cap_server_checked_in() */
 	    return KERN_SUCCESS;
 	}
 

@@ -154,7 +154,13 @@ main(int argc, char **argv)
 		program, mach_error_string(kr));
     }
 
-    kr = service_checkin(service_port, name_server_port, &netname_port);
+    /*
+     * #744: asked on this server's own bootstrap port, which names it to
+     * bootstrap, and not on the service port every task inherits.  Bootstrap
+     * gives the name server's slot only to the name server now, and it gave
+     * it to whoever asked first -- after a death of this server, any task.
+     */
+    kr = service_checkin(bootstrap_port, name_server_port, &netname_port);
     if (kr != KERN_SUCCESS) {
 	panic("%s: service_checkin: %s\n",
 	      program, mach_error_string(kr));
@@ -203,6 +209,35 @@ main(int argc, char **argv)
     if (kr != KERN_SUCCESS) {
 	panic("%s: netname_check_in: %s\n",
 		program, mach_error_string(kr));
+    }
+
+    /*
+     * 🔴 "cap_server" IS PUBLISHED HERE, BEFORE ANYONE ELSE CAN ASK (#744).
+     *
+     * The name was cap_server's to check in when it got round to it, and a
+     * name nobody holds goes to whoever asks first: six tasks start before
+     * cap_server in the x86-64 bundle.  Its port is the registered port in
+     * CAP_SERVER_SLOT, which bootstrap made and gives only to cap_server, so
+     * the name can say which port it is from the start -- and nothing reaches
+     * this server before it serves, since what arrives before the slot is
+     * taken is bootstrap's and what arrives after waits until the loop below.
+     * Signed as this server's own names are, and like them refused to anyone
+     * else; a request to the port waits in its queue until cap_server takes
+     * the receive right.
+     */
+    if (MACH_PORT_VALID(urmach_cap_server_port)) {
+	kr = mach_port_mod_refs(mach_task_self(), mach_task_self(),
+				MACH_PORT_RIGHT_SEND, 1);
+	if (kr == KERN_SUCCESS)
+	    kr = mach_port_mod_refs(mach_task_self(), urmach_cap_server_port,
+				    MACH_PORT_RIGHT_SEND, 1);
+	if (kr == KERN_SUCCESS)
+	    kr = do_netname_check_in(netname_port, (char *)"cap_server",
+				     mach_task_self(), urmach_cap_server_port);
+	if (kr != KERN_SUCCESS) {
+	    panic("%s: netname_check_in(cap_server): %s\n",
+		  program, mach_error_string(kr));
+	}
     }
 
     /* Prepare our port set. */

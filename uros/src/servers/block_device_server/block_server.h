@@ -328,6 +328,15 @@ struct blk_handle {
 	uint64_t		cap_id;		/* matched against cap_revoke_notify */
 	int			revoked;	/* set by blk_cap_revoke_notify (#183) */
 	/*
+	 * #744: the token the open was granted on, what it was checked for and
+	 * against, and urmach_cap_epoch() before that check -- so a revocation
+	 * the notice never brought is still seen at the handle's next use.
+	 */
+	struct uros_cap		cap;
+	uint32_t		cap_op;
+	uint64_t		cap_resource_id;
+	uint32_t		cap_epoch;
+	/*
 	 * #614: what the handle was opened for, D_READ and D_WRITE as the open
 	 * asked them -- the token was checked for exactly those, so a transfer
 	 * in a direction not named here holds no right to it.  said_mode keeps

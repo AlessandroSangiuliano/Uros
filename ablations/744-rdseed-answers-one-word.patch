@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #744
+Takes out: nothing -- a probe: RDSEED answers 0xFFFFFFFF with the carry set on every step, as AMD's RDRAND has on some processors and firmware; the block of equal words must be refused, and the key taken from RDRAND, which still answers
+Run: --entry 14 1200 -smp 1
+Expect: cap: hmac key from RDRAND, table ready \(#744\)
+
+diff --git a/uros/src/servers/cap_server/cap_table.c b/uros/src/servers/cap_server/cap_table.c
+index b1a81fdd..b34efc5a 100644
+--- a/uros/src/servers/cap_server/cap_table.c
++++ b/uros/src/servers/cap_server/cap_table.c
+@@ -192,6 +192,7 @@ static inline int cap_rdseed32(uint32_t *v)
+ {
+     unsigned char ok;
+     __asm__ volatile("rdseed %0; setc %1" : "=r" (*v), "=qm" (ok) :: "cc");
++    *v = 0xffffffffu;
+     return ok;
+ }
+ 

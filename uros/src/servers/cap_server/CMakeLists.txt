@@ -17,12 +17,26 @@ set(CAP_REVOKE_USER_MIG_H "${CMAKE_BINARY_DIR}/generated/cap_revoke.h")
 set_source_files_properties(${CAP_REVOKE_USER_MIG_C} ${CAP_REVOKE_USER_MIG_H}
   PROPERTIES GENERATED TRUE)
 
+# #744: service.defs's user half, for service_checkin() -- cap_server takes its
+# slot's receive right from bootstrap as the name server takes its own.  Not
+# libservice's: that one is made with bare migcom and no target, which is i386
+# layout (#426), and is built only there.
+set(_CAP_SVC_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
+set(CAP_SVC_GENERATED)
+add_mig_userland_client(${UROS_UAPI_DIR}/servers/service.defs ${_CAP_SVC_OUT}
+                        CAP_SVC)
+
 set(CAP_SERVER_SOURCES
   cap_server.c
   cap_table.c
   cap_manifest_table.c
   ${CAP_SERVER_MIG_C}
   ${CAP_REVOKE_USER_MIG_C}
+  ${CAP_SVC_GENERATED}
 )
 
 add_executable(cap_server_bin ${CAP_SERVER_SOURCES})
@@ -46,6 +60,8 @@ target_compile_definitions(cap_server_bin PRIVATE
 
 target_include_directories(cap_server_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  # #744: service.h, ahead of the generated/ one i386's libservice writes
+  ${_CAP_SVC_OUT}
   # Mach services include (mach.h, sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # libcap headers (libcap.h, sha256.h, hmac_sha256.h)

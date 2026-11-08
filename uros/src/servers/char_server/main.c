@@ -117,6 +117,7 @@ static int
 publish_service_port(void)
 {
 	kern_return_t kr;
+	mach_port_t sig = MACH_PORT_NULL;
 
 	kr = mach_port_allocate(mach_task_self(),
 				MACH_PORT_RIGHT_PORT_SET, &char_port_set);
@@ -143,8 +144,12 @@ publish_service_port(void)
 		return -1;
 	}
 
-	kr = netname_check_in(name_server_port, "char",
-			      mach_task_self(), char_service_port);
+	/* #744: signed with a port only this task holds -- mach_task_self()
+	 * gave the name server a send right to this task's port. */
+	kr = urmach_netname_signature(&sig);
+	if (kr == KERN_SUCCESS)
+		kr = netname_check_in(name_server_port, "char",
+				      sig, char_service_port);
 	if (kr != KERN_SUCCESS)
 		printf("char_server: netname_check_in(\"char\") failed "
 		       "(kr=%d)\n", kr);

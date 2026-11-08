@@ -104,6 +104,7 @@ static int
 ports_init(void)
 {
 	kern_return_t kr;
+	mach_port_t sig = MACH_PORT_NULL;
 
 	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET,
 	                        &vts_port_set);
@@ -144,8 +145,12 @@ ports_init(void)
 		       (int)kr);
 		return -1;
 	}
-	kr = netname_check_in(name_server_port, VT_SERVICE_NAME,
-	                      mach_task_self(), vts_service_port);
+	/* #744: signed with a port only this task holds -- mach_task_self()
+	 * gave the name server a send right to this task's port. */
+	kr = urmach_netname_signature(&sig);
+	if (kr == KERN_SUCCESS)
+		kr = netname_check_in(name_server_port, VT_SERVICE_NAME,
+		                      sig, vts_service_port);
 	if (kr != NETNAME_SUCCESS)
 		printf("virtual_terminal_server: netname_check_in(\"%s\") "
 		       "kr=%d — VT switches won't reach us\n",

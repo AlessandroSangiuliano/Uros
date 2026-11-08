@@ -56,6 +56,7 @@ mach_port_t	name_server_port = MACH_PORT_NULL;
 mach_port_t	environment_port = MACH_PORT_NULL;
 mach_port_t	service_port = MACH_PORT_NULL;
 mach_port_t	mach_cap_port = MACH_PORT_NULL;	/* #216 v2.1 */
+mach_port_t	urmach_cap_server_port = MACH_PORT_NULL;	/* #744 */
 
 void
 mach_init_ports(void)
@@ -93,6 +94,7 @@ mach_init_ports(void)
 	name_server_port = ports[NAME_SERVER_SLOT];
 	environment_port = ports[ENVIRONMENT_SLOT];
 	service_port     = ports[SERVICE_SLOT];
+	urmach_cap_server_port = ports[CAP_SERVER_SLOT];
 
 	/* get rid of out-of-line data so brk has a chance of working */
 

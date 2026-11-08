@@ -41,6 +41,16 @@ type cap_u64_t = unsigned64 ctype: cap_u64_t;
 
 import <mach/cap_types.h>;
 
+/*
+ *	#744: sent without waiting.  A subscriber whose queue is full used to
+ *	stop cap_server -- one thread, waiting on that send -- and with it every
+ *	capability in the system.  migcom gives a simpleroutine no wait time,
+ *	so MACH_SEND_TIMEOUT here is a timeout of zero: the notice is not sent
+ *	and cap_server goes on.  A subscriber must not need it to see a
+ *	revocation; the block server asks the kernel's epoch at every use.
+ */
+MsgOption MACH_SEND_TIMEOUT;
+
 simpleroutine cap_revoke_notify(
 		notify_port	: mach_port_t;
 	in	cap_id		: cap_u64_t);

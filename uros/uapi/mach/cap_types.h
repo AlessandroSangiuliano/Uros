@@ -82,6 +82,16 @@ typedef enum {
      */
     RESOURCE_DMA_BUFFER    = 10,
 
+    /*
+     * Revocation notices (#744): whether a task may ask cap_server to tell it
+     * of every capability revoked.  A PERMISSION, which a manifest grants and
+     * cap_subscribe_revoke() checks, and not a capability: no token of this
+     * type is issued, and cap_acquire() refuses one.  It was anyone's, into
+     * one of eight slots, and a resource server that found them taken heard
+     * of no revocation.
+     */
+    RESOURCE_REVOKE_NOTICES = 11,
+
     RESOURCE_TYPE_MAX
 } cap_resource_type_t;
 
@@ -130,6 +140,9 @@ typedef enum {
  */
 #define CAP_OP_DMA_DEVICE_READ   0x0000000000000001ULL  /* device reads it  */
 #define CAP_OP_DMA_DEVICE_WRITE  0x0000000000000002ULL  /* device writes it */
+
+/* RESOURCE_REVOKE_NOTICES (#744) */
+#define CAP_OP_REVOKE_SUBSCRIBE  0x0000000000000001ULL  /* be told of them */
 
 /* RESOURCE_FILE (reserved for v2) */
 #define CAP_OP_FILE_READ     0x0000000000000001ULL

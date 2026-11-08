@@ -53,6 +53,8 @@
 #include <pthread.h>
 #include <device/device.h>
 #include <device/device_types.h>
+#include <mach/cap_types.h>	/* #744: the two capability traps timed */
+#include <libcap.h>		/* #744: cap_verify, to wait for the key */
 #include "gpu_console.h"
 #include <stdio.h>
 #include <string.h>
@@ -2739,6 +2741,83 @@ bench_mach_print(int iters)
     print_result("mach_print(\"\") trap", elapsed_ns(&t0, &t1), iters);
 }
 
+/*
+ * #744: what a resource server pays per use to see a revocation itself -- the
+ * kernel's revocation epoch, one trap -- beside mach_null's noop trap above.
+ * The block server reads it at every transfer, and asks the token again only
+ * when it has moved.
+ */
+static void
+bench_cap_epoch(int iters)
+{
+    tvalspec_t		t0, t1;
+    volatile kern_return_t sink = 0;
+    int			i;
+
+    for (i = 0; i < WARMUP_ITERS; i++)
+	sink = urmach_cap_epoch();
+
+    get_time(&t0);
+    for (i = 0; i < iters; i++)
+	sink = urmach_cap_epoch();
+    get_time(&t1);
+    (void)sink;
+
+    print_result("urmach_cap_epoch trap (#744)", elapsed_ns(&t0, &t1), iters);
+}
+
+/*
+ * #744: what gpu_server and char_server pay per RPC today, in the kernel --
+ * urmach_cap_verify, which copies the 192-byte token in and computes its HMAC
+ * on every call.  #537's per-processor cache serves callers inside the kernel
+ * only, not this trap.
+ *
+ * ⚠️ With a token that does not verify, so the revocation look-up under
+ * cap_lock, which only a token whose MAC verifies reaches, is left out: this
+ * is the copy and the HMAC, a floor under what a valid token costs.
+ *
+ * ⚠️ AND ONLY WITH A KEY INSTALLED.  Without one the trap answers
+ * CAP_ERR_INTERNAL before computing anything, and a number taken then would be
+ * of a trap that returns early.  So the answer is read first, and anything but
+ * CAP_ERR_INVALID_TOKEN is said and not timed.
+ */
+static void
+bench_cap_verify(int iters)
+{
+    struct uros_cap	bogus;
+    tvalspec_t		t0, t1;
+    kern_return_t	kr;
+    int			i;
+
+    memset(&bogus, 0x5A, sizeof(bogus));
+    /*
+     * cap_server installs its key before its first receive, so an answer
+     * from it -- to the same garbage, by RPC -- says the key is in.  The RPC
+     * waits in CAP_SERVER_SLOT's queue until cap_server serves, and is
+     * refused at once in a bundle with no cap_server, which leaves the trap
+     * below to say so.
+     */
+    (void)cap_verify(&bogus, 1, 0);
+    kr = urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+    if (kr != CAP_ERR_INVALID_TOKEN) {
+	printf("  urmach_cap_verify (#744): NOT ASKED -- a garbage token came "
+	       "back %d, not CAP_ERR_INVALID_TOKEN(%d): no key installed, so "
+	       "no HMAC to time\n", (int)kr, CAP_ERR_INVALID_TOKEN);
+	return;
+    }
+
+    for (i = 0; i < WARMUP_ITERS; i++)
+	(void)urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+
+    get_time(&t0);
+    for (i = 0; i < iters; i++)
+	(void)urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+    get_time(&t1);
+
+    print_result("urmach_cap_verify, copy+HMAC (#744)", elapsed_ns(&t0, &t1),
+		 iters);
+}
+
 /* ===================================================================
  * Test suite selection
  *
@@ -4074,6 +4153,8 @@ main(int argc, char **argv)
 
 	bench_mach_null(SYSCALL_BENCH_ITERS);
 	bench_mach_print(SYSCALL_PRINT_ITERS);
+	bench_cap_epoch(SYSCALL_BENCH_ITERS);		/* #744 */
+	bench_cap_verify(SYSCALL_PRINT_ITERS);		/* #744: an HMAC each */
 
 	printf("\n");
     }

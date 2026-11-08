@@ -47,3 +47,12 @@ required 5 0x010000 0x7
 # whether a particular buffer is this task's to give away, because it made the
 # allocation.
 required 10 any 0x3
+
+# RESOURCE_REVOKE_NOTICES (11), any, CAP_OP_REVOKE_SUBSCRIBE (0x1) -- #744.
+#
+# 🔴 A HANDLE IS REVOKED BY THE NOTICE AND BY NOTHING ELSE.  A revoked
+# capability's handle stops answering because cap_server tells this server
+# the id (cap_revoke_notify), and cap_test's [5] reads through one after the
+# revoke to see it refused.  Subscribing was anyone's, into eight slots; it is
+# a permission now, and this is the task it is for.
+required 11 any 0x1

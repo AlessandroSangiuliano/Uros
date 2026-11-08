@@ -811,3 +811,14 @@ routine host_processor_info(
 		flavor			: processor_flavor_t;
 	out	out_processor_count	: natural_t;
 	out	out_processor_info	: processor_info_array_t, CountInOut);
+
+/*
+ *	Which task may install the capability system's HMAC key: the one
+ *	bootstrap started as cap_server, named by the privileged host port
+ *	before that task has a thread (#744).  Until a task is named nobody
+ *	may, and naming another forgets the key.  It used to be whichever task
+ *	installed a key first.
+ */
+routine urmach_cap_server_set(
+		host_priv	: host_priv_t;
+		task		: task_t);

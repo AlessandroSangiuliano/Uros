@@ -639,6 +639,7 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 {
 	mach_port_t	p = MACH_PORT_NULL;
 	mach_port_t	mine = MACH_PORT_NULL;
+	mach_port_t	sig = MACH_PORT_NULL;
 	unsigned	t;
 
 	/*
@@ -674,8 +675,10 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 			       &mine) != KERN_SUCCESS)
 		return 0;
 
-	if (netname_check_in(name_server_port, CHECKER_NAME, MACH_PORT_NULL,
-			     mine) != NETNAME_SUCCESS)
+	/* #744: the name server refuses a null signature. */
+	if (urmach_netname_signature(&sig) != KERN_SUCCESS
+	    || netname_check_in(name_server_port, CHECKER_NAME, sig,
+				mine) != NETNAME_SUCCESS)
 		return 0;
 
 	*keep = mine;
@@ -746,6 +749,7 @@ main(int argc, char **argv)
 	kern_return_t	kr;
 	mach_port_t	host_port, wired, paged, security;
 	mach_port_t	from_holder = MACH_PORT_NULL;
+	mach_port_t	sig = MACH_PORT_NULL;
 
 	kr = bootstrap_ports(bootstrap_port, &host_port, &device_port,
 			     &wired, &paged, &security);
@@ -772,8 +776,9 @@ main(int argc, char **argv)
 		    != KERN_SUCCESS)
 			die();
 
-		if (netname_check_in(name_server_port, HOLDER_NAME,
-				     MACH_PORT_NULL, holder_port)
+		if (urmach_netname_signature(&sig) != KERN_SUCCESS
+		    || netname_check_in(name_server_port, HOLDER_NAME,
+					sig, holder_port)
 		    != NETNAME_SUCCESS) {
 			printf("dma_reclaim: could not register \"%s\"\n",
 			       HOLDER_NAME);

@@ -149,23 +149,111 @@ int cap_verify_hmac(const struct uros_cap *token) {
 }
 
 /*
- * Bootstrap entropy: a defensive mix of sources available pre-Issue-B.
+ * The processor's random source (#744).
  *
- * - cap_tsc_read() is a raw rdtsc — non-zero and boot-time varying
- * - mach_task_self() port name varies per boot
- * - a fixed salt disambiguates distinct uros_cap instances on a shared
- *   kernel image (meaningful once SMP lands)
+ * 🔴 THE KEY WAS A TIMESTAMP.  It was SHA-256 of a TSC reading, this task's
+ * port name and a constant salt, and of those only the TSC is not known in
+ * advance -- read at a point of the boot that is.  A task holding one token
+ * could search that space offline and then sign tokens of its own.
  *
- * The mix is hashed with SHA-256 to derive a 32-byte key.  Issue B
- * replaces this with a kernel-generated key stored in cap_hmac_key and
- * consulted inside urmach_cap_verify.
+ * So the key's bytes come from RDSEED where the processor has it, which is
+ * the entropy source itself (an NRBG), and from RDRAND where it has only that,
+ * a DRBG the source reseeds.  CPUID.07H.00H:EBX.RDSEED[18] and
+ * CPUID.01H:ECX.RDRAND[30] say which (Intel SDM Vol. 1, 253665-093US,
+ * §7.3.17.1-2).
+ *
+ * ⚠️ Either may fail a step, carry clear, when demand outruns the hardware,
+ * and the SDM's answer is a limited number of retries: ten, in its RDRAND
+ * example.  It gives no number for RDSEED; 128 with a pause between them is
+ * ours, since the NRBG cannot be drawn on as fast as the DRBG it seeds.  A
+ * step that never succeeds gives the source up.
+ *
+ * ⚠️ AND A SOURCE THAT ANSWERS IS NOT YET RANDOM.  AMD processors have
+ * returned 0xFFFFFFFF with the carry set on every RDRAND -- families 15h and
+ * 16h after a resume, Zen 2 under early firmware.  CPUID says the instruction
+ * exists, not that its answers are random, so a block whose words are all
+ * equal is refused, as #394 refused a SHA-NI that gave wrong digests: the
+ * check is of the answer.
+ *
+ * With neither, the key falls back to the TSC, and cap_server says so.
  */
-void cap_key_init(void) {
+#define CAP_RDRAND_TRIES   10
+#define CAP_RDSEED_TRIES   128
+#define CAP_KEY_WORDS      8
+
+static inline void cap_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t r[4])
+{
+    __asm__ volatile("cpuid"
+        : "=a" (r[0]), "=b" (r[1]), "=c" (r[2]), "=d" (r[3])
+        : "a" (leaf), "c" (subleaf));
+}
+
+static inline int cap_rdseed32(uint32_t *v)
+{
+    unsigned char ok;
+    __asm__ volatile("rdseed %0; setc %1" : "=r" (*v), "=qm" (ok) :: "cc");
+    return ok;
+}
+
+static inline int cap_rdrand32(uint32_t *v)
+{
+    unsigned char ok;
+    __asm__ volatile("rdrand %0; setc %1" : "=r" (*v), "=qm" (ok) :: "cc");
+    return ok;
+}
+
+/* Whether `n' words came from the source, every step within its tries and
+ * not all of them the same word. */
+static int cap_random_words(uint32_t *w, unsigned n, int rdseed)
+{
+    unsigned i, t, same = 1;
+
+    for (i = 0; i < n; i++) {
+        for (t = 0; t < (rdseed ? CAP_RDSEED_TRIES : CAP_RDRAND_TRIES); t++) {
+            if (rdseed ? cap_rdseed32(&w[i]) : cap_rdrand32(&w[i]))
+                break;
+            __asm__ volatile("pause");
+        }
+        if (t == (rdseed ? CAP_RDSEED_TRIES : CAP_RDRAND_TRIES))
+            return 0;
+        if (w[i] != w[0])
+            same = 0;
+    }
+    return !same;
+}
+
+/*
+ * The key: SHA-256 of the processor's random words, where it has a source
+ * that answers, and of the TSC, this task's port name and a constant salt,
+ * which are all it had before.  Returns which source the random words came
+ * from, for cap_server to say.
+ */
+const char *cap_key_init(void) {
     struct {
+        uint32_t random[CAP_KEY_WORDS];
         uint64_t tsc;
         uint32_t self;
         uint32_t salt[6];
     } seed;
+    uint32_t r[4];
+    const char *source = NULL;
+
+    memset(&seed, 0, sizeof(seed));
+    cap_cpuid(0, 0, r);
+    if (r[0] >= 7) {
+        cap_cpuid(7, 0, r);
+        if ((r[1] & (1u << 18))
+            && cap_random_words(seed.random, CAP_KEY_WORDS, 1))
+            source = "RDSEED";
+    }
+    if (source == NULL) {
+        cap_cpuid(1, 0, r);
+        if ((r[2] & (1u << 30))
+            && cap_random_words(seed.random, CAP_KEY_WORDS, 0))
+            source = "RDRAND";
+    }
+    if (source == NULL)
+        memset(seed.random, 0, sizeof(seed.random));
 
     seed.tsc = cap_tsc_read();
     seed.self = (uint32_t)mach_task_self();
@@ -178,6 +266,7 @@ void cap_key_init(void) {
     seed.salt[5] = 0x9e87cd32;
 
     sha256(&seed, sizeof(seed), cap_hmac_key);
+    return source;
 }
 
 /*

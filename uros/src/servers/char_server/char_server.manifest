@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# char_server manifest -- the policy for the task that owns the keyboard and
+# the serial lines (#744).
+#
+# 🔴 IT HAD NONE, AND NEEDED ONE THE MOMENT SUBSCRIBING TO REVOCATIONS DID.
+# char_server acquires nothing: it verifies the tokens its clients bring with
+# the kernel (urmach_cap_verify) and keeps a keyboard subscription per token.
+# What it asks cap_server for is to be told when one of those is revoked, so
+# that a revoked token stops receiving keys -- and that is a permission now,
+# granted by a manifest and asked for on the per-task port bootstrap gives a
+# task that ships one.  A server with no policy file has no such port.
+
+name char_server
+
+# RESOURCE_REVOKE_NOTICES (11), any, CAP_OP_REVOKE_SUBSCRIBE (0x1).
+required 11 any 0x1

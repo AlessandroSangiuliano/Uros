@@ -90,7 +90,7 @@ extern kern_return_t urmach_cap_use(const struct uros_cap *user_token,
 
 /*
  * Add `cap_id` to the revocation set.  Only the cap_server task (the
- * one captured at setup-token time) may call this; other callers get
+ * one bootstrap named, urmach_cap_server_set()) may call this; others get
  * CAP_ERR_UNAUTHORIZED.
  */
 extern kern_return_t urmach_cap_revoke(uint64_t cap_id);
@@ -98,14 +98,24 @@ extern kern_return_t urmach_cap_revoke(uint64_t cap_id);
 /*
  * Setup / bookkeeping entry point:
  *   - If cap_id == 0 the token is a "setup token": the first 32 bytes
- *     of its hmac[] field are installed as the HMAC key and the caller
- *     becomes the trusted cap_server task (trust-on-first-use).  Later
- *     setup-token calls from the same task refresh the key; calls from
- *     other tasks return CAP_ERR_UNAUTHORIZED.
+ *     of its hmac[] field are installed as the HMAC key, if the caller is
+ *     the task urmach_cap_server_set() named; later setup tokens from it
+ *     refresh the key, and from any other task, or before a task is named,
+ *     return CAP_ERR_UNAUTHORIZED (#744 -- it was trust-on-first-use).
  *   - If cap_id != 0 the call is reserved for future cap bookkeeping
  *     (e.g. populating kernel-side metadata); v1 accepts and ignores it.
  */
 extern kern_return_t urmach_cap_register(const struct uros_cap *user_token);
+
+/*
+ * Which task may install the key: the one bootstrap started as cap_server,
+ * by the privileged host port (mach_host.defs, #744).  The kernel keeps a
+ * reference to it; naming another forgets the key.
+ */
+struct host;
+struct task;
+extern kern_return_t urmach_cap_server_set(struct host *host_priv,
+                                           struct task *task);
 /* #537: the revocation epoch, for a server that keeps translations (trap 45) */
 extern kern_return_t urmach_cap_epoch(void);
 
