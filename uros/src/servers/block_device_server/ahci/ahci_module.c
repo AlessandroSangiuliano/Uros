@@ -571,6 +571,23 @@ ahci_port_drop(struct ahci_state *st, int port_idx)
 	struct ahci_port_info *pi = &st->ports[port_idx];
 	int i, kept = 0;
 
+	/*
+	 * 🔴 SILENCED FIRST (#921).  After its start the device's first D2H
+	 * Register FIS set PxIS.DHRS, which PxIE enables, and nothing cleared
+	 * it: the interrupt handler clears PxIS only for the ports in the
+	 * table, and IS's bit for a port comes back while that port's PxIS and
+	 * PxIE meet.  Once GHC.IE came on at the end of the probe the line was
+	 * asserted again as soon as the handler unmasked it -- a storm on the
+	 * processor taking it, which under KVM lost half its ticks of a
+	 * ten-second window ("the clock stopped", five boots out of five with
+	 * the CD drive on port 2, and none where the drive was sent IDENTIFY,
+	 * whose submission happens to clear PxIS).  PxIE off, PxIS cleared,
+	 * then IS's bit, in that order (AHCI 1.3.1 §10.1.2, step 7).
+	 */
+	port_write(st, pi->hba_port, PORT_IE, 0);
+	port_write(st, pi->hba_port, PORT_IS, ~0u);
+	ahci_write(st, AHCI_IS, 1u << pi->hba_port);
+
 	if (pi->clb_uva != 0 && ahci_port_stop(st, pi->hba_port) == 0) {
 		(void) vm_deallocate(mach_task_self(), pi->clb_uva, 4096);
 		(void) device_dma_free(st->master_device, AHCI_BDF(st),
