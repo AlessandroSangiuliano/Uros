@@ -1383,7 +1383,12 @@ ahci_mod_write_batch(void *priv, int disk,
 
 		if (sz == 0)
 			continue;
-		if (data_off + sz > buf_size)
+		/*
+		 * #711: the server's own check, in the order that cannot wrap
+		 * -- data_off + sz did, and the copy below read past the
+		 * caller's buffer.  This module does not know who calls it.
+		 */
+		if (!blk_batch_entry_fits(data_off, sz, buf_size))
 			return -1;
 
 		wr_total = (sz + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
