@@ -575,7 +575,7 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors)
+	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
 	lba = part->start_lba + recnum;
@@ -741,7 +741,7 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors) {
+	if (!blk_part_range_ok(part, recnum, nsectors)) {	/* #711 */
 		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 		return D_INVALID_SIZE;
 	}
