@@ -2046,6 +2046,25 @@ a_handle_stays_inside_its_partition(mach_port_t device_port,
             asked++;
         }
     }
+    /*
+     * And a batch entry inside the partition that is not a whole number of
+     * sectors: an entry is written as whole sectors from its own offset, so
+     * the server's fallback read past it, into the page after the client's
+     * data when that ended near a page's end.  Refused as a size; without the
+     * check the AHCI module writes it padded, to c's first sector, the boot
+     * block an ext2 partition leaves unused.
+     */
+    if (writes) {
+        io_buf_len_t wr = 0;
+        unsigned32   size = 100;
+        recnum_t     r = 0;
+
+        kr = device_write_batch(h, D_WRITE, &r, 1, &size, 1,
+                                (io_buf_ptr_t)zeros, 4096, &wr);
+        ok &= ct36_refused(kr, "device_write_batch of 100 bytes", "inside it",
+                           tname);
+        asked++;
+    }
     if (zeros != 0)
         (void)vm_deallocate(mach_task_self(), zeros, CT36_BYTES);
     if (kva != 0)
@@ -2059,8 +2078,9 @@ a_handle_stays_inside_its_partition(mach_port_t device_port,
     if (ok && writes)
         printf("cap_test: [36] %s: %u requests outside its %u sectors, past "
                "its end and at a block number that wraps, on every path -- "
-               "read, write, batch, both physical ones -- each refused as a "
-               "range (#711)\n", tname, asked, (unsigned)sectors);
+               "read, write, batch, both physical ones -- and a batch entry "
+               "of part of a sector, each refused (#711)\n", tname, asked,
+               (unsigned)sectors);
     else if (ok)
         printf("cap_test: [36] %s: %u reads outside its %u sectors, past its "
                "end and at a block number that wraps, copying and physical, "
