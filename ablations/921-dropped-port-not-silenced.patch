@@ -3,6 +3,7 @@ Issue: #921
 Takes out: the silencing of a dropped port -- PxIE, PxIS and its bit in IS are left as they were, so the empty CD drive on ahci0's port 2 keeps the PxIS.DHRS its first D2H Register FIS set, with PxIE enabling it, and the line is asserted again each time the handler unmasks it once GHC.IE is on; the drop's own readback shows the enable still set.  Under KVM -smp 4 on victus the storm also cost the processor taking it half the ticks of window 1, five boots of five
 Run: --entry 14 600 -smp 4
 Expect: ahci: port 2 dropped, its interrupts off: PxIE 0x0*[1-9A-F]
+Note: 4 of 4 caught and 4 of 4 passed at 2e690366 on victus, TCG and KVM, two boots each: the ablated readback said PxIE 0x40000009, the three enables still set, where the fixed one read 0; and the ablated KVM boot lost half of window 1's ticks on one processor again, the fixed ones none
 
 diff --git a/uros/src/servers/block_device_server/ahci/ahci_module.c b/uros/src/servers/block_device_server/ahci/ahci_module.c
 index 9569692b..54ac00f5 100644
