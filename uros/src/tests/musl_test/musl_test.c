@@ -970,7 +970,7 @@ arm_own_id(void)
 #define R_STAT		3	/* the kind that goes to the file server */
 #define R_STATS		20	/* and how many of it, which ends all four */
 #define R_STATS_LEAST	3	/* #922: the fewest, when its time ends it */
-#define R_STAT_MS	10000	/* #922: the stat thread's time */
+#define R_STAT_STEPS	(2 * WAIT_STEPS)	/* #922: the stat thread's time */
 #define R_STALL_STEPS	(3 * WAIT_STEPS)	/* #922: no call this long */
 
 static const char *const r_kind[R_THREADS] = {
@@ -978,16 +978,13 @@ static const char *const r_kind[R_THREADS] = {
 };
 static int	r_wrong[R_THREADS], r_round[R_THREADS], r_ended[R_THREADS];
 static int	r_done, r_over;
-
-/* #922: milliseconds on the monotonic clock, for the stat thread's time */
-static uint64_t
-r_ms(void)
-{
-	struct timespec	t;
-
-	(void)clock_gettime(CLOCK_MONOTONIC, &t);
-	return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
-}
+/*
+ * #922: the stat thread's time is up -- raised by the wait, which counts it in
+ * the same 10 ms sleeps as everything else here.  Not clock_gettime(): no
+ * handler serves it in libposix-uros, and the first version of this read a
+ * timespec the call had never written, so the time never ran out.
+ */
+static int	r_stat_time_up;
 
 static int
 rpc_others_under_way(void)
@@ -1004,14 +1001,11 @@ static void *
 rpc_thread(void *arg)
 {
 	int		kind = (int)(uintptr_t)arg;
-	uint64_t	t0 = 0;
 	int		i, ok;
 
 	while (kind == R_STAT && !rpc_others_under_way()
 	       && !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST))
 		pause_a_little();
-	if (kind == R_STAT)
-		t0 = r_ms();
 	for (i = 0; ; i++) {
 		struct stat	st;
 
@@ -1035,7 +1029,8 @@ rpc_thread(void *arg)
 		if (kind == R_STAT) {
 			/* #922: on its count, or on its time with a few */
 			if (i + 1 >= R_STATS || (i + 1 >= R_STATS_LEAST &&
-			    r_ms() - t0 >= R_STAT_MS)) {
+			    __atomic_load_n(&r_stat_time_up,
+					    __ATOMIC_SEQ_CST))) {
 				__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST);
 				break;
 			}
@@ -1054,7 +1049,7 @@ arm_threads_in_servers(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, k, n, rc, done, stuck = -1;
+	int		i, k, n, rc, done, stuck = -1, steps = 0;
 	int		seen[R_THREADS] = { 0 }, still[R_THREADS] = { 0 };
 
 	if (access_by_stat(F_PATH) != 0) {
@@ -1078,6 +1073,8 @@ arm_threads_in_servers(void)
 	while (__atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS
 	       && stuck < 0) {
 		pause_a_little();
+		if (++steps == R_STAT_STEPS)
+			__atomic_store_n(&r_stat_time_up, 1, __ATOMIC_SEQ_CST);
 		for (k = 0; k < R_THREADS; k++) {
 			n = __atomic_load_n(&r_round[k], __ATOMIC_SEQ_CST);
 			if (__atomic_load_n(&r_ended[k], __ATOMIC_SEQ_CST)
