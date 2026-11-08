@@ -307,6 +307,26 @@ ahci_wait_port(struct ahci_state *st, int port, unsigned int deadline_ms,
 	return r;
 }
 
+/*
+ * 🔴 A CONTROLLER WITHOUT 64-BIT ADDRESSING IS NEVER HANDED MEMORY ABOVE
+ * 4 GiB (#921).
+ *
+ * With CAP.S64A clear "the 32-bit upper bits of the port DMA Descriptor, the
+ * PRD Base, and each PRD entry ... are read-only and treated as '0' by the
+ * HBA" (AHCI 1.3.1, CAP in §3.1.1).  So the upper halves #520 writes are
+ * dropped, and a buffer above 4 GiB is reached at the same offset in the
+ * bottom 4 GiB -- a DMA into memory that belongs to somebody else.  Nothing
+ * asked: a machine with more than 4 GiB, as lapsus with 12, can be handed
+ * such a buffer.  1 when the controller reaches all of [pa, pa + len).
+ */
+static int
+ahci_dma_reachable(struct ahci_state *st, vm_address_t pa, vm_size_t len)
+{
+	if (ahci_read(st, AHCI_CAP) & CAP_S64A)
+		return 1;
+	return (uint64_t)pa + (uint64_t)len <= 0x100000000ull;
+}
+
 /* ================================================================
  * Port discovery
  * ================================================================ */
@@ -486,6 +506,14 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	pi->fb_dma   = dma_pa  + 1024;
 	pi->fb_uva  = dma_uva + 1024;
 	pi->dma_kva = dma_kva;
+
+	/* #921: given back by the probe's failure, as the page is recorded */
+	if (!ahci_dma_reachable(st, dma_pa, 4096)) {
+		printf("ahci: port %d: its command list page is at 0x%llX, past "
+		       "the 4 GiB this controller can address (no CAP.S64A) -- "
+		       "refused (#921)\n", hba_port, (unsigned long long)dma_pa);
+		return -1;
+	}
 
 	memset((void *)dma_uva, 0, 4096);
 
@@ -864,6 +892,40 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 		for (unsigned p = 0; p < pa_count; p++)
 			new_list[p] = pa_list[p];
 		new_pages = (unsigned int) pa_count;
+
+		/* #921: every page, and the command table, reachable */
+		{
+			unsigned p, far = 0;
+
+			for (p = 0; p < new_pages; p++)
+				if (!ahci_dma_reachable(st, new_list[p], 4096))
+					far++;
+			if (far != 0 ||
+			    !ahci_dma_reachable(st, new_ct_dma, ct_size)) {
+				printf("ahci: %u of %u batch pages, or the "
+				       "command table, are past the 4 GiB this "
+				       "controller can address (no CAP.S64A) -- "
+				       "keeping the buffers it already had "
+				       "(#921)\n", far, new_pages);
+				(void) vm_deallocate(mach_task_self(),
+						     (vm_address_t)pa_list,
+						     (vm_size_t)pa_count
+						     * sizeof(vm_address_t));
+				(void) vm_deallocate(mach_task_self(),
+						     new_data_uva,
+						     n_pages * 4096u);
+				(void) device_dma_free(st->master_device,
+						       AHCI_BDF(st),
+						       new_data_kva,
+						       n_pages * 4096u);
+				(void) vm_deallocate(mach_task_self(),
+						     new_ct_uva, ct_size);
+				(void) device_dma_free(st->master_device,
+						       AHCI_BDF(st),
+						       new_ct_kva, ct_size);
+				return -1;
+			}
+		}
 
 		/*
 		 * ⚠️ Released whatever happens next.  Out-of-line memory a
@@ -1495,6 +1557,16 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	st->data_dma_list[0] = st->data_dma;
 	st->data_n_pages = 1;
+
+	if (!ahci_dma_reachable(st, st->ct_dma, 4096) ||
+	    !ahci_dma_reachable(st, st->data_dma, AHCI_PROBE_BUF_BYTES)) {
+		printf("ahci: the command table (0x%llX) or the data buffer "
+		       "(0x%llX) is past the 4 GiB this controller can address "
+		       "(no CAP.S64A) -- refused (#921)\n",
+		       (unsigned long long)st->ct_dma,
+		       (unsigned long long)st->data_dma);
+		return ahci_probe_fail(st);
+	}
 
 	printf("ahci: DMA: ct at 0x%08lX, data at 0x%08lX — the addresses\n\t       the CONTROLLER is programmed with, not where the memory is\n",
 	       (unsigned long) st->ct_dma,
