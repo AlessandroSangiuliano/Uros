@@ -537,11 +537,11 @@ ahci_port_init(struct ahci_state *st, int port_idx)
  * may still write there, and keeps them.  The table is compacted, so the
  * entries stay in port order.
  */
-static void
+static int
 ahci_port_drop(struct ahci_state *st, int port_idx)
 {
 	struct ahci_port_info *pi = &st->ports[port_idx];
-	int i;
+	int i, kept = 0;
 
 	if (pi->clb_uva != 0 && ahci_port_stop(st, pi->hba_port) == 0) {
 		(void) vm_deallocate(mach_task_self(), pi->clb_uva, 4096);
@@ -550,11 +550,68 @@ ahci_port_drop(struct ahci_state *st, int port_idx)
 	} else if (pi->clb_uva != 0) {
 		printf("ahci: port %d did not stop: its command list and FIS "
 		       "area stay held (#921)\n", pi->hba_port);
+		kept = 1;
 	}
 	for (i = port_idx; i + 1 < st->n_ports; i++)
 		st->ports[i] = st->ports[i + 1];
 	st->n_ports--;
 	memset(&st->ports[st->n_ports], 0, sizeof(st->ports[0]));
+	return kept ? -1 : 0;
+}
+
+/*
+ * 🔴 A PROBE THAT FAILS GIVES BACK WHAT IT WAS LENT (#921).
+ *
+ * Every failure after the shared buffers were allocated returned with them
+ * held, and with the command list and FIS area of each port it had set up:
+ * the DMA region table is shared and finite, and the block server kept the
+ * regions of a controller it was not driving until it died.  lapsus's ICH10
+ * failed its probe so, and the kernel took its two regions back only at the
+ * server's exit: "died holding DMA region 1 (4096 bytes, lent to 0
+ * devices...)".  Each port is stopped and dropped first; if one would not
+ * stop, the controller may still read the command table or write the data
+ * buffer, and those stay held as well, said.  -1, for the caller to return.
+ */
+static int
+ahci_probe_fail(struct ahci_state *st)
+{
+	int		kept = 0;
+	unsigned	given = 0;
+
+	while (st->n_ports > 0) {
+		if (st->ports[0].clb_uva != 0)
+			given++;
+		if (ahci_port_drop(st, 0) < 0) {
+			kept = 1;
+			given--;
+		}
+	}
+	if (kept) {
+		printf("ahci: a port would not stop, so the command table and "
+		       "the data buffer stay held too (#921)\n");
+		return -1;
+	}
+	if (st->ct_uva != 0)
+		(void) vm_deallocate(mach_task_self(), st->ct_uva,
+				     AHCI_PROBE_BUF_BYTES);
+	if (st->ct_kva != 0) {
+		(void) device_dma_free(st->master_device, AHCI_BDF(st),
+				       st->ct_kva, AHCI_PROBE_BUF_BYTES);
+		given++;
+	}
+	if (st->data_uva != 0)
+		(void) vm_deallocate(mach_task_self(), st->data_uva,
+				     AHCI_PROBE_BUF_BYTES);
+	if (st->data_kva != 0) {
+		(void) device_dma_free(st->master_device, AHCI_BDF(st),
+				       st->data_kva, AHCI_PROBE_BUF_BYTES);
+		given++;
+	}
+	st->ct_uva = st->ct_kva = st->ct_dma = 0;
+	st->data_uva = st->data_kva = st->data_dma = 0;
+	printf("ahci: the probe failed, and gave back the %u DMA buffer(s) it "
+	       "had been lent (#921)\n", given);
+	return -1;
 }
 
 /*
@@ -1413,7 +1470,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 				 mach_task_self(), &st->ct_uva);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: CT map of 4096 bytes failed (kr=%d)\n", (int)kr);
-		return -1;
+		st->ct_uva = 0;
+		return ahci_probe_fail(st);
 	}
 
 	/* Initial data buffer (1 page) */
@@ -1422,7 +1480,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: data alloc of %u bytes failed (kr=%d)\n",
 		       (unsigned)AHCI_PROBE_BUF_BYTES, (int)kr);
-		return -1;
+		st->data_kva = 0;
+		return ahci_probe_fail(st);
 	}
 	kr = device_dma_map_user(master_dev, st->data_kva,
 				 AHCI_PROBE_BUF_BYTES,
@@ -1430,7 +1489,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: data map of %u bytes failed (kr=%d)\n",
 		       (unsigned)AHCI_PROBE_BUF_BYTES, (int)kr);
-		return -1;
+		st->data_uva = 0;
+		return ahci_probe_fail(st);
 	}
 
 	st->data_dma_list[0] = st->data_dma;
@@ -1442,11 +1502,11 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	/* HBA reset + AHCI enable */
 	if (ahci_hba_reset(st) < 0)
-		return -1;
+		return ahci_probe_fail(st);
 
 	/* Find and init ports */
 	if (ahci_port_scan(st) < 0)
-		return -1;
+		return ahci_probe_fail(st);
 
 	/*
 	 * #921: a port whose device never became ready, or that is not an ATA
@@ -1457,7 +1517,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		int r = ahci_port_init(st, i);
 
 		if (r < 0)
-			return -1;
+			return ahci_probe_fail(st);
 		if (r > 0 || !ahci_port_is_ata(st, i)) {
 			ahci_port_drop(st, i);
 			continue;
@@ -1490,7 +1550,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	if (st->n_ports == 0) {
 		printf("ahci: no disk on this controller among the devices "
 		       "its ports answered with -- not driving it (#921)\n");
-		return -1;
+		return ahci_probe_fail(st);
 	}
 
 	/* Register IRQ */
