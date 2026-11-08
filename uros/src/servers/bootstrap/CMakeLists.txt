@@ -709,6 +709,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # arms about "/" and "/etc" are refused by.
   set(_MOUNT_TEST_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/mount_test.cmf")
+  # #496 and #716: proc_server mounts /proc, and since #716 a mount is a
+  # capability its manifest grants.  On i386 the manifest comes off the disk
+  # with the image; here a server in the bundle gets only what the bundle holds,
+  # and without it /proc was never registered.
+  set(_PROC_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/proc_server.cmf")
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
@@ -721,6 +727,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             irq_claim_test.cmf:${_IRQ_CMF}
             ext_server.cmf:${_EXT_CMF}
             mount_test.cmf:${_MOUNT_TEST_CMF}
+            proc_server.cmf:${_PROC_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             boot_ports_test:${_SBIN}/boot_ports_test
@@ -809,7 +816,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # line the source file plainly contained.
     DEPENDS mkbundle ${_CAPTEST_CMF} ${_DMARECLAIM_CMF} ${_BDS_CMF}
             ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_IRQ_CMF} ${_EXT_CMF}
-            ${_MOUNT_TEST_CMF}
+            ${_MOUNT_TEST_CMF} ${_PROC_CMF}
             name_server_bin netname_test_bin boot_ports_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
@@ -848,6 +855,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             bootstrap.conf:${_NODISK_CONF}
             bootstrap.cmf:${_BOOTSTRAP_CMF}
             hal_server.cmf:${_HAL_CMF}
+            proc_server.cmf:${_PROC_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             boot_ports_test:${_SBIN}/boot_ports_test
@@ -867,7 +875,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             taskpanic_load:${_SBIN}/taskpanic_load
             ${_CHAR_FILES}
             ${_MUSL_FILES}
-    DEPENDS mkbundle ${_BOOTSTRAP_CMF} ${_HAL_CMF}
+    DEPENDS mkbundle ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_PROC_CMF}
             name_server_bin netname_test_bin boot_ports_test_bin cap_server_bin pthread_test_server
             msg_server_test_bin dl_test_bin fault_test_bin fperr_test_bin
             act_test_bin cow_test_bin hal_server hal_pci_scan_module
