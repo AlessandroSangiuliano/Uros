@@ -3519,6 +3519,114 @@ a_futex_waits_as_long_as_told(void)
 }
 
 /*
+ * #924: [37] a multi-waiter is not woken by a wake meant for its slot's last
+ * owner.
+ *
+ * A WAITV waiter parks on its slot in a table of sixteen, and slots are
+ * reused.  The kernel noted the slots a key matched under the table's lock
+ * and woke them after dropping it, so a wake could land on the next owner of
+ * a slot whose owner had left on its timeout meanwhile: a wait on a word
+ * nobody changed answered KERN_SUCCESS -- [30]'s WRONG, once in a campaign.
+ * Here one thread takes a slot and leaves it on its timeout over and over, a
+ * second wakes its word without changing it, and this thread waits
+ * FX_ROUNDS times on a word nobody touches: every wait must time out.  On one
+ * processor the three cannot meet in that window, and the arm asks nothing
+ * it can fail; ablations/924-widen-late-wake.patch holds each wake 20 ms
+ * after its slot is chosen, where only the lock decides whether it can still
+ * reach a new owner.
+ */
+#define FX_ROUNDS	60
+#define FX_WAIT_MS	15
+
+static unsigned int		fx_owner_word, fx_quiet_word;
+static volatile int		fx_stop;
+static volatile unsigned int	fx_owner_waits, fx_wakes;
+
+static void *
+fx_owner(void *arg)
+{
+    struct urmach_futexv v;
+    unsigned int         woken;
+
+    (void)arg;
+    v.uaddr = &fx_owner_word;
+    v.val = 0;
+    while (!fx_stop) {
+        (void)urmach_futex_waitv(&v, 1, 1, &woken);	/* a tick, then gone */
+        fx_owner_waits++;
+    }
+    return NULL;
+}
+
+static void *
+fx_waker(void *arg)
+{
+    (void)arg;
+    while (!fx_stop) {
+        /* SHARED-keyed, as WAITV is, so this wake finds the owner's slot */
+        (void)urmach_futex(&fx_owner_word, URMACH_FUTEX_WAKE, 1, 0,
+                           (unsigned int *)0);
+        fx_wakes++;
+    }
+    return NULL;
+}
+
+static boolean_t
+a_waitv_takes_no_late_wake(void)
+{
+    pthread_t            owner, waker;
+    struct urmach_futexv v;
+    unsigned int         woken;
+    kern_return_t        kr;
+    int                  i, success = 0, other = 0, other_kr = 0;
+
+    /* Written first, so that no page's object changes under a key. */
+    fx_owner_word = 0;
+    fx_quiet_word = 0;
+    fx_stop = 0;
+    fx_owner_waits = fx_wakes = 0;
+    if (pthread_create(&owner, NULL, fx_owner, NULL) != 0) {
+        printf("cap_test: [37] pthread_create FAIL\n");
+        return 0;
+    }
+    if (pthread_create(&waker, NULL, fx_waker, NULL) != 0) {
+        fx_stop = 1;
+        (void)pthread_join(owner, NULL);
+        printf("cap_test: [37] pthread_create FAIL\n");
+        return 0;
+    }
+
+    v.uaddr = &fx_quiet_word;
+    v.val = 0;
+    for (i = 0; i < FX_ROUNDS; i++) {
+        kr = urmach_futex_waitv(&v, 1, FX_WAIT_MS, &woken);
+        if (kr == KERN_SUCCESS)
+            success++;
+        else if (kr != KERN_OPERATION_TIMED_OUT) {
+            other++;
+            other_kr = (int)kr;
+        }
+    }
+    fx_stop = 1;
+    (void)pthread_join(owner, NULL);
+    (void)pthread_join(waker, NULL);
+
+    if (success != 0 || other != 0) {
+        printf("cap_test: [37] WRONG — %d of %d WAITVs of %d ms on a word "
+               "nobody changed answered success, %d something else (last "
+               "%d), beside %u waits and %u wakes of another word: a wake "
+               "meant for the slot's last owner (#924)\n", success,
+               FX_ROUNDS, FX_WAIT_MS, other, other_kr, fx_owner_waits,
+               fx_wakes);
+        return 0;
+    }
+    printf("cap_test: [37] %d WAITVs of %d ms on a word nobody changed all "
+           "timed out, beside %u waits and %u wakes of another word (#924)\n",
+           FX_ROUNDS, FX_WAIT_MS, fx_owner_waits, fx_wakes);
+    return 1;
+}
+
+/*
  * #708: [31] a mach_msg() timeout longer than 2^32 / hz milliseconds.
  *
  * convert_ipc_timeout_to_ticks() multiplied the milliseconds by hz in 32
@@ -4258,6 +4366,10 @@ main(int argc, char **argv)
 
     /* #708: a futex's, rounded down to a tick. */
     if (!a_futex_waits_as_long_as_told())
+        pass = 0;
+
+    /* #924: and a WAITV woken by a wake meant for its slot's last owner. */
+    if (!a_waitv_takes_no_late_wake())
         pass = 0;
 
     /* #708: and mach_msg()'s past 2^32 / hz ms, wrapped. */

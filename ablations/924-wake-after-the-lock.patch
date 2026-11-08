@@ -1,0 +1,61 @@
+Kind: ablation
+Issue: #924
+Over: 924-widen-late-wake.patch
+Takes out: the wake under futexv_lock -- futexv_wake_key() notes the slots as it did and wakes them after dropping the lock, so over the widen's 20 ms the owner leaves on its timeout, the next WAITV takes the slot, and the late wake lands on it: cap_test's [37] must see a wait on a word nobody changed answer success
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[37\] WRONG
+Note: 4 of 4 caught and 4 of 4 passed at ba74330a on victus, TCG and KVM, two boots each: the ablated arm saw 7 and 6 of its 60 waits answer success beside the owner's 149 and 154 waits, the fixed one all 60 time out beside up to 15953 wakes
+
+diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
+index e10986b1..47ea41c1 100644
+--- a/uros/src/mach_kernel/kern/sync_sema.c
++++ b/uros/src/mach_kernel/kern/sync_sema.c
+@@ -678,9 +678,13 @@ futexv_init(void)
+ static void
+ futexv_wake_key(event_t key)
+ {
++	event_t		to_wake[FUTEXV_MAX_WAITERS];
++	boolean_t	same_task[FUTEXV_MAX_WAITERS];
++	int		nwake = 0;
+ 	int		i;
+ 	unsigned int	k;
+ 	spl_t		s;
++	extern void	delay(int);
+ 
+ 	s = splsched();
+ 	simple_lock(&futexv_lock);
+@@ -691,22 +695,26 @@ futexv_wake_key(event_t key)
+ 			continue;
+ 		for (k = 0; k < w->nr; k++) {
+ 			if (w->keys[k] == key) {
+-				extern void delay(int);
+-
+ 				if (w->woken_index < 0)
+ 					w->woken_index = (int) k;
+-				/* 924-widen-late-wake: a wake between threads of
+-				 * one task waits 20 ms after its slot is chosen */
+-				if (w->thread->top_act != THR_ACT_NULL &&
+-				    w->thread->top_act->task == current_task())
+-					delay(20000);
+-				thread_wakeup_one((event_t) w);
++				same_task[nwake] =
++				    w->thread->top_act != THR_ACT_NULL &&
++				    w->thread->top_act->task == current_task();
++				to_wake[nwake++] = (event_t) w;
+ 				break;
+ 			}
+ 		}
+ 	}
+ 	simple_unlock(&futexv_lock);
+ 	splx(s);
++
++	for (i = 0; i < nwake; i++) {
++		/* 924-widen-late-wake: a wake between threads of one task
++		 * waits 20 ms after its slot is chosen */
++		if (same_task[i])
++			delay(20000);
++		thread_wakeup_one(to_wake[i]);
++	}
+ }
+ 
+ /*
