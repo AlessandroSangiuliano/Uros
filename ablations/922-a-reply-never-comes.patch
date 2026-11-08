@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #922
+Takes out: one reply -- proc_server answers its 2000th getsid with MIG_NO_REPLY, which mach_msg_server takes for a reply the routine kept, so none is ever sent and the caller waits for good: a reply lost, the defect musl_test's arm [22] is for, and the 2000th falls inside the arm, whose fast threads make thousands.  The arm must name the thread that stopped, which on 414-one-reply-port it never reached: that ablation stops pthread_create first
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[22\] WRONG -- the getsid thread completed no call in 15 s
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 4d8ab385..163dc538 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -976,9 +976,14 @@ proc_S_getsid(
+     int                         *result)
+ {
+     struct pid_entry *e;
++    static int calls;
+     (void)server_port;
+     *sid = 0;
+ 
++    /* 922-a-reply-never-comes: the 2000th getsid is never answered */
++    if (__atomic_add_fetch(&calls, 1, __ATOMIC_SEQ_CST) == 2000)
++        return MIG_NO_REPLY;
++
+     pthread_mutex_lock(&pid_lock);
+     e = find_by_pid_locked(pid);
+     if (e)
