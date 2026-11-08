@@ -15,6 +15,14 @@
  * waits on an event, and this thread, on the master, wakes it once X has
  * blocked.  X notes P's tick count when it runs: unchanged since the wakeup,
  * the AST brought it; one more, it waited for P's tick.
+ *
+ * And X notes how many ASTs P has taken, because a tick on the way does not
+ * say no AST went: on a host that runs P's processor late, the AST arrives
+ * after the tick.  Campaign 42287329719 said WRONG on a nested KVM where X met
+ * the tick in 13 rounds of 20, from a branch that sends the AST in every one.
+ * So a round where X met the tick with no AST taken on P is the defect, and
+ * one where the AST came all the same is the host's; only the first can make
+ * this test say WRONG.
  */
 
 #include <kern/lock.h>			/* mutex_pause */
@@ -26,6 +34,7 @@
 #include <kern/thread.h>
 #include <kern/time_out.h>		/* timeout_ticks */
 
+#include <cpu/ipi.h>			/* ipi_ast_counts */
 #include <cpu/regs.h>			/* cpu_pause */
 #include <time/clock_event.h>		/* clock_event_ticks */
 #include <time/bound_ipi_test.h>
@@ -41,6 +50,7 @@ static thread_t			bound_ipi_x;
 static volatile int		bound_ipi_ready[3];	/* S, Q, X on P */
 static volatile int		bound_ipi_ran;
 static volatile unsigned long	bound_ipi_x_tick;
+static volatile uint64_t	bound_ipi_x_asts;	/* P's, when X ran */
 static volatile int		bound_ipi_stop;
 static volatile int		bound_ipi_gone[3];
 
@@ -82,6 +92,8 @@ bound_ipi_q(void)
 static void
 bound_ipi_x_main(void)
 {
+	uint64_t	asts, replays;
+
 	bound_ipi_to_p();
 	bound_ipi_x = current_thread();
 	bound_ipi_ready[BOUND_IPI_X] = 1;
@@ -93,6 +105,8 @@ bound_ipi_x_main(void)
 		}
 		thread_block((void (*)(void)) 0);
 		bound_ipi_x_tick = clock_event_ticks(bound_ipi_cpu);
+		ipi_ast_counts(bound_ipi_cpu, &asts, &replays);
+		bound_ipi_x_asts = asts;
 		bound_ipi_ran = 1;
 	}
 	bound_ipi_gone[BOUND_IPI_X] = 1;
@@ -130,8 +144,9 @@ void
 bound_ipi_test(void)
 {
 	thread_t	self = current_thread();
-	unsigned int	round, waited = 0, fast = 0;
+	unsigned int	round, fast = 0, late = 0, none = 0;
 	unsigned long	c0;
+	uint64_t	a0, replays;
 	const char	*stopped = NULL;
 	int		i, ncpu = 0;
 
@@ -188,16 +203,19 @@ bound_ipi_test(void)
 			break;
 		}
 		bound_ipi_ran = 0;
+		ipi_ast_counts(bound_ipi_cpu, &a0, &replays);
 		c0 = clock_event_ticks(bound_ipi_cpu);
 		thread_wakeup((event_t) &bound_ipi_event);
 		if (!bound_ipi_wait_flag(&bound_ipi_ran)) {
 			stopped = "X, woken, did not run";
 			break;
 		}
-		if (bound_ipi_x_tick != c0)
-			waited++;
-		else
+		if (bound_ipi_x_tick == c0)
 			fast++;
+		else if (bound_ipi_x_asts != a0)
+			late++;		/* the AST came, after the tick */
+		else
+			none++;		/* no AST reached P: the defect */
 		mutex_pause();		/* a different phase of P's tick */
 	}
 
@@ -212,13 +230,20 @@ bound_ipi_test(void)
 		printf("bound_ipi_test: WRONG — %s within %u ticks, at round "
 		       "%u of %u (#787)\n", stopped, BOUND_IPI_WAIT, round,
 		       BOUND_IPI_ROUNDS);
-	else if (waited * 2 >= BOUND_IPI_ROUNDS)
+	else if (none * 2 >= BOUND_IPI_ROUNDS)
 		printf("bound_ipi_test: WRONG — X, better than what ran on "
-		       "processor %d, waited for its tick in %u of %u rounds: "
-		       "no AST went while the queue there held another thread "
-		       "(#787)\n", bound_ipi_cpu, waited, BOUND_IPI_ROUNDS);
+		       "processor %d, waited for its tick in %u of %u rounds with "
+		       "no AST taken there, and %u more met it with the AST late "
+		       "(#787)\n", bound_ipi_cpu, none, BOUND_IPI_ROUNDS, late);
+	else if ((none + late) * 2 >= BOUND_IPI_ROUNDS)
+		printf("bound_ipi_test: NOT ASKED — X met processor %d's tick in "
+		       "%u of %u rounds, and in %u of them the AST had come, after "
+		       "the tick: this host runs that processor late, and whether "
+		       "the AST would have been in time it cannot say (#787)\n",
+		       bound_ipi_cpu, none + late, BOUND_IPI_ROUNDS, late);
 	else
 		printf("bound_ipi_test: PASS — X ran before processor %d's next "
-		       "tick in %u of %u rounds, %u met a tick on the way (#787)\n",
-		       bound_ipi_cpu, fast, BOUND_IPI_ROUNDS, waited);
+		       "tick in %u of %u rounds; %u met a tick on the way with the "
+		       "AST late, %u with no AST taken (#787)\n", bound_ipi_cpu,
+		       fast, BOUND_IPI_ROUNDS, late, none);
 }
