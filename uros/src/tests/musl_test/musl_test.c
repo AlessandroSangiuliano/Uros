@@ -953,16 +953,38 @@ arm_own_id(void)
  * And it waits for them.  On one processor stat and its server keep it for a
  * quantum, and under KVM the 20 were over before any of the others had
  * finished a call.
+ *
+ * 🔴 #922: SLOW IS NOT LOST.  The wait was 15 s for the whole arm, and under
+ * TCG at -smp 4 on GitHub's EPYC 7763 a stat took about a second (two disk
+ * reads each, #912): 12 and 16 of the 20 in three boots, with no wrong answer
+ * in any thread, and the arm said WRONG.  The defect it is for is a reply that
+ * reached the wrong thread, whose own thread then never comes back.  So the
+ * stat thread ends on its count or, once it has a few, on its time, and the
+ * wait ends when the four have ended or when one of them has completed no call
+ * for R_STALL_STEPS -- per thread, because with the stat thread stuck the fast
+ * three would go on completing calls for ever.  WRONG names the thread that
+ * stopped.
  */
 #define R_THREADS	4
 #define R_ROUNDS	1000	/* the least of each of the fast three */
 #define R_STAT		3	/* the kind that goes to the file server */
 #define R_STATS		20	/* and how many of it, which ends all four */
+#define R_STATS_LEAST	3	/* #922: the fewest, when its time ends it */
+#define R_STAT_STEPS	(2 * WAIT_STEPS)	/* #922: the stat thread's time */
+#define R_STALL_STEPS	(3 * WAIT_STEPS)	/* #922: no call this long */
 
 static const char *const r_kind[R_THREADS] = {
 	"getsid", "getpgid", "kill", "stat"
 };
-static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done, r_over;
+static int	r_wrong[R_THREADS], r_round[R_THREADS], r_ended[R_THREADS];
+static int	r_done, r_over;
+/*
+ * #922: the stat thread's time is up -- raised by the wait, which counts it in
+ * the same 10 ms sleeps as everything else here.  Not clock_gettime(): no
+ * handler serves it in libposix-uros (#923), and the first version of this
+ * read a timespec the call had never written, so the time never ran out.
+ */
+static int	r_stat_time_up;
 
 static int
 rpc_others_under_way(void)
@@ -978,15 +1000,13 @@ rpc_others_under_way(void)
 static void *
 rpc_thread(void *arg)
 {
-	int	kind = (int)(uintptr_t)arg;
-	int	least = kind == R_STAT ? R_STATS : R_ROUNDS;
-	int	i, ok;
+	int		kind = (int)(uintptr_t)arg;
+	int		i, ok;
 
 	while (kind == R_STAT && !rpc_others_under_way()
 	       && !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST))
 		pause_a_little();
-	for (i = 0; i < least || !__atomic_load_n(&r_over, __ATOMIC_SEQ_CST);
-	     i++) {
+	for (i = 0; ; i++) {
 		struct stat	st;
 
 		switch (kind) {
@@ -1006,9 +1026,20 @@ rpc_thread(void *arg)
 		if (!ok)
 			__atomic_add_fetch(&r_wrong[kind], 1, __ATOMIC_SEQ_CST);
 		__atomic_store_n(&r_round[kind], i + 1, __ATOMIC_SEQ_CST);
-		if (kind == R_STAT && i + 1 == R_STATS)
-			__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST);
+		if (kind == R_STAT) {
+			/* #922: on its count, or on its time with a few */
+			if (i + 1 >= R_STATS || (i + 1 >= R_STATS_LEAST &&
+			    __atomic_load_n(&r_stat_time_up,
+					    __ATOMIC_SEQ_CST))) {
+				__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST);
+				break;
+			}
+		} else if (i + 1 >= R_ROUNDS &&
+			   __atomic_load_n(&r_over, __ATOMIC_SEQ_CST)) {
+			break;
+		}
 	}
+	__atomic_store_n(&r_ended[kind], 1, __ATOMIC_SEQ_CST);
 	__atomic_add_fetch(&r_done, 1, __ATOMIC_SEQ_CST);
 	return NULL;
 }
@@ -1018,7 +1049,8 @@ arm_threads_in_servers(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, rc, done;
+	int		i, k, n, rc, done, stuck = -1, steps = 0;
+	int		seen[R_THREADS] = { 0 }, still[R_THREADS] = { 0 };
 
 	if (access_by_stat(F_PATH) != 0) {
 		not_asked(22, "no disk mounted on this boot");
@@ -1036,11 +1068,36 @@ arm_threads_in_servers(void)
 	}
 	(void)pthread_attr_destroy(&attr);
 
-	for (i = 0; i < 3 * WAIT_STEPS
-	     && __atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS; i++)
+	/* #922: until all four have ended, or one has completed no call for
+	 * R_STALL_STEPS -- the reply it waits for is not coming */
+	while (__atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS
+	       && stuck < 0) {
 		pause_a_little();
+		if (++steps == R_STAT_STEPS)
+			__atomic_store_n(&r_stat_time_up, 1, __ATOMIC_SEQ_CST);
+		for (k = 0; k < R_THREADS; k++) {
+			n = __atomic_load_n(&r_round[k], __ATOMIC_SEQ_CST);
+			if (__atomic_load_n(&r_ended[k], __ATOMIC_SEQ_CST)
+			    || n != seen[k])
+				still[k] = 0;
+			else if (++still[k] >= R_STALL_STEPS && stuck < 0)
+				stuck = k;
+			seen[k] = n;
+		}
+	}
 	done = __atomic_load_n(&r_done, __ATOMIC_SEQ_CST);
 	__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST); /* if stat never came back */
+	if (stuck >= 0) {
+		verdict(22, 0, "the %s thread completed no call in %d s, after "
+			"%d: a reply that never came back -- %s %d/%d, %s %d/%d, "
+			"%s %d/%d, %s %d/%d made/wrong", r_kind[stuck],
+			R_STALL_STEPS / 100, r_round[stuck],
+			r_kind[0], r_round[0], r_wrong[0],
+			r_kind[1], r_round[1], r_wrong[1],
+			r_kind[2], r_round[2], r_wrong[2],
+			r_kind[3], r_round[3], r_wrong[3]);
+		return;
+	}
 	verdict(22, done == R_THREADS
 		&& r_wrong[0] + r_wrong[1] + r_wrong[2] + r_wrong[3] == 0,
 		"%d of %d threads ended, at once in two servers: %s %d made "

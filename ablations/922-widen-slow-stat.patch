@@ -1,0 +1,33 @@
+Kind: widen
+Issue: #922
+Holds open: musl_test [22]'s stat thread at about a second a call -- ext_server's vfs_stat() sleeps 900 ms for cow_test, as GitHub's EPYC 7763 served those stats under TCG at -smp 4 (12 to 16 of 20 in 15 s); the fixed arm must still pass, its stat thread ending on its time
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+index 42e59c16..98b3e33d 100644
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -42,6 +42,7 @@
+ #include <mach/mach_traps.h>
+ #include <mach/bootstrap.h>
+ #include <mach/mach_port.h>
++#include <mach/thread_switch.h>	/* 922-widen-slow-stat */
+ #include <mach/message.h>
+ #include <mach/cap_types.h>
+ #include <sa_mach.h>
+@@ -1252,6 +1253,15 @@ vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
+ 
+ 	if (mnt == NULL)
+ 		return KERN_INVALID_ARGUMENT;
++	/* 922-widen-slow-stat: musl_test's stat of cow_test at about a second
++	 * a call, as GitHub's EPYC 7763 served it under TCG at -smp 4 */
++	{
++		size_t	n = strlen(path);
++
++		if (n >= 8 && strcmp(path + n - 8, "cow_test") == 0)
++			(void) thread_switch(MACH_PORT_NULL,
++					     SWITCH_OPTION_WAIT, 900);
++	}
+ 
+ 	/* Open + fstat + close.  v0.1 acceptable; future work: a
+ 	 * dedicated lookup that doesn't allocate an fid. */
