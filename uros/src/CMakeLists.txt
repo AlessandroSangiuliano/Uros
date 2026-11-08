@@ -608,6 +608,14 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND OSFMK_BUILD_CHAR_SERVER)
   add_subdirectory(tests/char_test)
 endif()
 
+# proc_server and the program that exercises it (#496).  The server links
+# libmach and libpthreads, with no C library under it, and it stands ahead of
+# the musl programs below because every one of those registers with it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/proc_server)
+  add_subdirectory(tests/sig_test)
+endif()
+
 # The textbook program, static against musl, the first of the kind on this
 # target (#414).
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
