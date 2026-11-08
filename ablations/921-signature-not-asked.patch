@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #921
+Takes out: the signature's question -- every port whose device became ready goes on to IDENTIFY, the ATAPI one too: the empty CD drive run-x86_64.sh puts on ahci0's port 2 is refused only there, by IDENTIFY's own failure, and the module never says it is an ATAPI device, which the harness requires (must_report, 'ahci: port 2: an ATAPI device'); the serial log has the later refusal instead
+Run: --entry 14 600 -smp 4
+Expect: ahci: port 2: no answer to IDENTIFY DEVICE
+
+diff --git a/uros/src/servers/block_device_server/ahci/ahci_module.c b/uros/src/servers/block_device_server/ahci/ahci_module.c
+index 221fe6af..59414dfe 100644
+--- a/uros/src/servers/block_device_server/ahci/ahci_module.c
++++ b/uros/src/servers/block_device_server/ahci/ahci_module.c
+@@ -1590,7 +1590,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
+ 
+ 		if (r < 0)
+ 			return ahci_probe_fail(st);
+-		if (r > 0 || !ahci_port_is_ata(st, i)) {
++		if (r > 0) {
+ 			ahci_port_drop(st, i);
+ 			continue;
+ 		}
