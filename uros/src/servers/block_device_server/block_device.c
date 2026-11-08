@@ -1571,13 +1571,18 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 	if (!ctrl->ops->read_sectors_phys)
 		return D_INVALID_OPERATION;
 
-	if (bytes_wanted == 0 || phys_addrsCnt == 0)
+	/*
+	 * #711: io_buf_len_t is signed, and a negative count rounded up in
+	 * unsigned arithmetic came out as 0 sectors, which any range passes.
+	 */
+	if (bytes_wanted <= 0 || phys_addrsCnt == 0)
 		return D_INVALID_SIZE;
 
-	total = (bytes_wanted + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	total = ((unsigned int)bytes_wanted + SECTOR_SIZE - 1) &
+		~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors)
+	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
 	if (!blk_pages_cover(phys_addrsCnt, total, "read"))
@@ -1649,13 +1654,15 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 	if (!ctrl->ops->write_sectors_phys)
 		return D_INVALID_OPERATION;
 
-	if (bytes_to_write == 0 || phys_addrsCnt == 0)
+	/* #711: as in ds_device_read_phys(), a negative count was 0 sectors. */
+	if (bytes_to_write <= 0 || phys_addrsCnt == 0)
 		return D_INVALID_SIZE;
 
-	total = (bytes_to_write + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	total = ((unsigned int)bytes_to_write + SECTOR_SIZE - 1) &
+		~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (recnum + nsectors > part->num_sectors)
+	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
 	if (!blk_pages_cover(phys_addrsCnt, total, "write"))
