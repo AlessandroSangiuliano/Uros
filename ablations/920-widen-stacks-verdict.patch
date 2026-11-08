@@ -1,0 +1,21 @@
+Kind: widen
+Issue: #920
+Holds open: the verdict of the census's stacks line -- quiet_stacks_so_far() is told one stack more than the shuttles, so every report says WRONG, a line printf_log_only_if() must hand to the screen; with it, a verdict printed for the log only is seen to be missing from the panel
+Screen: --entry=14
+Screen: --smp=4
+Screen: --wait-for=quiet_census: kernel stacks taken
+Screen: --freeze
+Screen: --expect=WRONG, a kernel stack outlived its thread
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+index e42bce2a..c798e959 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
++++ b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+@@ -682,6 +682,7 @@ quiet_stacks_so_far(int periodic)
+ 	thread_machine_stack_counts(&taken, &given_back);
+ 	simple_unlock(&thread_shuttle_zone->lock);
+ 	held = taken - given_back;
++	held = (uint64_t) shuttles + 1;	/* the widen: a verdict to draw */
+ 
+ 	printf_log_only_if(periodic && held <= (uint64_t) shuttles,
+ 	       "quiet_census: kernel stacks taken %llu, given back %llu, so "
