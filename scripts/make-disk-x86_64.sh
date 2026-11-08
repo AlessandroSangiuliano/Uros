@@ -352,6 +352,12 @@ fi
 # not run on a partition without one.
 SCRATCH_MB=2
 SCRATCH_PART="$WORK/ahci-scratch.img"
+# #711: and a megabyte that no partition holds, between `a' and `c'.  A block
+# number that wraps puts a transfer BEFORE the partition it was asked on, and
+# before `c' there was `a', the root ext_server mounts: cap_test's [36] aims the
+# writes that a tree without the bounds check would let through, and they must
+# land where nothing lives.
+SCRATCH_GAP_MB=1
 
 ahci_disk_n=0
 for AHCI_DISK in $AHCI_DISKS; do
@@ -362,7 +368,8 @@ for AHCI_DISK in $AHCI_DISKS; do
 	[ $ahci_disk_n = 1 ] && [ -n "$BENCH_FILES" ] && AHCI_MB=48
 	AHCI_PART_SECTS=$(( AHCI_MB * 1024 * 1024 / SECT - PART_START ))
 	AHCI_EXTRA_MB=0
-	[ $ahci_disk_n = 1 ] && AHCI_EXTRA_MB=$SCRATCH_MB
+	AHCI_GAP_MB=0
+	[ $ahci_disk_n = 1 ] && AHCI_EXTRA_MB=$SCRATCH_MB && AHCI_GAP_MB=$SCRATCH_GAP_MB
 
 	truncate -s $(( AHCI_PART_SECTS * SECT )) "$AHCI_PART"
 	mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -L "$AHCI_LABEL" \
@@ -390,8 +397,8 @@ for AHCI_DISK in $AHCI_DISKS; do
 	} | debugfs -w -f /dev/stdin "$AHCI_PART" >/dev/null 2>&1
 
 	rm -f "$AHCI_DISK"
-	truncate -s "$(( AHCI_MB + AHCI_EXTRA_MB ))M" "$AHCI_DISK"
-	SCRATCH_START=$(( AHCI_MB * 1024 * 1024 / SECT ))
+	truncate -s "$(( AHCI_MB + AHCI_GAP_MB + AHCI_EXTRA_MB ))M" "$AHCI_DISK"
+	SCRATCH_START=$(( (AHCI_MB + AHCI_GAP_MB) * 1024 * 1024 / SECT ))
 	SCRATCH_SECTS=$(( AHCI_EXTRA_MB * 1024 * 1024 / SECT ))
 	# Entries named by partition, so that the scratch one is the third
 	# whatever comes before it (#596).
@@ -418,7 +425,9 @@ for AHCI_DISK in $AHCI_DISKS; do
 		echo "                  ${AHCI_MB} MB, with ipc_bench's disk files at / (#537): $BENCH_FILES"
 	fi
 	[ "$AHCI_EXTRA_MB" = 0 ] ||
-		echo "                  and partition c at LBA $SCRATCH_START, ${AHCI_EXTRA_MB} MB of ext2 (label ahci_scratch) that nobody opens: cap_test's scratch writes (#596)"
+		echo "                  and partition c at LBA $SCRATCH_START, ${AHCI_EXTRA_MB} MB of ext2 (label ahci_scratch) that nobody opens: cap_test's scratch writes (#596),"
+	[ "$AHCI_GAP_MB" = 0 ] ||
+		echo "                  after ${AHCI_GAP_MB} MB that no partition holds, where a wrapped block number on c would land (#711)"
 done
 echo "make-disk-x86_64: $DISK — bootable, grub core at LBA 1 ($CORE_SECTS sectors),"
 echo "                  one ext2 partition at LBA $PART_START (label $PART_LABEL) holding:"
