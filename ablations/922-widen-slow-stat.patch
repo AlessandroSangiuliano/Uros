@@ -4,7 +4,7 @@ Holds open: musl_test [22]'s stat thread at about a second a call -- ext_server'
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
-index 42e59c16..7e1ebf9c 100644
+index 42e59c16..98b3e33d 100644
 --- a/uros/src/servers/ext_server/ext_server.c
 +++ b/uros/src/servers/ext_server/ext_server.c
 @@ -42,6 +42,7 @@
@@ -15,14 +15,19 @@ index 42e59c16..7e1ebf9c 100644
  #include <mach/message.h>
  #include <mach/cap_types.h>
  #include <sa_mach.h>
-@@ -1252,6 +1253,10 @@ vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
+@@ -1252,6 +1253,15 @@ vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
  
  	if (mnt == NULL)
  		return KERN_INVALID_ARGUMENT;
 +	/* 922-widen-slow-stat: musl_test's stat of cow_test at about a second
 +	 * a call, as GitHub's EPYC 7763 served it under TCG at -smp 4 */
-+	if (strstr(path, "cow_test") != NULL)
-+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 900);
++	{
++		size_t	n = strlen(path);
++
++		if (n >= 8 && strcmp(path + n - 8, "cow_test") == 0)
++			(void) thread_switch(MACH_PORT_NULL,
++					     SWITCH_OPTION_WAIT, 900);
++	}
  
  	/* Open + fstat + close.  v0.1 acceptable; future work: a
  	 * dedicated lookup that doesn't allocate an fid. */
