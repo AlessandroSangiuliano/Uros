@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #919
+Takes out: the release of the reference syscall_thread_create() now keeps across convert_act_to_port() -- pthread_create() comes through this trap, so every thread a boot creates keeps its activation, and the quiet census counts the activations held in the hundreds where a boot holds some thirty-five: the reference is taken on the path every boot runs, and given back once
+Run: --entry 14 600 -smp 4
+Expect: quiet_census: floating-point areas taken [0-9]+, given back [0-9]+, so [0-9]{3,} held
+Note: 4 of 4 caught and 4 of 4 passed at 1f059f0d on victus, TCG and KVM, two boots each: the ablated census held 3105 and 3179 activations where the fixed one held 46, and act_test's [53] found its 32 faulted tasks still in the zone of tasks, held by their activations -- a second witness the Expect does not need
+
+diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
+index 50fac47b..22f4a8da 100644
+--- a/uros/src/mach_kernel/kern/ipc_mig.c
++++ b/uros/src/mach_kernel/kern/ipc_mig.c
+@@ -1975,7 +1975,6 @@ syscall_thread_create(
+ 				result = KERN_INVALID_ADDRESS;
+ 			}
+ 		}
+-		act_deallocate(c);
+ 	}
+ 	task_deallocate(t);
+ 

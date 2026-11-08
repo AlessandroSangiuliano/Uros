@@ -1382,6 +1382,16 @@ syscall_task_create(
 
 	result = task_create(t, ledgers, num_ledgers, inherit_memory, &c);
 	if (result == KERN_SUCCESS) {
+		/*
+		 * 🔴 convert_task_to_port() CONSUMES THE CREATOR'S REFERENCE,
+		 * WHATEVER IT ANSWERS, and leaves the task only the one it holds
+		 * for being alive.  Both refusals below still hand the task to
+		 * task_terminate(), and by then anyone holding a right to it --
+		 * the name is in the caller's space once copied out -- can have
+		 * terminated it, which drops that last reference and frees it.
+		 * This reference is ours, for the refusals, and goes at the end.
+		 */
+		task_reference(c);
 		port = (ipc_port_t) convert_task_to_port(c);
 		if (port == IP_NULL) {
 			/* #662: no self-port -- the caller would be told
@@ -1406,6 +1416,7 @@ syscall_task_create(
 				result = KERN_INVALID_ADDRESS;
 			}
 		}
+		task_deallocate(c);
 	}
 	task_deallocate(t);
 
@@ -1440,6 +1451,8 @@ syscall_kernel_task_create(
 
 	result = kernel_task_create(t, host, map_base, map_size, &c);
 	if (result == KERN_SUCCESS) {
+		/* Ours, for the refusals, as in syscall_task_create(). */
+		task_reference(c);
 		port = (ipc_port_t) convert_task_to_port(c);
 		if (port == IP_NULL) {
 			/* #662: no self-port -- the caller would be told
@@ -1464,6 +1477,7 @@ syscall_kernel_task_create(
 				result = KERN_INVALID_ADDRESS;
 			}
 		}
+		task_deallocate(c);
 	}
 	task_deallocate(t);
 
@@ -1536,6 +1550,17 @@ syscall_thread_create_running(
 	result = thread_create_running(task, flavor, t_state, 
 				       new_state_count, &thr_act);
 	if (result == KERN_SUCCESS) {
+		/*
+		 * 🔴 convert_act_to_port() CONSUMES THE CREATOR'S REFERENCE,
+		 * WHATEVER IT ANSWERS.  Both refusals below still hand the
+		 * activation to thread_terminate(), and by then the new thread
+		 * can have terminated itself, or died with its task, and taken
+		 * every other reference with it: convert_act_to_port() then
+		 * answers IP_NULL and frees it, and thread_terminate() ran on
+		 * freed memory -- the panic("thread_swapin") of a campaign boot.
+		 * This reference is ours, for the refusals, and goes at the end.
+		 */
+		act_reference(thr_act);
 		port = (ipc_port_t) convert_act_to_port(thr_act);
 		if (port == IP_NULL) {
 			/* #662: no self-port -- the caller would be told
@@ -1560,6 +1585,7 @@ syscall_thread_create_running(
 				result = KERN_INVALID_ADDRESS;
 			}
 		}
+		act_deallocate(thr_act);
         }
         task_deallocate(task);
 
@@ -1921,6 +1947,10 @@ syscall_thread_create(
 
 	result = thread_create(t, &c);
 	if (result == KERN_SUCCESS) {
+		/* Ours, for the refusals: convert_act_to_port() consumes the
+		 * creator's reference, as in syscall_thread_create_running(),
+		 * and a task that dies frees the activation under them. */
+		act_reference(c);
 		port = (ipc_port_t) convert_act_to_port(c);
 		if (port == IP_NULL) {
 			/* #662: no self-port -- the caller would be told
@@ -1945,6 +1975,7 @@ syscall_thread_create(
 				result = KERN_INVALID_ADDRESS;
 			}
 		}
+		act_deallocate(c);
 	}
 	task_deallocate(t);
 
