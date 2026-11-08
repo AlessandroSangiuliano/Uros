@@ -131,6 +131,47 @@ gdb.execute("set confirm off")
 gdb.execute("target remote :" + PORT)
 print("=== active=%s task_count=%s sched_tick=%s" % (
     ev("cpu_data[0].active_thread"), ev("default_pset.task_count"), ev("sched_tick")))
+# The run queues and processor 0's quantum and pending ASTs (#889): a thread
+# runnable at a better priority than the one running says nothing until the
+# queue it should be on is read beside it.
+print("=== pset runq count=%s low=%s depress=%s; cpu0 runq count=%s low=%s; "
+      "cpu0 quantum=%s first_quantum=%s state=%s; need_ast[0]=%s" % (
+          ev("default_pset.runq.count"), ev("default_pset.runq.low"),
+          ev("default_pset.runq.depress_count"),
+          ev("processor_array[0].runq.count"), ev("processor_array[0].runq.low"),
+          ev("processor_array[0].quantum"), ev("processor_array[0].first_quantum"),
+          ev("processor_array[0].state"), ev("need_ast[0]")))
+# What else decides whether a tick takes the processor from the thread on it
+# (#889): ast_check() asks csw_needed() only while the processor is RUNNING or
+# VIDLE, a processor DISPATCHING holds its next thread in next_thread and on no
+# queue, and the active thread's activation carries the ASTs that a tick
+# propagates -- a suspension among them.
+print("=== cpu0 next_thread=%s pset idle_count=%s; active: state=%s act.ast=%s "
+      "suspend=%s stops=%s handoff_target=%s handoff_wakee=%s" % (
+          ev("processor_array[0].next_thread"), ev("default_pset.idle_count"),
+          ev("cpu_data[0].active_thread->state"),
+          ev("cpu_data[0].active_thread->top_act->ast"),
+          ev("cpu_data[0].active_thread->top_act->suspend_count"),
+          ev("cpu_data[0].active_thread->top_act->user_stop_count"),
+          ev("cpu_data[0].active_thread->handoff_target"),
+          ev("cpu_data[0].active_thread->handoff_wakee")))
+# And every queue that holds a thread, head to tail: which thread a processor
+# takes next is the head of the best queue.  `links' is a thread's first field.
+for rq in ("default_pset.runq", "processor_array[0].runq"):
+    for pri in range(32):
+        hd = ev("&%s.runq[%d]" % (rq, pri))
+        nx = ev("%s.runq[%d].next" % (rq, pri))
+        if hd is None or nx is None:
+            continue
+        head, e, order = int(hd), int(nx), []
+        while e != head and len(order) < 64:
+            order.append("%#x" % e)
+            n = ev("((queue_entry_t) %d)->next" % e)
+            if n is None:
+                break
+            e = int(n)
+        if order:
+            print("=== %s[%d]: %s" % (rq, pri, " ".join(order)))
 tt = gdb.lookup_type("struct task").pointer()
 at = gdb.lookup_type("struct thread_activation").pointer()
 head = int(ev("&default_pset.tasks"))
@@ -163,6 +204,25 @@ while q != head and nt < 64:
                       int(th["saved"]["receive"]["mqueue"]), int(th["futex_uaddr"]), int(th["timer"]["set"]),
                       int(th["user_timer"]["low_bits"]), int(th["system_timer"]["low_bits"]),
                       ksym(th["continuation"]) if int(th["continuation"]) else "0", rip, symb(rip), rsp))
+            # What the scheduler chose by (#889): a thread runnable for twenty
+            # minutes beside one that ran says nothing until its priority is
+            # read next to the other's.
+            print("      pri=%d max=%d sched_pri=%d policy=%d depress=%d usage=%u runq=%#x" % (
+                int(th["priority"]), int(th["max_priority"]), int(th["sched_pri"]),
+                int(th["policy"]), int(th["depress_priority"]), int(th["sched_usage"]) & 0xffffffff,
+                int(th["runq"])))
+            # Whether it was asked to stop, and by which hand-off it waits
+            # (#889): a thread_terminate() that never returned waits for its
+            # target's suspension to be taken.  Its own try, so that a field
+            # this kernel lacks costs this line and not the thread's.
+            try:
+                print("      act.ast=%#x suspend=%d stops=%d stop_asked=%d wake_active=%d "
+                      "handoff_target=%#x handoff_wakee=%#x" % (
+                          int(A["ast"]), int(A["suspend_count"]), int(A["user_stop_count"]),
+                          int(A["stop_asked"]), int(th["wake_active"]),
+                          int(th["handoff_target"]), int(th["handoff_wakee"])))
+            except gdb.error as x:
+                print("      act.ast etc. unreadable: %s" % x)
             # A thread asleep on a mutex: who holds it, from own_thr, as
             # quiet_census does.  That census cannot speak while another
             # task polls, and this one asks no one (#889).
