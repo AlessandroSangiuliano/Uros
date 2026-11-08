@@ -587,6 +587,11 @@ ahci_port_drop(struct ahci_state *st, int port_idx)
 	port_write(st, pi->hba_port, PORT_IE, 0);
 	port_write(st, pi->hba_port, PORT_IS, ~0u);
 	ahci_write(st, AHCI_IS, 1u << pi->hba_port);
+	/* read back, not assumed: what the port will interrupt with now */
+	printf("ahci: port %d dropped, its interrupts off: PxIE 0x%08X, PxIS "
+	       "0x%08X (#921)\n", pi->hba_port,
+	       port_read(st, pi->hba_port, PORT_IE),
+	       port_read(st, pi->hba_port, PORT_IS));
 
 	if (pi->clb_uva != 0 && ahci_port_stop(st, pi->hba_port) == 0) {
 		(void) vm_deallocate(mach_task_self(), pi->clb_uva, 4096);
