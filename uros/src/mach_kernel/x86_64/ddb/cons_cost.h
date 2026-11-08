@@ -16,6 +16,6 @@ void cons_ring_report(void);
 
 /* The same counts so far, one line beginning with lead, every call (#599):
  * the quiet census's. */
-void cons_ring_so_far(const char *lead);
+void cons_ring_so_far(const char *lead, int log_only);
 
 #endif	/* _X86_64_DDB_CONS_COST_H_ */
