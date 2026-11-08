@@ -1,0 +1,25 @@
+Kind: widen
+Issue: #924
+Holds open: the window between a wake choosing a multi-waiter's slot and waking it -- 20 ms of delay() before the wake, only for a wake between threads of one task, so that cap_test's [37] meets it and the rest of the boot (ext_server's FLIPC reactor and its clients, other tasks) does not; with the fix the delay is spent holding futexv_lock, and the slot cannot change owner
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
+index 1a91bed8..e10986b1 100644
+--- a/uros/src/mach_kernel/kern/sync_sema.c
++++ b/uros/src/mach_kernel/kern/sync_sema.c
+@@ -691,8 +691,15 @@ futexv_wake_key(event_t key)
+ 			continue;
+ 		for (k = 0; k < w->nr; k++) {
+ 			if (w->keys[k] == key) {
++				extern void delay(int);
++
+ 				if (w->woken_index < 0)
+ 					w->woken_index = (int) k;
++				/* 924-widen-late-wake: a wake between threads of
++				 * one task waits 20 ms after its slot is chosen */
++				if (w->thread->top_act != THR_ACT_NULL &&
++				    w->thread->top_act->task == current_task())
++					delay(20000);
+ 				thread_wakeup_one((event_t) w);
+ 				break;
+ 			}
