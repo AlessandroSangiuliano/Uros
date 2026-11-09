@@ -1106,13 +1106,22 @@ vfs_open(
 
 	kr = ds_ext2_open(fs_port, path, &fid);
 
+	/*
+	 * #911: on a failure the right is NOT let go here.  mach_msg_server()
+	 * destroys the request of a routine that fails, and the right with it;
+	 * this released it as well, so every failed open took one reference too
+	 * many from the name all of one client's opens share -- a reference an
+	 * open fid's `owner' was counting on.  With it gone the name could die
+	 * under the fid, and the client's death then found nothing to reclaim
+	 * by (#385).
+	 */
+
 	/* O_EXCL: a successful open of an existing file is an error. */
 	if (kr == KERN_SUCCESS &&
 	    (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
 		(void)ds_ext2_close(fs_port, fid);
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
-		(void)mach_port_deallocate(mach_task_self(), client_token);
 		return VFS_ERR_EXIST;			/* #599 */
 	}
 
@@ -1134,7 +1143,6 @@ vfs_open(
 			       mnt->service_name, rc);
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
-			(void)mach_port_deallocate(mach_task_self(), client_token);
 			return fs_error(rc);		/* #599 */
 		}
 		kr = ds_ext2_open(fs_port, path, &fid);
@@ -1143,7 +1151,6 @@ vfs_open(
 	if (kr != KERN_SUCCESS) {
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
-		(void)mach_port_deallocate(mach_task_self(), client_token);
 		return kr;
 	}
 
