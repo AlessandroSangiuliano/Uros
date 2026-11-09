@@ -112,11 +112,20 @@ extern void thread_will_wait_with_timeout(
  *	eleven hours and fifty-six minutes at 100 Hz, and 42949673 ms
  *	came out as one tick.  Apart, every timeout the type holds fits,
  *	at any hz up to 1000, and the division stays in 32 bits.
+ *
+ *	🔴 And one tick more (#923).  set_timeout() counts ticks from the
+ *	next interrupt, so a wait that starts late in a tick period ended
+ *	up to a tick before the time asked: a 10 ms sleep at 100 Hz could
+ *	be over almost at once.  The tick that period is already part of is
+ *	the one added, as BSD's tvtohz() adds it.  Zero stays zero: it is
+ *	no wait at all, and thread_depress_priority() reads it as no timer.
  */
 static __inline__ unsigned int
 convert_ipc_timeout_to_ticks(mach_msg_timeout_t millis)
 {
-	return millis / 1000 * hz + (millis % 1000 * hz + 999) / 1000;
+	if (millis == 0)
+		return 0;
+	return millis / 1000 * hz + (millis % 1000 * hz + 999) / 1000 + 1;
 }
 
 
