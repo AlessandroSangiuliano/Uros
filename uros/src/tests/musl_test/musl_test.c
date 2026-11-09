@@ -983,9 +983,10 @@ static int	r_wrong[R_THREADS], r_round[R_THREADS], r_ended[R_THREADS];
 static int	r_done, r_over;
 /*
  * #922: the stat thread's time is up -- raised by the wait, which counts it in
- * the same 10 ms sleeps as everything else here.  Not clock_gettime(): no
- * handler serves it in libposix-uros (#923), and the first version of this
- * read a timespec the call had never written, so the time never ran out.
+ * the same 10 ms sleeps as everything else here.  Not clock_gettime(): when
+ * this was written no handler served it in libposix-uros (#923), and the
+ * first version of this read a timespec the call had never written, so the
+ * time never ran out.
  */
 static int	r_stat_time_up;
 
