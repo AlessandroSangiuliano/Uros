@@ -543,6 +543,12 @@ _pthread_pool_park(pthread_t self)
 
 	/* Park: block until pthread_create publishes fun/arg and bumps our word */
 	(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
+	/* prova/925-diag2, never merged: a wake with the word unchanged is one
+	 * nobody sent, and this thread now runs its old function */
+	if (*PTH_FW(self->pool_wake) == wake_seq)
+		printf("pthread: prova/925-diag2: parked thread %p woke with its "
+		       "pool word unchanged and runs fun %p again\n",
+		       (void *) self, (void *) self->fun);
 
 	/*
 	 * Woken up — self->fun and self->arg have been set by pthread_create.
@@ -1302,6 +1308,11 @@ pthread_join(pthread_t thread,
 			/* Block until exit/detach bumps the joiners futex. */
 			(void) _pthread_futex_wait(PTH_FW(thread->joiners),
 						   j_snap, 0);
+			/* prova/925-diag2, never merged */
+			if (*PTH_FW(thread->joiners) == j_snap)
+				printf("pthread: prova/925-diag2: a join of %p woke "
+				       "with its joiners word unchanged\n",
+				       (void *) thread);
 			LOCK(thread->lock);
 			thread->num_joiners--;
 		}
