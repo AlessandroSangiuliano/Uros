@@ -330,14 +330,19 @@ static unsigned int ctty_dev_id(void)
  * a task that has no ctty when it first writes stays on the console
  * rather than re-issuing RPCs on every write.
  *
- * #897: the probe belongs to the console description, not to the number,
- * so a dup() of fd 1 that is written first binds fd 1 too: they are one
- * description.  Only 0, 1 and 2 start out naming a console, so a dup of one
- * of them is the only other way to reach one.
+ * #897: the probe belongs to the console description, not to the number:
+ * once 0, 1 or 2 is bound, a dup() of it at another number reaches the tty
+ * too, as they are one description.  Only those three ask, as they always
+ * did: every read and write comes through here, and a higher number goes on
+ * without taking pfd_lock a second time.  A dup of the console written
+ * before any of the three stays on the console until one of them is.
  */
 static void maybe_upgrade_std_fd(int fd)
 {
     struct posix_ofd *o;
+
+    if (fd < 0 || fd > 2)
+        return;
 
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
