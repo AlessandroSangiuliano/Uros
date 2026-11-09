@@ -48,7 +48,8 @@
  * --------------------------------
  * Seeding the ports is only half of what a static task gets before
  * main().  Static binaries run crt0's __uros_libc_init(), whose first
- * half brings up musl TLS + the stack canary and whose second half
+ * half hands musl the environment and the program's name (#916) and
+ * brings up musl TLS + the stack canary, and whose second half
  * wires the Uros POSIX personality: __uros_signals_init() (which
  * proc_register()s us — so __uros_my_pid / __uros_proc_port become
  * valid and printf can find the session's controlling tty instead of
@@ -57,9 +58,10 @@
  * handed over).
  *
  * A dynamic task does NOT need the first half — musl's real
- * __libc_start_main already ran __init_tls + __init_ssp from the true
- * SysV auxv before .init_array, so this constructor executes with TLS
- * and the canary already live.  Calling __uros_libc_init() wholesale
+ * __libc_start_main already ran __init_libc, which set __environ and
+ * __progname from the entry stack exec_server built and ran __init_tls +
+ * __init_ssp from the true SysV auxv before .init_array, so this
+ * constructor executes with all of it already live.  Calling __uros_libc_init() wholesale
  * would redo (and disturb) that.  So we run only its personality tail
  * here, giving dynamic tools the same proc identity + ctty routing as
  * static ones.  Both symbols are weak: a smoke build that folds this
