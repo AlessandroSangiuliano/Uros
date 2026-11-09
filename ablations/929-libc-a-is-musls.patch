@@ -3,6 +3,7 @@ Issue: #929
 Takes out: the static umbrella's name -- it is libc-uros.a again, and libc.a in the install directory is musl's own, with the weak -ENOSYS stubs and no dispatcher: a static link with a plain -lc finds that one, and musl_test's [29] must see /static_lc_test fail
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[29\] WRONG -- /static_lc_test ended with status
+Note: 4 of 4 caught and 4 of 4 passed at 042b79cb on victus, TCG and KVM: in every ablated boot /static_lc_test, linked against musl's own libc.a, printed nothing and ended with status 0x9
 
 diff --git a/uros/src/contrib/CMakeLists.txt b/uros/src/contrib/CMakeLists.txt
 index 92aa4b88..cd795a1f 100644
