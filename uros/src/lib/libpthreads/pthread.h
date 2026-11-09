@@ -305,6 +305,11 @@ int       pthread_join(pthread_t thread,
 int       pthread_timedjoin_np(pthread_t thread,
 			       void **value_ptr,
 			       const struct timespec *abstime);
+/* #925: what a join waits on -- the thread's state, the joiners it counts and
+ * the joiners and death futex words -- for a test whose join did not return. */
+int       pthread_join_state_np(pthread_t thread, int *detached,
+				int *num_joiners, unsigned int *joiners,
+				unsigned int *death);
 /* #667: what a condition variable holds, and what a thread asleep on one
  * waits for -- for a test that has to say why a waiter did not come back. */
 int       pthread_cond_state_np(pthread_cond_t *cond, int *seq, int *waiters);

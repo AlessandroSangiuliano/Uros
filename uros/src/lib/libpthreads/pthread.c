@@ -1414,6 +1414,28 @@ pthread_timedjoin_np(pthread_t thread,
 }
 
 /*
+ * #925: what a join waits on, read from another thread: the thread's state
+ * (joinable, detached, or exited and waiting to be harvested), the joiners it
+ * counts, and the two futex words of the handshake -- joiners, which an exit
+ * bumps and a joiner sleeps on, and death, which a joiner sets and the exited
+ * thread sleeps on.  For a test whose join did not return to say what the
+ * handshake shows.  Read without the lock, as pthread_cond_waiting_np() reads
+ * its fields: a lock left held must not stop the one call that looks.
+ */
+int
+pthread_join_state_np(pthread_t thread, int *detached, int *num_joiners,
+		      unsigned int *joiners, unsigned int *death)
+{
+	if (thread == (pthread_t)NULL || thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	*detached = thread->detached;
+	*num_joiners = thread->num_joiners;
+	*joiners = (unsigned int) *PTH_FW(thread->joiners);
+	*death = (unsigned int) *PTH_FW(thread->death);
+	return (ESUCCESS);
+}
+
+/*
  * Push a (policy, base priority) pair down to the Mach scheduler for a
  * thread and keep the pthread bookkeeping in sync.  Shared by
  * pthread_setschedparam (explicit policy) and pthread_setschedprio
