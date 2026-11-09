@@ -1385,11 +1385,102 @@ arm_clocks(void)
 			took, short_both, short_mono, shortest);
 }
 
+/*
+ * ── [26] The environment a program is started with (#916) ───────────────
+ *
+ * crt0 has a static program's environment, from the bootstrap server or from
+ * the stack exec_server built, and musl's __environ was never set from it:
+ * getenv() answered NULL for every name, environ read NULL, and execv()
+ * passed an empty environment on.  Nor was the program's name, so err() and
+ * warn() said "(null)".  This program starts itself again with two
+ * variables.  The child reads one back, counts what environ holds and reads
+ * its own short name, prints what it read, and answers in its status which
+ * of them were wrong: libposix-uros has no pipe() to send the reading back
+ * on (#904).
+ */
+#define ENV_FIRST	"MUSL_TEST_FIRST=1"
+#define ENV_NAME	"MUSL_TEST_ENV"
+#define ENV_VALUE	"set by arm 26 (#916)"
+
+/* The child's status, a bit for each thing it found wrong. */
+#define ENV_NONE	1	/* getenv() found no ENV_NAME */
+#define ENV_OTHER	2	/* it found another value */
+#define ENV_COUNT	4	/* environ held other than the two */
+#define ENV_NAMED	8	/* its short name was not musl_test */
+
+static int
+as_env_child(void)
+{
+	const char	*v = getenv(ENV_NAME);
+	char		**e;
+	int		n = 0, wrong = 0;
+
+	for (e = environ; e != NULL && *e != NULL; e++)
+		n++;
+	if (v == NULL)
+		wrong |= ENV_NONE;
+	else if (strcmp(v, ENV_VALUE) != 0)
+		wrong |= ENV_OTHER;
+	if (n != 2)
+		wrong |= ENV_COUNT;
+	if (program_invocation_short_name == NULL ||
+	    strcmp(program_invocation_short_name, "musl_test") != 0)
+		wrong |= ENV_NAMED;
+	/* musl prints a null string as "(null)", which is what it was */
+	printf("musl_test (env child): getenv(\"%s\") gave %s%s%s, environ "
+	       "held %d, and the program's short name is %s\n", ENV_NAME,
+	       v != NULL ? "\"" : "", v != NULL ? v : "nothing",
+	       v != NULL ? "\"" : "", n, program_invocation_short_name);
+	return wrong;
+}
+
+static void
+arm_environment(void)
+{
+	char	*argv[3];
+	char	*envp[3];
+	pid_t	pid, got;
+	int	status = 0, wrong;
+
+	if (!program_is_there(26, "/musl_test"))
+		return;
+	argv[0] = (char *)"/musl_test";
+	argv[1] = (char *)"env";
+	argv[2] = NULL;
+	envp[0] = (char *)ENV_FIRST;
+	envp[1] = (char *)ENV_NAME "=" ENV_VALUE;
+	envp[2] = NULL;
+	pid = fork();
+	if (pid < 0) {
+		not_asked(26, "fork refused: no process server on this boot");
+		return;
+	}
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(127);
+	}
+	got = waitpid(pid, &status, 0);
+	wrong = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+	if (got != pid || wrong < 0 || wrong > 15)
+		verdict(26, 0, "a child exec'd with two variables ended with "
+			"status %#x", (unsigned)status);
+	else
+		verdict(26, wrong == 0, "a child exec'd with %s and %s=\"%s\" "
+			"answered %d: getenv() found %s, environ held %s, and "
+			"its short name was %s", ENV_FIRST, ENV_NAME, ENV_VALUE,
+			wrong, (wrong & ENV_NONE) ? "nothing" :
+			(wrong & ENV_OTHER) ? "another value" : "it",
+			(wrong & ENV_COUNT) ? "other than two" : "two",
+			(wrong & ENV_NAMED) ? "not musl_test" : "musl_test");
+}
+
 int
 main(int argc, char **argv)
 {
 	if (argc > 1 && strcmp(argv[1], "child") == 0)
 		return as_exec_child();
+	if (argc > 1 && strcmp(argv[1], "env") == 0)
+		return as_env_child();
 
 	printf("musl_test: started -- a static C program, on %zu-bit "
 	       "pointers (#414)\n", sizeof(void *) * 8);
@@ -1419,6 +1510,7 @@ main(int argc, char **argv)
 	arm_threads_in_servers();
 	arm_null_signal();
 	arm_clocks();
+	arm_environment();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
