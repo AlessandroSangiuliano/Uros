@@ -15,6 +15,10 @@ extern weak hidden void (*const __init_array_start)(void), (*const __init_array_
 static void dummy1(void *p) {}
 weak_alias(dummy1, __init_ssp);
 
+/* Uros patch (#929): libposix-uros's start of a program that comes through
+ * here (uros_start.c), declared strong so that a static link pulls it. */
+void __uros_start_personality(void);
+
 #define AUX_CNT 38
 
 #ifdef __GNUC__
@@ -89,6 +93,14 @@ int __libc_start_main(int (*main)(int,char **,char **), int argc, char **argv,
 static int libc_start_main_stage2(int (*main)(int,char **,char **), int argc, char **argv)
 {
 	char **envp = argv+argc+1;
+	/* Uros patch (#929): the Mach personality -- mach_task_self_ seeded, the
+	 * well-known ports, proc_server's identity, an inherited descriptor table
+	 * -- before the program's own constructors.  A program that starts here,
+	 * from crt1, had none of it when linked statically with a plain -lc, as a
+	 * build that is not ours links.  libc.so's constructor has already done
+	 * it for a dynamic program, and the call returns at once; libmach's crt0
+	 * does not come here at all. */
+	__uros_start_personality();
 	__libc_start_init();
 
 	/* Pass control to the application */

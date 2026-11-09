@@ -66,3 +66,12 @@ UROS_SYS_STUB int __uros_set_thread_area_tp(void *tp)
 /* x86-64's __unmapself.s reaches for this one (#414). */
 UROS_SYS_STUB void __uros_unmapself(void *base, unsigned long size)
 { (void)base; (void)size; }
+
+/*
+ * __libc_start_main reaches for this one (#929): libposix-uros's start of a
+ * program that comes in through crt1.  Here only so that musl's own libc.so
+ * links under --no-undefined; libc-musl.a is made without this file, and the
+ * umbrella libc.so links libposix-uros's strong one over it.
+ */
+UROS_SYS_STUB void __uros_start_personality(void)
+{ }
