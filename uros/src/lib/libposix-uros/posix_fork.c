@@ -88,6 +88,8 @@ extern void          __uros_post_fork_init(void);
  * less weak symbol so we don't broaden the public ABI. */
 mach_port_t __uros_get_exec_port(void);
 void        __uros_set_exec_port(mach_port_t p);
+/* #923: the clock ports clock_gettime() keeps (posix_time.c), by index. */
+mach_port_t __uros_get_clock_port(int which);
 
 #if defined(__i386__)
 /* posix_tls.c: install the per-thread LDT TLS descriptor for the
@@ -236,6 +238,9 @@ __uros_fork(void)
     inherit_send_right(mach_task_self(), child_task, name_server_port);
     inherit_send_right(mach_task_self(), child_task, __uros_proc_port);
     inherit_send_right(mach_task_self(), child_task, __uros_get_exec_port());
+    /* #923: and the clocks, whose names the child's memory keeps too. */
+    inherit_send_right(mach_task_self(), child_task, __uros_get_clock_port(0));
+    inherit_send_right(mach_task_self(), child_task, __uros_get_clock_port(1));
 
     /*
      * 2b. Inherit the fs_server send rights behind every open libvfs fd

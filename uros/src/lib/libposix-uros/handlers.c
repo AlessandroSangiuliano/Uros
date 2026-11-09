@@ -98,6 +98,8 @@ extern long __uros_fstatat(int dirfd, const char *path, void *kst, int flags);
  * fd handlers above.
  */
 extern long __uros_nanosleep(const void *req, void *rem);
+extern long __uros_clock_gettime(long clk, void *ts);		/* #923 */
+extern long __uros_gettimeofday(void *tv, void *tz);		/* #923 */
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -173,6 +175,21 @@ static long h_nanosleep(long req, long rem, long a3,
 {
     (void)a3; (void)a4; (void)a5; (void)a6;
     return __uros_nanosleep((const void *)req, (void *)rem);
+}
+
+/* #923: the two clocks musl asks for, served in posix_time.c. */
+static long h_clock_gettime(long clk, long ts, long a3,
+                            long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_clock_gettime(clk, (void *)ts);
+}
+
+static long h_gettimeofday(long tv, long tz, long a3,
+                           long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_gettimeofday((void *)tv, (void *)tz);
 }
 
 static long h_open(long path, long flags, long mode,
@@ -868,6 +885,8 @@ static const struct entry table[] = {
     { SYS_munmap,           h_munmap          },
     { SYS_mprotect,         h_mprotect        },
     { SYS_nanosleep,        h_nanosleep       },
+    { SYS_clock_gettime,    h_clock_gettime   },	/* #923 */
+    { SYS_gettimeofday,     h_gettimeofday    },	/* #923 */
     { SYS_readv,            h_readv           },
     { SYS_writev,           h_writev          },
     { SYS_rt_sigaction,     h_rt_sigaction    },
