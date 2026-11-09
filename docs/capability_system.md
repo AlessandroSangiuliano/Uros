@@ -549,7 +549,7 @@ Stated so nobody reads this document as a description of a finished system.
   handed the port of every task that spawns and keeps it, though it needs
   only a parent for `task_create()`; proc_server holds every process's, to
   terminate, suspend and resume it and to see it die, and a task port is
-  much more than that. Found while enumerating for #911.
+  much more than that. Found while enumerating for #911: #926 and #927.
 - **A manifest decides every capability.** A task that ships none is refused
   all of them (`cap_manifest_allows()`, #511). Eighteen programs ship one: the
   drivers, the tests that claim devices, `cap_test` and a few commands.
