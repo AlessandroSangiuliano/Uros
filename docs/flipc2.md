@@ -166,8 +166,9 @@ of channels (forward + reverse).
 ┌──────────┐   netname_look_up("disk_io")   ┌──────────────┐
 │  Client   │ ─────────────────────────────► │  Server      │
 │           │                                │  (endpoint)  │
-│           │ ◄── MIG RPC: connect ────────► │              │
-│           │     vm_remap channels           │              │
+│           │ ── connect(token) ───────────► │              │
+│           │ ◄─ memory entries ───────────── │              │
+│           │    vm_map() them into itself    │              │
 │           │                                │              │
 │  fwd_ch ──│────── shared memory ───────────│── fwd_ch     │
 │  rev_ch ──│────── shared memory ───────────│── rev_ch     │
@@ -175,9 +176,19 @@ of channels (forward + reverse).
 ```
 
 The endpoint handles:
-- Client connection/disconnection via MIG RPC
-- Dead-name notifications (client crash cleanup)
+- Client connection via MIG RPC
+- Dead-name notifications on the connection's token (client crash, and
+  disconnect, cleanup)
 - Up to 64 simultaneous connections per endpoint
+
+🔑 Nobody holds anybody's task port (#911).  The client sends a token, a port
+it made for the connection and holds the receive right of, with
+`MACH_MSG_TYPE_MAKE_SEND`; the server answers a memory entry for each channel
+(`urmach_make_memory_entry()`), and the client maps the entries itself with
+`vm_map()`.  Until #911 the client sent its task port and the server
+`vm_remap()`ped the channels into it, so every endpoint held all of every
+connected client.  The token is the connection: its dead name ends it, whether
+the client died or destroyed it, and one token names one connection.
 
 ### 2.7 Buffer Groups
 
@@ -263,11 +274,15 @@ flipc2_channel_share_isolated(rev_ch, child_task,
 ```
 
 This performs one `vm_remap` for the full region, then four `vm_protect` calls
-to enforce per-section access based on the role.
+to set per-section access based on the role.  ⚠️ They set the *current*
+protection only: the maximum stays read-write, and the peer can set it back.
 
 **Endpoint integration**: pass `FLIPC2_CREATE_ISOLATED` as flags to
 `flipc2_endpoint_create()` and connections will automatically use isolated
-channels with per-role protections.
+channels with per-role protections.  There they hold: the server's memory
+entry gives each section the most the client's role may have as its
+*maximum* protection (`flipc2_channel_make_entry()`, #911), which the client
+cannot raise.
 
 ### Decision Matrix
 
@@ -718,9 +733,9 @@ flipc2_endpoint_accept(flipc2_endpoint_t ep,
                        flipc2_channel_t *rev_ch);
 ```
 Blocks until a client connects. Creates a channel pair (forward: server→client,
-reverse: client→server), maps them into the client via `vm_remap`, and returns
-the server-side handles. Also handles dead-name notifications and disconnects
-transparently.
+reverse: client→server), answers a memory entry for each, which the client
+maps, and returns the server-side handles. Also handles dead-name
+notifications on the connections' tokens transparently.
 
 ```c
 flipc2_return_t flipc2_endpoint_destroy(flipc2_endpoint_t ep);
@@ -742,9 +757,10 @@ flipc2_endpoint_connect(const char *name,
                         flipc2_channel_t *fwd_ch,
                         flipc2_channel_t *rev_ch);
 ```
-Looks up `name` in the Mach name server, connects to the endpoint. Returns
-channel handles (forward: server→client, reverse: client→server). Pass 0 for
-`channel_size`/`ring_entries` to use server defaults.
+Looks up `name` in the Mach name server, connects to the endpoint with a token
+made for the connection, and maps the two memory entries the server answers.
+Returns channel handles (forward: server→client, reverse: client→server). Pass
+0 for `channel_size`/`ring_entries` to use server defaults.
 
 ```c
 flipc2_return_t
@@ -761,7 +777,10 @@ flipc2_return_t
 flipc2_endpoint_disconnect(flipc2_channel_t fwd_ch,
                            flipc2_channel_t rev_ch);
 ```
-Deallocates semaphore send rights and detaches both channels.
+Deallocates semaphore send rights, detaches both channels, and destroys the
+connection's token, whose dead name tells the endpoint the connection is over
+(#911).  Before #911 the endpoint was never told and kept the slot until the
+client died.
 
 ### 4.9 Buffer Group API
 
@@ -968,8 +987,8 @@ void consumer_batch(flipc2_channel_t ch) {
 ### 5.3 Inter-Task Channel (Endpoint API)
 
 The **endpoint API** is the recommended way to set up inter-task channels. It
-handles everything automatically: name registration, channel creation, `vm_remap`,
-semaphore sharing, and dead-name notifications.
+handles everything automatically: name registration, channel creation, the
+memory entries the client maps, and dead-name notifications.
 
 ```c
 /*

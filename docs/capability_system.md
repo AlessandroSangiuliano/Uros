@@ -117,6 +117,21 @@ nobody's leave: a task that registered "/etc" answered every open under it.
 The capability is asked at check-in only — one revoked later does not take
 the mount out; its server's signature or its death does.
 
+🔑 **And a mount's server holds nothing of its readers (#911).** The capability
+decides who may serve a prefix; until #911 it also decided, without saying so,
+who would hold every reader's task port. `fs_open` carried the client's task
+port so that ext_server could reclaim a dead client's handles, and FLIPC's
+connect handed it to the endpoint so that it could `vm_remap()` the channels in
+— and a send right to a task port is all of the task: its memory, its threads,
+its port rights. Now `fs_open` carries a send right made from the client's
+*lifetime port* (`urmach_lifetime_port()`, libmach), which dies with the client
+and grants nothing else, and a FLIPC client sends a token made for the
+connection and maps the channels itself from the **memory entries** the server
+answers (`urmach_make_memory_entry()`, a range of the server's memory named by
+a port, each segment with the most a mapping may have). Both rights travel as
+`MACH_MSG_TYPE_MAKE_SEND`, which the kernel makes from a receive right the
+sender holds, so a task port cannot be sent there even by mistake.
+
 🔑 **`RESOURCE_PCI_DEVICE` names a class and not a bus address**, and that is a
 decision worth understanding. A bus/device/function is a property of the
 *board*: this tree's AHCI controller is `00:04.0` under one QEMU command line
@@ -530,11 +545,11 @@ Stated so nobody reads this document as a description of a finished system.
   `DIRECTORY`, `PRINTER`, `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values
   with no enforcement behind them — the browser example above is therefore
   *architecture*, not a transcript.
-- **A filesystem server holds its clients' task ports.** `fs_open` carries the
-  client's task port, and FLIPC's connect hands it to the endpoint's server;
-  each needs only to learn of the client's death (#911). So the capability
-  that decides who may serve a mount is, today, also deciding who may reach
-  every reader's memory.
+- **Two servers still hold their clients' task ports.** exec_server is
+  handed the port of every task that spawns and keeps it, though it needs
+  only a parent for `task_create()`; proc_server holds every process's, to
+  terminate, suspend and resume it and to see it die, and a task port is
+  much more than that. Found while enumerating for #911.
 - **A manifest decides every capability.** A task that ships none is refused
   all of them (`cap_manifest_allows()`, #511). Eighteen programs ship one: the
   drivers, the tests that claim devices, `cap_test` and a few commands.
@@ -560,6 +575,12 @@ this is where to look, and what to break to confirm it still works.
 | a revoked handle stops with no notice | `cap_test [5]` | `ablations/744-handle-not-reverified`, over `744-widen-no-revoke-notices` |
 | a mount is put on a capability for its prefix | `mount_test [4]`, `[6]` | `ablations/716-mount-without-capability` |
 | a mount is checked in and out on a signature | `mount_test [2]`, `[7]`, `[11]` | `ablations/716-null-mount-signature-accepted` |
+| `fs_open` hands a server no task port | `mount_test [27]` | `ablations/911-fs-open-hands-the-task` |
+| FLIPC's connect hands an endpoint no task port | `mount_test [28]` | `ablations/911-connect-hands-the-task` |
+| a connection ends with its token, refused ones keep nothing | `mount_test [29]`, `[30]` | `ablations/911-disconnect-keeps-the-token`, `911-one-token-for-every-connection`, `911-refused-connect-keeps-its-right` |
+| a failed open leaves the client's right alone | `mount_test [31]` | `ablations/911-failed-open-released-twice` |
+| an entry's segments hold, and never exceed its maker's mapping | `cow_test [10]`, `[11]` | `ablations/911-segments-not-enforced`, `911-entry-allows-more-than-its-maker` |
+| an entry ends with its last send right, and a fork keeps it shared | `cow_test [12]`, `[14]` | `ablations/911-entry-outlives-its-port`, `911-symmetric-copy-kept` |
 
 ⚠️ `[11]` asks `device_dma_owned` *before* trying, because a test written as
 "try it and see" would claim any device nobody had claimed yet — a self-test
