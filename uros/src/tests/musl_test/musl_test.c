@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>	/* gettimeofday (#923) */
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1224,6 +1225,80 @@ arm_page_zero(void)
 		(unsigned)status);
 }
 
+/*
+ * ── [25] The two clocks, and the sleeps they measure (#923) ─────────────
+ *
+ * clock_gettime() reaches libposix-uros as SYS_clock_gettime, which had no
+ * handler: it answered ENOSYS and left the timespec as it was.  Both clocks
+ * must answer, gettimeofday() must agree with the calendar to the second, and
+ * a clock nobody has must be refused with EINVAL.
+ *
+ * The monotonic clock is then read 100000 times by a thread that sleeps a
+ * millisecond every 1000 readings, so that it comes back on whatever
+ * processor is free, and no reading may be below the one before it: the
+ * processors' TSCs need not agree, and the kernel's clock must not show it.
+ * And 50 sleeps of 10 ms must each be seen by that clock to take at least
+ * 10 ms -- a timed wait counted from the next tick could end up to a tick
+ * early, which at 100 Hz is the whole of a 10 ms sleep.
+ */
+static int
+ts_before(const struct timespec *a, const struct timespec *b)
+{
+	return a->tv_sec < b->tv_sec ||
+	       (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec);
+}
+
+static void
+arm_clocks(void)
+{
+	struct timespec	mono = { -1, -1 }, cal = { -1, -1 }, other;
+	struct timespec	prev, now, a, b;
+	struct timespec	ms = { 0, 1000 * 1000 };
+	struct timespec	nap = { 0, 10 * 1000 * 1000 };
+	struct timeval	tv = { -1, -1 };
+	int		rc_mono, rc_cal, rc_tv, rc_other, err_other, i;
+	int		back = 0, short_naps = 0;
+	long long	d, shortest = -1;
+
+	rc_mono = clock_gettime(CLOCK_MONOTONIC, &mono);
+	rc_cal = clock_gettime(CLOCK_REALTIME, &cal);
+	rc_tv = gettimeofday(&tv, NULL);
+	errno = 0;
+	rc_other = clock_gettime((clockid_t)99, &other);
+	err_other = errno;
+
+	prev = mono;
+	for (i = 0; i < 100000 && rc_mono == 0; i++) {
+		if (i % 1000 == 999)
+			(void)nanosleep(&ms, NULL);
+		(void)clock_gettime(CLOCK_MONOTONIC, &now);
+		if (ts_before(&now, &prev))
+			back++;
+		prev = now;
+	}
+	for (i = 0; i < 50 && rc_mono == 0; i++) {
+		(void)clock_gettime(CLOCK_MONOTONIC, &a);
+		(void)nanosleep(&nap, NULL);
+		(void)clock_gettime(CLOCK_MONOTONIC, &b);
+		d = (long long)(b.tv_sec - a.tv_sec) * 1000000000LL +
+		    (b.tv_nsec - a.tv_nsec);
+		if (shortest < 0 || d < shortest)
+			shortest = d;
+		if (d < 10LL * 1000 * 1000)
+			short_naps++;
+	}
+	verdict(25, rc_mono == 0 && rc_cal == 0 && rc_tv == 0 &&
+		rc_other == -1 && err_other == EINVAL && back == 0 &&
+		short_naps == 0 && tv.tv_sec - cal.tv_sec >= 0 &&
+		tv.tv_sec - cal.tv_sec <= 1,
+		"monotonic %lld.%09ld, calendar %lld, day %lld; clock 99: %d "
+		"errno %d; %d of 100000 readings went back; %d of 50 10 ms "
+		"sleeps short, shortest %lld ns",
+		(long long)mono.tv_sec, (long)mono.tv_nsec,
+		(long long)cal.tv_sec, (long long)tv.tv_sec, rc_other,
+		err_other, back, short_naps, shortest);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1257,6 +1332,7 @@ main(int argc, char **argv)
 	arm_many_forks();
 	arm_threads_in_servers();
 	arm_null_signal();
+	arm_clocks();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
