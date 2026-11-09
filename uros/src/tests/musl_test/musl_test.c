@@ -1519,6 +1519,13 @@ main(int argc, char **argv)
 	 */
 	arm_program(27, "/mach_error_test");
 	arm_program(28, "/mach_error_dyn");
+	/*
+	 * #929: a program linked as a build that is not ours links it,
+	 * -static with a plain -lc through the installed musl-gcc.specs.  It
+	 * starts in musl's crt1, and exits 0 only if getpid() answered and
+	 * printf() printed.
+	 */
+	arm_program(29, "/static_lc_test");
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
