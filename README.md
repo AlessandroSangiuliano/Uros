@@ -189,7 +189,7 @@ Disk benchmarks (`disk_bench` via flipc_bench): raw AHCI 64 KB reads ~240–307 
 
 ### Requirements
 
-- CMake >= 3.16
+- CMake >= 3.26
 - Ninja
 - GCC (i686 multilib or cross-compiler; tested with GCC 15)
 - Flex, Bison (for the in-tree `migcom`)

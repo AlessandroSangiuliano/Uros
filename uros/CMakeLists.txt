@@ -1,4 +1,5 @@
-cmake_minimum_required(VERSION 3.21)
+# 3.26: ExternalProject's INSTALL_BYPRODUCTS, which musl's build needs (#930).
+cmake_minimum_required(VERSION 3.26)
 
 project(uros
   VERSION 0.1
