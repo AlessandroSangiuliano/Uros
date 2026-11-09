@@ -140,11 +140,13 @@ if(UROS_BUILD_MUSL)
   # #375: --exclude-libs=ALL (from musl's configure) forces every symbol of
   # the folded-in *-pic ARCHIVES to local, so a dynamic tool cannot import the
   # Mach API from the umbrella.  Only LOOSE objects escape --exclude-libs, so
-  # we hand the two objects that carry the Mach surface a tool needs — the MIG
-  # host stubs (host_processors/processor_info) and the trap thunks
-  # (mach_host_self) — to the link as loose objects.  Their globals stay
-  # exported, letting cpustat run the umbrella's single, initialised Mach
-  # runtime instead of a static duplicate.  The objects come from the
+  # we hand the objects that carry the Mach surface a tool needs — the MIG
+  # host stubs (host_processors/processor_info), the trap thunks
+  # (mach_host_self), and mach_error()'s and mach_error_string()'s (#917) —
+  # to the link as loose objects.  Their globals stay exported, letting
+  # cpustat run the umbrella's single, initialised Mach runtime instead of a
+  # static duplicate.  This, and not uros_umbrella_mach.list, is what exports
+  # them: #917 measured it both ways.  The objects come from the
   # dedicated libmach_export_objs OBJECT library (#396) — named through
   # $<TARGET_OBJECTS>, not guessed from another target's CMakeFiles layout.
   set(MACH_EXPORT_OBJS "$<JOIN:$<TARGET_OBJECTS:libmach_export_objs>, >")
