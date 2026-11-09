@@ -6097,6 +6097,15 @@ arm_thirty_nine_end_receiver(pthread_t receiver)
 			ok = 1;
 	}
 	if (!arm_thirty_nine_returned) {
+		/*
+		 * prova/925-diag, never merged: the STOP was lost, so the arm
+		 * stands still with the receiver and its port as they are, and
+		 * the harness cuts the run at its budget and walks the threads.
+		 */
+		printf("act_test: [39] standing still for the thread walk "
+		       "(prova/925-diag)\n");
+		for (;;)
+			nap(100000);
 		(void) mach_port_destroy(mach_task_self(),
 					 arm_thirty_nine_port);
 		arm_thirty_nine_port = MACH_PORT_NULL;
