@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #916
+Takes out: the program's name -- __uros_libc_init() leaves musl's __progname and __progname_full null, so err() and warn() say "(null)" again: musl_test's [26] must see its exec'd child read a short name that is not musl_test
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[26\] WRONG -- .*its short name was not musl_test
+
+diff --git a/uros/src/contrib/musl/src/internal/uros_main_thread.c b/uros/src/contrib/musl/src/internal/uros_main_thread.c
+index a34b4207..085beeb3 100644
+--- a/uros/src/contrib/musl/src/internal/uros_main_thread.c
++++ b/uros/src/contrib/musl/src/internal/uros_main_thread.c
+@@ -65,8 +65,6 @@ void *__uros_mach_thread_state(void)
+ 
+ void __uros_libc_init(char **envp, char *pn)
+ {
+-	size_t i;
+-
+ 	/*
+ 	 * #916: the two things __init_libc() takes from the entry stack that
+ 	 * this init had been leaving out.  crt0 has both, from the bootstrap
+@@ -76,9 +74,8 @@ void __uros_libc_init(char **envp, char *pn)
+ 	 * warn() named the program "(null)".
+ 	 */
+ 	__environ = envp;
+-	if (!pn) pn = "";
+-	__progname = __progname_full = pn;
+-	for (i = 0; pn[i]; i++) if (pn[i] == '/') __progname = pn + i + 1;
++	/* 916-progname-unset: __progname and __progname_full left null */
++	(void)pn;
+ 
+ 	/* Minimal synthetic auxv.  Indexed up to AT_RANDOM; everything
+ 	 * not set stays zero. */

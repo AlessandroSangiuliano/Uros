@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #916
+Takes out: the environment -- __uros_libc_init() leaves musl's __environ as it was, null, so a static program's getenv() answers NULL for every name again: musl_test's [26] must see its exec'd child find nothing
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[26\] WRONG -- .*getenv\(\) found nothing
+
+diff --git a/uros/src/contrib/musl/src/internal/uros_main_thread.c b/uros/src/contrib/musl/src/internal/uros_main_thread.c
+index a34b4207..84d5398c 100644
+--- a/uros/src/contrib/musl/src/internal/uros_main_thread.c
++++ b/uros/src/contrib/musl/src/internal/uros_main_thread.c
+@@ -75,7 +75,8 @@ void __uros_libc_init(char **envp, char *pn)
+ 	 * passed on an empty environment, and without the second err() and
+ 	 * warn() named the program "(null)".
+ 	 */
+-	__environ = envp;
++	/* 916-environ-unset: __environ left as it was */
++	(void)envp;
+ 	if (!pn) pn = "";
+ 	__progname = __progname_full = pn;
+ 	for (i = 0; pn[i]; i++) if (pn[i] == '/') __progname = pn + i + 1;
