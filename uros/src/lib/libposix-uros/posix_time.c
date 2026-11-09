@@ -196,8 +196,9 @@ uros_epoch(long *epoch)
 #endif
 
 /*
- * SYS_clock_gettime.  Two failures, two answers, as libmach's getclock()
- * learned: no clock service at all is -ENXIO, a reading refused is -EIO.
+ * SYS_clock_gettime, SYS_clock_gettime32 on i386: a timespec of two longs on
+ * both.  Two failures, two answers, as libmach's getclock() learned: no clock
+ * service at all is -ENXIO, a reading refused is -EIO.
  */
 long
 __uros_clock_gettime(long clk, void *ts_p)
@@ -230,8 +231,9 @@ __uros_clock_gettime(long clk, void *ts_p)
 }
 
 /*
- * SYS_gettimeofday, on the calendar clock above.  The zone is UTC, as the
- * CMOS clock is read (#290), and a caller that asks for it is told so.
+ * SYS_gettimeofday, SYS_gettimeofday_time32 on i386, on the calendar clock
+ * above.  The zone is UTC, as the CMOS clock is read (#290), and a caller
+ * that asks for it is told so.
  */
 struct uros_ktimeval { long tv_sec; long tv_usec; };
 struct uros_ktimezone { int tz_minuteswest; int tz_dsttime; };

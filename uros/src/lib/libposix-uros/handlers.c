@@ -885,8 +885,19 @@ static const struct entry table[] = {
     { SYS_munmap,           h_munmap          },
     { SYS_mprotect,         h_mprotect        },
     { SYS_nanosleep,        h_nanosleep       },
-    { SYS_clock_gettime,    h_clock_gettime   },	/* #923 */
-    { SYS_gettimeofday,     h_gettimeofday    },	/* #923 */
+    /* #923.  i386's musl has the clocks under the names of their 32-bit
+     * variants, which take two longs as posix_time.c writes them: it asks
+     * for SYS_clock_gettime64 first and, told -ENOSYS, falls back here. */
+#ifdef SYS_clock_gettime32
+    { SYS_clock_gettime32,  h_clock_gettime   },
+#else
+    { SYS_clock_gettime,    h_clock_gettime   },
+#endif
+#ifdef SYS_gettimeofday_time32
+    { SYS_gettimeofday_time32, h_gettimeofday },
+#else
+    { SYS_gettimeofday,     h_gettimeofday    },
+#endif
     { SYS_readv,            h_readv           },
     { SYS_writev,           h_writev          },
     { SYS_rt_sigaction,     h_rt_sigaction    },
