@@ -856,6 +856,70 @@ long __uros_close(int fd)
     return 0;
 }
 
+/*
+ * dup2() and dup3(): make `newfd` name what `oldfd` names, closing what
+ * `newfd` named first (#897).  Under the one lock, so no open() can take
+ * `newfd` in between, which is what Linux answers EBUSY for.
+ */
+static long dup_onto(int oldfd, int newfd, int cloexec)
+{
+    struct posix_ofd gone;
+    int freed = 0;
+
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    struct posix_ofd *o = pfd_ofd_locked(oldfd);
+    if (o == NULL || newfd < 0 || newfd >= POSIX_OPEN_MAX) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -EBADF;
+    }
+    if (newfd == oldfd) {               /* dup2() only: dup3() refused it */
+        pthread_mutex_unlock(&pfd_lock);
+        return newfd;
+    }
+    if (pfds[newfd].ofd != NULL)
+        freed = pfd_unbind_locked(newfd, &gone);
+    pfd_bind_locked(newfd, o, cloexec);
+    pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    return newfd;
+}
+
+/* dup(): the lowest free descriptor, naming what `oldfd` names. */
+long __uros_dup(int oldfd)
+{
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    struct posix_ofd *o = pfd_ofd_locked(oldfd);
+    if (o == NULL) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -EBADF;
+    }
+    int fd = pfd_alloc_locked(0);
+    if (fd < 0) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -EMFILE;
+    }
+    pfd_bind_locked(fd, o, 0);
+    pthread_mutex_unlock(&pfd_lock);
+    return fd;
+}
+
+long __uros_dup2(int oldfd, int newfd)
+{
+    return dup_onto(oldfd, newfd, 0);
+}
+
+long __uros_dup3(int oldfd, int newfd, int flags)
+{
+    if (flags & ~LX_O_CLOEXEC)
+        return -EINVAL;
+    if (oldfd == newfd)
+        return -EINVAL;
+    return dup_onto(oldfd, newfd, flags & LX_O_CLOEXEC);
+}
+
 #ifdef __x86_64__
 /* lseek(fd, off, whence) — the offset fits a register here. */
 long __uros_lseek(int fd, long off, unsigned int whence)
