@@ -11,9 +11,15 @@
  *
  * Keep this minimal: entry points only.  Their internals (mach_msg, reply
  * port, task-self cache) stay local in the umbrella and resolve there.
+ *
+ * #917: mach_error() and mach_error_string(), whose objects the umbrella
+ * also takes loose (libmach_export_objs).  The table of error systems and
+ * fprintf_stderr() they reach stay local.
  */
 {
 	mach_host_self;
 	host_processors;
 	processor_info;
+	mach_error;
+	mach_error_string;
 };

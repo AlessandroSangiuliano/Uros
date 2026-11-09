@@ -26,20 +26,27 @@ function(uros_add_libmach_core LIB_SOURCES)
     "/printf\\.c$"
     "/sprintf\\.c$"
     "/doprnt\\.c$"
+    # #917: fprintf_stderr() and vprintf_stderr_func come from
+    # libposix-uros (libmach_musl.c) instead, through musl's stderr:
+    # mach_error() prints through it.
     "/fprintf_stderr\\.c$"
     # malloc family (musl src/malloc/mallocng)
     "/malloc\\.c$"
     "/sbrk\\.c$"
     # process termination (musl src/exit/)
     "/exit\\.c$"
-    "/panic\\.c$"          # abort wrapper, calls printf+exit
+    # abort wrapper, calls printf+exit; #917: panic() and panic_init() come
+    # from libposix-uros (libmach_musl.c) instead: port_obj.c calls panic().
+    "/panic\\.c$"
     "/Ovfork\\.c$"         # defines vfork(); musl has its own
     # SSP (musl src/env/__stack_chk_fail.c); init_stack_guard stub
     # is provided by libposix-uros so crt0.c still links cleanly.
     "/stack_protector\\.c$"
-    # error reporting (musl src/errno/, src/string/strerror.c)
+    # error reporting (musl src/errno/, src/string/strerror.c).  #917: not
+    # error_codes.c, which is Mach's table of error systems, `errors', and
+    # no name of musl's: mach_error_string() reads it, and it was left out
+    # here with errno.c for its heading alone.
     "/errno\\.c$"
-    "/error_codes\\.c$"
     # POSIX libc bits (musl src/{ctype,env,unistd,stdlib}/)
     "/ctype\\.c$"
     "/getenv\\.c$"
@@ -133,16 +140,20 @@ function(uros_add_libmach_core LIB_SOURCES)
     $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
   set_target_properties(libmach_core-pic PROPERTIES OUTPUT_NAME "mach_core-pic")
 
-  # #396: the two objects the musl umbrella must receive LOOSE (see
+  # #396: the objects the musl umbrella must receive LOOSE (see
   # src/contrib/CMakeLists.txt — its --exclude-libs=ALL hides every archive
   # member, and only loose objects keep the Mach surface exported for
   # dynamic tools like cpustat, #375).  Compiled here as an OBJECT library
   # so the umbrella names them as $<TARGET_OBJECTS:...> instead of guessing
   # this target's internal CMakeFiles object paths — which encoded the
   # source depth as __/ segments and broke the day libmach moved.
+  # #917: mach_error() and mach_error_string() among them, for a dynamic
+  # program; the table they read comes from the archive by reference.
   add_library(libmach_export_objs OBJECT
     ${CMAKE_BINARY_DIR}/generated/mach_host_user.c
     ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/mach_error.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/mach_error_string.c
   )
   add_dependencies(libmach_export_objs mig_device_header mig_mach_public_headers)
   set_target_properties(libmach_export_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
