@@ -4,7 +4,7 @@ Over: 923-widen-tsc-skew.patch
 Takes out: the floor -- each processor answers its own reading, so over the widen a reading on a processor with a smaller skew comes out below one another processor has already given: musl_test's [25], whose four threads each read after taking the largest reading any of them has published, must count readings that went back
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[25\] WRONG -- .* [1-9][0-9]* of 100000 readings by [0-9]+ threads went back
-Note: the first [25] read with one thread, which a wake puts back on the processor it last ran on when that one is idle (HW_FOOTPRINT), and caught 0 of 4 on omen at f2e0521f, 0 of 100000 back in each boot, under TCG and under KVM
+Note: 4 of 4 caught and 4 of 4 passed at 961a96ce on omen: 42688 and 21796 of the 100000 readings went back under TCG, 38729 and 64326 under KVM, by 9.97 ms at most.  The first [25] read with one thread, which a wake puts back on the processor it last ran on when that one is idle (HW_FOOTPRINT), and caught 0 of 4 at f2e0521f, 0 of 100000 back in each boot
 
 diff --git a/uros/src/mach_kernel/x86_64/time/clock_dev.c b/uros/src/mach_kernel/x86_64/time/clock_dev.c
 index f29206c5..8e1f423a 100644

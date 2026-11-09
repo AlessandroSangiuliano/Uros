@@ -3,6 +3,7 @@ Issue: #923
 Takes out: the handlers -- SYS_clock_gettime and SYS_gettimeofday leave libposix-uros's table, so musl's clock_gettime() answers ENOSYS again and leaves its timespec as it was: musl_test's [25] must say WRONG
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[25\] WRONG
+Note: 4 of 4 caught and 4 of 4 passed at 961a96ce on omen, TCG and KVM: in every ablated boot clock_gettime() left both timespecs at the -1 the arm had put in them
 
 diff --git a/uros/src/lib/libposix-uros/handlers.c b/uros/src/lib/libposix-uros/handlers.c
 index 851eb8cc..10ee9bf0 100644

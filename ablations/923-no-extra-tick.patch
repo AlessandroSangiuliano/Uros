@@ -3,6 +3,7 @@ Issue: #923
 Takes out: the extra tick -- convert_ipc_timeout_to_ticks() counts a timeout from the next interrupt again, so a 10 ms sleep at 100 Hz ends at the next tick, often well before 10 ms: musl_test's [25] must count short sleeps among its 50
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[25\] WRONG -- .* [1-9][0-9]* of 50 10 ms sleeps short
+Note: 4 of 4 caught and 4 of 4 passed at 961a96ce on omen, TCG and KVM: 27, 29, 27 and 27 of the 50 sleeps short by both clocks, the shortest 9.16 ms; in the fixed tree's first boot of each the shortest took 19.6 ms under TCG and 19.9 ms under KVM
 
 diff --git a/uros/src/mach_kernel/kern/ipc_sched.h b/uros/src/mach_kernel/kern/ipc_sched.h
 index f8b45b5d..30167550 100644
