@@ -69,7 +69,13 @@ if(UROS_BUILD_MUSL)
                 # The shared libc.so keeps the stubs (built from libc.a, not
                 # this copy), so the standalone ldso link is unaffected.
                 COMMAND ar d ${MUSL_OUT} uros_syscall_stub.lo
-    BUILD_BYPRODUCTS  ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
+    # #930: written by the INSTALL step, and declared as its.  They were
+    # BUILD_BYPRODUCTS: ninja looked at them right after the build step,
+    # found them unchanged, and what is made from them was not made again
+    # in that build -- measured, a changed musl source left libc.so as
+    # musl's own install wrote it, without the dispatcher, and libc-uros.a
+    # with the musl from before.
+    INSTALL_BYPRODUCTS ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
     LOG_CONFIGURE     ON
     LOG_BUILD         ON
     LOG_INSTALL       ON
@@ -169,7 +175,7 @@ if(UROS_BUILD_MUSL)
   # order the build and give no file to depend on -- musl's own build relinks
   # lib/libc.so without our backend and installs it over ${MUSL_SO}, so a
   # change to a musl source left libc.so without the dispatcher until this
-  # ran again.  ${MUSL_OUT} is rewritten by every musl install.
+  # ran again.  ${MUSL_OUT} is written by every musl install, and declared so.
   set(MUSL_UMBRELLA_STAMP ${UROS_MUSL_UMBRELLA_STAMP})
   add_custom_command(
     OUTPUT ${MUSL_UMBRELLA_STAMP}
