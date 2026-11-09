@@ -3,7 +3,7 @@ Issue: #925
 Takes out: the STOP -- arm_thirty_nine_stop_it() sends nothing and answers that it went in, so arm 39's receiver stays in its receive: the arm must say WRONG within ten seconds, with the port's count and the receiver's state, and act_test must go on to its closing line, where before #925 it waited in pthread_join() until the harness's budget ran out
 Run: --entry 14 600 -smp 4
 Expect: act_test: \[39\] the STOP went in, and the receiver had not returned
-Note: 4 of 4 caught and 4 of 4 passed at ee9a1459 on victus, TCG and KVM, two boots each: each ablated arm said the STOP went in and the receiver had not returned 10000 ms later, its port counting 0 messages against a limit of 10 and having given 2, the receiver waiting (run_state 3) with no suspension; act_test went on to its closing line, 48 of 49 arms under KVM and 47 of 48 under TCG, where the fixed tree had 49 of 49 and 48 of 48
+Note: 4 of 4 caught and 4 of 4 passed at ee9a1459 on victus, TCG and KVM, two boots each: each ablated arm said the STOP went in and the receiver had not returned 10000 ms later, its port counting 0 messages against a limit of 10 and having given 2, the receiver waiting (run_state 3) with no suspension; act_test went on to its closing line, 48 of 49 arms under KVM and 47 of 48 under TCG, where the fixed tree had 49 of 49 and 48 of 48 -- and again at 151c42db, where the joins have a bound: 4 of 4 and 4 of 4, the same lines
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
 index 8b1cb80e..a16f0f5a 100644
