@@ -159,6 +159,8 @@ function(uros_add_libmach_core LIB_SOURCES)
   # source depth as __/ segments and broke the day libmach moved.
   # #917: mach_error() and mach_error_string() among them, for a dynamic
   # program; the table they read comes from the archive by reference.
+  # #930: and contrib/uros_umbrella_exports.list names what they must export,
+  # checked after each link: a name added there and not here fails the build.
   add_library(libmach_export_objs OBJECT
     ${CMAKE_BINARY_DIR}/generated/mach_host_user.c
     ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S

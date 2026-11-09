@@ -77,7 +77,7 @@ endforeach()
 add_custom_command(
   OUTPUT ${MACH_ERROR_DYN}
   # As hello_dyn_world: a PIE whose PT_INTERP is the umbrella, which exports
-  # mach_error and mach_error_string (contrib/uros_umbrella_mach.list).
+  # mach_error and mach_error_string (contrib/uros_umbrella_exports.list).
   COMMAND cc ${UROS_ARCH_FLAGS} -nostdinc -fPIE -pie -fno-stack-protector
             -std=gnu11 -Wall -Wextra -include stdint.h
             ${_dyn_inc}
@@ -96,7 +96,7 @@ add_custom_command(
             --set-section-flags .uros_manifest=noload,readonly,contents
             ${MACH_ERROR_DYN}
   DEPENDS mach_error_test.c ${MACH_ERROR_DYN_MANIFEST}
-          mkmanifest musl_umbrella mig_mach_public_headers
+          mkmanifest musl_umbrella ${UROS_MUSL_UMBRELLA_STAMP}  # #930: libc.so's file, not only its target mig_mach_public_headers
   COMMENT "Linking mach_error_dyn (dynamic PIE against umbrella libc.so, #917)"
   VERBATIM
 )

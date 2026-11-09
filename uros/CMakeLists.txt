@@ -297,6 +297,15 @@ set(UROS_UAPI_DIR ${CMAKE_SOURCE_DIR}/uapi)
 # can be removed.
 include_directories(${CMAKE_SOURCE_DIR}/uapi)
 
+# #930: the file the umbrella libc.so's link touches each time it relinks
+# libc.so (src/contrib/CMakeLists.txt).  A program linked against libc.so
+# depends on this FILE: a dependency on the musl_umbrella target orders the
+# build and nothing more, and a program kept a link made against an older
+# libc.so -- a name libc.so had stopped exporting went unnoticed until a build
+# from nothing.  Named here because src/, where those programs are, is read
+# before src/contrib, where the stamp is made.
+set(UROS_MUSL_UMBRELLA_STAMP ${CMAKE_BINARY_DIR}/src/contrib/musl-umbrella.stamp)
+
 # Main source directory
 include(CTest)
 enable_testing()

@@ -48,7 +48,7 @@ add_custom_command(
             --set-section-flags .uros_manifest=noload,readonly,contents
             ${HELLO_DYN}
   DEPENDS hello_dyn.c ${HELLO_DYN_MANIFEST}
-          mkmanifest musl_umbrella
+          mkmanifest musl_umbrella ${UROS_MUSL_UMBRELLA_STAMP}  # #930: libc.so's file, not only its target
   COMMENT "Linking hello_dyn (dynamic PIE against umbrella libc.so)"
   VERBATIM
 )

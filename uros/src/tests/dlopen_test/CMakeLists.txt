@@ -45,7 +45,7 @@ add_custom_command(
             --set-section-flags .uros_manifest=noload,readonly,contents
             ${DLOPEN_TEST}
   DEPENDS dlopen_test.c ${DLOPEN_TEST_MANIFEST}
-          mkmanifest musl_umbrella libfoo
+          mkmanifest musl_umbrella ${UROS_MUSL_UMBRELLA_STAMP}  # #930: libc.so's file, not only its target libfoo
   COMMENT "Linking dlopen_test (dynamic PIE; dlopens libfoo.so at runtime)"
   VERBATIM
 )
