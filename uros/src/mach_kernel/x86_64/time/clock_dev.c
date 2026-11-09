@@ -55,6 +55,7 @@
 #include <kern/posixtime.h>		/* bbc_gettime, utime_get, utime_set */
 #include <kern/time_out.h>		/* tick -- microseconds per tick */
 #include <x86_64/time/tsc.h>		/* rdtsc, tsc_hz -- the sub-tick ruler */
+#include <x86_64/sync/atomic.h>		/* atomic_cmpxchg64 -- the monotonic clock's floor */
 
 /*
  * ⚠️ <sys/time.h> is deliberately not included, although it is where the rest
@@ -381,4 +382,121 @@ bbclk_getattr(
 struct clock_ops bbc_ops = {
 	bbclk_config,	bbclk_init,	bbc_gettime,	0,
 	bbclk_getattr,	0,		0,		0,
+};
+
+/*
+ * ── URMACH_MONOTONIC_CLOCK (#923) ─────────────────────────────────────────
+ *
+ * Time since boot, which nothing sets and which never goes back: what POSIX's
+ * CLOCK_MONOTONIC asks for, and what neither clock above is.  REALTIME_CLOCK
+ * can be set, and its interpolation can come out below an earlier reading by
+ * up to a tick; BATTERY_CLOCK counts whole seconds and is slow to read.
+ *
+ * The master processor's tick advances it by one tick and stamps the TSC with
+ * it, both under a sequence lock, so that no reading pairs one tick's count
+ * with another tick's stamp.  A reading adds the wall clock's sub-tick
+ * interpolation, clamped to a tick.  Two processors' TSCs need not agree
+ * (#318), so a reading on one can come out below one already given on
+ * another: every reading is compared with the largest given so far, and a
+ * smaller one is answered with that.  The clock pauses then, and never goes
+ * back.
+ *
+ * ⚠️ It counts ticks, so a tick lost is time lost (#717), as for the wall
+ * clock.  And it has no c_settime: a monotonic clock that could be set would
+ * be REALTIME_CLOCK again.
+ */
+static volatile uint64_t	mono_ns;	/* since boot, at the last tick */
+static volatile uint64_t	mono_tsc;	/* the TSC stamped with it */
+static volatile uint32_t	mono_seq;	/* odd while the tick writes */
+static volatile uint64_t	mono_given;	/* the largest reading given out */
+
+/*
+ * The tick's half, on the master processor with interrupts off, beside the
+ * wall clock's anchor (x86_64/time/clock_event.c).  One writer, so the
+ * sequence needs no lock of its own, and this machine keeps stores in order,
+ * so compiler barriers are the whole of the fencing.
+ */
+void
+urmach_monotonic_tick(uint64_t tsc)
+{
+	mono_seq++;
+	__asm__ __volatile__("" ::: "memory");
+	mono_ns += (uint64_t) tick * NSEC_PER_USEC;
+	mono_tsc = tsc;
+	__asm__ __volatile__("" ::: "memory");
+	mono_seq++;
+}
+
+static int
+mono_config(void)
+{
+	return (1);		/* a reading of variables this kernel keeps */
+}
+
+static int
+mono_init(void)
+{
+	return (0);
+}
+
+static kern_return_t
+mono_gettime(tvalspec_t *cur_time)
+{
+	uint64_t	base, anchor, ns, given, seen;
+	uint32_t	seq;
+
+	do {
+		while ((seq = mono_seq) & 1)
+			;		/* the tick is writing: a few stores */
+		__asm__ __volatile__("" ::: "memory");
+		base = mono_ns;
+		anchor = mono_tsc;
+		__asm__ __volatile__("" ::: "memory");
+	} while (mono_seq != seq);
+	ns = base + wall_subtick_nsec(anchor);
+
+	/* Never below what any processor has been given. */
+	given = mono_given;
+	while (ns > given) {
+		seen = atomic_cmpxchg64(&mono_given, given, ns);
+		if (seen == given)
+			break;
+		given = seen;
+	}
+	if (ns < given)
+		ns = given;
+
+	cur_time->tv_sec  = (unsigned int) (ns / NSEC_PER_SEC);
+	cur_time->tv_nsec = (clock_res_t) (ns % NSEC_PER_SEC);
+	return (KERN_SUCCESS);
+}
+
+static kern_return_t
+mono_getattr(
+	clock_flavor_t		flavor,
+	clock_attr_t		attr,		/* OUT */
+	mach_msg_type_number_t	*count)		/* IN/OUT */
+{
+	if (*count != 1)
+		return (KERN_FAILURE);
+
+	switch (flavor) {
+
+	case CLOCK_GET_TIME_RES:
+		/* The wall clock's ruler, for the same reason (wall_getattr). */
+		*attr = tsc_hz() ? (int) NSEC_PER_USEC
+				 : (int) (tick * NSEC_PER_USEC);
+		break;
+
+	default:
+		return (KERN_INVALID_VALUE);
+	}
+
+	*count = 1;
+	return (KERN_SUCCESS);
+}
+
+struct clock_ops urmach_mono_ops = {
+	mono_config,	mono_init,	mono_gettime,	0,
+	mono_getattr,	0,		0,		0,
 };

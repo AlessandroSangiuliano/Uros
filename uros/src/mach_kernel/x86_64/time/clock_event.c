@@ -46,6 +46,8 @@
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
+/* And the monotonic clock advanced with the same stamp (#923). */
+extern void			urmach_monotonic_tick(uint64_t tsc);
 #include <cpus.h>			/* NCPUS */
 #include <trap/trap.h>			/* struct trap_frame */
 #include <mach/machine/vm_types.h>	/* vm_offset_t */
@@ -1248,8 +1250,10 @@ clock_event_tick(struct trap_frame *frame)
 	 * only -- so the stamp belongs immediately before it, and on the same
 	 * processor for the same reason.
 	 */
-	if (cpu == (unsigned) master_cpu)
+	if (cpu == (unsigned) master_cpu) {
 		wall_tsc_at_tick = rdtsc();
+		urmach_monotonic_tick(wall_tsc_at_tick);	/* #923 */
+	}
 
 	/*
 	 * ⚠️ The full rip, not its low half.  #453 widened this argument to
