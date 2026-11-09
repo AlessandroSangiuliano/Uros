@@ -1474,6 +1474,191 @@ arm_environment(void)
 			(wrong & ENV_NAMED) ? "not musl_test" : "musl_test");
 }
 
+/*
+ * ── [30] dup(), dup2() and dup3(): two names for one description (#897) ─
+ *
+ * A descriptor names an open file description, and the description holds the
+ * offset.  dup() gives it a second number, so a read through one moves the
+ * other's offset too, and the file stays open until the last name closes.
+ * The three answered ENOSYS, and the table under them kept a description per
+ * descriptor.  The file is one on the root disk that nobody writes; the arm
+ * only reads it.
+ */
+#define DUP_READ	16
+
+static void
+arm_dup(void)
+{
+	char	buf[DUP_READ];
+	off_t	shared, by_two, after_close;
+	int	fd, d, two, same, rc_bad, err_bad, rc_neg, err_neg;
+	int	rc_self, err_self, rc_flag, err_flag, rc_gone, err_gone;
+
+	if (!program_is_there(30, F_PATH))
+		return;
+	fd = open(F_PATH, O_RDONLY);
+	if (fd < 0) {
+		verdict(30, 0, "open failed, errno %d", errno);
+		return;
+	}
+	d = dup(fd);
+	if (d < 0) {
+		verdict(30, 0, "dup(%d) failed, errno %d", fd, errno);
+		(void)close(fd);
+		return;
+	}
+	if (read(fd, buf, sizeof buf) != (ssize_t)sizeof buf) {
+		verdict(30, 0, "reading %d bytes failed, errno %d", DUP_READ,
+			errno);
+		(void)close(d);
+		(void)close(fd);
+		return;
+	}
+	shared = lseek(d, 0, SEEK_CUR);
+	two = dup2(fd, 20);
+	by_two = lseek(20, 0, SEEK_CUR);
+	same = dup2(fd, fd);
+	rc_neg = dup2(fd, -1);
+	err_neg = errno;
+	rc_self = dup3(fd, fd, 0);
+	err_self = errno;
+	rc_flag = dup3(fd, 21, 0x1);	/* not a flag dup3() takes */
+	err_flag = errno;
+	/* The first name closed, the others still reach the file. */
+	(void)close(fd);
+	after_close = lseek(d, 0, SEEK_CUR);
+	(void)close(d);
+	rc_bad = dup2(d, 21);		/* closed, so nothing to copy */
+	err_bad = errno;
+	(void)close(20);
+	rc_gone = (int)lseek(20, 0, SEEK_CUR);
+	err_gone = errno;
+	verdict(30, d >= 0 && d != fd && shared == DUP_READ && two == 20
+		&& by_two == DUP_READ && same == fd && rc_neg == -1
+		&& err_neg == EBADF && rc_self == -1 && err_self == EINVAL
+		&& rc_flag == -1 && err_flag == EINVAL
+		&& after_close == DUP_READ && rc_bad == -1 && err_bad == EBADF
+		&& rc_gone == -1 && err_gone == EBADF,
+		"after %d bytes read on %d, its dup %d was at %ld and dup2's "
+		"20 at %ld; dup2 onto itself gave %d, onto -1 %d errno %d; "
+		"dup3 onto itself %d errno %d, with a bad flag %d errno %d; "
+		"with %d closed, %d was at %ld; dup2 of a closed one %d errno "
+		"%d, and 20 closed read %d errno %d", DUP_READ, fd, d,
+		(long)shared, (long)by_two, same, rc_neg, err_neg, rc_self,
+		err_self, rc_flag, err_flag, fd, d, (long)after_close, rc_bad,
+		err_bad, rc_gone, err_gone);
+}
+
+/*
+ * ── [31] A dup() is still one description after execve() (#897) ────────
+ *
+ * The descriptors that cross an exec go to the new image as records, and the
+ * new image opens each record again.  Two names of one description came out
+ * two opens of the file, each with an offset of its own, each writing over
+ * what the other wrote.  And a name dup3() gave with O_CLOEXEC must not
+ * cross at all.  This program starts itself again holding 20 and 21, one
+ * description, and 22, made with O_CLOEXEC; the child reads through 20, looks
+ * at 21's offset and at 22, prints what it found, and answers in its status.
+ */
+#define DUP_LOST	1	/* 20 or 21 did not cross, or at another offset */
+#define DUP_APART	2	/* a read on 20 left 21's offset where it was */
+#define DUP_CLOEXEC	4	/* 22, made with O_CLOEXEC, crossed */
+
+static int
+as_dup_child(void)
+{
+	char	buf[DUP_READ];
+	off_t	at20, at21, moved = -1, at22;
+	int	wrong = 0, err22;
+
+	at20 = lseek(20, 0, SEEK_CUR);
+	at21 = lseek(21, 0, SEEK_CUR);
+	if (at20 != DUP_READ || at21 != DUP_READ)
+		wrong |= DUP_LOST;
+	else if (read(20, buf, sizeof buf) != (ssize_t)sizeof buf
+		 || (moved = lseek(21, 0, SEEK_CUR)) != 2 * DUP_READ)
+		wrong |= DUP_APART;
+	at22 = lseek(22, 0, SEEK_CUR);
+	err22 = errno;
+	if (at22 != -1 || err22 != EBADF)
+		wrong |= DUP_CLOEXEC;
+	printf("musl_test (dup child): 20 at %ld and 21 at %ld; after %d "
+	       "bytes read on 20, 21 at %ld; 22 answered %ld errno %d\n",
+	       (long)at20, (long)at21, DUP_READ, (long)moved, (long)at22,
+	       err22);
+	return wrong;
+}
+
+static void
+arm_dup_across_exec(void)
+{
+	char	buf[DUP_READ];
+	char	*argv[3];
+	char	*envp[1];
+	pid_t	pid, got;
+	int	fd, status = 0, wrong, rc20, rc21, rc22;
+
+	if (!program_is_there(31, "/musl_test"))
+		return;
+	fd = open(F_PATH, O_RDONLY);
+	if (fd < 0) {
+		verdict(31, 0, "open failed, errno %d", errno);
+		return;
+	}
+	if (read(fd, buf, sizeof buf) != (ssize_t)sizeof buf) {
+		verdict(31, 0, "reading %d bytes failed, errno %d", DUP_READ,
+			errno);
+		(void)close(fd);
+		return;
+	}
+	rc20 = dup2(fd, 20);
+	rc21 = dup2(fd, 21);
+	rc22 = dup3(fd, 22, O_CLOEXEC);
+	(void)close(fd);
+	if (rc20 != 20 || rc21 != 21 || rc22 != 22) {
+		verdict(31, 0, "dup2 onto 20 and 21 gave %d and %d, dup3 onto "
+			"22 %d, errno %d", rc20, rc21, rc22, errno);
+		(void)close(20);
+		(void)close(21);
+		(void)close(22);
+		return;
+	}
+	argv[0] = (char *)"/musl_test";
+	argv[1] = (char *)"dup";
+	argv[2] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid < 0) {
+		not_asked(31, "fork refused: no process server on this boot");
+		(void)close(20);
+		(void)close(21);
+		(void)close(22);
+		return;
+	}
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(127);
+	}
+	(void)close(20);
+	(void)close(21);
+	(void)close(22);
+	got = waitpid(pid, &status, 0);
+	wrong = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+	if (got != pid || wrong < 0 || wrong > 7)
+		verdict(31, 0, "a child exec'd holding 20, 21 and 22 ended "
+			"with status %#x", (unsigned)status);
+	else
+		verdict(31, wrong == 0, "a child exec'd holding 20 and 21, one "
+			"description at %d, and 22 made with O_CLOEXEC answered "
+			"%d: 20 and 21 %s, %s, and 22 %s", DUP_READ, wrong,
+			(wrong & DUP_LOST) ? "did not both cross at that offset"
+			: "crossed at that offset",
+			(wrong & DUP_LOST) ? "the read was not asked"
+			: (wrong & DUP_APART) ? "a read on 20 left 21 where it was"
+			: "a read on 20 moved 21",
+			(wrong & DUP_CLOEXEC) ? "crossed" : "did not cross");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1481,6 +1666,8 @@ main(int argc, char **argv)
 		return as_exec_child();
 	if (argc > 1 && strcmp(argv[1], "env") == 0)
 		return as_env_child();
+	if (argc > 1 && strcmp(argv[1], "dup") == 0)
+		return as_dup_child();
 
 	printf("musl_test: started -- a static C program, on %zu-bit "
 	       "pointers (#414)\n", sizeof(void *) * 8);
@@ -1526,6 +1713,9 @@ main(int argc, char **argv)
 	 * printf() printed.
 	 */
 	arm_program(29, "/static_lc_test");
+	/* #897: dup(), dup2() and dup3(), in this task and across execve(). */
+	arm_dup();
+	arm_dup_across_exec();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
