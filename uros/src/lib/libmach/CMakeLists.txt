@@ -93,6 +93,14 @@ function(uros_add_libmach_core LIB_SOURCES)
   # path.
   list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/generated/asm/(memset|memcpy|ffs|gcc|fork|bzero)\\.s\\.S$")
 
+  # #917: the server halves of three interfaces.  A server half calls
+  # routines its server writes -- do_bootstrap_*, do_mach_notify_*,
+  # ds_device_* -- and every program that demultiplexes one of these links
+  # libmach in full, so here they were 25 names nothing defines, among which
+  # three real omissions went unseen.  A server of musl generates its own half
+  # from the .defs, as #931 asks of every server, in libmach as well.
+  list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/(bootstrap|notify|device)_server\\.c$")
+
   add_library(libmach_core STATIC ${LIBMACH_CORE_SOURCES})
   add_dependencies(libmach_core mig_device_header mig_mach_public_headers)
 
