@@ -6127,6 +6127,11 @@ arm_thirty_nine_join(pthread_t t, const char *who, pthread_t volatile *self)
 	else
 		printf("act_test: [39] the %s found the handle as its own "
 		       "structure\n", who);
+	/* prova/925-diag2, never merged: stand still for the harness's walk */
+	printf("act_test: [39] standing still for the thread walk "
+	       "(prova/925-diag2)\n");
+	for (;;)
+		nap(100000);
 	return 0;
 }
 
@@ -6167,6 +6172,11 @@ arm_thirty_nine_end_receiver(pthread_t receiver)
 			ok = 1;
 	}
 	if (!arm_thirty_nine_returned) {
+		/* prova/925-diag2, never merged: stand still for the harness's walk */
+		printf("act_test: [39] standing still for the thread walk "
+		       "(prova/925-diag2)\n");
+		for (;;)
+			nap(100000);
 		(void) mach_port_destroy(mach_task_self(),
 					 arm_thirty_nine_port);
 		arm_thirty_nine_port = MACH_PORT_NULL;
