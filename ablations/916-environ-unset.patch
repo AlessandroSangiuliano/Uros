@@ -3,6 +3,7 @@ Issue: #916
 Takes out: the environment -- __uros_libc_init() leaves musl's __environ as it was, null, so a static program's getenv() answers NULL for every name again: musl_test's [26] must see its exec'd child find nothing
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[26\] WRONG -- .*getenv\(\) found nothing
+Note: 4 of 4 caught and 4 of 4 passed at d3e64845 on omen, TCG and KVM: in every ablated boot the child answered 5, getenv() gave nothing and environ held 0, and its short name was still musl_test
 
 diff --git a/uros/src/contrib/musl/src/internal/uros_main_thread.c b/uros/src/contrib/musl/src/internal/uros_main_thread.c
 index a34b4207..84d5398c 100644

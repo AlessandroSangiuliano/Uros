@@ -3,6 +3,7 @@ Issue: #916
 Takes out: the program's name -- __uros_libc_init() leaves musl's __progname and __progname_full null, so err() and warn() say "(null)" again: musl_test's [26] must see its exec'd child read a short name that is not musl_test
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[26\] WRONG -- .*its short name was not musl_test
+Note: 4 of 4 caught and 4 of 4 passed at d3e64845 on omen, TCG and KVM: in every ablated boot the child answered 8, its short name read (null), and getenv() still gave the value with environ holding 2
 
 diff --git a/uros/src/contrib/musl/src/internal/uros_main_thread.c b/uros/src/contrib/musl/src/internal/uros_main_thread.c
 index a34b4207..085beeb3 100644
