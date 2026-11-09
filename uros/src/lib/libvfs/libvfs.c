@@ -298,6 +298,7 @@ kern_return_t
 vfs_open_rc(const char *path, int flags, int mode, vfs_fd_t *fd_out)
 {
     mach_port_t fs_port;
+    mach_port_t token;
     const char *rel = path;
     vfs_u64_t   handle = 0;
     vfs_u32_t   type   = VFS_FT_UNKNOWN;
@@ -309,6 +310,13 @@ vfs_open_rc(const char *path, int flags, int mode, vfs_fd_t *fd_out)
         return VFS_ERR_INVAL;
 
     vfs_init();
+
+    /* #385, #911: what the fs_server learns our death by.  Not our task
+     * port, which it was: that turns into a dead name on our death too, and
+     * is also all of this task, to every server we open a file through. */
+    kr = urmach_lifetime_port(&token);
+    if (kr != KERN_SUCCESS)
+        return kr;
 
     /*
      * Resolve + open, retrying once if the chosen fs_server turns out to
@@ -331,10 +339,11 @@ vfs_open_rc(const char *path, int flags, int mode, vfs_fd_t *fd_out)
          * with its own refcount, safe to use without the lock. */
         pthread_mutex_unlock(&vfs_lock);
 
-        /* #385: hand the fs_server a send right to our task so it can
-         * reclaim this open's server-side fid if we die without close()
-         * (e.g. SIGKILL) — the right turns into a dead name on our death. */
-        kr = fs_open(fs_port, mach_task_self(), (char *)rel, flags, mode,
+        /* #385: hand the fs_server a send right made from our lifetime
+         * port so it can reclaim this open's server-side fid if we die
+         * without close() (e.g. SIGKILL) — the right turns into a dead
+         * name on our death. */
+        kr = fs_open(fs_port, token, (char *)rel, flags, mode,
                      &handle, &type);
         if (!vfs_send_died(kr))
             break;

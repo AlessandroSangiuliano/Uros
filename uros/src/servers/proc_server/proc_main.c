@@ -1669,7 +1669,7 @@ parse_proc_path(const char *path, proc_pid_t *out_pid)
 kern_return_t
 vfs_open(
     mach_port_t fs_port,
-    mach_port_t client_task,
+    mach_port_t client_token,
     vfs_path_t path,
     int flags,
     int mode,
@@ -1682,8 +1682,8 @@ vfs_open(
 
     (void)fs_port; (void)flags; (void)mode;
     /* #385: /proc handles are virtual (no fs_server fid pool), so we don't
-     * need the client-task reclaim hook — just drop the send right. */
-    (void)mach_port_deallocate(mach_task_self(), client_task);
+     * need the client's right to learn its death by -- just drop it. */
+    (void)mach_port_deallocate(mach_task_self(), client_token);
 
     *handle_out = 0;
     *type_out   = VFS_FT_UNKNOWN;

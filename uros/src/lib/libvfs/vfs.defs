@@ -83,14 +83,24 @@ type vfs_dirent_array_t  = pointer_t;
 
 /*
  * Open a file by absolute path.
+ *   client_token — a send right made from the client's lifetime port
+ *            (urmach_lifetime_port()), whose dead name tells the server the
+ *            client died and its handles can be given back (#385)
  *   flags  — bitmask of VFS_O_* (vfs_types.h)
  *   mode   — POSIX mode bits, used only when VFS_O_CREAT is set
  *   handle — opaque cookie; pass to fs_read/write/close/fstat
  *   type   — VFS_FT_* of the opened object
+ *
+ * 🔑 Not the client's task port, which this took until #911: a send right to
+ * a task port turns into a dead name when the task dies, which is what the
+ * server wanted, and is also the whole task, which it did not.  MAKE_SEND is
+ * the point of the type: the kernel makes the right from a receive right the
+ * client holds, and no task holds the receive right of a task port, so a
+ * task port cannot travel here, even by mistake.
  */
 routine fs_open(
 		fs_port		: mach_port_t;
-	in	client_task	: mach_port_t;
+	in	client_token	: mach_port_make_send_t;
 	in	path		: vfs_path_t;
 	in	flags		: int;
 	in	mode		: int;

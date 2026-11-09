@@ -114,9 +114,10 @@ struct open_file {
 					 * (of_op_begin/of_op_end).  close waits
 					 * for pinned slots to drain; the dead-
 					 * client reclaim skips them. */
-	mach_port_t	owner;		/* #385: send right to the client task
-					 * that opened this fid via fs_open (0 for
-					 * the raw ext2_open path).  A SIGKILL'd
+	mach_port_t	owner;		/* #385: send right to the lifetime port
+					 * of the client that opened this fid via
+					 * fs_open (0 for the raw ext2_open path) --
+					 * its task port until #911.  A SIGKILL'd
 					 * client never sends ext2_close; the send
 					 * right turns into a dead name on its death,
 					 * and ds_ext2_open reclaims the slot when the
@@ -532,7 +533,7 @@ ds_ext2_open(
 			break;
 	if (fid == MAX_OPEN_FILES) {
 		/*
-		 * #385: pool full — reclaim any fid whose owning client task
+		 * #385: pool full — reclaim any fid whose owning client
 		 * has died.  A SIGKILL'd client never sends ext2_close, so its
 		 * slot would leak forever; but its owner send right (handed to
 		 * us at fs_open) turns into a dead name on task death, which we
@@ -1088,7 +1089,7 @@ vfs_fill_stat(fs_private_t priv, vfs_stat_t *st)
 kern_return_t
 vfs_open(
 	mach_port_t	fs_port,
-	mach_port_t	client_task,
+	mach_port_t	client_token,
 	vfs_path_t	path,
 	int		flags,
 	int		mode,
@@ -1111,7 +1112,7 @@ vfs_open(
 		(void)ds_ext2_close(fs_port, fid);
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
-		(void)mach_port_deallocate(mach_task_self(), client_task);
+		(void)mach_port_deallocate(mach_task_self(), client_token);
 		return VFS_ERR_EXIST;			/* #599 */
 	}
 
@@ -1133,7 +1134,7 @@ vfs_open(
 			       mnt->service_name, rc);
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
-			(void)mach_port_deallocate(mach_task_self(), client_task);
+			(void)mach_port_deallocate(mach_task_self(), client_token);
 			return fs_error(rc);		/* #599 */
 		}
 		kr = ds_ext2_open(fs_port, path, &fid);
@@ -1142,11 +1143,11 @@ vfs_open(
 	if (kr != KERN_SUCCESS) {
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
-		(void)mach_port_deallocate(mach_task_self(), client_task);
+		(void)mach_port_deallocate(mach_task_self(), client_token);
 		return kr;
 	}
 
-	/* #385: record the client task so a dead-name reclaim can free this
+	/* #385: record the client's right so a dead-name reclaim can free this
 	 * fid if the client is killed before it calls close().  We keep the
 	 * send right (dropped in ds_ext2_close / the reclaim scan). */
 	{
@@ -1154,12 +1155,12 @@ vfs_open(
 		pthread_mutex_lock(&mnt->of_lock);
 		if (fid >= 1 && fid <= MAX_OPEN_FILES &&
 		    mnt->open_files[fid - 1].in_use) {
-			mnt->open_files[fid - 1].owner = client_task;
+			mnt->open_files[fid - 1].owner = client_token;
 			stored = 1;
 		}
 		pthread_mutex_unlock(&mnt->of_lock);
 		if (!stored)
-			(void)mach_port_deallocate(mach_task_self(), client_task);
+			(void)mach_port_deallocate(mach_task_self(), client_token);
 	}
 
 	priv = vfs_op_begin(mnt, (vfs_u64_t)fid);
