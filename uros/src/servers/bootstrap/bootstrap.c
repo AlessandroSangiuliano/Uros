@@ -62,11 +62,12 @@
 #include <mach/bootstrap.h>
 #include <mach/host_info.h>
 #include <mach/mach_host.h>
-#include <mach/exc_server.h>
 #include <mach/module_pool.h>
 #include "bundle.h"
-#include <mach/bootstrap_server.h>
-#include <mach/notify_server.h>		/* #716: bootstrap_msg_size */
+/* The server halves this program answers, generated in its own build (#931). */
+#include "excServer.h"
+#include "bootstrapServer.h"
+#include "notifyServer.h"		/* #716: bootstrap_msg_size */
 #include "serviceServer.h"		/* #716: bootstrap_msg_size */
 
 #include <device/device_types.h>
