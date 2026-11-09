@@ -5,7 +5,7 @@ Run: --entry 14 600 -smp 4
 Expect: musl_test: \[25\] WRONG
 
 diff --git a/uros/src/lib/libposix-uros/handlers.c b/uros/src/lib/libposix-uros/handlers.c
-index 4779d169..10ee9bf0 100644
+index 851eb8cc..10ee9bf0 100644
 --- a/uros/src/lib/libposix-uros/handlers.c
 +++ b/uros/src/lib/libposix-uros/handlers.c
 @@ -177,21 +177,6 @@ static long h_nanosleep(long req, long rem, long a3,
@@ -30,12 +30,23 @@ index 4779d169..10ee9bf0 100644
  static long h_open(long path, long flags, long mode,
                     long a4, long a5, long a6)
  {
-@@ -885,8 +870,7 @@ static const struct entry table[] = {
+@@ -885,19 +870,7 @@ static const struct entry table[] = {
      { SYS_munmap,           h_munmap          },
      { SYS_mprotect,         h_mprotect        },
      { SYS_nanosleep,        h_nanosleep       },
--    { SYS_clock_gettime,    h_clock_gettime   },	/* #923 */
--    { SYS_gettimeofday,     h_gettimeofday    },	/* #923 */
+-    /* #923.  i386's musl has the clocks under the names of their 32-bit
+-     * variants, which take two longs as posix_time.c writes them: it asks
+-     * for SYS_clock_gettime64 first and, told -ENOSYS, falls back here. */
+-#ifdef SYS_clock_gettime32
+-    { SYS_clock_gettime32,  h_clock_gettime   },
+-#else
+-    { SYS_clock_gettime,    h_clock_gettime   },
+-#endif
+-#ifdef SYS_gettimeofday_time32
+-    { SYS_gettimeofday_time32, h_gettimeofday },
+-#else
+-    { SYS_gettimeofday,     h_gettimeofday    },
+-#endif
 +    /* 923-no-clock-handler: the two clocks unserved again */
      { SYS_readv,            h_readv           },
      { SYS_writev,           h_writev          },
