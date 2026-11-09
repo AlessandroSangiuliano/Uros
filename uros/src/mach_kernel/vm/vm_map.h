@@ -640,6 +640,29 @@ extern kern_return_t	vm_map_enter(
 				vm_prot_t	max_protection,
 				vm_inherit_t	inheritance);
 
+/*
+ * Enter a mapping of a memory entry (#911): [object_offset, object_offset +
+ * size) of its object, where *address falls at entry_offset in the entry, cut
+ * where the entry's segments end and each piece given the smaller of what was
+ * asked and what its segment allows -- under one hold of the map lock.
+ * Consumes the caller's reference on the object whatever it answers.
+ */
+extern kern_return_t	vm_map_enter_segments(
+				vm_map_t	map,
+				vm_offset_t	*address,	/* IN/OUT */
+				vm_size_t	size,
+				vm_offset_t	mask,
+				boolean_t	anywhere,
+				vm_object_t	object,
+				vm_offset_t	object_offset,
+				vm_size_t	entry_offset,
+				unsigned int	segments,
+				const vm_size_t	*ends,
+				const vm_prot_t	*prots,
+				vm_prot_t	cur_protection,
+				vm_prot_t	max_protection,
+				vm_inherit_t	inheritance);
+
 /* Mark the given range as handled by a subordinate map. */
 extern kern_return_t	vm_map_submap(
 				vm_map_t	map,

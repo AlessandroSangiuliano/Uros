@@ -2089,6 +2089,154 @@ _vm_map_clip_end(
 		vm_object_reference(new_entry->object.vm_object);
 }
 
+/*
+ *	Routine:	vm_map_enter_segments (#911)
+ *
+ *	Description:
+ *		Map part of the object a memory entry names, cut where the
+ *		entry's segments end, each piece with its own maximum
+ *		protection.  It cannot be vm_map_enter() followed by
+ *		vm_map_protect(): between the two the task would hold the
+ *		whole range at the widest protection, and another of its
+ *		threads could write a page its segment keeps read-only.  So
+ *		the range is found, linked, cut and given its protections
+ *		under one hold of the map lock.
+ *
+ *		The caller's reference on the object goes to the first piece
+ *		and each clip takes one for the piece it makes, so the
+ *		reference is consumed whatever this answers.
+ */
+kern_return_t
+vm_map_enter_segments(
+	vm_map_t	map,
+	vm_offset_t	*address,	/* IN/OUT */
+	vm_size_t	size,
+	vm_offset_t	mask,
+	boolean_t	anywhere,
+	vm_object_t	object,
+	vm_offset_t	object_offset,
+	vm_size_t	entry_offset,
+	unsigned int	segments,
+	const vm_size_t	*ends,
+	const vm_prot_t	*prots,
+	vm_prot_t	cur_protection,
+	vm_prot_t	max_protection,
+	vm_inherit_t	inheritance)
+{
+	vm_map_entry_t	entry;
+	vm_map_entry_t	prev;
+	vm_offset_t	start;
+	vm_offset_t	end;
+	vm_size_t	lo, hi;
+	kern_return_t	kr;
+	unsigned int	i;
+
+	assert(page_aligned(*address));
+	assert(page_aligned(size));
+	assert(size != 0);
+
+	if (anywhere) {
+		/* Comes back locked, with an entry for the range linked. */
+		kr = vm_map_find_space(map, &start, size, mask, &entry);
+		if (kr != KERN_SUCCESS) {
+			vm_object_deallocate(object);
+			return kr;
+		}
+		end = start + size;
+	} else {
+		start = *address;
+		end = start + size;
+		kr = KERN_SUCCESS;
+		vm_map_lock(map);
+		if ((start & mask) != 0)
+			kr = KERN_NO_SPACE;
+		else if (start < map->min_offset || end > map->max_offset ||
+			 start >= end)
+			kr = KERN_INVALID_ADDRESS;
+		else if (vm_map_lookup_entry(map, start, &prev))
+			kr = KERN_NO_SPACE;
+		else if (prev->vme_next != vm_map_to_entry(map) &&
+			 prev->vme_next->vme_start < end)
+			kr = KERN_NO_SPACE;
+		if (kr != KERN_SUCCESS) {
+			vm_map_unlock(map);
+			vm_object_deallocate(object);
+			return kr;
+		}
+		entry = vm_map_entry_insert(map, prev, start, end,
+					    VM_OBJECT_NULL, 0, FALSE, FALSE,
+					    FALSE, VM_PROT_NONE, VM_PROT_NONE,
+					    VM_BEHAVIOR_DEFAULT, inheritance, 0);
+	}
+
+	/*
+	 * Nothing in the range until it is cut: no access at all, and no
+	 * way for the task to raise it, the map being held.
+	 */
+	entry->object.vm_object = object;
+	entry->offset = object_offset;
+	entry->is_shared = TRUE;
+	entry->needs_copy = FALSE;
+	entry->inheritance = inheritance;
+	entry->behavior = VM_BEHAVIOR_DEFAULT;
+	entry->protection = VM_PROT_NONE;
+	entry->max_protection = VM_PROT_NONE;
+
+	/*
+	 * The segments are in order and cover the entry, so the pieces come
+	 * in order too: each one starts where `entry' does, and what is left
+	 * after it is the next entry.
+	 */
+	for (i = 0; i < segments; i++) {
+		lo = (i == 0) ? 0 : ends[i - 1];
+		hi = ends[i];
+		if (lo < entry_offset)
+			lo = entry_offset;
+		if (hi > entry_offset + size)
+			hi = entry_offset + size;
+		if (lo >= hi)
+			continue;
+		vm_map_clip_start(map, entry, start + (lo - entry_offset));
+		vm_map_clip_end(map, entry, start + (hi - entry_offset));
+		entry->max_protection = prots[i] & max_protection;
+		entry->protection = cur_protection & entry->max_protection;
+		entry = entry->vme_next;
+	}
+	vm_map_unlock(map);
+
+	/*
+	 * A map whose task asked for every new mapping wired (task_wire())
+	 * gets each piece wired at its own protection, as vm_map_enter() does
+	 * for its one entry.  A piece that cannot be wired takes the whole
+	 * mapping back out.
+	 */
+	if (map->wiring_required) {
+		for (i = 0; i < segments && kr == KERN_SUCCESS; i++) {
+			lo = (i == 0) ? 0 : ends[i - 1];
+			hi = ends[i];
+			if (lo < entry_offset)
+				lo = entry_offset;
+			if (hi > entry_offset + size)
+				hi = entry_offset + size;
+			if (lo >= hi ||
+			    (cur_protection & prots[i] & max_protection) ==
+			    VM_PROT_NONE)
+				continue;
+			kr = vm_map_wire(map, start + (lo - entry_offset),
+					 start + (hi - entry_offset),
+					 cur_protection & prots[i] &
+					 max_protection, TRUE);
+		}
+		if (kr != KERN_SUCCESS) {
+			(void) vm_map_remove(map, start, end, VM_MAP_NO_FLAGS);
+			return kr;
+		}
+	}
+
+	*address = start;
+	return KERN_SUCCESS;
+}
+
 
 /*
  *	VM_MAP_RANGE_CHECK:	[ internal use only ]
