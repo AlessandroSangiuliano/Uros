@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #911
+Takes out: each segment's own maximum in vm_map_enter_segments() (8462c454) -- every piece of a mapped entry gets the maximum the mapping asked for, so a read-only segment comes out writable
+Run: --entry 14 1200 -smp 1
+Expect: cow_test: \[10\] page 0 is mapped 3, at most 3, and its segment allows 1 — WRONG
+
+diff --git a/uros/src/mach_kernel/vm/vm_map.c b/uros/src/mach_kernel/vm/vm_map.c
+index aa76465d..c24100d1 100644
+--- a/uros/src/mach_kernel/vm/vm_map.c
++++ b/uros/src/mach_kernel/vm/vm_map.c
+@@ -2198,7 +2198,7 @@ vm_map_enter_segments(
+ 			continue;
+ 		vm_map_clip_start(map, entry, start + (lo - entry_offset));
+ 		vm_map_clip_end(map, entry, start + (hi - entry_offset));
+-		entry->max_protection = prots[i] & max_protection;
++		entry->max_protection = max_protection;
+ 		entry->protection = cur_protection & entry->max_protection;
+ 		entry = entry->vme_next;
+ 	}

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #911
+Takes out: the delayed copy strategy an entry's object is given (0583964b) -- it keeps the symmetric one, which takes the object to be one mapping's alone
+Run: --entry 14 1200 -smp 1
+Expect: cow_test: \[14\] after a fork this task's two mappings of the entry did NOT see each other's writes
+
+diff --git a/uros/src/mach_kernel/vm/vm_memory_entry.c b/uros/src/mach_kernel/vm/vm_memory_entry.c
+index e901957f..d6a54b7e 100644
+--- a/uros/src/mach_kernel/vm/vm_memory_entry.c
++++ b/uros/src/mach_kernel/vm/vm_memory_entry.c
+@@ -166,8 +166,6 @@ vm_memory_entry_object(
+ 	vm_object_lock(object);
+ 	object->ref_count++;		/* the caller's */
+ 	VM_OBJ_RES_INCR(object);
+-	if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC)
+-		object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
+ 	vm_object_unlock(object);
+ 	map_entry->is_shared = TRUE;
+ 
