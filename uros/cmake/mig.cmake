@@ -225,6 +225,48 @@ function(add_mig_userland_client DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
         ${USER_C} PARENT_SCOPE)
 endfunction()
 
+# The server half alone, for a program that ANSWERS a subsystem -- the
+# demultiplexer and the header that declares it -- in that program's own build
+# directory (#931).  A server half calls routines only its server writes, so it
+# belongs to the server: in a library it left those routines' names undefined,
+# and the library did not say what it was.  The libraries carry user halves
+# (add_mig_userland_client above).
+#
+# ⚠️ -header and -user /dev/null: the server file includes only its own server
+# header, so nothing of the user half is needed or produced, and nothing it
+# would have produced can shadow a header of the same name elsewhere.
+function(add_mig_userland_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
+    get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
+    set(MIG_PP   ${OUTPUT_DIR}/${DEFS_NAME}.server.mig.i)
+    set(SERVER_C ${OUTPUT_DIR}/${DEFS_NAME}_server.c)
+    set(SERVER_H ${OUTPUT_DIR}/${DEFS_NAME}_server.h)
+
+    file(MAKE_DIRECTORY ${OUTPUT_DIR})
+    set_source_files_properties(${SERVER_C} ${SERVER_H} PROPERTIES GENERATED TRUE)
+
+    add_custom_command(
+        OUTPUT ${SERVER_C} ${SERVER_H}
+        COMMAND ${CMAKE_C_COMPILER} -E -x c
+                -I${UROS_UAPI_DIR}
+                ${UROS_MIG_USERLAND_INCLUDES}
+                ${UROS_MIG_DEFS_ARCH}
+                ${DEFS_FILE} -o ${MIG_PP}
+        COMMAND $<TARGET_FILE:migcom>
+                -target ${UROS_TARGET_ARCH}
+                -header /dev/null
+                -sheader ${SERVER_H}
+                -user /dev/null
+                -server ${SERVER_C}
+                ${MIG_PP}
+        DEPENDS migcom ${DEFS_FILE} ${UROS_MIG_COMMON_DEFS}
+        COMMENT "MIG: ${DEFS_NAME} (userland server, ${UROS_TARGET_ARCH})"
+        VERBATIM
+    )
+
+    set(${SUBSYS_NAME}_GENERATED ${${SUBSYS_NAME}_GENERATED}
+        ${SERVER_C} PARENT_SCOPE)
+endfunction()
+
 function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
     mig_user_header_name(${DEFS_NAME} USER_H_NAME)
