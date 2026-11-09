@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #923
+Takes out: the extra tick -- convert_ipc_timeout_to_ticks() counts a timeout from the next interrupt again, so a 10 ms sleep at 100 Hz ends at the next tick, often well before 10 ms: musl_test's [25] must count short sleeps among its 50
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[25\] WRONG -- .* [1-9][0-9]* of 50 10 ms sleeps short
+
+diff --git a/uros/src/mach_kernel/kern/ipc_sched.h b/uros/src/mach_kernel/kern/ipc_sched.h
+index f8b45b5d..30167550 100644
+--- a/uros/src/mach_kernel/kern/ipc_sched.h
++++ b/uros/src/mach_kernel/kern/ipc_sched.h
+@@ -125,7 +125,7 @@ convert_ipc_timeout_to_ticks(mach_msg_timeout_t millis)
+ {
+ 	if (millis == 0)
+ 		return 0;
+-	return millis / 1000 * hz + (millis % 1000 * hz + 999) / 1000 + 1;
++	return millis / 1000 * hz + (millis % 1000 * hz + 999) / 1000;	/* 923-no-extra-tick */
+ }
+ 
+ 

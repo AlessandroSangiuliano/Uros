@@ -1,0 +1,46 @@
+Kind: ablation
+Issue: #923
+Over: 923-widen-tsc-skew.patch
+Takes out: the floor -- each processor answers its own reading, so over the widen a thread that moves to a processor with a smaller skew reads a time before one it has already read: musl_test's [25] must count readings that went back
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[25\] WRONG -- .* [1-9][0-9]* of 100000 readings went back
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_dev.c b/uros/src/mach_kernel/x86_64/time/clock_dev.c
+index b73ba78c..9b6f801b 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_dev.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_dev.c
+@@ -409,7 +409,6 @@ struct clock_ops bbc_ops = {
+ static volatile uint64_t	mono_ns;	/* since boot, at the last tick */
+ static volatile uint64_t	mono_tsc;	/* the TSC stamped with it */
+ static volatile uint32_t	mono_seq;	/* odd while the tick writes */
+-static volatile uint64_t	mono_given;	/* the largest reading given out */
+ 
+ /*
+  * The tick's half, on the master processor with interrupts off, beside the
+@@ -443,7 +442,7 @@ mono_init(void)
+ static kern_return_t
+ mono_gettime(tvalspec_t *cur_time)
+ {
+-	uint64_t	base, anchor, ns, given, seen;
++	uint64_t	base, anchor, ns;
+ 	uint32_t	seq;
+ 
+ 	do {
+@@ -459,16 +458,7 @@ mono_gettime(tvalspec_t *cur_time)
+ 	ns = base + wall_subtick_nsec(anchor - (uint64_t) cpu_number() *
+ 				       (tsc_hz() / 200));
+ 
+-	/* Never below what any processor has been given. */
+-	given = mono_given;
+-	while (ns > given) {
+-		seen = atomic_cmpxchg64(&mono_given, given, ns);
+-		if (seen == given)
+-			break;
+-		given = seen;
+-	}
+-	if (ns < given)
+-		ns = given;
++	/* 923-no-monotonic-floor: each processor answers its own reading */
+ 
+ 	cur_time->tv_sec  = (unsigned int) (ns / NSEC_PER_SEC);
+ 	cur_time->tv_nsec = (clock_res_t) (ns % NSEC_PER_SEC);

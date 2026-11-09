@@ -1,0 +1,29 @@
+Kind: widen
+Issue: #923
+Holds open: unsynchronised TSCs -- the monotonic clock's reading takes the TSC 5 ms further on per processor number, so two processors' readings of one moment differ by up to a tick: the clock must still never go back
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_dev.c b/uros/src/mach_kernel/x86_64/time/clock_dev.c
+index 31854f3b..b73ba78c 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_dev.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_dev.c
+@@ -56,6 +56,7 @@
+ #include <kern/time_out.h>		/* tick -- microseconds per tick */
+ #include <x86_64/time/tsc.h>		/* rdtsc, tsc_hz -- the sub-tick ruler */
+ #include <x86_64/sync/atomic.h>		/* atomic_cmpxchg64 -- the monotonic clock's floor */
++#include <x86_64/cpu_number.h>		/* 923-widen-tsc-skew */
+ 
+ /*
+  * ⚠️ <sys/time.h> is deliberately not included, although it is where the rest
+@@ -453,7 +454,10 @@ mono_gettime(tvalspec_t *cur_time)
+ 		anchor = mono_tsc;
+ 		__asm__ __volatile__("" ::: "memory");
+ 	} while (mono_seq != seq);
+-	ns = base + wall_subtick_nsec(anchor);
++	/* 923-widen-tsc-skew: each processor reads the TSC 5 ms further on per
++	 * processor number, as unsynchronised TSCs would */
++	ns = base + wall_subtick_nsec(anchor - (uint64_t) cpu_number() *
++				       (tsc_hz() / 200));
+ 
+ 	/* Never below what any processor has been given. */
+ 	given = mono_given;
