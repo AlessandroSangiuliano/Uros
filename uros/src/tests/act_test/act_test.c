@@ -5884,6 +5884,11 @@ static volatile unsigned arm_thirty_nine_got;
 static volatile mach_port_t arm_thirty_nine_thread;
 static volatile int	arm_thirty_nine_stop;
 
+/* #925: the receiver's way out, set as it returns: the last receive's answer. */
+static volatile int	arm_thirty_nine_returned;
+static volatile mach_msg_return_t arm_thirty_nine_rcv_mr;
+static volatile int	arm_thirty_nine_rcv_id;
+
 /*
  * A thread the kernel has in a wait.  A flag set before mach_msg() says only
  * that it is on its way, so a message sent on that word reaches a queue with no
@@ -5956,15 +5961,21 @@ arm_thirty_nine_receiver(void *arg)
 		mach_msg_header_t	h;
 		char			bytes[128];
 	} m;
+	mach_msg_return_t	mr;
 
 	(void) arg;
 	arm_thirty_nine_thread = mach_thread_self();
 	for (;;) {
-		if (mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
-			     arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
-			     MACH_PORT_NULL) != MACH_MSG_SUCCESS ||
-		    m.h.msgh_id != A39_WAKE)
+		mr = mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
+			      arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS || m.h.msgh_id != A39_WAKE) {
+			arm_thirty_nine_rcv_mr = mr;
+			arm_thirty_nine_rcv_id = mr == MACH_MSG_SUCCESS ?
+						 m.h.msgh_id : 0;
+			arm_thirty_nine_returned = 1;
 			return NULL;
+		}
 		arm_thirty_nine_got++;
 	}
 }
@@ -5985,18 +5996,121 @@ arm_thirty_nine_send(mach_port_t port, mach_msg_option_t option, int id)
 			sizeof h, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
 }
 
-/* The last message a server sees: the queue may be full, so until it is taken. */
-static void
+/*
+ * The last message a server sees: the queue may be full, so until it is taken.
+ * Answers the last send's result: MACH_MSG_SUCCESS once one went in (#925).
+ */
+static mach_msg_return_t
 arm_thirty_nine_stop_it(void)
 {
-	unsigned	i;
+	mach_msg_return_t	mr = MACH_SEND_TIMED_OUT;
+	unsigned		i;
 
 	for (i = 0; i < 2000; i++) {
-		if (arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP)
-		    == MACH_MSG_SUCCESS)
-			return;
+		mr = arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP);
+		if (mr == MACH_MSG_SUCCESS)
+			return mr;
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 	}
+	return mr;
+}
+
+/*
+ * #925: the receiver's port as the kernel counts it.  The count is what the
+ * port has accepted and not given up, the limit what a send is measured
+ * against, and the sequence number how many messages it has given to a
+ * receiver: two WAKEs, and the STOP would be the third.
+ */
+static void
+arm_thirty_nine_port_said(void)
+{
+	mach_port_status_t	st;
+	mach_msg_type_number_t	n = MACH_PORT_RECEIVE_STATUS_COUNT;
+
+	if (mach_port_get_attributes(mach_task_self(), arm_thirty_nine_port,
+				     MACH_PORT_RECEIVE_STATUS,
+				     (mach_port_info_t) &st, &n)
+	    != KERN_SUCCESS) {
+		printf("act_test: [39] the receiver's port refused its "
+		       "status\n");
+		return;
+	}
+	printf("act_test: [39] the receiver's port counts %u message(s) "
+	       "against a limit of %u, and has given %u\n",
+	       (unsigned) st.mps_msgcount, (unsigned) st.mps_qlimit,
+	       (unsigned) st.mps_seqno);
+}
+
+/* #925: the receiver as the kernel sees it. */
+static void
+arm_thirty_nine_receiver_said(void)
+{
+	struct thread_basic_info	info;
+	mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
+
+	if (arm_thirty_nine_thread == MACH_PORT_NULL ||
+	    thread_info(arm_thirty_nine_thread, THREAD_BASIC_INFO,
+			(thread_info_t) &info, &n) != KERN_SUCCESS) {
+		printf("act_test: [39] the receiver refused its state\n");
+		return;
+	}
+	printf("act_test: [39] the receiver: run_state %d, suspend_count %d, "
+	       "flags 0x%x, asleep %d s\n", (int) info.run_state,
+	       (int) info.suspend_count, (unsigned) info.flags,
+	       (int) info.sleep_time);
+}
+
+/*
+ * #925: ends the receiver, and never waits for it without a bound.  The STOP
+ * goes in, or the arm says what refused it.  The receiver returns on it within
+ * PATIENCE naps, or the arm says what the receiver and its port look like.
+ * Either way a receiver still in its receive is let out by destroying the
+ * port, which ends the receive with MACH_RCV_PORT_DIED, so that act_test goes
+ * on.  Answers whether the STOP ended it.
+ */
+static int
+arm_thirty_nine_end_receiver(pthread_t receiver)
+{
+	mach_msg_return_t	mr = arm_thirty_nine_stop_it();
+	int			i, ok = 0;
+
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [39] the STOP was refused 2000 times, the "
+		       "last with 0x%x — WRONG\n", (int) mr);
+		arm_thirty_nine_port_said();
+	} else {
+		for (i = 0; i < PATIENCE && !arm_thirty_nine_returned; i++)
+			nap(100);
+		if (!arm_thirty_nine_returned) {
+			printf("act_test: [39] the STOP went in, and the "
+			       "receiver had not returned %d ms later — "
+			       "WRONG\n", PATIENCE * 100);
+			arm_thirty_nine_port_said();
+			arm_thirty_nine_receiver_said();
+		} else if (arm_thirty_nine_rcv_mr != MACH_MSG_SUCCESS ||
+			   arm_thirty_nine_rcv_id != A39_STOP)
+			printf("act_test: [39] the receiver returned on 0x%x, "
+			       "message %d, and not on the STOP — WRONG\n",
+			       (int) arm_thirty_nine_rcv_mr,
+			       arm_thirty_nine_rcv_id);
+		else
+			ok = 1;
+	}
+	if (!arm_thirty_nine_returned) {
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_nine_port);
+		arm_thirty_nine_port = MACH_PORT_NULL;
+		for (i = 0; i < PATIENCE && !arm_thirty_nine_returned; i++)
+			nap(100);
+		if (!arm_thirty_nine_returned) {
+			/* Not joined: the join would wait for ever. */
+			printf("act_test: [39] the receiver did not return "
+			       "when its port was destroyed either — WRONG\n");
+			return 0;
+		}
+	}
+	(void) pthread_join(receiver, NULL);
+	return ok;
 }
 
 static mach_msg_return_t
@@ -6162,7 +6276,7 @@ arm_thirty_nine_window(mach_port_t host)
 	arm_thirty_nine_stop = 0;
 	if (pthread_create(&noise, NULL, arm_thirty_nine_noise, NULL) != 0) {
 		arm_thirty_nine_stop = 1;
-		arm_thirty_nine_stop_it();
+		(void) arm_thirty_nine_stop_it();
 		(void) pthread_join(server, NULL);
 		(void) mach_port_destroy(mach_task_self(), reply);
 		return 0;
@@ -6181,7 +6295,7 @@ arm_thirty_nine_window(mach_port_t host)
 	}
 	arm_thirty_nine_stop = 1;
 	(void) pthread_join(noise, NULL);
-	arm_thirty_nine_stop_it();
+	(void) arm_thirty_nine_stop_it();
 	(void) pthread_join(server, NULL);
 	(void) mach_port_destroy(mach_task_self(), reply);
 	if (mr != MACH_MSG_SUCCESS) {
@@ -6228,21 +6342,27 @@ arm_thirty_nine_asked(mach_port_t host)
 		return 0;
 	}
 	arm_thirty_nine_thread = MACH_PORT_NULL;
+	arm_thirty_nine_returned = 0;
 	if (pthread_create(&receiver, NULL, arm_thirty_nine_receiver, NULL)
 	    != 0) {
 		printf("act_test: [39] pthread_create failed — WRONG\n");
 	} else {
 		ok = arm_thirty_nine_break(host, own, 0, cpus);
 		ok &= arm_thirty_nine_break(host, own, 1, cpus);
-		arm_thirty_nine_stop_it();
-		(void) pthread_join(receiver, NULL);
-		(void) mach_port_deallocate(mach_task_self(),
-					    arm_thirty_nine_thread);
-		if (cpus > 1 && arm_thirty_nine_window(host) == 0)
+		/* #925: a receiver the STOP did not end has no port left. */
+		if (!arm_thirty_nine_end_receiver(receiver))
+			ok = 0;
+		if (arm_thirty_nine_thread != MACH_PORT_NULL)
+			(void) mach_port_deallocate(mach_task_self(),
+						    arm_thirty_nine_thread);
+		if (arm_thirty_nine_port != MACH_PORT_NULL && cpus > 1 &&
+		    arm_thirty_nine_window(host) == 0)
 			ok = 0;
 	}
 	(void) mach_port_destroy(mach_task_self(), own);
-	(void) mach_port_destroy(mach_task_self(), arm_thirty_nine_port);
+	if (arm_thirty_nine_port != MACH_PORT_NULL)
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_nine_port);
 	if (ok)
 		printf("act_test: [39] a lost bet is undone, at a receive and "
 		       "at a return — OK\n");
