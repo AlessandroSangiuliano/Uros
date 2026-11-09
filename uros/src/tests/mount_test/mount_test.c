@@ -538,7 +538,8 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 	mach_port_t		token = MACH_PORT_NULL, notify = MACH_PORT_NULL;
 	mach_port_t		prev = MACH_PORT_NULL;
 	flipc2_channel_t	f1, r1, f2, r2;
-	flipc2_return_t		first, full, again, a, b;
+	flipc2_return_t		first, again, a, b;
+	kern_return_t		full;
 	vfs_u64_t		handle = 0, absent = 0;
 	vfs_u32_t		type = 0;
 	unsigned32		so = 0, eo = 0;
@@ -606,16 +607,53 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 	/*
 	 * [29] A connection ends with its token.  The endpoint holds one; the
 	 * control is a second connect refused while the first is held, without
-	 * which a reconnect would show nothing.
+	 * which a reconnect would show nothing.  That refusal is asked by hand,
+	 * with a token this arm keeps: a refused request is destroyed with the
+	 * right it brought, so the token's no-senders notification must come
+	 * the moment it is asked for -- the endpoint's pump used to keep the
+	 * right of every connect it refused.
 	 */
 	if (eps_why != NULL) {
 		printf("mount_test: [29] WRONG — not asked: %s\n", eps_why);
 		mt_result(0);
 	} else {
+		int	left = 0;
+
 		first = flipc2_endpoint_connect(MT_OWN_EP, 0, 0, &f1, &r1);
-		full = flipc2_endpoint_connect(MT_OWN_EP, 0, 0, &f2, &r2);
-		if (full == FLIPC2_SUCCESS)
-			(void)flipc2_endpoint_disconnect(f2, r2);
+		full = KERN_FAILURE;
+		token = notify = ep = MACH_PORT_NULL;
+		if (netname_look_up(name_server_port, "", MT_OWN_EP, &ep)
+		    == NETNAME_SUCCESS &&
+		    mach_port_allocate(mach_task_self(),
+				       MACH_PORT_RIGHT_RECEIVE, &token)
+		    == KERN_SUCCESS &&
+		    mach_port_allocate(mach_task_self(),
+				       MACH_PORT_RIGHT_RECEIVE, &notify)
+		    == KERN_SUCCESS) {
+			full = flipc2_endpoint_connect_rpc(ep, token, 0, 0,
+							   &fe, &re, &so, &eo);
+			if (full == KERN_SUCCESS) {
+				(void)mach_port_deallocate(mach_task_self(),
+							   fe);
+				(void)mach_port_deallocate(mach_task_self(),
+							   re);
+			} else if (mach_port_request_notification(
+					   mach_task_self(), token,
+					   MACH_NOTIFY_NO_SENDERS, 1, notify,
+					   MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev)
+				   == KERN_SUCCESS) {
+				left = !mt_no_senders(notify, 20);
+			}
+		}
+		if (MACH_PORT_VALID(token))
+			(void)mach_port_mod_refs(mach_task_self(), token,
+						 MACH_PORT_RIGHT_RECEIVE, -1);
+		if (MACH_PORT_VALID(notify))
+			(void)mach_port_mod_refs(mach_task_self(), notify,
+						 MACH_PORT_RIGHT_RECEIVE, -1);
+		if (MACH_PORT_VALID(ep))
+			(void)mach_port_deallocate(mach_task_self(), ep);
+		token = notify = MACH_PORT_NULL;
 		if (first == FLIPC2_SUCCESS)
 			(void)flipc2_endpoint_disconnect(f1, r1);
 		ok = mt_reaches(&mt_own.deads, 1, 50);
@@ -623,20 +661,22 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 		if (again == FLIPC2_SUCCESS)
 			(void)flipc2_endpoint_disconnect(f2, r2);
 		ok = ok && first == FLIPC2_SUCCESS &&
-		     full == FLIPC2_ERR_MAX_CLIENTS && again == FLIPC2_SUCCESS;
+		     full == KERN_RESOURCE_SHORTAGE && !left &&
+		     again == FLIPC2_SUCCESS;
 		mt_result(ok);
 		if (ok)
 			printf("mount_test: [29] an endpoint of one slot, held: "
-			       "a second connect refused, and once the first let "
-			       "its token go, the endpoint saw it end and took a "
-			       "new one\n");
+			       "a second connect refused with nothing of it "
+			       "kept, and once the first let its token go the "
+			       "endpoint saw it end and took a new one\n");
 		else
 			printf("mount_test: [29] WRONG — a connect: %d; another "
 			       "while it held the slot: %d, not "
-			       "FLIPC2_ERR_MAX_CLIENTS (%d); ended seen %u time(s); "
-			       "a connect after: %d\n", first, full,
-			       FLIPC2_ERR_MAX_CLIENTS, (unsigned)mt_own.deads,
-			       again);
+			       "KERN_RESOURCE_SHORTAGE (%d)%s; ended seen %u "
+			       "time(s); a connect after: %d\n", first, full,
+			       KERN_RESOURCE_SHORTAGE,
+			       left ? ", and its right kept" : "",
+			       (unsigned)mt_own.deads, again);
 	}
 
 	/*
