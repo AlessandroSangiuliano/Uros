@@ -20,6 +20,7 @@
 
 #include <mach.h>
 #include <mach/message.h>
+#include <mach/mach_syscalls.h>		/* syscall_vm_deallocate(), #911 */
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -33,6 +34,14 @@
 
 volatile uint32_t liar_mach_reads[LIAR_FILES];
 volatile uint32_t liar_flipc_reads[LIAR_FILES];
+volatile uint32_t liar_opens;
+volatile uint32_t liar_opens_with_a_task;
+
+int
+mt_is_task(mach_port_t name)
+{
+	return syscall_vm_deallocate(name, 0, 0) == KERN_SUCCESS;
+}
 
 static mach_port_t		liar_port;
 static flipc2_endpoint_t	liar_ep;
@@ -79,18 +88,21 @@ liar_left(vfs_u64_t offset, uint64_t count)
 }
 
 kern_return_t
-liar_open(mach_port_t fs_port, mach_port_t client_task, vfs_path_t path,
+liar_open(mach_port_t fs_port, mach_port_t client_token, vfs_path_t path,
 	  int flags, int mode, vfs_u64_t *handle, vfs_u32_t *type)
 {
 	int h = liar_handle_of(path);
 
 	(void)fs_port; (void)flags; (void)mode;
 	if (h == 0)
-		return KERN_INVALID_ARGUMENT;	/* the request, task port and
-						 * all, goes back with it */
-	/* libvfs sends its task port with every open (#911); this server has
-	 * no use for it. */
-	(void)mach_port_deallocate(mach_task_self(), client_task);
+		return KERN_INVALID_ARGUMENT;	/* the request, right and all,
+						 * goes back with it */
+	/* #911: libvfs sent its task port with every open, to say when it
+	 * died; [27] asks what it sends now.  This server has no use for it. */
+	liar_opens++;
+	if (mt_is_task(client_token))
+		liar_opens_with_a_task++;
+	(void)mach_port_deallocate(mach_task_self(), client_token);
 	*handle = (vfs_u64_t)h;
 	*type = VFS_FT_REG;
 	return KERN_SUCCESS;
