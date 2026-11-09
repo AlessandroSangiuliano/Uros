@@ -142,6 +142,7 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_thread.h>
 #include <device/ds_routines.h>
+#include <vm/vm_memory_entry.h>		/* #911: vm_memory_entry_notify() */
 #include <kern/counters.h>
 
 /*
@@ -606,6 +607,9 @@ ipc_kobject_notify(
 
 		case IKOT_MASTER_DEVICE:
 		return ds_master_notify(port, request_header);
+
+		case IKOT_MEMORY_ENTRY:			/* #911 */
+		return vm_memory_entry_notify(port, request_header);
 
 		default:
                 return FALSE;

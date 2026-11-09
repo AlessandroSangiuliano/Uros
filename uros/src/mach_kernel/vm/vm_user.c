@@ -203,6 +203,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_memory_entry.h>		/* #911 */
 #include <vm/memory_object.h>
 
 
@@ -435,6 +436,18 @@ vm_map(
 		(inheritance > VM_INHERIT_LAST_VALID) ||
 		size == 0)
 		return(KERN_INVALID_ARGUMENT);
+
+	/*
+	 * A memory entry's port names pages already in some object, with
+	 * the most each segment of them may be mapped with (#911).  It is not
+	 * a memory object: vm_object_enter() would take it for a pager's port
+	 * and send it memory_object_init().
+	 */
+	if (IP_VALID(port) && ip_kotype(port) == IKOT_MEMORY_ENTRY)
+		return vm_memory_entry_map(target_map, address, size, mask,
+					   anywhere, port, offset, copy,
+					   cur_protection, max_protection,
+					   inheritance);
 
 	/*
 	 * Find the vm object (if any) corresponding to this port.
