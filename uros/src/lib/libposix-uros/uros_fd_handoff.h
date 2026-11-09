@@ -32,8 +32,21 @@ struct uros_fd_handoff_rec {
     uint64_t  offset;       /* current file offset */
     int32_t   flags;        /* VFS_O_* */
     uint8_t   type;         /* VFS_FT_* */
-    uint8_t   _pad[3];
+    /*
+     * #897: 0, or 1 + the index of an earlier record this descriptor was a
+     * dup() of.  The new image then makes it a second name of that record's
+     * description, one offset for both, instead of opening it again.  The
+     * other fields repeat the earlier record's, so an image built before
+     * this field reads it as padding and opens the file twice, as all of
+     * them did.  It fits a byte: UROS_FD_HANDOFF_MAX is below 255.
+     */
+    uint8_t   same_as;
+    uint8_t   _pad[2];
 };
+
+_Static_assert(sizeof(struct uros_fd_handoff_rec) == 32,
+               "a handoff record changed size: images of two builds would "
+               "read each other's records at different strides");
 
 struct uros_fd_handoff {
     uint32_t  magic;        /* UROS_FD_HANDOFF_MAGIC */

@@ -1129,7 +1129,9 @@ int __uros_pfd_is_terminal(int fd)
  * Enumerate the POSIX fds that survive execve: in use, not a console
  * stream, and not O_CLOEXEC.  Writes parallel (posix_fd, vfs_fd) arrays
  * and returns the count (<= max).  posix_exec_fds.c turns each pair into
- * a handoff record by exporting the libvfs state behind vfd.
+ * a handoff record by exporting the libvfs state behind vfd.  Two
+ * descriptors of one description carry the same vfd, which is how
+ * posix_exec_fds.c tells a dup() from a second open() (#897).
  */
 int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
 {
@@ -1172,6 +1174,34 @@ void __uros_pfd_install(int posix_fd, vfs_fd_t vfd)
         ofd_release(&gone);
     if (o == NULL)
         vfs_close(vfd);
+}
+
+/*
+ * Bind POSIX fd 'posix_fd' in the freshly-execed task to the description
+ * 'of_fd' already names: the two were one description before the exec, a
+ * dup() of each other (#897).  Returns 0, or -1 when 'of_fd' names nothing.
+ */
+int __uros_pfd_install_alias(int posix_fd, int of_fd)
+{
+    struct posix_ofd gone, *o;
+    int freed = 0;
+
+    if (posix_fd < 3 || posix_fd >= POSIX_OPEN_MAX || posix_fd == of_fd)
+        return -1;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    o = pfd_ofd_locked(of_fd);
+    if (o == NULL) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -1;
+    }
+    if (pfds[posix_fd].ofd != NULL)
+        freed = pfd_unbind_locked(posix_fd, &gone);
+    pfd_bind_locked(posix_fd, o, 0);
+    pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

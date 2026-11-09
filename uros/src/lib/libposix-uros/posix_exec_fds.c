@@ -23,6 +23,7 @@
 /* POSIX-fd table accessors (posix_fd.c). */
 extern int  __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max);
 extern void __uros_pfd_install(int posix_fd, vfs_fd_t vfd);
+extern int  __uros_pfd_install_alias(int posix_fd, int of_fd);
 
 /* libvfs handoff helpers (header-less: libvfs.h omits them by design). */
 extern int      vfs_export_fd(vfs_fd_t fd, mach_port_t *port, uint64_t *handle,
@@ -40,7 +41,8 @@ __uros_serialize_fds(struct uros_fd_handoff *blob)
 {
     int posix_fds[UROS_FD_HANDOFF_MAX];
     vfs_fd_t vfds[UROS_FD_HANDOFF_MAX];
-    int n, i, out = 0;
+    vfs_fd_t rec_vfd[UROS_FD_HANDOFF_MAX];  /* the libvfs fd behind recs[k] */
+    int n, i, j, out = 0;
 
     /* #232: push any buffered writes to the fs_servers before execve —
      * the write-behind buffers live in this (about-to-be-replaced) task's
@@ -56,6 +58,28 @@ __uros_serialize_fds(struct uros_fd_handoff *blob)
         uint64_t    handle = 0, offset = 0;
         int         flags = 0;
         uint8_t     type = 0;
+        int         first = -1;
+
+        /*
+         * #897: two descriptors with one libvfs fd are one description, a
+         * dup() of each other.  The second is the first's record again,
+         * marked as a second name of it, so that the new image gives both
+         * one offset; exported twice, they came out two opens of the file,
+         * each writing over what the other wrote.
+         */
+        for (j = 0; j < out; j++)
+            if (rec_vfd[j] == vfds[i] && blob->recs[j].same_as == 0) {
+                first = j;
+                break;
+            }
+        if (first >= 0) {
+            blob->recs[out] = blob->recs[first];
+            blob->recs[out].posix_fd = posix_fds[i];
+            blob->recs[out].same_as  = (uint8_t)(first + 1);
+            rec_vfd[out] = vfds[i];
+            out++;
+            continue;
+        }
         if (vfs_export_fd(vfds[i], &port, &handle, &offset, &flags, &type) != 0)
             continue;
         if (port == MACH_PORT_NULL)
@@ -66,6 +90,8 @@ __uros_serialize_fds(struct uros_fd_handoff *blob)
         blob->recs[out].offset   = offset;
         blob->recs[out].flags    = flags;
         blob->recs[out].type     = type;
+        blob->recs[out].same_as  = 0;
+        rec_vfd[out] = vfds[i];
         out++;
     }
     blob->count = (uint32_t)out;
@@ -104,6 +130,16 @@ __uros_absorb_inherited_fds(void)
 
     for (i = 0; i < h->count && i < UROS_FD_HANDOFF_MAX; i++) {
         const struct uros_fd_handoff_rec *r = &h->recs[i];
+
+        /* #897: a second name of an earlier record's description.  Only an
+         * earlier one: same_as is 1 + its index, so it is below i + 1. */
+        if (r->same_as != 0 && r->same_as <= i) {
+            (void)__uros_pfd_install_alias(r->posix_fd,
+                                           h->recs[r->same_as - 1].posix_fd);
+            continue;
+        }
+        if (r->same_as != 0)
+            continue;               /* names a record at or after itself */
         vfs_fd_t vfd = vfs_import_fd((mach_port_t)r->fs_port, r->handle,
                                      r->offset, r->flags, r->type);
         if (vfd != VFS_FD_INVALID)
