@@ -76,6 +76,7 @@
 
 #include <stdio.h>
 #include <pthread.h>
+#include <sys/timers.h>	/* #925: getclock(), the bound of arm 39's joins */
 
 #include "exc_server.h"
 
@@ -5890,6 +5891,15 @@ static volatile mach_msg_return_t arm_thirty_nine_rcv_mr;
 static volatile int	arm_thirty_nine_rcv_id;
 
 /*
+ * #925: the structure each of the arm's threads finds as its own, written by
+ * the thread as it returns.  A join waits on the handle pthread_create() gave;
+ * the thread's exit works on what pthread_self() answers; the two must be one.
+ */
+static pthread_t volatile arm_thirty_nine_receiver_self;
+static pthread_t volatile arm_thirty_nine_server_self;
+static pthread_t volatile arm_thirty_nine_noise_self;
+
+/*
  * A thread the kernel has in a wait.  A flag set before mach_msg() says only
  * that it is on its way, so a message sent on that word reaches a queue with no
  * receiver on it, and no hand-off is bet at all.  arm 39 and arm 40.
@@ -5973,6 +5983,7 @@ arm_thirty_nine_receiver(void *arg)
 			arm_thirty_nine_rcv_mr = mr;
 			arm_thirty_nine_rcv_id = mr == MACH_MSG_SUCCESS ?
 						 m.h.msgh_id : 0;
+			arm_thirty_nine_receiver_self = pthread_self();
 			arm_thirty_nine_returned = 1;
 			return NULL;
 		}
@@ -6060,6 +6071,65 @@ arm_thirty_nine_receiver_said(void)
 	       (int) info.sleep_time);
 }
 
+/* #925: one structure's side of the join handshake, one line. */
+static void
+arm_thirty_nine_join_said(const char *who, const char *as, pthread_t t)
+{
+	int		detached, num_joiners;
+	unsigned int	joiners, death;
+
+	if (pthread_join_state_np(t, &detached, &num_joiners, &joiners,
+				  &death) != 0) {
+		printf("act_test: [39] the %s's %s %p is no thread's\n", who, as,
+		       (void *) t);
+		return;
+	}
+	printf("act_test: [39] the %s's %s %p: state %d (1 joinable, 2 "
+	       "detached, 3 exited), joiners counted %d, joiners word %u, "
+	       "death word %u\n", who, as, (void *) t, detached, num_joiners,
+	       joiners, death);
+}
+
+/*
+ * #925: a join with a bound.  In four boots pthread_join() of a thread that had
+ * already exited did not return: the joiner slept on the thread's joiners word
+ * while the thread slept on its death word.  So every join of this arm waits
+ * ten seconds at most, and one that does not return says what the handshake
+ * shows, on the handle pthread_create() gave and on the structure the thread
+ * found as its own, and leaves the thread where it is.  Answers whether the
+ * join returned.
+ */
+static int
+arm_thirty_nine_join(pthread_t t, const char *who, pthread_t volatile *self)
+{
+	struct timespec	deadline;
+	pthread_t	seen;
+	int		r;
+
+	if (getclock(TIMEOFDAY, &deadline) != 0) {
+		printf("act_test: [39] no clock to bound the join of the %s "
+		       "— WRONG\n", who);
+		return 0;
+	}
+	deadline.tv_sec += PATIENCE / 10;
+	r = pthread_timedjoin_np(t, NULL, &deadline);
+	if (r == 0)
+		return 1;
+	seen = *self;
+	printf("act_test: [39] the join of the %s answered %d %d s after it "
+	       "was asked — WRONG\n", who, r, PATIENCE / 10);
+	arm_thirty_nine_join_said(who, "handle", t);
+	if (seen == (pthread_t) 0)
+		printf("act_test: [39] the %s never said which structure was "
+		       "its own\n", who);
+	else if (seen != t)
+		arm_thirty_nine_join_said(who, "own structure", seen);
+	else
+		printf("act_test: [39] the %s found the handle as its own "
+		       "structure\n", who);
+	return 0;
+}
+
 /*
  * #925: ends the receiver, and never waits for it without a bound.  The STOP
  * goes in, or the arm says what refused it.  The receiver returns on it within
@@ -6109,7 +6179,9 @@ arm_thirty_nine_end_receiver(pthread_t receiver)
 			return 0;
 		}
 	}
-	(void) pthread_join(receiver, NULL);
+	if (!arm_thirty_nine_join(receiver, "receiver",
+				  &arm_thirty_nine_receiver_self))
+		return 0;
 	return ok;
 }
 
@@ -6232,6 +6304,7 @@ arm_thirty_nine_server(void *arg)
 				      sizeof m, arm_thirty_nine_port, 10000,
 				      MACH_PORT_NULL);
 	}
+	arm_thirty_nine_server_self = pthread_self();	/* #925 */
 	return NULL;
 }
 
@@ -6249,6 +6322,7 @@ arm_thirty_nine_noise(void *arg)
 		       !arm_thirty_nine_stop)
 			;
 	}
+	arm_thirty_nine_noise_self = pthread_self();	/* #925 */
 	return NULL;
 }
 
@@ -6264,10 +6338,13 @@ arm_thirty_nine_window(mach_port_t host)
 	mach_port_t		reply;
 	mach_msg_return_t	mr = MACH_MSG_SUCCESS;
 	unsigned		i, reach, r0, t0, r1, t1;
+	int			joined;
 
 	reply = arm_own_port(39);
 	if (reply == MACH_PORT_NULL)
 		return 0;
+	arm_thirty_nine_server_self = (pthread_t) 0;
+	arm_thirty_nine_noise_self = (pthread_t) 0;
 	if (!arm_thirty_nine_counts(host, &reach, &r0, &t0) ||
 	    pthread_create(&server, NULL, arm_thirty_nine_server, NULL) != 0) {
 		(void) mach_port_destroy(mach_task_self(), reply);
@@ -6277,7 +6354,8 @@ arm_thirty_nine_window(mach_port_t host)
 	if (pthread_create(&noise, NULL, arm_thirty_nine_noise, NULL) != 0) {
 		arm_thirty_nine_stop = 1;
 		(void) arm_thirty_nine_stop_it();
-		(void) pthread_join(server, NULL);
+		(void) arm_thirty_nine_join(server, "server",
+					    &arm_thirty_nine_server_self);
 		(void) mach_port_destroy(mach_task_self(), reply);
 		return 0;
 	}
@@ -6294,15 +6372,19 @@ arm_thirty_nine_window(mach_port_t host)
 			      10000, MACH_PORT_NULL);
 	}
 	arm_thirty_nine_stop = 1;
-	(void) pthread_join(noise, NULL);
+	joined = arm_thirty_nine_join(noise, "noise thread",
+				      &arm_thirty_nine_noise_self);
 	(void) arm_thirty_nine_stop_it();
-	(void) pthread_join(server, NULL);
+	joined &= arm_thirty_nine_join(server, "server",
+				       &arm_thirty_nine_server_self);
 	(void) mach_port_destroy(mach_task_self(), reply);
 	if (mr != MACH_MSG_SUCCESS) {
 		printf("act_test: [39] RPC %u of the window answered 0x%x — "
 		       "WRONG\n", i, (int) mr);
 		return 0;
 	}
+	if (!joined)
+		return 0;
 	if (!arm_thirty_nine_counts(host, &reach, &r1, &t1))
 		return 0;
 	printf("act_test: [39] the queue filled in the window %u time(s) in %u "
@@ -6343,6 +6425,7 @@ arm_thirty_nine_asked(mach_port_t host)
 	}
 	arm_thirty_nine_thread = MACH_PORT_NULL;
 	arm_thirty_nine_returned = 0;
+	arm_thirty_nine_receiver_self = (pthread_t) 0;
 	if (pthread_create(&receiver, NULL, arm_thirty_nine_receiver, NULL)
 	    != 0) {
 		printf("act_test: [39] pthread_create failed — WRONG\n");
