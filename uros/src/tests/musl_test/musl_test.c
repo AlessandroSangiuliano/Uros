@@ -1511,6 +1511,14 @@ main(int argc, char **argv)
 	arm_null_signal();
 	arm_clocks();
 	arm_environment();
+	/*
+	 * #917: two programs that call libmach's mach_error() and
+	 * mach_error_string(), static against uros_libc and dynamic against
+	 * libc.so.  Each prints the text of KERN_INVALID_ARGUMENT and exits 0
+	 * only if it is the one libmach's table holds; neither linked before.
+	 */
+	arm_program(27, "/mach_error_test");
+	arm_program(28, "/mach_error_dyn");
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
