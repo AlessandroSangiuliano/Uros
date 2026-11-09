@@ -74,8 +74,14 @@ __attribute__((weak)) void	  (*_threadlib_exit_routine)(int)  = 0;
  * slot only becomes valid once __uros_libc_init drives __init_tls +
  * __init_ssp.  Calling it from inside main() (as Phase 3-6 did) faults
  * main()'s own prologue on the not-yet-installed TLS.
+ *
+ * #916: it is handed the environment and argv[0], as musl's own
+ * __init_libc(envp, pn) is, because this file is the only one that has them:
+ * from the bootstrap server, or from the stack exec_server built.  Without
+ * them musl's __environ stayed null and getenv() answered NULL for every
+ * name, in every static program.
  */
-extern void __uros_libc_init(void) __attribute__((weak));
+extern void __uros_libc_init(char **envp, char *pn) __attribute__((weak));
 
 static char *__nullarg = 0;
 static char **__argv = &__nullarg;
@@ -217,11 +223,13 @@ __start_mach_c(unsigned long entry_sp)
 
 	/*
 	 * musl-linked servers: bring up TLS + stack canary before main()
-	 * runs, so main()'s %gs:0x14 canary prologue sees a live TCB.
+	 * runs, so main()'s %gs:0x14 canary prologue sees a live TCB, and
+	 * hand musl the environment and the program's name (#916).
 	 * No-op for legacy libmach servers (weak symbol absent).
 	 */
 	if (__uros_libc_init)
-		__uros_libc_init();
+		__uros_libc_init(__environment,
+				 __argc > 0 ? __argv[0] : (char *)0);
 
 	if (*_threadlib_init_routine) {
 		vm_offset_t new_sp;
