@@ -123,7 +123,8 @@ if(UROS_BUILD_MUSL)
   set_target_properties(libvfs-pic PROPERTIES OUTPUT_NAME "vfs-pic")
 
   # -------------------------------------------------------------------------
-  # What a static program of musl gets, inside libc-uros.a (#733).
+  # What a static program of musl gets, inside the static umbrella libc.a
+  # (#733; libc-uros.a until #929).
   #
   # The sources of the static libvfs above, FLIPC included, against musl's
   # headers.  That libvfs is for the servers, and the header decides what a

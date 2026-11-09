@@ -2,8 +2,9 @@
 # Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
 # SPDX-License-Identifier: MIT
 #
-# uros_libc_check.sh NM MUSL_ARCHIVE PART_ARCHIVE... -- libc-uros.a holds musl
-# and our libraries under it, and in it musl's functions are the ones (#733).
+# uros_libc_check.sh NM MUSL_ARCHIVE PART_ARCHIVE... -- the static umbrella
+# libc.a (libc-uros.a until #929) holds musl and our libraries under it, and
+# in it musl's functions are the ones (#733).
 # So no part may define a name that musl defines: a second strchr in
 # libmach_core went on for months, and which of the two a program got was the
 # order of an archive.  Nor may two members of ours both define one for good,
@@ -13,7 +14,7 @@
 # where it is.
 #
 # uros_libc_check.sh --must-refuse NM MUSL_ARCHIVE CANARY_1 CANARY_2 CANARY_3 --
-# the same check, every time libc-uros.a is made, on parts made to fail it.
+# the same check, every time the umbrella is made, on parts made to fail it.
 # uros_libc_check_canary.c's object goes once into the first and the second,
 # and uros_libc_check_canary_pair.c's twice under one member name into the
 # second and three times into the third.  On the first two, each part must be

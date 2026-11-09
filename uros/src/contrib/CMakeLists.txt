@@ -13,7 +13,12 @@ if(UROS_BUILD_MUSL)
   set(MUSL_SRC      ${CMAKE_CURRENT_SOURCE_DIR}/musl)
   set(MUSL_BUILD    ${CMAKE_CURRENT_BINARY_DIR}/musl-build)
   set(MUSL_PREFIX   ${CMAKE_CURRENT_BINARY_DIR}/musl-install)
-  set(MUSL_LIB      ${MUSL_PREFIX}/lib/libc.a)
+  # #929: musl's own archive, in its BUILD directory.  In the install
+  # directory libc.a is the static umbrella (UROS_LIBC_A below), so that a
+  # static link with a plain -lc gets the dispatcher; musl's make install
+  # still writes its own there, and the umbrella's archive step, which every
+  # install makes run again, writes over it.
+  set(MUSL_LIB      ${MUSL_BUILD}/lib/libc.a)
   set(MUSL_OUT      ${MUSL_PREFIX}/lib/libc-musl.a)
   # Phase 7 (#234 incr 2a): shared build also emits libc.so (which IS the
   # musl dynamic linker, entry _dlstart) and the ld-musl-i386.so.1 symlink.
@@ -73,9 +78,11 @@ if(UROS_BUILD_MUSL)
     # BUILD_BYPRODUCTS: ninja looked at them right after the build step,
     # found them unchanged, and what is made from them was not made again
     # in that build -- measured, a changed musl source left libc.so as
-    # musl's own install wrote it, without the dispatcher, and libc-uros.a
-    # with the musl from before.
-    INSTALL_BYPRODUCTS ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
+    # musl's own install wrote it, without the dispatcher, and the static
+    # umbrella with the musl from before.
+    # #929: not the installed libc.a, which the umbrella's archive step
+    # declares as its own.
+    INSTALL_BYPRODUCTS ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
     LOG_CONFIGURE     ON
     LOG_BUILD         ON
     LOG_INSTALL       ON
@@ -210,7 +217,8 @@ if(UROS_BUILD_MUSL)
   # -------------------------------------------------------------------------
   # The umbrella's static twin (#733), which #221 planned beside libc.so.
   #
-  # libc-uros.a holds what libc.so holds, for a program of musl that links
+  # libc.a (#929; libc-uros.a until then) holds what libc.so holds, for a
+  # program of musl that links
   # statically: libc-musl.a and everything of ours that goes under it --
   # libvfs-musl and not libvfs, and libflipc2 as well, which libc.so leaves
   # out.
@@ -222,7 +230,11 @@ if(UROS_BUILD_MUSL)
   # uros_libc is the name to link against.  One archive needs no group for the
   # references among its members, libgcc is the only reason there is one.
   # -------------------------------------------------------------------------
-  set(UROS_LIBC_A    ${MUSL_PREFIX}/lib/libc-uros.a)
+  # #929: under the name a static link with -lc asks for.  It was
+  # libc-uros.a, beside musl's own libc.a with its -ENOSYS stubs, which is
+  # what such a link found: #291 again, in every program a build that is not
+  # ours would link.
+  set(UROS_LIBC_A    ${MUSL_PREFIX}/lib/libc.a)
   set(UROS_LIBC_MRI  ${CMAKE_CURRENT_BINARY_DIR}/libc-uros.mri)
   set(UROS_LIBC_PARTS libcap libnetname libvfs-musl libflipc2 libmach_core libposix-uros)
 
@@ -281,7 +293,7 @@ if(UROS_BUILD_MUSL)
             ${CMAKE_CURRENT_SOURCE_DIR}/uros_libc_check.sh
             uros_libc_check_canary $<TARGET_OBJECTS:uros_libc_check_canary>
             uros_libc_check_canary_pair $<TARGET_OBJECTS:uros_libc_check_canary_pair>
-    COMMENT "Archiving libc-uros.a (musl + posix-uros/vfs/flipc/mach/netname/cap)"
+    COMMENT "Archiving libc.a, the static umbrella (musl + posix-uros/vfs/flipc/mach/netname/cap)"
     VERBATIM
   )
   add_custom_target(uros_libc_archive ALL DEPENDS ${UROS_LIBC_A})
