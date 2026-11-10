@@ -1147,20 +1147,19 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 		}
 	}
 
-	task_lock(task);
-
-	/* Chain the thr_act onto the task's list */
-	mutex_lock(&task->act_list_lock);
-	thr_act->thr_acts.next = task->thr_acts.next;
-	thr_act->thr_acts.prev = &task->thr_acts;
-	task->thr_acts.next->prev = &thr_act->thr_acts;
-	task->thr_acts.next = &thr_act->thr_acts;
-	task->thr_act_count++;
-	/* no need to check for transition from 0 -> 1 here */
-	task->res_act_count++;
-	mutex_unlock(&task->act_list_lock);
-
-	task_unlock(task);
+	/*
+	 * 🔴 NOT ON THE TASK'S LIST YET (#935).  The chaining moved to
+	 * thread_create_in(), which does it under the task lock once the
+	 * thread is attached and the task is still active -- so an activation
+	 * is discoverable through task->thr_acts only when it is whole.
+	 * Before, act_create() listed it here, with no thread; task_info(
+	 * TASK_THREAD_TIMES_INFO) and task_assign() walk that list and assert
+	 * a thread on every activation without a pool_port, and one caught a
+	 * half-built activation between here and the attach.  thr_acts.next is
+	 * NULL (bzero above), which act_disable_task_locked() reads as "not
+	 * listed", so an activation freed before it is listed unwinds
+	 * cleanly.
+	 */
 
 	/* Cache the task's map and take a reference to it */
 	thr_act->map = task->map;

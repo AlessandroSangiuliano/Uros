@@ -1314,6 +1314,24 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 		return(KERN_FAILURE);
 	}
 
+	/*
+	 * 🔴 CHAIN IT ONTO THE TASK NOW, WHOLE (#935).  act_create() used to
+	 * do this, before the thread existed; a task_info(TASK_THREAD_TIMES_
+	 * INFO) that walked thr_acts in that window asserted on an activation
+	 * with no thread yet.  Here the thread is attached and the task is
+	 * still active (checked just above, under this same task lock), so
+	 * every activation reachable through the list has a thread -- the
+	 * property those walks assume for activations with no pool_port.
+	 */
+	mutex_lock(&parent_task->act_list_lock);
+	thr_act->thr_acts.next = parent_task->thr_acts.next;
+	thr_act->thr_acts.prev = &parent_task->thr_acts;
+	parent_task->thr_acts.next->prev = &thr_act->thr_acts;
+	parent_task->thr_acts.next = &thr_act->thr_acts;
+	parent_task->thr_act_count++;
+	parent_task->res_act_count++;
+	mutex_unlock(&parent_task->act_list_lock);
+
 	task_unlock(parent_task);
 	pset_unlock(pset);
 
