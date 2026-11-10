@@ -1284,6 +1284,30 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 	if (!parent_task->active) {
 		task_unlock(parent_task);
 		pset_unlock(pset);
+		/*
+		 * 🔴 UNDO THE ATTACH BEFORE FREEING THE THREAD (#935).
+		 *
+		 * act_attach() above put new_thread in thr_act->thread, and the
+		 * two thread_deallocate() below free it (its template ref_count
+		 * is 2).  Without this, thr_act->thread is left pointing at
+		 * freed memory, and every caller answers the failure with
+		 * thread_terminate(thr_act), which reads thr_act->thread as a
+		 * live thread and writes through it -- a page fault in
+		 * thread_setrun() off a NULL processor set, caught five times
+		 * in #934's A/Bs on OMEGA.
+		 *
+		 * This leaves the activation exactly as the early failure
+		 * (thread_machine_create()) does: no thread.  act_detach() is
+		 * not used -- it assumes a thread_pool this fresh activation
+		 * has not got, and asserts.  So the two links act_attach() set
+		 * are cleared by hand, and the reference the thread took on the
+		 * activation (act_locked_act_reference()) is given back.
+		 */
+		act_lock(thr_act);
+		new_thread->top_act = THR_ACT_NULL;
+		thr_act->thread = THREAD_NULL;
+		act_unlock(thr_act);
+		act_deallocate(thr_act);
 		thread_deallocate(new_thread);
 		/* Drop ref we'd have given caller */
 		thread_deallocate(new_thread);
