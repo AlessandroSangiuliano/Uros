@@ -137,6 +137,7 @@ set(LIBPOSIX_UROS_SRCS
   posix_time.c
   posix_exec_fds.c
   stubs.c
+  libmach_musl.c
   signals.c
   exceptions.c
   posix_exec.c
