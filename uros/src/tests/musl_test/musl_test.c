@@ -1774,23 +1774,35 @@ arm_pipe(void)
  * Children that may block, watched: the pipe has no end of file yet (#911),
  * and a child waiting on a pipe that nothing will write is a boot with no
  * verdict.  Each is given `secs'; one still there then is killed.  Returns
- * how many were killed, and each one's status in status[].
+ * how many were killed, each one's status in status[], and in *others how
+ * many children not in pid[] the wait collected.
+ *
+ * The wait is waitpid(-1, WNOHANG), the one non-blocking wait libposix-uros
+ * has: given a pid, WNOHANG is not honoured and the call blocks
+ * (posix_wait.c), which held this watch on a child that never ended.  Every
+ * arm above waits for its own children, so by here what it collects is one
+ * of these, and *others says so if not.
  */
 static int
-watch_children(pid_t *pid, int n, int secs, int *status)
+watch_children(pid_t *pid, int n, int secs, int *status, int *others)
 {
-	int	left = n, killed = 0, i, step;
+	int	left = n, killed = 0, i, step, st, ours;
+	pid_t	got;
 
+	*others = 0;
 	for (i = 0; i < n; i++)
 		status[i] = -1;
 	for (step = 0; left > 0 && step < secs * 100; step++) {
-		for (i = 0; i < n; i++) {
-			if (status[i] != -1)
-				continue;
-			if (waitpid(pid[i], &status[i], WNOHANG) == pid[i])
-				left--;
-			else
-				status[i] = -1;
+		while (left > 0 && (got = waitpid(-1, &st, WNOHANG)) > 0) {
+			ours = 0;
+			for (i = 0; i < n; i++)
+				if (pid[i] == got && status[i] == -1) {
+					status[i] = st;
+					left--;
+					ours = 1;
+				}
+			if (!ours)
+				(*others)++;
 		}
 		if (left > 0)
 			pause_a_little();
@@ -1879,7 +1891,7 @@ static void
 arm_pipe_writers(void)
 {
 	pid_t	pid[3];
-	int	status[3], fds[2], i, killed, rstat, w1, w2;
+	int	status[3], fds[2], i, killed, others, rstat, w1, w2;
 
 	if (pipe(fds) != 0) {
 		verdict(33, 0, "pipe failed, errno %d", errno);
@@ -1904,21 +1916,23 @@ arm_pipe_writers(void)
 	}
 	(void)close(fds[0]);
 	(void)close(fds[1]);
-	killed = watch_children(pid, 3, 60, status);
+	killed = watch_children(pid, 3, 60, status, &others);
 	rstat = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
 	w1 = WIFEXITED(status[1]) ? WEXITSTATUS(status[1]) : -1;
 	w2 = WIFEXITED(status[2]) ? WEXITSTATUS(status[2]) : -1;
-	verdict(33, killed == 0 && rstat == 0 && w1 == 0 && w2 == 0,
+	verdict(33, killed == 0 && others == 0 && rstat == 0 && w1 == 0 &&
+		w2 == 0,
 		"two writers of %d records of %d bytes each ended %d and %d, "
 		"and the reader of all %d answered %d: %s, %s%s; %d of 3 still "
-		"there after 60 s", PW_RECORDS, PIPE_BUF, w1, w2,
+		"there after 60 s, %d other children collected", PW_RECORDS,
+		PIPE_BUF, w1, w2,
 		2 * PW_RECORDS, rstat,
 		rstat < 0 ? "no answer" : (rstat & PW_TORN) ? "a record TORN"
 		: "every record whole",
 		rstat < 0 ? "no answer" : (rstat & PW_ORDER)
 		? "OUT of order" : "each writer's in order",
 		rstat > 0 && (rstat & PW_READ) ? ", a read FAILED" : "",
-		killed);
+		killed, others);
 }
 
 /*
@@ -1982,7 +1996,7 @@ static void
 arm_pipe_stream(void)
 {
 	pid_t	pid[2];
-	int	status[2], fds[2], killed, rs, ws;
+	int	status[2], fds[2], killed, others, rs, ws;
 
 	if (pipe(fds) != 0) {
 		verdict(34, 0, "pipe failed, errno %d", errno);
@@ -2004,14 +2018,15 @@ arm_pipe_stream(void)
 		not_asked(34, "fork refused: no process server on this boot");
 		return;
 	}
-	killed = watch_children(pid, 2, 60, status);
+	killed = watch_children(pid, 2, 60, status, &others);
 	rs = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
 	ws = WIFEXITED(status[1]) ? WEXITSTATUS(status[1]) : -1;
-	verdict(34, killed == 0 && rs == 0 && ws == 0,
+	verdict(34, killed == 0 && others == 0 && rs == 0 && ws == 0,
 		"%d bytes written in 1000s ended %d and read in 777s ended %d "
-		"(%s); %d of 2 still there after 60 s", PS_BYTES, ws, rs,
+		"(%s); %d of 2 still there after 60 s, %d other children "
+		"collected", PS_BYTES, ws, rs,
 		rs == 0 ? "every byte as written" : rs == 1 ? "a byte WRONG"
-		: rs == 2 ? "a read FAILED" : "no answer", killed);
+		: rs == 2 ? "a read FAILED" : "no answer", killed, others);
 }
 
 int
