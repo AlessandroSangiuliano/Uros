@@ -3319,9 +3319,27 @@ test_park_survives_abort(void)
 	}
 	runs = parkabort_runs;
 
-	/* Then the next create takes a parked thread, and must run its own
-	 * function once; the parked one, unless another parked after it. */
-	if (runs == 1 && aborts == PARKABORT_ABORTS &&
+	/*
+	 * 🔴 THE CATCH, SAID BEFORE ANY CLEANUP (#925).  Under the ablation
+	 * the aborted park re-ran its function (runs > 1) and left the pool
+	 * with a duplicate entry, so a later pool use -- the holder joins
+	 * below among them -- can hang on a lost wakeup.  A test that hangs
+	 * after finding the bug reports nothing, so the FAIL goes out now, and
+	 * only then the best-effort cleanup, which need not finish.
+	 */
+	if (runs != 1) {
+		snprintf(buf, sizeof(buf), "its function ran %d times, after "
+			 "%d abort(s) of its park: the park took the abort for "
+			 "pthread_create()'s wake (#925)", runs, aborts);
+		test_fail(name, buf);
+		parkabort_holders_end = 1;	/* may not wake a broken pool */
+		return;
+	}
+
+	/* The fix held: the pool is intact.  The next create takes a parked
+	 * thread and must run its own function once; the parked one, unless
+	 * another parked after it. */
+	if (aborts == PARKABORT_ABORTS &&
 	    pthread_create(&u, NULL, parkabort_reused, NULL) == 0) {
 		(void) pthread_join(u, NULL);
 		reused = 1;
@@ -3336,12 +3354,7 @@ test_park_survives_abort(void)
 		(void) mach_port_deallocate(mach_task_self(),
 					    parkabort_reused_port);
 
-	if (runs != 1) {
-		snprintf(buf, sizeof(buf), "its function ran %d times, after "
-			 "%d abort(s) of its park: the park took the abort for "
-			 "pthread_create()'s wake (#925)", runs, aborts);
-		test_fail(name, buf);
-	} else if (aborts == 0 && abort_kr != KERN_SUCCESS) {
+	if (aborts == 0 && abort_kr != KERN_SUCCESS) {
 		snprintf(buf, sizeof(buf), "thread_abort() answered %d on the "
 			 "parked thread (#925)", (int) abort_kr);
 		test_fail(name, buf);
@@ -3565,6 +3578,16 @@ main(int argc, char **argv)
 	test_static_mutex_first_lock();
 	test_static_cond_first_use();
 
+	/*
+	 * #925: early, before the pool is used heavily.  The ablation that
+	 * reverts the park's re-check makes an aborted park re-run its
+	 * function and corrupt the pool; a later pool use then hangs, and a
+	 * hung pthread_test never prints this arm's verdict.  Run first, where
+	 * the abort is the only thing that touches the parked thread, so the
+	 * FAIL goes out before anything can hang.
+	 */
+	test_park_survives_abort();
+
 	test_create_join();
 	test_cond_signal();
 	test_cond_broadcast();
@@ -3601,7 +3624,6 @@ main(int argc, char **argv)
 	test_trap_sweep();
 	test_futex_wait_page_unmapped();
 	test_exit_keeps_own_stack();
-	test_park_survives_abort();
 	test_join_survives_abort();
 
 	if (pass)
