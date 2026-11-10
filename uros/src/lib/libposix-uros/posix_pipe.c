@@ -216,8 +216,8 @@ head_pos(flipc2_channel_t ch, uint32_t tail)
  * the look and the wait is not lost -- once the release's store is visible.
  * ⚠️ flipc2_consume_release() orders that store before its load of
  * prod_sleeping with a compiler barrier only, an order x86 does not keep:
- * the fence #299 put on the commit side is not on this one.  It is FLIPC's to
- * fix, with the part of #904 in libflipc2; #904's body lists it.
+ * the fence #299 put on the commit side is not on this one: #933, FLIPC's
+ * to fix.
  */
 static void
 wait_for_room(flipc2_channel_t ch, struct uros_pipe_shared *sh)
