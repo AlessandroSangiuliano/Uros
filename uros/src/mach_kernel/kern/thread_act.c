@@ -308,8 +308,16 @@ thread_terminate(
 		/*
 		 * Release locks individually. (`act_unlock_thread()'
 		 * will not work since `pool_port' field has changed.)
+		 *
+		 * 🔴 ONLY IF THERE IS ONE (#935).  act_lock_thread() locks the
+		 * pool_port when the activation has one, and a threadless
+		 * activation that never had a pool_port -- the one a failed
+		 * thread_create_in() now hands here -- has none, so this would
+		 * ip_unlock() a NULL port.  The AGRESSIVE_ABORT path above
+		 * guards it the same way.
 		 */
-		ip_unlock(iplock);
+		if (iplock != IP_NULL)
+			ip_unlock(iplock);
 		act_unlock(thr_act);
 	}
 	else {
