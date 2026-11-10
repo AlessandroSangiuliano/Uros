@@ -3202,6 +3202,338 @@ test_exit_keeps_own_stack(void)
 }
 
 /* ----------------------------------------------------------------
+ * #925: a wait that an abort ends, in the pool's park and in a join
+ *
+ * futex_wait() answers KERN_SUCCESS for a wait thread_abort() interrupted,
+ * as for one that was woken, and the kernel hands wakes on to other waiters
+ * on purpose (#460): a waiter has to look at its word again.  The pool's
+ * park took the first return for pthread_create()'s wake, and the thread
+ * ran its last function again with its entry still in the pool -- which is
+ * how act_test's arm [39] hung in pthread_join().  pthread_join() and
+ * pthread_timedjoin_np() took it for the exit, and answered EINVAL for a
+ * thread still running.
+ *
+ * Both are asked by aborting the wait itself, on a thread thread_info()
+ * says is waiting, so that the abort ends the wait every time and nothing
+ * has to hold a window open.
+ * ---------------------------------------------------------------- */
+
+#define	PARKABORT_HOLDERS	8	/* the pool holds 8: every parked one taken */
+#define	PARKABORT_ABORTS	3
+#define	PARKABORT_SETTLE_MS	200	/* a join's end to the park, or to a wait */
+
+static volatile int		parkabort_holders_in;
+static volatile int		parkabort_holders_end;
+static volatile int		parkabort_runs;
+static volatile mach_port_t	parkabort_port;
+static volatile int		parkabort_reused_runs;
+static volatile mach_port_t	parkabort_reused_port;
+
+static void
+parkabort_nap(unsigned int ms)
+{
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, ms);
+}
+
+static void *
+parkabort_holder(void *arg)
+{
+	(void) arg;
+	(void) __atomic_add_fetch(&parkabort_holders_in, 1, __ATOMIC_RELAXED);
+	while (!parkabort_holders_end)
+		ownstack_nap();
+	return NULL;
+}
+
+/* The thread that parks.  Its port is taken on the first run only, so a
+ * second run is counted and nothing else. */
+static void *
+parkabort_once(void *arg)
+{
+	(void) arg;
+	if (__atomic_add_fetch(&parkabort_runs, 1, __ATOMIC_RELAXED) == 1)
+		parkabort_port = mach_thread_self();
+	return NULL;
+}
+
+static void *
+parkabort_reused(void *arg)
+{
+	(void) arg;
+	if (__atomic_add_fetch(&parkabort_reused_runs, 1,
+			       __ATOMIC_RELAXED) == 1)
+		parkabort_reused_port = mach_thread_self();
+	return NULL;
+}
+
+static void
+test_park_survives_abort(void)
+{
+	const char *name = "a parked thread whose park is aborted stays parked";
+	pthread_t holder[PARKABORT_HOLDERS], t, u;
+	kern_return_t kr = KERN_SUCCESS, abort_kr = KERN_SUCCESS;
+	int i, made, runs, aborts = 0, reused = 0;
+	int state = OWNSTACK_RUNNING;
+	char buf[240];
+
+	/*
+	 * Every parked thread taken out of the pool first, so that the thread
+	 * below parks when it ends: with the pool full it would terminate.
+	 */
+	parkabort_holders_in = 0;
+	parkabort_holders_end = 0;
+	for (made = 0; made < PARKABORT_HOLDERS; made++)
+		if (pthread_create(&holder[made], NULL, parkabort_holder,
+				   NULL) != 0)
+			break;
+	OWNSTACK_AWAIT(parkabort_holders_in == made);
+
+	parkabort_runs = 0;
+	parkabort_port = MACH_PORT_NULL;
+	parkabort_reused_runs = 0;
+	parkabort_reused_port = MACH_PORT_NULL;
+	if (pthread_create(&t, NULL, parkabort_once, NULL) != 0) {
+		parkabort_holders_end = 1;
+		for (i = 0; i < made; i++)
+			(void) pthread_join(holder[i], NULL);
+		test_fail(name, "pthread_create failed (#925)");
+		return;
+	}
+	(void) pthread_join(t, NULL);
+
+	/*
+	 * The join released it from its death wait; it parks a few calls
+	 * later.  Each abort is fired on a thread thread_info() says is
+	 * waiting, which after the nap is the park.
+	 */
+	parkabort_nap(PARKABORT_SETTLE_MS);
+	for (i = 0; i < PARKABORT_ABORTS && parkabort_runs == 1; i++) {
+		state = ownstack_settle(parkabort_port, &kr);
+		if (state != OWNSTACK_BLOCKED)
+			break;
+		abort_kr = thread_abort(parkabort_port);
+		if (abort_kr != KERN_SUCCESS)
+			break;
+		aborts++;
+		parkabort_nap(PARKABORT_SETTLE_MS);
+	}
+	runs = parkabort_runs;
+
+	/* Then the next create takes a parked thread, and must run its own
+	 * function once; the parked one, unless another parked after it. */
+	if (runs == 1 && aborts == PARKABORT_ABORTS &&
+	    pthread_create(&u, NULL, parkabort_reused, NULL) == 0) {
+		(void) pthread_join(u, NULL);
+		reused = 1;
+	}
+
+	parkabort_holders_end = 1;
+	for (i = 0; i < made; i++)
+		(void) pthread_join(holder[i], NULL);
+	if (parkabort_port != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), parkabort_port);
+	if (parkabort_reused_port != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(),
+					    parkabort_reused_port);
+
+	if (runs != 1) {
+		snprintf(buf, sizeof(buf), "its function ran %d times, after "
+			 "%d abort(s) of its park: the park took the abort for "
+			 "pthread_create()'s wake (#925)", runs, aborts);
+		test_fail(name, buf);
+	} else if (aborts == 0 && abort_kr != KERN_SUCCESS) {
+		snprintf(buf, sizeof(buf), "thread_abort() answered %d on the "
+			 "parked thread (#925)", (int) abort_kr);
+		test_fail(name, buf);
+	} else if (aborts == 0) {
+		printf("  [%d] %s: NOT ASKED — the thread was not waiting after "
+		       "its join (state %d, kr %d): the pool did not keep it "
+		       "(#925)\n", ++test_num, name, state, (int) kr);
+	} else if (aborts < PARKABORT_ABORTS) {
+		snprintf(buf, sizeof(buf), "after %d abort(s) the thread was no "
+			 "longer waiting (state %d, kr %d, thread_abort %d) "
+			 "(#925)", aborts, state, (int) kr, (int) abort_kr);
+		test_fail(name, buf);
+	} else if (!reused || parkabort_reused_runs != 1) {
+		snprintf(buf, sizeof(buf), "the next pthread_create() ran its "
+			 "function %d times (#925)", parkabort_reused_runs);
+		test_fail(name, buf);
+	} else {
+		printf("  [%d] %s: OK — waiting in its park, it was aborted %d "
+		       "times and its function ran once; the next "
+		       "pthread_create() ran its own once, on %s (#925)\n",
+		       ++test_num, name, aborts,
+		       parkabort_reused_port == parkabort_port
+		       ? "that kernel thread"
+		       : "another kernel thread, parked after it");
+	}
+}
+
+static volatile int		joinabort_release;
+static volatile mach_port_t	joinabort_port[2];
+static volatile int		joinabort_returned[2];
+static volatile int		joinabort_rc[2];
+static void * volatile		joinabort_value[2];
+static pthread_t		joinabort_target[2];
+
+static void *
+joinabort_target_fn(void *arg)
+{
+	while (!joinabort_release)
+		ownstack_nap();
+	return arg;
+}
+
+/* Joiner 0 joins its target with pthread_join(), joiner 1 with
+ * pthread_timedjoin_np() and a deadline 30 s away. */
+static void *
+joinabort_joiner(void *arg)
+{
+	long i = (long) arg;
+	struct timespec deadline;
+	void *v = NULL;
+	int rc;
+
+	joinabort_port[i] = mach_thread_self();
+	if (i == 0)
+		rc = pthread_join(joinabort_target[0], &v);
+	else if (getclock(TIMEOFDAY, &deadline) != 0)
+		rc = -1;
+	else {
+		deadline.tv_sec += 30;
+		rc = pthread_timedjoin_np(joinabort_target[1], &v, &deadline);
+	}
+	joinabort_value[i] = v;
+	joinabort_rc[i] = rc;
+	joinabort_returned[i] = 1;
+	return NULL;
+}
+
+static void
+test_join_survives_abort(void)
+{
+	static const char *const how[2] = {
+		"pthread_join()", "pthread_timedjoin_np()"
+	};
+	const char *name = "a join whose wait is aborted goes on waiting";
+	pthread_t joiner[2];
+	kern_return_t kr = KERN_SUCCESS, abort_kr[2];
+	int i, j, made_t, made_j, wrong = 0, unasked = 0;
+	int aborts[2], early[2], state[2];
+	char buf[320];
+
+	joinabort_release = 0;
+	for (i = 0; i < 2; i++) {
+		joinabort_port[i] = MACH_PORT_NULL;
+		joinabort_returned[i] = 0;
+		joinabort_rc[i] = -1;
+		joinabort_value[i] = NULL;
+		abort_kr[i] = KERN_SUCCESS;
+		aborts[i] = early[i] = 0;
+		state[i] = OWNSTACK_RUNNING;
+	}
+
+	for (made_t = 0; made_t < 2; made_t++)
+		if (pthread_create(&joinabort_target[made_t], NULL,
+				   joinabort_target_fn,
+				   (void *) (long) (0x9250 + made_t)) != 0)
+			break;
+	made_j = 0;
+	if (made_t == 2)
+		for (; made_j < 2; made_j++)
+			if (pthread_create(&joiner[made_j], NULL,
+					   joinabort_joiner,
+					   (void *) (long) made_j) != 0)
+				break;
+	for (i = 0; i < made_j; i++)
+		OWNSTACK_AWAIT(joinabort_port[i] != MACH_PORT_NULL);
+	parkabort_nap(PARKABORT_SETTLE_MS);
+
+	/* Each joiner's wait aborted while its thread still runs. */
+	for (i = 0; i < made_j; i++) {
+		for (j = 0; j < PARKABORT_ABORTS && !joinabort_returned[i];
+		     j++) {
+			state[i] = ownstack_settle(joinabort_port[i], &kr);
+			if (state[i] != OWNSTACK_BLOCKED)
+				break;
+			abort_kr[i] = thread_abort(joinabort_port[i]);
+			if (abort_kr[i] != KERN_SUCCESS)
+				break;
+			aborts[i]++;
+			parkabort_nap(PARKABORT_SETTLE_MS);
+		}
+		early[i] = joinabort_returned[i];
+	}
+
+	joinabort_release = 1;
+	for (i = 0; i < made_j; i++) {
+		OWNSTACK_AWAIT(joinabort_returned[i]);
+		if (joinabort_returned[i])
+			(void) pthread_join(joiner[i], NULL);
+	}
+	/* A join that answered something else left its target to harvest. */
+	for (i = 0; i < made_t; i++)
+		if (i >= made_j || (joinabort_returned[i] &&
+				    joinabort_rc[i] != 0))
+			(void) pthread_join(joinabort_target[i], NULL);
+	for (i = 0; i < made_j; i++)
+		if (joinabort_port[i] != MACH_PORT_NULL)
+			(void) mach_port_deallocate(mach_task_self(),
+						    joinabort_port[i]);
+
+	if (made_t < 2 || made_j < 2) {
+		test_fail(name, "pthread_create failed (#925)");
+		return;
+	}
+	buf[0] = '\0';
+	for (i = 0; i < 2 && !wrong; i++) {
+		if (early[i]) {
+			snprintf(buf, sizeof(buf), "%s answered %d after %d "
+				 "abort(s) of its wait, while its thread was "
+				 "still running (#925)", how[i],
+				 joinabort_rc[i], aborts[i]);
+			wrong = 1;
+		} else if (aborts[i] == 0 && abort_kr[i] != KERN_SUCCESS) {
+			snprintf(buf, sizeof(buf), "thread_abort() answered %d "
+				 "on the thread in %s (#925)",
+				 (int) abort_kr[i], how[i]);
+			wrong = 1;
+		} else if (aborts[i] == 0) {
+			unasked = 1;
+		} else if (aborts[i] < PARKABORT_ABORTS) {
+			snprintf(buf, sizeof(buf), "the thread in %s was no "
+				 "longer waiting after %d abort(s) (state %d, "
+				 "thread_abort %d) (#925)", how[i], aborts[i],
+				 state[i], (int) abort_kr[i]);
+			wrong = 1;
+		} else if (!joinabort_returned[i]) {
+			snprintf(buf, sizeof(buf), "%s did not return once its "
+				 "thread had ended (#925)", how[i]);
+			wrong = 1;
+		} else if (joinabort_rc[i] != 0 ||
+			   joinabort_value[i] != (void *) (long) (0x9250 + i)) {
+			snprintf(buf, sizeof(buf), "%s answered %d with %p, not "
+				 "0 with %p (#925)", how[i], joinabort_rc[i],
+				 joinabort_value[i],
+				 (void *) (long) (0x9250 + i));
+			wrong = 1;
+		}
+	}
+	if (wrong)
+		test_fail(name, buf);
+	else if (unasked)
+		printf("  [%d] %s: NOT ASKED — a joiner was not waiting (states "
+		       "%d and %d, kr %d) (#925)\n", ++test_num, name,
+		       state[0], state[1], (int) kr);
+	else
+		printf("  [%d] %s: OK — pthread_join() and "
+		       "pthread_timedjoin_np() were each aborted %d times while "
+		       "their thread ran, went on waiting, and answered 0 with "
+		       "its value once it ended (#925)\n", ++test_num, name,
+		       PARKABORT_ABORTS);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -3269,6 +3601,8 @@ main(int argc, char **argv)
 	test_trap_sweep();
 	test_futex_wait_page_unmapped();
 	test_exit_keeps_own_stack();
+	test_park_survives_abort();
+	test_join_survives_abort();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
