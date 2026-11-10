@@ -164,9 +164,15 @@ routine cap_subscribe_revoke(
  *	Trust model in v2.1: any caller can invoke this; the secure
  *	gating to "bootstrap only" arrives in a follow-up issue
  *	(setup-port pattern).
+ *
+ *	The per-task port comes back MADE, not copied (#743): cap_server
+ *	keeps its receive right and no send right, so once the task and
+ *	whoever provisioned it have let theirs go the port has no senders,
+ *	and cap_server can give its slot back.  A copied right was one
+ *	cap_server held for ever.
  */
 routine cap_provision_task(
 		cap_server	: mach_port_t;
 	in	task_port	: mach_port_t;
 	in	manifest	: cap_manifest_blob_t;
-	out	task_cap_port	: mach_port_t);
+	out	task_cap_port	: mach_port_make_send_t);

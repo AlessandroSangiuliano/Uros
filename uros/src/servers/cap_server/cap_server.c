@@ -671,7 +671,6 @@ cap_provision_task(mach_port_t            server,
                    mach_port_t           *out_task_cap_port)
 {
     mach_port_t new_port = MACH_PORT_NULL;
-    mach_port_t send_right = MACH_PORT_NULL;
     kern_return_t kr;
     int vrc;
 
@@ -709,20 +708,17 @@ cap_provision_task(mach_port_t            server,
         return vrc;
     }
 
-    /* Caller wants a send right; we keep the receive side. */
-    kr = mach_port_insert_right(mach_task_self(), new_port, new_port,
-                                MACH_MSG_TYPE_MAKE_SEND);
-    if (kr != KERN_SUCCESS) {
-        printf("cap: provision_task — insert_right kr=%d\n", kr);
-        (void)mach_port_destroy(mach_task_self(), new_port);
-        return CAP_ERR_INTERNAL;
-    }
-    send_right = new_port;
-
     printf("cap: provisioned task — cap_port=0x%x manifest=%u bytes\n",
            (unsigned)new_port, (unsigned)manifest_len);
 
-    *out_task_cap_port = send_right;
+    /*
+     * The reply MAKES the caller's send right from our receive right
+     * (mach_port_make_send_t, #743).  This server used to make one for
+     * itself and send a copy, and the one it kept meant no per-task port
+     * could ever have no senders: the slot of a task long dead stayed
+     * taken.
+     */
+    *out_task_cap_port = new_port;
     return KERN_SUCCESS;
 }
 
