@@ -148,6 +148,22 @@ cap_manifest_table_task(mach_port_t task_cap_port)
     return MACH_PORT_NULL;
 }
 
+mach_port_t
+cap_manifest_table_remove(mach_port_t task_cap_port)
+{
+    mach_port_t task;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == task_cap_port) {
+            task = g_table[i].task;
+            free(g_table[i].blob);
+            memset(&g_table[i], 0, sizeof(g_table[i]));
+            return task;
+        }
+
+    return MACH_PORT_NULL;
+}
+
 const cap_manifest_header_t *
 cap_manifest_table_get(mach_port_t task_cap_port)
 {

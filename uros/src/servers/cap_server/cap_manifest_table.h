@@ -68,6 +68,15 @@ cap_manifest_table_get(mach_port_t task_cap_port);
 mach_port_t cap_manifest_table_task(mach_port_t task_cap_port);
 
 /*
+ * Give back the slot of `task_cap_port' (#743): its manifest is freed and the
+ * slot is free for the next task.  Answers the task port the slot held, which
+ * is the caller's to release or not -- on an error path of the request that
+ * brought it, mach_msg_server() releases it with the request -- or
+ * MACH_PORT_NULL when no slot was that port's.
+ */
+mach_port_t cap_manifest_table_remove(mach_port_t task_cap_port);
+
+/*
  * Helper: does the given manifest declare `type + resource_id + ops' in its
  * `caps_required' list?  Returns 1 when allowed, 0 when not.  NULL manifest is
  * treated as permissive (returns 1) so callers can pass through the legacy
