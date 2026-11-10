@@ -176,6 +176,127 @@ cap_manifest_table_get(mach_port_t task_cap_port)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Derivation (#743)                                                   */
+/* ------------------------------------------------------------------ */
+
+static const cap_manifest_entry_t *
+manifest_entries(const cap_manifest_header_t *m, uint32_t offset)
+{
+    return (const cap_manifest_entry_t *)((const char *)m + offset);
+}
+
+/*
+ * One list of `asked', cut to what `may' lets a parent hand on.  An entry
+ * survives for a type `may' names, for an instance it names -- one that asks
+ * for any instance gets the instance `may' names, or any if `may' says any --
+ * and for the operations both name; an entry left with no operation is
+ * dropped.  Answers how many entries went to `out', or -1 when more than
+ * CAP_MANIFEST_MAX_ENTRIES would.
+ */
+static int
+derive_list(const cap_manifest_entry_t *asked, uint32_t n_asked,
+            const cap_manifest_entry_t *may, uint32_t n_may,
+            cap_manifest_entry_t *out)
+{
+    int n = 0;
+
+    for (uint32_t i = 0; i < n_asked; i++) {
+        for (uint32_t j = 0; j < n_may; j++) {
+            uint64_t id, ops;
+
+            if (asked[i].type != may[j].type)
+                continue;
+            if (asked[i].resource_id == CAP_MANIFEST_ANY_ID)
+                id = may[j].resource_id;
+            else if (may[j].resource_id == CAP_MANIFEST_ANY_ID ||
+                     may[j].resource_id == asked[i].resource_id)
+                id = asked[i].resource_id;
+            else
+                continue;
+            ops = asked[i].ops & may[j].ops;
+            if (ops == 0)
+                continue;
+            if (n == CAP_MANIFEST_MAX_ENTRIES)
+                return -1;
+            out[n].type        = asked[i].type;
+            out[n]._pad        = 0;
+            out[n].resource_id = id;
+            out[n].ops         = ops;
+            n++;
+        }
+    }
+    return n;
+}
+
+int
+cap_manifest_derive(const cap_manifest_header_t *parent,
+                    const cap_manifest_header_t *asked,
+                    void **out_blob, uint32_t *out_len)
+{
+    cap_manifest_entry_t req[CAP_MANIFEST_MAX_ENTRIES];
+    cap_manifest_entry_t del[CAP_MANIFEST_MAX_ENTRIES];
+    const cap_manifest_entry_t *may;
+    cap_manifest_header_t *h;
+    uint32_t name_off, total;
+    char *blob;
+    int nr, nd;
+
+    /*
+     * 🔑 BOTH LISTS ARE CUT BY THE PARENT'S delegatable[].  The child's
+     * required[] is what it may hold; its delegatable[] is what it may hand
+     * on in turn, and a grandchild must get no more than the parent could
+     * have given -- so the parent's limit is carried down a whole chain of
+     * execs, and the child's own words can only narrow it.
+     */
+    may = manifest_entries(parent, parent->delegatable_offset);
+    nr = derive_list(manifest_entries(asked, asked->required_offset),
+                     asked->required_count, may, parent->delegatable_count,
+                     req);
+    nd = derive_list(manifest_entries(asked, asked->delegatable_offset),
+                     asked->delegatable_count, may,
+                     parent->delegatable_count, del);
+    if (nr < 0 || nd < 0)
+        return CAP_ERR_MANIFEST_INVALID;
+
+    name_off = (uint32_t)(sizeof(*h) +
+                          (uint32_t)(nr + nd) * sizeof(cap_manifest_entry_t));
+    total = name_off + ((asked->name_length + 3u) & ~3u);
+    blob = malloc(total);
+    if (blob == NULL)
+        return CAP_ERR_NO_MEMORY;
+    memset(blob, 0, total);
+
+    h = (cap_manifest_header_t *)blob;
+    h->magic              = CAP_MANIFEST_MAGIC;
+    h->version            = CAP_MANIFEST_VERSION;
+    h->header_size        = (uint16_t)sizeof(*h);
+    h->total_size         = total;
+    h->flags              = 0;
+    h->required_offset    = (uint32_t)sizeof(*h);
+    h->required_count     = (uint32_t)nr;
+    h->delegatable_offset = (uint32_t)(sizeof(*h) +
+                                       (uint32_t)nr * sizeof(cap_manifest_entry_t));
+    h->delegatable_count  = (uint32_t)nd;
+    h->name_offset        = name_off;
+    h->name_length        = asked->name_length;
+    memcpy(blob + h->required_offset, req,
+           (size_t)nr * sizeof(cap_manifest_entry_t));
+    memcpy(blob + h->delegatable_offset, del,
+           (size_t)nd * sizeof(cap_manifest_entry_t));
+    memcpy(blob + name_off, (const char *)asked + asked->name_offset,
+           asked->name_length);
+
+    /* What this function builds, the table's own check must accept. */
+    if (cap_manifest_validate(blob, total, NULL) != CAP_ERR_NONE) {
+        free(blob);
+        return CAP_ERR_INTERNAL;
+    }
+    *out_blob = blob;
+    *out_len  = total;
+    return CAP_ERR_NONE;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Predicate                                                           */
 /* ------------------------------------------------------------------ */
 

@@ -146,6 +146,21 @@ kern_return_t cap_provision(mach_port_t provisioner,
                             unsigned int manifest_len,
                             mach_port_t *out_task_cap_port);
 
+/*
+ * cap_derive_child() — the cap_derive_task RPC (#743).  A per-task port for the
+ * child `task_port', asked on its parent's per-task port `parent_cap_port':
+ * the child gets what `manifest_blob' asks for, cut to what the parent's
+ * manifest may hand on.  exec_server asks it with the port its caller passed
+ * to exec_load.  The returned port is the caller's to give back once the
+ * child holds it.  CAP_ERR_NOT_DELEGABLE when `parent_cap_port' is no task's
+ * per-task port.
+ */
+kern_return_t cap_derive_child(mach_port_t parent_cap_port,
+                               mach_port_t task_port,
+                               const void *manifest_blob,
+                               unsigned int manifest_len,
+                               mach_port_t *out_task_cap_port);
+
 #ifdef __cplusplus
 }
 #endif

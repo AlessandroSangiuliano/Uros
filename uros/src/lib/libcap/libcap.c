@@ -276,3 +276,28 @@ cap_provision(mach_port_t provisioner,
                                   (mach_msg_type_number_t)manifest_len,
                                   out_task_cap_port);
 }
+
+/* #743: the second signature kept by hand, for the reason given above. */
+extern kern_return_t mig_cap_derive_task(mach_port_t parent_cap_port,
+                                         mach_port_t task_port,
+                                         const char *manifest,
+                                         mach_msg_type_number_t manifestCnt,
+                                         mach_port_t *task_cap_port);
+
+kern_return_t
+cap_derive_child(mach_port_t parent_cap_port,
+                 mach_port_t task_port,
+                 const void *manifest_blob,
+                 unsigned int manifest_len,
+                 mach_port_t *out_task_cap_port)
+{
+    if (!MACH_PORT_VALID(parent_cap_port)) return CAP_ERR_NOT_DELEGABLE;
+    if (!manifest_blob || manifest_len == 0 || !out_task_cap_port)
+        return CAP_ERR_INVALID_TOKEN;
+
+    *out_task_cap_port = MACH_PORT_NULL;
+    return mig_cap_derive_task(parent_cap_port, task_port,
+                               (const char *)manifest_blob,
+                               (mach_msg_type_number_t)manifest_len,
+                               out_task_cap_port);
+}

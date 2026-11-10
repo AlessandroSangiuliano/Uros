@@ -176,3 +176,28 @@ routine cap_provision_task(
 	in	task_port	: mach_port_t;
 	in	manifest	: cap_manifest_blob_t;
 	out	task_cap_port	: mach_port_make_send_t);
+
+/*
+ *	cap_derive_task (#743) — a per-task port for a child, asked on
+ *	its PARENT's per-task port.  The child gets what `manifest' asks
+ *	for, cut to what the parent's manifest may hand on
+ *	(delegatable[]): the types, the instances and the operations
+ *	both name, and nothing else.  The child's own delegatable[] is
+ *	cut the same way, so that a grandchild gets no more than the
+ *	parent could have given.  The name is the child's.
+ *
+ *	This is how exec_server gives a program its policy: from the
+ *	task that exec'd it, and not from the program's own file, which
+ *	whoever wrote the binary wrote.
+ *
+ *	Asked on the port every task inherits, on the provisioning port,
+ *	or on any port that is no task's, the answer is
+ *	CAP_ERR_NOT_DELEGABLE: there is no parent manifest to cut by.
+ *	The port comes back made, as cap_provision_task's does.
+ *	Appended: MIG numbers routines by position.
+ */
+routine cap_derive_task(
+		cap_server	: mach_port_t;
+	in	task_port	: mach_port_t;
+	in	manifest	: cap_manifest_blob_t;
+	out	task_cap_port	: mach_port_make_send_t);

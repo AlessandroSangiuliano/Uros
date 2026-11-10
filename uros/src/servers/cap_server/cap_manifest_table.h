@@ -77,6 +77,18 @@ mach_port_t cap_manifest_table_task(mach_port_t task_cap_port);
 mach_port_t cap_manifest_table_remove(mach_port_t task_cap_port);
 
 /*
+ * What a child that asks for `asked' may have, from a parent whose manifest
+ * is `parent' (#743): each of the child's lists cut to the parent's
+ * delegatable[], and the child's name.  Both must be validated, and aligned
+ * as a malloc'd blob is.  The new blob is malloc'd and validated, and the
+ * caller's to free.  Returns CAP_ERR_NONE, CAP_ERR_MANIFEST_INVALID when a
+ * list would grow past CAP_MANIFEST_MAX_ENTRIES, or CAP_ERR_NO_MEMORY.
+ */
+int cap_manifest_derive(const cap_manifest_header_t *parent,
+                        const cap_manifest_header_t *asked,
+                        void **out_blob, uint32_t *out_len);
+
+/*
  * Helper: does the given manifest declare `type + resource_id + ops' in its
  * `caps_required' list?  Returns 1 when allowed, 0 when not.  NULL manifest is
  * treated as permissive (returns 1) so callers can pass through the legacy

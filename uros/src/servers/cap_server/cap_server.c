@@ -809,6 +809,83 @@ cap_provision_task(mach_port_t            server,
     return KERN_SUCCESS;
 }
 
+/*
+ * cap_derive_task (#743).  A per-task port for a child of the task whose
+ * per-task port the request arrived on: what the child's manifest asks for,
+ * cut to what the parent's may hand on (cap_manifest_derive()).
+ *
+ * 🔑 THE POLICY COMES FROM THE PARENT.  exec_server used to provision every
+ * program from the manifest in the program's own file, so whoever wrote a
+ * binary that something exec'd wrote its policy too.  A derivation can only
+ * narrow what the parent holds, and a parent with no manifest -- a request on
+ * the port every task inherits, or on the provisioning port -- has nothing
+ * to hand on.
+ *
+ * The child's blob is copied before it is read: it arrives in the request
+ * buffer, and its 64-bit fields are read where malloc() puts them.
+ */
+kern_return_t
+cap_derive_task(mach_port_t            server,
+                mach_port_t            task_port,
+                cap_manifest_blob_t   manifest_buf,
+                mach_msg_type_number_t manifest_len,
+                mach_port_t           *out_task_cap_port)
+{
+    const cap_manifest_header_t *parent;
+    const cap_manifest_header_t *asked;
+    void *copy = NULL;
+    void *derived = NULL;
+    uint32_t derived_len = 0;
+    mach_port_t new_port = MACH_PORT_NULL;
+    kern_return_t kr;
+    int vrc;
+
+    (void)server;
+    *out_task_cap_port = MACH_PORT_NULL;
+
+    parent = cap_manifest_table_get(g_request_local_port);
+    if (parent == NULL) {
+        printf("cap: DENY derive_task on port 0x%x — no task's port, so "
+               "nothing to hand on (#743)\n", (unsigned)g_request_local_port);
+        return CAP_ERR_NOT_DELEGABLE;
+    }
+
+    if (manifest_len == 0 || manifest_len > CAP_MANIFEST_MAX_BYTES)
+        return CAP_ERR_MANIFEST_INVALID;
+    copy = malloc(manifest_len);
+    if (copy == NULL)
+        return CAP_ERR_NO_MEMORY;
+    memcpy(copy, manifest_buf, manifest_len);
+
+    vrc = cap_manifest_validate(copy, (uint32_t)manifest_len, &asked);
+    if (vrc == CAP_ERR_NONE)
+        vrc = cap_manifest_derive(parent, asked, &derived, &derived_len);
+    if (vrc != CAP_ERR_NONE) {
+        printf("cap: derive_task — manifest refused (rc=%d, len=%u)\n",
+               vrc, (unsigned)manifest_len);
+        free(copy);
+        return vrc;
+    }
+
+    kr = cap_task_port_make(task_port, derived, derived_len, &new_port);
+    if (kr == KERN_SUCCESS)
+        printf("cap: derived task — cap_port=0x%x from 0x%x, %u of %u "
+               "entries kept (#743)\n", (unsigned)new_port,
+               (unsigned)g_request_local_port,
+               (unsigned)(((const cap_manifest_header_t *)derived)
+                              ->required_count +
+                          ((const cap_manifest_header_t *)derived)
+                              ->delegatable_count),
+               (unsigned)(asked->required_count + asked->delegatable_count));
+    free(derived);
+    free(copy);
+    if (kr != KERN_SUCCESS)
+        return kr;
+
+    *out_task_cap_port = new_port;
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 cap_verify(mach_port_t             server,
            cap_token_t            token_buf,
