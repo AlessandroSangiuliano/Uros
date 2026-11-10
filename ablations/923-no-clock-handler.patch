@@ -1,0 +1,54 @@
+Kind: ablation
+Issue: #923
+Takes out: the handlers -- SYS_clock_gettime and SYS_gettimeofday leave libposix-uros's table, so musl's clock_gettime() answers ENOSYS again and leaves its timespec as it was: musl_test's [25] must say WRONG
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[25\] WRONG
+Note: 4 of 4 caught and 4 of 4 passed at 961a96ce on omen, TCG and KVM: in every ablated boot clock_gettime() left both timespecs at the -1 the arm had put in them
+
+diff --git a/uros/src/lib/libposix-uros/handlers.c b/uros/src/lib/libposix-uros/handlers.c
+index 851eb8cc..10ee9bf0 100644
+--- a/uros/src/lib/libposix-uros/handlers.c
++++ b/uros/src/lib/libposix-uros/handlers.c
+@@ -177,21 +177,6 @@ static long h_nanosleep(long req, long rem, long a3,
+     return __uros_nanosleep((const void *)req, (void *)rem);
+ }
+ 
+-/* #923: the two clocks musl asks for, served in posix_time.c. */
+-static long h_clock_gettime(long clk, long ts, long a3,
+-                            long a4, long a5, long a6)
+-{
+-    (void)a3; (void)a4; (void)a5; (void)a6;
+-    return __uros_clock_gettime(clk, (void *)ts);
+-}
+-
+-static long h_gettimeofday(long tv, long tz, long a3,
+-                           long a4, long a5, long a6)
+-{
+-    (void)a3; (void)a4; (void)a5; (void)a6;
+-    return __uros_gettimeofday((void *)tv, (void *)tz);
+-}
+-
+ static long h_open(long path, long flags, long mode,
+                    long a4, long a5, long a6)
+ {
+@@ -885,19 +870,7 @@ static const struct entry table[] = {
+     { SYS_munmap,           h_munmap          },
+     { SYS_mprotect,         h_mprotect        },
+     { SYS_nanosleep,        h_nanosleep       },
+-    /* #923.  i386's musl has the clocks under the names of their 32-bit
+-     * variants, which take two longs as posix_time.c writes them: it asks
+-     * for SYS_clock_gettime64 first and, told -ENOSYS, falls back here. */
+-#ifdef SYS_clock_gettime32
+-    { SYS_clock_gettime32,  h_clock_gettime   },
+-#else
+-    { SYS_clock_gettime,    h_clock_gettime   },
+-#endif
+-#ifdef SYS_gettimeofday_time32
+-    { SYS_gettimeofday_time32, h_gettimeofday },
+-#else
+-    { SYS_gettimeofday,     h_gettimeofday    },
+-#endif
++    /* 923-no-clock-handler: the two clocks unserved again */
+     { SYS_readv,            h_readv           },
+     { SYS_writev,           h_writev          },
+     { SYS_rt_sigaction,     h_rt_sigaction    },

@@ -39,6 +39,14 @@
 #define BATTERY_CLOCK	1		/* optional */
 #define HIGHRES_CLOCK	2		/* optional */
 
+/*
+ * #923: x86-64 puts in slot 2 a clock of time since boot that is never set and
+ * never goes back -- what POSIX's CLOCK_MONOTONIC asks for, and what its
+ * REALTIME_CLOCK, the time of day, is not.  i386 keeps HIGHRES_CLOCK in the
+ * slot, and its REALTIME_CLOCK is already time since boot.
+ */
+#define	URMACH_MONOTONIC_CLOCK	2
+
 /* Any number of distributed clocks may be defined. */
 #define DIST_CLOCK_0	3		/* optional */
 #define DIST_CLOCK_1	4		/* optional */

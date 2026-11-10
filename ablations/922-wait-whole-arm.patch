@@ -7,10 +7,10 @@ Expect: musl_test: \[22\] WRONG -- [0-9] of 4 threads ended
 Note: 4 of 4 caught and 4 of 4 passed at 2da2af09 on victus, TCG and KVM: over the widen the fixed arm ended its stat thread on its time, 11 and 12 calls, and passed; the ablated one ran out at 16 with 0 wrong in every thread, as the campaign's three boots
 
 diff --git a/uros/src/tests/musl_test/musl_test.c b/uros/src/tests/musl_test/musl_test.c
-index de6c3971..490e5262 100644
+index 64dbc4cd..b82ea644 100644
 --- a/uros/src/tests/musl_test/musl_test.c
 +++ b/uros/src/tests/musl_test/musl_test.c
-@@ -953,38 +953,16 @@ arm_own_id(void)
+@@ -956,39 +956,16 @@ arm_own_id(void)
   * And it waits for them.  On one processor stat and its server keep it for a
   * quantum, and under KVM the 20 were over before any of the others had
   * finished a call.
@@ -41,16 +41,17 @@ index de6c3971..490e5262 100644
 -static int	r_done, r_over;
 -/*
 - * #922: the stat thread's time is up -- raised by the wait, which counts it in
-- * the same 10 ms sleeps as everything else here.  Not clock_gettime(): no
-- * handler serves it in libposix-uros (#923), and the first version of this
-- * read a timespec the call had never written, so the time never ran out.
+- * the same 10 ms sleeps as everything else here.  Not clock_gettime(): when
+- * this was written no handler served it in libposix-uros (#923), and the
+- * first version of this read a timespec the call had never written, so the
+- * time never ran out.
 - */
 -static int	r_stat_time_up;
 +static int	r_wrong[R_THREADS], r_round[R_THREADS], r_done, r_over;
  
  static int
  rpc_others_under_way(void)
-@@ -1000,13 +978,15 @@ rpc_others_under_way(void)
+@@ -1004,13 +981,15 @@ rpc_others_under_way(void)
  static void *
  rpc_thread(void *arg)
  {
@@ -69,7 +70,7 @@ index de6c3971..490e5262 100644
  		struct stat	st;
  
  		switch (kind) {
-@@ -1026,20 +1006,9 @@ rpc_thread(void *arg)
+@@ -1030,20 +1009,9 @@ rpc_thread(void *arg)
  		if (!ok)
  			__atomic_add_fetch(&r_wrong[kind], 1, __ATOMIC_SEQ_CST);
  		__atomic_store_n(&r_round[kind], i + 1, __ATOMIC_SEQ_CST);
@@ -92,7 +93,7 @@ index de6c3971..490e5262 100644
  	__atomic_add_fetch(&r_done, 1, __ATOMIC_SEQ_CST);
  	return NULL;
  }
-@@ -1049,8 +1018,7 @@ arm_threads_in_servers(void)
+@@ -1053,8 +1021,7 @@ arm_threads_in_servers(void)
  {
  	pthread_attr_t	attr;
  	pthread_t	th;
@@ -102,7 +103,7 @@ index de6c3971..490e5262 100644
  
  	if (access_by_stat(F_PATH) != 0) {
  		not_asked(22, "no disk mounted on this boot");
-@@ -1068,36 +1036,11 @@ arm_threads_in_servers(void)
+@@ -1072,36 +1039,11 @@ arm_threads_in_servers(void)
  	}
  	(void)pthread_attr_destroy(&attr);
  

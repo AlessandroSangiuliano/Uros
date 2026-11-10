@@ -108,12 +108,13 @@ int			dev_indirect_count = sizeof(dev_indirect_list)
  * so every absolute deadline in libpthreads was computed from an
  * uninitialised struct.  The gap was named; its consumer was not.
  *
- * HIGHRES_CLOCK is absent rather than null-filled: kern/clock.c reads
- * clock_count, and a third entry would only be a slot that answers
- * KERN_FAILURE more slowly than a range check does.
+ * HIGHRES_CLOCK's slot holds URMACH_MONOTONIC_CLOCK (#923): time since boot,
+ * never set and never back, which neither clock before it is.  A slot is an
+ * index into this table, so the third clock can only be the third entry.
  */
 extern	struct clock_ops	rtc_ops;
 extern	struct clock_ops	bbc_ops;
+extern	struct clock_ops	urmach_mono_ops;
 
 struct	clock	clock_list[] = {
 
@@ -122,5 +123,8 @@ struct	clock	clock_list[] = {
 
 	/* BATTERY_CLOCK */
 	{ &bbc_ops,	0,		0,		0 },
+
+	/* URMACH_MONOTONIC_CLOCK, in HIGHRES_CLOCK's slot (#923) */
+	{ &urmach_mono_ops, 0,		0,		0 },
 };
 int	clock_count = sizeof(clock_list) / sizeof(clock_list[0]);

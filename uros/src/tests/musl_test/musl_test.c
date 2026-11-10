@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/time.h>	/* gettimeofday (#923) */
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -40,12 +41,14 @@ static int	arms_passed;
 
 /*
  * One arm's verdict, one line.  `ok' is the arm's own conclusion and what
- * follows says what was read, either way.
+ * follows says what was read, either way.  A longer line is cut, and an
+ * ablation's Expect: that matches its end then matches nothing: [25]'s is
+ * near 300 characters.
  */
 static void
 verdict(int arm, int ok, const char *fmt, ...)
 {
-	char	text[200];
+	char	text[400];
 	va_list	ap;
 
 	va_start(ap, fmt);
@@ -980,9 +983,10 @@ static int	r_wrong[R_THREADS], r_round[R_THREADS], r_ended[R_THREADS];
 static int	r_done, r_over;
 /*
  * #922: the stat thread's time is up -- raised by the wait, which counts it in
- * the same 10 ms sleeps as everything else here.  Not clock_gettime(): no
- * handler serves it in libposix-uros (#923), and the first version of this
- * read a timespec the call had never written, so the time never ran out.
+ * the same 10 ms sleeps as everything else here.  Not clock_gettime(): when
+ * this was written no handler served it in libposix-uros (#923), and the
+ * first version of this read a timespec the call had never written, so the
+ * time never ran out.
  */
 static int	r_stat_time_up;
 
@@ -1224,6 +1228,163 @@ arm_page_zero(void)
 		(unsigned)status);
 }
 
+/*
+ * ── [25] The two clocks, and the sleeps they measure (#923) ─────────────
+ *
+ * clock_gettime() reaches libposix-uros as SYS_clock_gettime, which had no
+ * handler: it answered ENOSYS and left the timespec as it was.  Both clocks
+ * must answer, gettimeofday() must agree with the calendar to the second, and
+ * a clock nobody has must be refused with EINVAL.
+ *
+ * The monotonic clock is then read 100000 times by four threads at once, each
+ * sleeping a millisecond every 1000 readings so that it wakes on whatever
+ * processor is free.  Before each reading a thread takes the largest reading
+ * any of them has published, and after it publishes its own: no reading may
+ * be below what was published before it was taken.  The processors' TSCs
+ * need not agree, and the kernel's clock must not show it.  One thread alone
+ * could not see it: a thread that wakes goes back to the processor it last
+ * ran on when that one is idle (HW_FOOTPRINT), and with the kernel's floor
+ * taken out it read 0 of 100000 back.
+ *
+ * And 50 sleeps of 10 ms must each take at least 10 ms -- a timed wait counted
+ * from the next tick could end up to a tick early, which at 100 Hz is the
+ * whole of a 10 ms sleep.  A sleep is short when both clocks say so, and the
+ * shortest is said by the clock that measured it longer: where the TSCs
+ * disagree the monotonic clock pauses rather than go back, and it alone
+ * measures short a sleep that began on a processor ahead of the rest.
+ */
+#define CLK_READERS	4
+#define CLK_READS	25000			/* each, 100000 in all */
+#define CLK_STEPS	(12 * WAIT_STEPS)	/* the readers' time, 60 s */
+#define CLK_NAP_NS	(10LL * 1000 * 1000)
+
+static long long	clk_published;	/* ns, the largest reading published */
+static long long	clk_worst;	/* ns, the furthest one went back */
+static int		clk_back;	/* readings below what was published */
+static int		clk_refused;	/* readers refused a reading */
+static int		clk_finished;	/* readers done */
+
+static long long
+ts_ns(const struct timespec *t)
+{
+	return (long long)t->tv_sec * 1000000000LL + t->tv_nsec;
+}
+
+/* *x becomes v if v is larger, with any number of threads at it. */
+static void
+clk_raise(long long *x, long long v)
+{
+	long long	cur = __atomic_load_n(x, __ATOMIC_SEQ_CST);
+
+	while (v > cur && !__atomic_compare_exchange_n(x, &cur, v, 0,
+						       __ATOMIC_SEQ_CST,
+						       __ATOMIC_SEQ_CST))
+		;
+}
+
+static void *
+clock_reader(void *arg)
+{
+	struct timespec	ms = { 0, 1000 * 1000 }, now;
+	long long	seen, mine;
+	int		i;
+
+	for (i = 0; i < CLK_READS; i++) {
+		if (i % 1000 == 999)
+			(void)nanosleep(&ms, NULL);
+		seen = __atomic_load_n(&clk_published, __ATOMIC_SEQ_CST);
+		if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+			__atomic_add_fetch(&clk_refused, 1, __ATOMIC_SEQ_CST);
+			break;
+		}
+		mine = ts_ns(&now);
+		if (mine < seen) {
+			__atomic_add_fetch(&clk_back, 1, __ATOMIC_SEQ_CST);
+			clk_raise(&clk_worst, seen - mine);
+		}
+		clk_raise(&clk_published, mine);
+	}
+	__atomic_add_fetch(&clk_finished, 1, __ATOMIC_SEQ_CST);
+	return arg;
+}
+
+static void
+arm_clocks(void)
+{
+	struct timespec	mono = { -1, -1 }, cal = { -1, -1 }, other;
+	struct timespec	start, end, ma, mb, ca, cb;
+	struct timespec	nap = { 0, 10 * 1000 * 1000 };
+	struct timeval	tv = { -1, -1 };
+	pthread_t	th[CLK_READERS];
+	int		rc_mono, rc_cal, rc_tv, rc_other, err_other, i;
+	int		rc = 0, made = 0, finished, waited;
+	int		short_both = 0, short_mono = 0;
+	long long	dm, dc, longer, shortest = -1, took = -1;
+
+	rc_mono = clock_gettime(CLOCK_MONOTONIC, &mono);
+	rc_cal = clock_gettime(CLOCK_REALTIME, &cal);
+	rc_tv = gettimeofday(&tv, NULL);
+	errno = 0;
+	rc_other = clock_gettime((clockid_t)99, &other);
+	err_other = errno;
+
+	(void)clock_gettime(CLOCK_MONOTONIC, &start);
+	for (i = 0; i < CLK_READERS && rc_mono == 0 && rc == 0; i++) {
+		rc = pthread_create(&th[i], NULL, clock_reader, NULL);
+		if (rc == 0)
+			made++;
+	}
+	for (waited = 0; waited < CLK_STEPS &&
+	     __atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST) < made; waited++)
+		pause_a_little();
+	finished = __atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST);
+	if (finished == made) {
+		for (i = 0; i < made; i++)
+			(void)pthread_join(th[i], NULL);
+		if (clock_gettime(CLOCK_MONOTONIC, &end) == 0 && rc_mono == 0)
+			took = (ts_ns(&end) - ts_ns(&start)) / 1000000;
+	}
+
+	for (i = 0; i < 50 && rc_mono == 0 && rc_cal == 0; i++) {
+		(void)clock_gettime(CLOCK_MONOTONIC, &ma);
+		(void)clock_gettime(CLOCK_REALTIME, &ca);
+		(void)nanosleep(&nap, NULL);
+		(void)clock_gettime(CLOCK_MONOTONIC, &mb);
+		(void)clock_gettime(CLOCK_REALTIME, &cb);
+		dm = ts_ns(&mb) - ts_ns(&ma);
+		dc = ts_ns(&cb) - ts_ns(&ca);
+		longer = dm > dc ? dm : dc;
+		if (shortest < 0 || longer < shortest)
+			shortest = longer;
+		if (dm < CLK_NAP_NS)
+			short_mono++;
+		if (longer < CLK_NAP_NS)
+			short_both++;
+	}
+
+	if (rc != 0)
+		verdict(25, 0, "pthread_create %d said %d", made, rc);
+	else if (finished < made)
+		verdict(25, 0, "of %d threads reading the monotonic clock, %d "
+			"had finished after %d sleeps of 10 ms asked", made,
+			finished, waited);
+	else
+		verdict(25, rc_mono == 0 && rc_cal == 0 && rc_tv == 0 &&
+			rc_other == -1 && err_other == EINVAL &&
+			clk_refused == 0 && clk_back == 0 && short_both == 0 &&
+			tv.tv_sec - cal.tv_sec >= 0 &&
+			tv.tv_sec - cal.tv_sec <= 1,
+			"monotonic %lld.%09ld, calendar %lld, day %lld; clock "
+			"99: %d errno %d; %d of 100000 readings by %d threads "
+			"went back, by %lld ns at most, %d threads refused, in "
+			"%lld ms; %d of 50 10 ms sleeps short by both clocks, "
+			"%d by the monotonic one, shortest %lld ns",
+			(long long)mono.tv_sec, (long)mono.tv_nsec,
+			(long long)cal.tv_sec, (long long)tv.tv_sec, rc_other,
+			err_other, clk_back, made, clk_worst, clk_refused,
+			took, short_both, short_mono, shortest);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1257,6 +1418,7 @@ main(int argc, char **argv)
 	arm_many_forks();
 	arm_threads_in_servers();
 	arm_null_signal();
+	arm_clocks();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
