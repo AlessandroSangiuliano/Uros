@@ -34,6 +34,8 @@
 #include <mach/thread_switch.h>	/* SWITCH_OPTION_WAIT (#583) */
 #include <mach/mach_syscalls.h>	/* syscall_thread_switch (#583) */
 
+#include "posix_pipe.h"         /* pipes (#904) */
+
 /* From signals.c: proc_server send right + caller's pid. */
 extern mach_port_t  __uros_proc_port;
 extern unsigned int __uros_my_pid;
@@ -69,9 +71,17 @@ static mach_port_t char_port_resolve(void)
 #define LX_O_EXCL       0200
 #define LX_O_TRUNC     01000
 #define LX_O_APPEND    02000
+#define LX_O_NONBLOCK  04000
 #define LX_O_DIRECTORY 0200000
 #define LX_O_NOFOLLOW  0400000
 #define LX_O_CLOEXEC  02000000
+
+/* struct iovec on Linux: { void *iov_base; size_t iov_len; }. */
+struct uros_iovec { unsigned long base; unsigned long len; };
+_Static_assert(sizeof(struct uros_iovec) == sizeof(struct uros_pipe_iov) &&
+               offsetof(struct uros_iovec, len) ==
+               offsetof(struct uros_pipe_iov, len),
+               "a writev()'s pieces go to posix_pipe.c as they are");
 
 /* statx / *at flags we recognise. */
 #define LX_AT_FDCWD            (-100)
@@ -113,14 +123,20 @@ enum ofd_kind {
     OFD_CONSOLE,            /* mach_print; a read finds nothing */
     OFD_TTY,                /* char_server's tty (#275.4-bis) */
     OFD_VFS,                /* a libvfs fd */
+    OFD_PIPE_READ,          /* a pipe's read end (#904, posix_pipe.c) */
+    OFD_PIPE_WRITE,         /* and its write end */
 };
+
+#define OFD_IS_PIPE(k)  ((k) == OFD_PIPE_READ || (k) == OFD_PIPE_WRITE)
 
 struct posix_ofd {
     int       refs;         /* descriptors of this task naming it; 0 = free */
     int       kind;         /* enum ofd_kind */
     int       std_probed;   /* console: tried to bind to the session ctty (#286) */
+    int       nonblock;     /* O_NONBLOCK, a flag of the description (#904) */
     vfs_fd_t  vfd;          /* OFD_VFS; VFS_FD_INVALID otherwise */
     unsigned  tty_dev_id;   /* OFD_TTY: char_server's dev_id */
+    struct uros_pipe *pipe; /* OFD_PIPE_*: holds one of the pipe's refs */
 };
 
 struct posix_fd {
@@ -168,8 +184,10 @@ static struct posix_ofd *ofd_alloc_locked(int kind, vfs_fd_t vfd,
             continue;
         o->kind       = kind;
         o->std_probed = 0;
+        o->nonblock   = 0;
         o->vfd        = vfd;
         o->tty_dev_id = tty_dev_id;
+        o->pipe       = NULL;
         return o;
     }
     return NULL;
@@ -198,10 +216,16 @@ static int pfd_unbind_locked(int fd, struct posix_ofd *gone)
     if (--o->refs > 0)
         return 0;
     *gone = *o;
+    /* #904: a pipe end gives back its hold on the pipe; *gone keeps the pipe
+     * only when that was the last, for ofd_release() to let it go. */
+    if (OFD_IS_PIPE(o->kind) && --o->pipe->refs > 0)
+        gone->pipe = NULL;
     o->kind       = OFD_FREE;
     o->std_probed = 0;
+    o->nonblock   = 0;
     o->vfd        = VFS_FD_INVALID;
     o->tty_dev_id = 0;
+    o->pipe       = NULL;
     return 1;
 }
 
@@ -210,8 +234,33 @@ static void ofd_release(const struct posix_ofd *gone)
 {
     if (gone->kind == OFD_VFS)
         vfs_close(gone->vfd);
+    else if (OFD_IS_PIPE(gone->kind) && gone->pipe != NULL)
+        __uros_pipe_free(gone->pipe);   /* this task's last hold on it */
     /* A console has nothing to close, and a tty has no per-open state at
      * char_server: it tracks subscriptions, not descriptors. */
+}
+
+/*
+ * A read or write in a pipe holds the pipe, so that a close() of the last
+ * descriptor by another thread meanwhile does not unmap it under the call:
+ * the pipe goes with the last of the two.  pipe_put() lets go of what
+ * resolve_fd() took.
+ */
+struct pipe_hold {
+    struct uros_pipe *pipe;
+    int               kind;     /* OFD_PIPE_READ or OFD_PIPE_WRITE */
+    int               nonblock;
+};
+
+static void pipe_put(struct uros_pipe *p)
+{
+    int last;
+
+    pthread_mutex_lock(&pfd_lock);
+    last = --p->refs == 0;
+    pthread_mutex_unlock(&pfd_lock);
+    if (last)
+        __uros_pipe_free(p);
 }
 
 /* The description descriptor `fd` names, or NULL.  Caller holds pfd_lock. */
@@ -474,14 +523,17 @@ vfs_fd_t __uros_pfd_to_vfs(int fd)
     struct posix_ofd *o = pfd_ofd_locked(fd);
     if (o == NULL) { pthread_mutex_unlock(&pfd_lock); return -1; }
     int console = o->kind == OFD_CONSOLE;
+    int pipe = OFD_IS_PIPE(o->kind);
     vfs_fd_t vfd = o->vfd;
     pthread_mutex_unlock(&pfd_lock);
-    return console ? -2 : vfd;
+    return console ? -2 : pipe ? -3 : vfd;
 }
 
 /* Resolve a POSIX fd to its libvfs fd.  Returns -1 and sets *err for an
- * invalid fd; returns -2 (with *err=0) for a console fd. */
-static vfs_fd_t resolve_fd(int fd, int *err)
+ * invalid fd; returns -2 (with *err=0) for a console fd, and -3 for a pipe
+ * end (#904), with the pipe held in *hold when the caller passes one: it
+ * then lets go with pipe_put(). */
+static vfs_fd_t resolve_fd(int fd, int *err, struct pipe_hold *hold)
 {
     *err = 0;
     pthread_mutex_lock(&pfd_lock);
@@ -490,10 +542,43 @@ static vfs_fd_t resolve_fd(int fd, int *err)
     if (o == NULL) { pthread_mutex_unlock(&pfd_lock); *err = -EBADF; return -1; }
     int special = o->kind == OFD_CONSOLE || o->kind == OFD_TTY;
     vfs_fd_t vfd = o->vfd;
+    if (OFD_IS_PIPE(o->kind)) {
+        if (hold != NULL) {
+            o->pipe->refs++;
+            hold->pipe     = o->pipe;
+            hold->kind     = o->kind;
+            hold->nonblock = o->nonblock;
+        }
+        pthread_mutex_unlock(&pfd_lock);
+        return -3;
+    }
     pthread_mutex_unlock(&pfd_lock);
     if (special)
         return -2;     /* caller distinguishes console vs tty via tty_fd_snapshot */
     return vfd;
+}
+
+/*
+ * read(), readv(), write() and writev() on a pipe end (#904): the pieces go
+ * down whole, so that a writev() of up to PIPE_BUF bytes is one write, as
+ * musl's stdio makes every line it flushes.  The wrong end answers EBADF, as
+ * on Linux.
+ */
+static long pipe_io(struct pipe_hold *h, const struct uros_iovec *iov,
+                    int iovcnt, int writing)
+{
+    long r;
+
+    if (h->kind != (writing ? OFD_PIPE_WRITE : OFD_PIPE_READ))
+        r = -EBADF;
+    else if (writing)
+        r = __uros_pipe_write(h->pipe, (const struct uros_pipe_iov *)iov,
+                              iovcnt, h->nonblock);
+    else
+        r = __uros_pipe_read(h->pipe, (const struct uros_pipe_iov *)iov,
+                             iovcnt, h->nonblock);
+    pipe_put(h->pipe);
+    return r;
 }
 
 /* Snapshot a tty-kind fd's (char_port, dev_id) under the lock.
@@ -628,9 +713,14 @@ static void tty_waiter_wait(mach_port_t port)
 long __uros_read(int fd, void *buf, size_t count)
 {
     int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
     maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, &hold);
     if (err) return err;
+    if (vfd == -3) {
+        struct uros_iovec one = { (unsigned long)buf, (unsigned long)count };
+        return pipe_io(&hold, &one, 1, 0);
+    }
     if (vfd == -2) {
         /* A console or a tty: tty_fd_snapshot() says which. */
         mach_port_t cport;
@@ -681,8 +771,6 @@ long __uros_read(int fd, void *buf, size_t count)
     return n < 0 ? -EIO : (long)n;
 }
 
-/* struct iovec on Linux i386: { void *iov_base; size_t iov_len; }. */
-struct uros_iovec { unsigned long base; unsigned long len; };
 
 /* One char_tty_write of n bytes, at most the 4096 chr_buf_t carries: the
  * bytes it took, or the error. */
@@ -778,9 +866,14 @@ static long terminal_write(int fd, const struct uros_iovec *iov, int iovcnt)
 long __uros_write(int fd, const void *buf, size_t count)
 {
     int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
     maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, &hold);
     if (err) return err;
+    if (vfd == -3) {
+        struct uros_iovec one = { (unsigned long)buf, (unsigned long)count };
+        return pipe_io(&hold, &one, 1, 1);
+    }
     if (vfd == -2) {
         struct uros_iovec one = { (unsigned long)buf, (unsigned long)count };
         return terminal_write(fd, &one, 1);
@@ -793,6 +886,13 @@ long __uros_readv(int fd, const void *iov_ptr, int iovcnt)
 {
     const struct uros_iovec *iov = (const struct uros_iovec *)iov_ptr;
     if (iovcnt < 0) return -EINVAL;
+
+    /* A pipe takes the pieces in one read (#904). */
+    int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
+    if (resolve_fd(fd, &err, &hold) == -3 && err == 0)
+        return pipe_io(&hold, iov, iovcnt, 0);
+
     long total = 0;
     for (int i = 0; i < iovcnt; i++) {
         if (iov[i].len == 0) continue;
@@ -814,9 +914,12 @@ long __uros_writev(int fd, const void *iov_ptr, int iovcnt)
      * Nothing to write is 0 with no RPC, as it always was.
      */
     int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
     maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, &hold);
     if (err) return err;
+    if (vfd == -3)                     /* a pipe: one write too (#904) */
+        return pipe_io(&hold, iov, iovcnt, 1);
     if (vfd == -2) {
         for (int i = 0; i < iovcnt; i++)
             if (iov[i].len)
@@ -925,14 +1028,72 @@ long __uros_dup3(int oldfd, int newfd, int flags)
     return dup_onto(oldfd, newfd, flags & LX_O_CLOEXEC);
 }
 
+/*
+ * pipe() and pipe2() (#904): a new pipe, its read end at the lowest free
+ * descriptor and its write end at the next.  O_CLOEXEC goes to both
+ * descriptors, and O_NONBLOCK to both descriptions.  Each end's description
+ * holds one of the pipe's refs (posix_pipe.h).
+ */
+long __uros_pipe2(int *fds, int flags)
+{
+    struct uros_pipe *p;
+    struct posix_ofd *r, *w = NULL, gone;
+    int fr, fw = -1, freed = 0, rc;
+    int cloexec = flags & LX_O_CLOEXEC;
+    int nonblock = (flags & LX_O_NONBLOCK) != 0;
+
+    if (fds == NULL)
+        return -EFAULT;
+    if (flags & ~(LX_O_CLOEXEC | LX_O_NONBLOCK))
+        return -EINVAL;
+    rc = __uros_pipe_new(&p);
+    if (rc != 0)
+        return rc;
+
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    fr = pfd_alloc_locked(0);
+    r = fr < 0 ? NULL : ofd_alloc_locked(OFD_PIPE_READ, VFS_FD_INVALID, 0);
+    if (r != NULL) {
+        r->pipe = p;
+        r->nonblock = nonblock;
+        p->refs++;
+        pfd_bind_locked(fr, r, cloexec);
+        fw = pfd_alloc_locked(0);
+        w = fw < 0 ? NULL : ofd_alloc_locked(OFD_PIPE_WRITE, VFS_FD_INVALID,
+                                             0);
+        if (w != NULL) {
+            w->pipe = p;
+            w->nonblock = nonblock;
+            p->refs++;
+            pfd_bind_locked(fw, w, cloexec);
+        } else {
+            freed = pfd_unbind_locked(fr, &gone);   /* takes the pipe along */
+        }
+    }
+    pthread_mutex_unlock(&pfd_lock);
+    if (r == NULL) {
+        __uros_pipe_free(p);
+        return -EMFILE;
+    }
+    if (w == NULL) {
+        if (freed)
+            ofd_release(&gone);
+        return -EMFILE;
+    }
+    fds[0] = fr;
+    fds[1] = fw;
+    return 0;
+}
+
 #ifdef __x86_64__
 /* lseek(fd, off, whence) — the offset fits a register here. */
 long __uros_lseek(int fd, long off, unsigned int whence)
 {
     int err;
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, NULL);
     if (err) return err;
-    if (vfd == -2)                    /* console is not seekable */
+    if (vfd == -2 || vfd == -3)       /* console and pipe: not seekable */
         return -ESPIPE;
     off_t r = vfs_lseek(vfd, (off_t)off, (int)whence);
     if (r == (off_t)-1)
@@ -945,9 +1106,9 @@ long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
                    void *result, unsigned int whence)
 {
     int err;
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, NULL);
     if (err) return err;
-    if (vfd == -2)                    /* console is not seekable */
+    if (vfd == -2 || vfd == -3)       /* console and pipe: not seekable */
         return -ESPIPE;
     int64_t off = (int64_t)(((uint64_t)off_hi << 32) | (uint64_t)off_lo);
     off_t r = vfs_lseek(vfd, (off_t)off, (int)whence);
@@ -1014,6 +1175,16 @@ static void fill_statx_console(struct lx_statx *sx)
     sx->stx_mode    = (uint16_t)(0620 | LX_S_IFCHR);
 }
 
+/* A pipe end presents as a FIFO, which is what S_ISFIFO() asks (#904). */
+static void fill_statx_fifo(struct lx_statx *sx)
+{
+    memset(sx, 0, sizeof(*sx));
+    sx->stx_mask    = LX_STATX_BASIC_STATS;
+    sx->stx_blksize = 4096;
+    sx->stx_nlink   = 1;
+    sx->stx_mode    = (uint16_t)(0600 | LX_S_IFIFO);
+}
+
 long __uros_statx(int dirfd, const char *path, int flags,
                   unsigned int mask, void *statxbuf)
 {
@@ -1025,9 +1196,10 @@ long __uros_statx(int dirfd, const char *path, int flags,
     /* fstat(fd): musl calls statx(fd, "", AT_EMPTY_PATH, ...). */
     if ((flags & LX_AT_EMPTY_PATH) && path && path[0] == '\0') {
         int err;
-        vfs_fd_t vfd = resolve_fd(dirfd, &err);
+        vfs_fd_t vfd = resolve_fd(dirfd, &err, NULL);
         if (err) return err;
         if (vfd == -2) { fill_statx_console(sx); return 0; }
+        if (vfd == -3) { fill_statx_fifo(sx); return 0; }   /* #904 */
         vfs_stat_t vs;
         int rc = vfs_fstat(vfd, &vs);
         if (rc != 0)
@@ -1145,7 +1317,10 @@ int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
     pfd_init_locked();
     for (int i = 3; i < POSIX_OPEN_MAX && n < max; i++) {
         struct posix_ofd *o = pfds[i].ofd;
-        if (o == NULL || o->kind == OFD_CONSOLE || pfds[i].cloexec)
+        /* #904: a pipe's ends cross an exec once the new image can map the
+         * pipe, with #911's memory entries; until then they do not. */
+        if (o == NULL || o->kind == OFD_CONSOLE || OFD_IS_PIPE(o->kind) ||
+            pfds[i].cloexec)
             continue;
         posix_fds[n] = i;
         vfds[n]      = o->vfd;
@@ -1243,6 +1418,8 @@ __uros_mmap_fd(long addr, unsigned long len, long prot,
         return -EINVAL;
 
     vfd = __uros_pfd_to_vfs(fd);
+    if (vfd == -3)
+        return -ENODEV;     /* a pipe end (#904): nothing to map, as on Linux */
     if (vfd < 0)
         return -EBADF;
 
