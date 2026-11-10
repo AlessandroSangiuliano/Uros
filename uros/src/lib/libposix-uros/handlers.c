@@ -731,6 +731,7 @@ extern int  __uros_sigaction(int signo, const void *act, void *old);
 extern int  __uros_sigprocmask(int how, const void *set, void *old,
                                unsigned setsize);
 extern int  __uros_kill(unsigned int pid, int signo);
+extern int  __uros_kill_group(int pid, int signo);	/* #934 */
 
 /*
  * The pointers here are in the *kernel* sigaction ABI (struct
@@ -771,6 +772,8 @@ static long h_kill(long pid, long sig, long a3,
                    long a4, long a5, long a6)
 {
     (void)a3; (void)a4; (void)a5; (void)a6;
+    if ((int)pid <= 0)              /* a process group (#934) */
+        return __uros_kill_group((int)pid, (int)sig);
     return __uros_kill((unsigned int)pid, (int)sig);
 }
 

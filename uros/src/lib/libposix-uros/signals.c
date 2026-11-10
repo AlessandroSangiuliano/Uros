@@ -457,6 +457,42 @@ __uros_sigprocmask(int how, const void *set_, void *old_, unsigned setsize)
     return 0;
 }
 
+/*
+ * kill() of a process group (#934): pid 0 is the caller's own group, below
+ * -1 the group -pid.  It went to proc_kill() as a pid, which none is, and
+ * answered ESRCH; proc_killpg() reaches every process of the group.
+ * kill(-1), every process, is not served, and answers ESRCH as before.
+ */
+int
+__uros_kill_group(int pid, int signo)
+{
+    proc_pid_t group = 0;
+    unsigned   n_sent = 0;
+    int        rc = PROC_ERR_INVAL;
+
+    if (__uros_proc_port == MACH_PORT_NULL)
+        return -ESRCH;
+    if (signo < 0 || signo >= PROC_NSIG)
+        return -EINVAL;
+    if (pid == -1)
+        return -ESRCH;
+    if (pid == 0) {
+        if (proc_getpgid(__uros_proc_port, __uros_my_pid, &group, &rc)
+            != KERN_SUCCESS || rc != PROC_OK)
+            return -ESRCH;
+    } else {
+        group = (proc_pid_t)(0u - (unsigned)pid);
+    }
+    if (proc_killpg(__uros_proc_port, group, signo, &n_sent, &rc)
+        != KERN_SUCCESS)
+        return -ESRCH;
+    switch (rc) {
+    case PROC_OK:               return 0;
+    case PROC_ERR_BAD_SIGNO:    return -EINVAL;
+    default:                    return -ESRCH;
+    }
+}
+
 int
 __uros_kill(proc_pid_t pid, int signo)
 {
