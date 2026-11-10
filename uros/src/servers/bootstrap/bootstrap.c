@@ -803,6 +803,15 @@ provision_cap_port_for_child(task_port_t child_task,
 	       program_name, symtab_name, (unsigned)cap_port,
 	       (unsigned)sz);
 	BOOTSTRAP_IO_UNLOCK();
+
+	/*
+	 * 🔴 AND OURS GOES BACK (#743).  The task holds the port now, in its
+	 * TASK_CAP_PORT, and this copy was the second reason no per-task port
+	 * could ever have no senders: bootstrap kept one for every task it
+	 * provisioned, itself included, and cap_server could never learn that a
+	 * task was gone.
+	 */
+	(void)mach_port_deallocate(mach_task_self(), cap_port);
 	return 1;
 }
 

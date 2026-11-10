@@ -449,6 +449,12 @@ provision_cap_port(mach_port_t new_task, const elf_image_t *img,
     printf("exec: %s -> TASK_CAP_PORT=0x%x (manifest %u bytes%s)\n",
            path ? path : "(?)", (unsigned)cap_port, blen,
            (blob == &default_manifest_blob) ? ", default" : "");
+
+    /*
+     * The task holds the port now; this copy would keep it from ever having
+     * no senders, and cap_server from giving its slot back (#743).
+     */
+    (void)mach_port_deallocate(mach_task_self(), cap_port);
     return 1;
 }
 
