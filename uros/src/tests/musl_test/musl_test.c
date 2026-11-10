@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>	/* PIPE_BUF (#904) */
 #include <pthread.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -30,6 +31,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>	/* gettimeofday (#923) */
+#include <sys/uio.h>	/* writev (#904) */
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1675,6 +1677,343 @@ arm_dup_across_exec(void)
 			(wrong & DUP_CLOEXEC) ? "crossed" : "did not cross");
 }
 
+/*
+ * ── [32] A pipe in one process (#904) ─────────────────────────────────────
+ *
+ * pipe() answered ENOSYS.  Bytes written come out in order and once, a read
+ * takes part of a write and the next read the rest, writev()'s pieces come
+ * out as one run, a dup() of the write end writes into the same pipe, and the
+ * ends say what they are: a FIFO to fstat(), not seekable, and each refusing
+ * the other's call.  With O_NONBLOCK an empty pipe answers EAGAIN to a read,
+ * and the pipe takes 64 KiB, as Linux's does, and then EAGAIN to a write.
+ */
+#define PIPE_HOLDS	65536
+
+static void
+arm_pipe(void)
+{
+	char		buf[PIPE_BUF];
+	struct iovec	v[2];
+	struct stat	st;
+	int		fds[2], nb[2], d;
+	ssize_t		w1, r1, r2, wv, rv, wd, rd, r_wrong, w_wrong, r_empty;
+	ssize_t		w_full, r_drain, w_again;
+	int		e_seek, e_rwrong, e_wwrong, e_empty, e_full, fifo;
+	long		filled = 0;
+	int		bytes_ok;
+
+	if (pipe(fds) != 0) {
+		verdict(32, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	w1 = write(fds[1], "abcdefghij", 10);
+	r1 = read(fds[0], buf, 4);
+	r2 = read(fds[0], buf + 4, sizeof buf - 4);
+	bytes_ok = r1 == 4 && r2 == 6 && memcmp(buf, "abcdefghij", 10) == 0;
+	v[0].iov_base = (void *)"12";
+	v[0].iov_len = 2;
+	v[1].iov_base = (void *)"345";
+	v[1].iov_len = 3;
+	wv = writev(fds[1], v, 2);
+	rv = read(fds[0], buf, sizeof buf);
+	bytes_ok = bytes_ok && rv == 5 && memcmp(buf, "12345", 5) == 0;
+	d = dup(fds[1]);
+	wd = d >= 0 ? write(d, "x", 1) : -1;
+	if (d >= 0)
+		(void)close(d);
+	rd = read(fds[0], buf, sizeof buf);
+	bytes_ok = bytes_ok && rd == 1 && buf[0] == 'x';
+	fifo = fstat(fds[0], &st) == 0 && S_ISFIFO(st.st_mode);
+	e_seek = lseek(fds[0], 0, SEEK_CUR) == -1 ? errno : 0;
+	r_wrong = read(fds[1], buf, 1);
+	e_rwrong = errno;
+	w_wrong = write(fds[0], "y", 1);
+	e_wwrong = errno;
+	(void)close(fds[0]);
+	(void)close(fds[1]);
+
+	if (pipe2(nb, O_NONBLOCK) != 0) {
+		verdict(32, 0, "pipe2(O_NONBLOCK) failed, errno %d", errno);
+		return;
+	}
+	r_empty = read(nb[0], buf, sizeof buf);
+	e_empty = errno;
+	memset(buf, 'z', sizeof buf);
+	for (;;) {
+		ssize_t	w = write(nb[1], buf, sizeof buf);
+
+		if (w <= 0 || filled > 2 * PIPE_HOLDS)
+			break;
+		filled += w;
+	}
+	w_full = write(nb[1], buf, 1);
+	e_full = errno;
+	r_drain = read(nb[0], buf, sizeof buf);
+	w_again = write(nb[1], buf, sizeof buf);
+	(void)close(nb[0]);
+	(void)close(nb[1]);
+
+	verdict(32, w1 == 10 && bytes_ok && wv == 5 && wd == 1 && fifo
+		&& e_seek == ESPIPE && r_wrong == -1 && e_rwrong == EBADF
+		&& w_wrong == -1 && e_wwrong == EBADF && r_empty == -1
+		&& e_empty == EAGAIN && filled == PIPE_HOLDS && w_full == -1
+		&& e_full == EAGAIN && r_drain == PIPE_BUF
+		&& w_again == PIPE_BUF,
+		"10 bytes read as %zd and %zd, writev's 5 as %zd, a dup's byte "
+		"as %zd, %s; %s, lseek errno %d, read on the write end %zd "
+		"errno %d, write on the read end %zd errno %d; O_NONBLOCK: "
+		"empty read %zd errno %d, took %ld bytes, then %zd errno %d, "
+		"and after a read of %zd a write of %zd", r1, r2, rv, rd,
+		bytes_ok ? "in order" : "NOT in order",
+		fifo ? "a FIFO" : "NOT a FIFO", e_seek, r_wrong, e_rwrong,
+		w_wrong, e_wwrong, r_empty, e_empty, filled, w_full, e_full,
+		r_drain, w_again);
+}
+
+/*
+ * Children that may block, watched: the pipe has no end of file yet (#911),
+ * and a child waiting on a pipe that nothing will write is a boot with no
+ * verdict.  Each is given `secs'; one still there then is killed.  Returns
+ * how many were killed, and each one's status in status[].
+ */
+static int
+watch_children(pid_t *pid, int n, int secs, int *status)
+{
+	int	left = n, killed = 0, i, step;
+
+	for (i = 0; i < n; i++)
+		status[i] = -1;
+	for (step = 0; left > 0 && step < secs * 100; step++) {
+		for (i = 0; i < n; i++) {
+			if (status[i] != -1)
+				continue;
+			if (waitpid(pid[i], &status[i], WNOHANG) == pid[i])
+				left--;
+			else
+				status[i] = -1;
+		}
+		if (left > 0)
+			pause_a_little();
+	}
+	for (i = 0; i < n; i++) {
+		if (status[i] != -1)
+			continue;
+		(void)kill(pid[i], SIGKILL);
+		(void)waitpid(pid[i], &status[i], 0);
+		killed++;
+	}
+	return killed;
+}
+
+/*
+ * ── [33] Two processes write one pipe at once (#904) ──────────────────────
+ *
+ * A write of up to PIPE_BUF bytes is whole however many write.  Two children
+ * each write 64 records of PIPE_BUF bytes, each record filled with its
+ * writer's mark and number, and a third reads all 128 and looks at every
+ * record: one writer's bytes only, and each writer's numbers in order.  The
+ * 512 KiB go round the 64 KiB ring eight times, so records are split where it
+ * wraps, and the three block on a full pipe and on an empty one.
+ */
+#define PW_RECORDS	64
+
+/* What the reading child answers in its status. */
+#define PW_TORN		1	/* a record held two writers' bytes */
+#define PW_ORDER	2	/* a writer's records came out of order */
+#define PW_READ		4	/* a read failed */
+
+static void
+pipe_record(unsigned char *rec, int writer, int n)
+{
+	memset(rec, (writer * 64 + n) & 0xff, PIPE_BUF);
+	rec[0] = (unsigned char)writer;
+	rec[1] = (unsigned char)n;
+}
+
+static int
+pipe_writer(int fd, int writer)
+{
+	unsigned char	rec[PIPE_BUF];
+	int		n;
+
+	for (n = 0; n < PW_RECORDS; n++) {
+		pipe_record(rec, writer, n);
+		if (write(fd, rec, sizeof rec) != (ssize_t)sizeof rec)
+			return 1;
+	}
+	return 0;
+}
+
+static int
+pipe_reader(int fd)
+{
+	static unsigned char	rec[PIPE_BUF];
+	unsigned char		want[PIPE_BUF];
+	int			next[3] = { 0, 0, 0 };
+	int			wrong = 0, got, k;
+	size_t			have;
+
+	for (k = 0; k < 2 * PW_RECORDS; k++) {
+		for (have = 0; have < sizeof rec; have += (size_t)got) {
+			got = (int)read(fd, rec + have, sizeof rec - have);
+			if (got <= 0)
+				return wrong | PW_READ;
+		}
+		if (rec[0] != 1 && rec[0] != 2) {
+			wrong |= PW_TORN;
+			continue;
+		}
+		pipe_record(want, rec[0], rec[1]);
+		if (memcmp(rec, want, sizeof want) != 0)
+			wrong |= PW_TORN;
+		if (rec[1] != next[rec[0]])
+			wrong |= PW_ORDER;
+		next[rec[0]] = rec[1] + 1;
+	}
+	if (next[1] != PW_RECORDS || next[2] != PW_RECORDS)
+		wrong |= PW_ORDER;
+	return wrong;
+}
+
+static void
+arm_pipe_writers(void)
+{
+	pid_t	pid[3];
+	int	status[3], fds[2], i, killed, rstat, w1, w2;
+
+	if (pipe(fds) != 0) {
+		verdict(33, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	for (i = 0; i < 3; i++) {
+		pid[i] = fork();
+		if (pid[i] < 0) {
+			while (--i >= 0) {
+				(void)kill(pid[i], SIGKILL);
+				(void)waitpid(pid[i], NULL, 0);
+			}
+			(void)close(fds[0]);
+			(void)close(fds[1]);
+			not_asked(33, "fork refused: no process server on "
+				  "this boot");
+			return;
+		}
+		if (pid[i] == 0)
+			_exit(i == 0 ? pipe_reader(fds[0])
+				     : pipe_writer(fds[1], i));
+	}
+	(void)close(fds[0]);
+	(void)close(fds[1]);
+	killed = watch_children(pid, 3, 60, status);
+	rstat = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
+	w1 = WIFEXITED(status[1]) ? WEXITSTATUS(status[1]) : -1;
+	w2 = WIFEXITED(status[2]) ? WEXITSTATUS(status[2]) : -1;
+	verdict(33, killed == 0 && rstat == 0 && w1 == 0 && w2 == 0,
+		"two writers of %d records of %d bytes each ended %d and %d, "
+		"and the reader of all %d answered %d: %s, %s%s; %d of 3 still "
+		"there after 60 s", PW_RECORDS, PIPE_BUF, w1, w2,
+		2 * PW_RECORDS, rstat,
+		rstat < 0 ? "no answer" : (rstat & PW_TORN) ? "a record TORN"
+		: "every record whole",
+		rstat < 0 ? "no answer" : (rstat & PW_ORDER)
+		? "OUT of order" : "each writer's in order",
+		rstat > 0 && (rstat & PW_READ) ? ", a read FAILED" : "",
+		killed);
+}
+
+/*
+ * ── [34] A pipe from one process to another, in a stream (#904) ──────────
+ *
+ * One child writes 256 KiB in writes of 1000 bytes, which fit the ring's
+ * edges nowhere in particular, and another reads them in reads of 777 and
+ * checks every byte: four times the ring, so each side waits for the other
+ * again and again, and a read takes the rest of one write and the start of
+ * the next.
+ */
+#define PS_BYTES	(256 * 1024)
+
+static unsigned char
+pipe_stream_byte(long i)
+{
+	return (unsigned char)((i * 7) ^ (i >> 9));
+}
+
+static int
+pipe_stream_writer(int fd)
+{
+	unsigned char	chunk[1000];
+	long		i = 0;
+	int		k;
+
+	while (i < PS_BYTES) {
+		int	n = PS_BYTES - i < (long)sizeof chunk
+			    ? (int)(PS_BYTES - i) : (int)sizeof chunk;
+
+		for (k = 0; k < n; k++)
+			chunk[k] = pipe_stream_byte(i + k);
+		if (write(fd, chunk, (size_t)n) != n)
+			return 1;
+		i += n;
+	}
+	return 0;
+}
+
+static int
+pipe_stream_reader(int fd)
+{
+	unsigned char	chunk[777];
+	long		i = 0;
+	int		k;
+
+	while (i < PS_BYTES) {
+		ssize_t	got = read(fd, chunk, sizeof chunk);
+
+		if (got <= 0)
+			return 2;
+		for (k = 0; k < got; k++)
+			if (chunk[k] != pipe_stream_byte(i + k))
+				return 1;
+		i += got;
+	}
+	return 0;
+}
+
+static void
+arm_pipe_stream(void)
+{
+	pid_t	pid[2];
+	int	status[2], fds[2], killed, rs, ws;
+
+	if (pipe(fds) != 0) {
+		verdict(34, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	pid[0] = fork();
+	if (pid[0] == 0)
+		_exit(pipe_stream_reader(fds[0]));
+	pid[1] = pid[0] < 0 ? -1 : fork();
+	if (pid[1] == 0)
+		_exit(pipe_stream_writer(fds[1]));
+	(void)close(fds[0]);
+	(void)close(fds[1]);
+	if (pid[0] < 0 || pid[1] < 0) {
+		if (pid[0] > 0) {
+			(void)kill(pid[0], SIGKILL);
+			(void)waitpid(pid[0], NULL, 0);
+		}
+		not_asked(34, "fork refused: no process server on this boot");
+		return;
+	}
+	killed = watch_children(pid, 2, 60, status);
+	rs = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
+	ws = WIFEXITED(status[1]) ? WEXITSTATUS(status[1]) : -1;
+	verdict(34, killed == 0 && rs == 0 && ws == 0,
+		"%d bytes written in 1000s ended %d and read in 777s ended %d "
+		"(%s); %d of 2 still there after 60 s", PS_BYTES, ws, rs,
+		rs == 0 ? "every byte as written" : rs == 1 ? "a byte WRONG"
+		: rs == 2 ? "a read FAILED" : "no answer", killed);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1732,6 +2071,10 @@ main(int argc, char **argv)
 	/* #897: dup(), dup2() and dup3(), in this task and across execve(). */
 	arm_dup();
 	arm_dup_across_exec();
+	/* #904: pipes, in this process and between processes. */
+	arm_pipe();
+	arm_pipe_writers();
+	arm_pipe_stream();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
