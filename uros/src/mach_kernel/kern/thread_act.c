@@ -382,6 +382,9 @@ thread_hold(
 {
 	if (thr_act->suspend_count++ == 0) {
 		install_special_handler(thr_act);
+#if	WAKER_TRACK
+		thr_act->hold_from = __builtin_return_address(0);	/* #925 */
+#endif
 		nudge(thr_act);
 	}
 }
@@ -436,6 +439,10 @@ thread_suspend(
 		 */
 		thr_act->stop_asked_at = thr_act->user_faults;
 		thr_act->stop_asked = TRUE;
+#if	WAKER_TRACK
+		thr_act->stop_asked_by = current_thread();	/* #925 */
+		thr_act->stop_asked_tick = sched_tick;
+#endif
 		if (thread &&
 			thr_act == thread->top_act && thread != current_thread()) {
 			nudge(thr_act);
@@ -1638,6 +1645,13 @@ install_special_handler(
 	spl = splsched();
 	if (thread)
 		thread_lock(thread);
+#if	WAKER_TRACK
+	/* #925: thread_hold() writes its own caller after this. */
+	thr_act->apc_from = __builtin_return_address(0);
+	thr_act->hold_from = 0;
+	thr_act->apc_by = current_thread();
+	thr_act->apc_tick = sched_tick;
+#endif
 	install_special_handler_locked(thr_act);
 	act_set_apc(thr_act);
 	if (thread)

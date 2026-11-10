@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #925
+Takes out: pthread_join()'s loop -- one futex wait, and whatever ends it is taken for the exit, as before #925, so a join whose wait an abort ended answers EINVAL for a thread still running: pthread_test's joiner, aborted while thread_info() says it waits, must be seen returning before its thread ends
+Run: --entry 14 600 -smp 4
+Expect: a join whose wait is aborted goes on waiting: FAIL — pthread_join\(\) answered
+
+diff --git a/uros/src/lib/libpthreads/pthread.c b/uros/src/lib/libpthreads/pthread.c
+index b1e72c57..04a7c6b1 100644
+--- a/uros/src/lib/libpthreads/pthread.c
++++ b/uros/src/lib/libpthreads/pthread.c
+@@ -1337,14 +1337,12 @@ pthread_join(pthread_t thread,
+ 			 * between two turns makes the next wait return at
+ 			 * once.
+ 			 */
+-			while (thread->detached == PTHREAD_CREATE_JOINABLE)
+-			{
+-				j_snap = *PTH_FW(thread->joiners);
+-				UNLOCK(thread->lock);
+-				(void) _pthread_futex_wait(PTH_FW(thread->joiners),
+-							   j_snap, 0);
+-				LOCK(thread->lock);
+-			}
++			/* 925-join-takes-first-return: one wait, any return */
++			j_snap = *PTH_FW(thread->joiners);
++			UNLOCK(thread->lock);
++			(void) _pthread_futex_wait(PTH_FW(thread->joiners),
++						   j_snap, 0);
++			LOCK(thread->lock);
+ 			thread->num_joiners--;
+ 		}
+ 		if (thread->detached == _PTHREAD_EXITED)

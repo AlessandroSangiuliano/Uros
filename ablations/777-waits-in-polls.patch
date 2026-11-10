@@ -6,9 +6,10 @@ Run: --entry 14 300 -smp 4
 Expect: act_test: \[(39|40)\] .*(never came to wait|never ran)
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index a5ee2e2f..407555a2 100644
 --- a/uros/src/tests/act_test/act_test.c
 +++ b/uros/src/tests/act_test/act_test.c
-@@ -5910,7 +5910,7 @@
+@@ -5915,7 +5915,7 @@ arm_thread_waiting(volatile mach_port_t *thread)
  				&n) == KERN_SUCCESS &&
  		    info.run_state == TH_STATE_WAITING)
  			return 1;
@@ -17,16 +18,16 @@ diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_te
  	}
  	return 0;
  }
-@@ -5995,7 +5995,7 @@
- 		if (arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP)
- 		    == MACH_MSG_SUCCESS)
- 			return;
+@@ -6022,7 +6022,7 @@ arm_thirty_nine_stop_it(void)
+ 		mr = arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP);
+ 		if (mr == MACH_MSG_SUCCESS)
+ 			return mr;
 -		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 +		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
  	}
+ 	return mr;
  }
- 
-@@ -6066,7 +6066,7 @@
+@@ -6192,7 +6192,7 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
  		/* On one processor it can run only now. */
  		for (i = 0; i < 2000 && arm_thirty_nine_got == before; i++)
  			(void) thread_switch(MACH_PORT_NULL,
@@ -35,7 +36,7 @@ diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_te
  		took = arm_thirty_nine_tsc() - start;
  		if (arm_thirty_nine_got == before) {
  			printf("act_test: [39] the thread woken before %s "
-@@ -6376,7 +6376,7 @@
+@@ -6513,7 +6513,7 @@ arm_forty_ran(unsigned before)
  	unsigned	i;
  
  	for (i = 0; i < 2000 && arm_forty_got == before; i++)

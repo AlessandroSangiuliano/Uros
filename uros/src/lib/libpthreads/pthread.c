@@ -541,8 +541,34 @@ _pthread_pool_park(pthread_t self)
 	wake_seq = 0;
 	UNLOCK(_thread_pool_lock);
 
-	/* Park: block until pthread_create publishes fun/arg and bumps our word */
-	(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
+	/*
+	 * Park until pthread_create() has published fun/arg and bumped our
+	 * word, and not merely until the wait returns (#925).
+	 *
+	 * The kernel's futex_wait() answers KERN_SUCCESS for every end of the
+	 * wait but a timeout: a wake on the word, an abort that interrupted
+	 * the wait, a TH_ABORT still pending when the thread blocked.  And it
+	 * hands wakes on to other waiters on purpose (#460), on the
+	 * understanding that a waiter woken for nothing looks at its word
+	 * again.  This park took the first return for pthread_create()'s
+	 * wake.  A thread whose park ended any other way ran its last function
+	 * again, on fun/arg nobody had set, with its entry still in the pool:
+	 *
+	 *   - parked again, it was in the pool twice, and two pthread_create()s
+	 *     each memset() this one structure, the second over a thread
+	 *     running the first's function -- one join slept for ever on a
+	 *     structure whose joiners the memset had taken away;
+	 *   - with the pool full it terminated, and the pthread_create() that
+	 *     later took the entry it left woke nobody and handed out a
+	 *     structure no thread would ever run on.
+	 *
+	 * Both are how act_test's arm [39] hung in pthread_join().
+	 *
+	 * Acquire, against the release in pthread_create(): once the word
+	 * reads changed, fun and arg read as the creator wrote them.
+	 */
+	while (__atomic_load_n(&self->pool_wake, __ATOMIC_ACQUIRE) == wake_seq)
+		(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
 
 	/*
 	 * Woken up — self->fun and self->arg have been set by pthread_create.
@@ -1050,9 +1076,12 @@ pthread_create(pthread_t *thread,
 			t->arg = arg;
 			t->fun = start_routine;
 			/* Wake the parked thread (bump its seq) — it will run
-			 * _pthread_pool_trampoline and read fun/arg. */
+			 * _pthread_pool_trampoline and read fun/arg.  Release:
+			 * the park reads the word without the kernel now, and
+			 * goes on to fun/arg as soon as it reads it bumped
+			 * (#925). */
 			_pthread_live_enter();
-			(*wake_word)++;
+			(void) __atomic_add_fetch(wake_word, 1, __ATOMIC_RELEASE);
 			_pthread_futex_wake_one(wake_word);
 			return (ESUCCESS);
 		}
@@ -1297,12 +1326,25 @@ pthread_join(pthread_t thread,
 		{
 			int j_snap;
 			thread->num_joiners++;
-			j_snap = *PTH_FW(thread->joiners);  /* snapshot under lock */
-			UNLOCK(thread->lock);
-			/* Block until exit/detach bumps the joiners futex. */
-			(void) _pthread_futex_wait(PTH_FW(thread->joiners),
-						   j_snap, 0);
-			LOCK(thread->lock);
+			/*
+			 * Block until an exit or a detach has made the thread
+			 * no longer joinable, and not merely until the wait
+			 * returns (#925): futex_wait() answers KERN_SUCCESS
+			 * for an interrupted wait as well, and this took any
+			 * return for the exit, answering EINVAL for a thread
+			 * that was still running.  Each turn reads the word
+			 * under the lock, as the exit bumps it, so an exit
+			 * between two turns makes the next wait return at
+			 * once.
+			 */
+			while (thread->detached == PTHREAD_CREATE_JOINABLE)
+			{
+				j_snap = *PTH_FW(thread->joiners);
+				UNLOCK(thread->lock);
+				(void) _pthread_futex_wait(PTH_FW(thread->joiners),
+							   j_snap, 0);
+				LOCK(thread->lock);
+			}
 			thread->num_joiners--;
 		}
 		if (thread->detached == _PTHREAD_EXITED)
@@ -1372,17 +1414,29 @@ pthread_timedjoin_np(pthread_t thread,
 		int j_snap;
 
 		thread->num_joiners++;
-		j_snap = *PTH_FW(thread->joiners);  /* snapshot under lock */
-		UNLOCK(thread->lock);
+		/*
+		 * Until the thread is no longer joinable or the deadline has
+		 * passed, as in pthread_join(), and not until the first return
+		 * (#925): an interrupted wait answers KERN_SUCCESS, and this
+		 * then answered EINVAL for a thread still running, well before
+		 * its deadline.  Each turn waits for what is left of it.
+		 */
+		kern_res = KERN_SUCCESS;
+		while (thread->detached == PTHREAD_CREATE_JOINABLE &&
+		       kern_res != KERN_OPERATION_TIMED_OUT) {
+			j_snap = *PTH_FW(thread->joiners);
+			UNLOCK(thread->lock);
 
-		/* #324: deadline already passed -> immediate timeout (don't
-		 * pass 0 ms to the futex, which would mean "wait forever"). */
-		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
-			kern_res = KERN_OPERATION_TIMED_OUT;
-		else
-			kern_res = _pthread_futex_wait(PTH_FW(thread->joiners),
-						       j_snap, tmo_ms);
-		LOCK(thread->lock);
+			/* #324: deadline already passed -> immediate timeout
+			 * (don't pass 0 ms to the futex, which would mean
+			 * "wait forever"). */
+			if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
+				kern_res = KERN_OPERATION_TIMED_OUT;
+			else
+				kern_res = _pthread_futex_wait(
+				    PTH_FW(thread->joiners), j_snap, tmo_ms);
+			LOCK(thread->lock);
+		}
 		thread->num_joiners--;
 
 		if (kern_res == KERN_OPERATION_TIMED_OUT &&
@@ -1411,6 +1465,28 @@ pthread_timedjoin_np(pthread_t thread,
 
 	UNLOCK(thread->lock);
 	return (EINVAL);
+}
+
+/*
+ * #925: what a join waits on, read from another thread: the thread's state
+ * (joinable, detached, or exited and waiting to be harvested), the joiners it
+ * counts, and the two futex words of the handshake -- joiners, which an exit
+ * bumps and a joiner sleeps on, and death, which a joiner sets and the exited
+ * thread sleeps on.  For a test whose join did not return to say what the
+ * handshake shows.  Read without the lock, as pthread_cond_waiting_np() reads
+ * its fields: a lock left held must not stop the one call that looks.
+ */
+int
+pthread_join_state_np(pthread_t thread, int *detached, int *num_joiners,
+		      unsigned int *joiners, unsigned int *death)
+{
+	if (thread == (pthread_t)NULL || thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	*detached = thread->detached;
+	*num_joiners = thread->num_joiners;
+	*joiners = (unsigned int) *PTH_FW(thread->joiners);
+	*death = (unsigned int) *PTH_FW(thread->death);
+	return (ESUCCESS);
 }
 
 /*

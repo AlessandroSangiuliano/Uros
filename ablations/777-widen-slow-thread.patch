@@ -4,9 +4,10 @@ Holds open: the woken threads of act_test's arms 39 and 40 for 20 ms or so, runn
 Run: --entry 14 300 -smp 4
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 8b1cb80e..a5ee2e2f 100644
 --- a/uros/src/tests/act_test/act_test.c
 +++ b/uros/src/tests/act_test/act_test.c
-@@ -5915,6 +5915,16 @@
+@@ -5920,6 +5920,16 @@ arm_thread_waiting(volatile mach_port_t *thread)
  	return 0;
  }
  
@@ -23,22 +24,23 @@ diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_te
  /* -N, as the kernel says it.  arm 39 and arm 40. */
  static int
  arm_direct_switch(mach_port_t host)
-@@ -5959,12 +5969,14 @@
+@@ -5965,6 +5975,7 @@ arm_thirty_nine_receiver(void *arg)
  
  	(void) arg;
  	arm_thirty_nine_thread = mach_thread_self();
 +	arm_slow_thread();
  	for (;;) {
- 		if (mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
- 			     arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
- 			     MACH_PORT_NULL) != MACH_MSG_SUCCESS ||
- 		    m.h.msgh_id != A39_WAKE)
+ 		mr = mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
+ 			      arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
+@@ -5976,6 +5987,7 @@ arm_thirty_nine_receiver(void *arg)
+ 			arm_thirty_nine_returned = 1;
  			return NULL;
+ 		}
 +		arm_slow_thread();
  		arm_thirty_nine_got++;
  	}
  }
-@@ -6312,11 +6324,13 @@
+@@ -6435,11 +6447,13 @@ arm_forty_receiver(void *arg)
  
  	(void) arg;
  	arm_forty_thread = mach_thread_self();

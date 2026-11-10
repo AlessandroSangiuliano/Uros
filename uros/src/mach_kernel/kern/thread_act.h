@@ -101,6 +101,7 @@
 #include <kern/lock.h>
 #include <kern/queue.h>
 #include <kern/etap_macros.h>
+#include <kern/waker_track.h>
 #include <machine/thread_act.h>
 #include <kern/thread_pool.h>
 
@@ -276,6 +277,24 @@ typedef struct thread_activation {
 	unsigned int	user_faults;
 	unsigned int	stop_asked_at;
 	boolean_t	stop_asked;
+
+#if	WAKER_TRACK
+	/*
+	 * #925: who last put the special handler on this activation, and who
+	 * last asked it to stop.  apc_from is install_special_handler()'s
+	 * caller, hold_from thread_hold()'s when the handler came that way,
+	 * apc_by and stop_asked_by the thread that called, and the ticks are
+	 * sched_tick then.  An AST_APC or a stop_asked found on a thread that
+	 * nothing in its own task meant to stop says here where it came from.
+	 * Nothing reads these but scripts/x86_64-walk-threads.py.
+	 */
+	void		*apc_from;
+	void		*hold_from;
+	thread_t	apc_by;
+	unsigned int	apc_tick;
+	thread_t	stop_asked_by;
+	unsigned int	stop_asked_tick;
+#endif	/* WAKER_TRACK */
 
 	/* ast is needed - see ast.h */
 	int		ast;

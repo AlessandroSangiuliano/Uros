@@ -84,6 +84,87 @@ def ksym(addr):
         return "?"
 
 
+def waker(v):
+    # WAKER_FROM_HOTPATH and WAKER_FROM_DTS are 1 and 2, not addresses.
+    v = int(v)
+    return {0: "0", 1: "hot-path-claim", 2: "direct-switch"}.get(v) or ksym(v)
+
+
+def ring(first, nxt, limit=16):
+    # A circular list of elements linked through their own field: the element
+    # addresses from `first', at most `limit' of them.
+    out, e = [], first
+    while e and len(out) < limit:
+        out.append(e)
+        e = nxt(e)
+        if e == first:
+            break
+    return out
+
+
+def receive_port(th):
+    # The queue a receive in progress waits on (#925): the port or the set it
+    # was asked on, the count and the limit a send is measured against, the
+    # messages on the queue and the receivers on its list, and whether this
+    # thread is one of them.  A message it never took is either queued with
+    # the receiver missing from the list, or was refused at the limit.
+    #
+    # Only for a thread asleep in mach_msg_receive_continue: that park writes
+    # the queue and the object it waits on (ipc_mqueue_receive() and
+    # mach_msg_receive()).  The hot path's park and a kernel receive write
+    # neither, and a receive that ended leaves both behind, naming memory that
+    # may since be another port's -- nap()'s port, freed, came back as arm 39's.
+    st = int(th["ith_state"]) & 0xffffffff
+    if st not in (0x10004001, 0x10004011):              # MACH_RCV_IN_PROGRESS[_TIMED]
+        return
+    if not (int(th["state"]) & 1) or int(th["wait_event"]):
+        return                                          # not parked on an IPC queue
+    if "mach_msg_receive_continue" not in ksym(th["continuation"]):
+        print("      receive parked by a path that records no queue")
+        return
+    mq = int(th["saved"]["receive"]["mqueue"])
+    obj = int(th["saved"]["receive"]["object"])
+    try:
+        # Every field the two lists are read through, asked for even when a
+        # list is empty: an empty one never follows a link, and a name this
+        # kernel lacks would otherwise pass unseen until a list had something.
+        KM = gdb.lookup_type("struct ipc_kmsg")
+        KM["ikm_next"], KM["ikm_header"].type.strip_typedefs()["msgh_id"]
+        th.type.strip_typedefs().target()["ith_next"]
+        MQ = gdb.Value(mq).cast(gdb.lookup_type("struct ipc_mqueue").pointer())
+        kt = KM.pointer()
+        msgs = ["%#x:%d" % (k, int(gdb.Value(k).cast(kt)["ikm_header"]["msgh_id"]))
+                for k in ring(int(MQ["imq_messages"]["ikmq_base"]),
+                              lambda k: int(gdb.Value(k).cast(kt)["ikm_next"]))]
+        rcvs = ["%#x%s" % (r, "*" if r == int(th) else "")
+                for r in ring(int(MQ["imq_threads"]["ithq_base"]),
+                              lambda r: int(gdb.Value(r).cast(th.type)["ith_next"]))]
+        lists = "messages=[%s] receivers=[%s] (* this thread)" % (" ".join(msgs), " ".join(rcvs))
+        bits = int(gdb.Value(obj).cast(gdb.lookup_type("struct ipc_object").pointer())["io_bits"])
+        bits &= 0xffffffff
+        otype = (bits >> 16) & 0x7fff
+        if otype in (0, 1):                             # IOT_PORT, IOT_PORT_SET
+            tname, field = ("struct ipc_port", "ip_messages") if otype == 0 else \
+                ("struct ipc_pset", "ips_messages")
+            O = gdb.Value(obj).cast(gdb.lookup_type(tname).pointer())
+            own = int(O[field].address)
+            # The two halves of one record (#925): the object asked on, and
+            # the queue the thread sleeps on.  A park that wrote one and not
+            # the other names two different things.
+            odd = "" if own == mq else " -- its own queue is %#x and the thread's %#x" % (own, mq)
+            if otype == 0:
+                print("      port %#x active=%d msgcount=%u qlimit=%u seqno=%u pset=%#x %s%s" % (
+                    obj, bits >> 31, int(O["ip_msgcount"]) & 0xffffffff,
+                    int(O["ip_qlimit"]) & 0xffffffff, int(O["ip_seqno"]) & 0xffffffff,
+                    int(O["ip_pset"]), lists, odd))
+            else:
+                print("      port set %#x active=%d %s%s" % (obj, bits >> 31, lists, odd))
+        else:
+            print("      receive on object %#x of type %d, queue %#x: %s" % (obj, otype, mq, lists))
+    except Exception as x:
+        print("      receive queue %#x unreadable: %s" % (mq, x))
+
+
 def xp(pa, n):
     out = gdb.execute("monitor xp /%dgx %#x" % (n, pa), to_string=True)
     vals = []
@@ -223,6 +304,31 @@ while q != head and nt < 64:
                           int(th["handoff_target"]), int(th["handoff_wakee"])))
             except gdb.error as x:
                 print("      act.ast etc. unreadable: %s" % x)
+            # Who last ended one of its waits, the IPC park it is in and the
+            # one it was last taken off at (#687's record): a receiver taken
+            # off its port's list at the park it still sleeps in was handed
+            # something and never woken.
+            try:
+                print("      woke_from=%s cpu=%d result=%d event=%#x park=%u dq=%u wait_from=%s" % (
+                    waker(th["woke_from"]), int(th["woke_cpu"]), int(th["woke_result"]),
+                    int(th["woke_event"]), int(th["ith_park_seq"]) & 0xffffffff,
+                    int(th["ith_dq_seq"]) & 0xffffffff,
+                    ksym(th["wait_from"]) if int(th["wait_from"]) else "0"))
+            except gdb.error as x:
+                print("      waker record unreadable: %s" % x)
+            # Who last put the special handler on it and who last asked it to
+            # stop, with sched_tick then (#925): an AST_APC on a thread nobody
+            # in its task meant to stop.
+            try:
+                print("      apc_from=%s hold_from=%s apc_by=%#x apc_tick=%u "
+                      "stop_asked_by=%#x stop_asked_tick=%u" % (
+                          ksym(A["apc_from"]) if int(A["apc_from"]) else "0",
+                          ksym(A["hold_from"]) if int(A["hold_from"]) else "0",
+                          int(A["apc_by"]), int(A["apc_tick"]),
+                          int(A["stop_asked_by"]), int(A["stop_asked_tick"])))
+            except gdb.error as x:
+                print("      special handler record unreadable: %s" % x)
+            receive_port(th)
             # A thread asleep on a mutex: who holds it, from own_thr, as
             # quiet_census does.  That census cannot speak while another
             # task polls, and this one asks no one (#889).

@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #925
+Takes out: the park's loop -- _pthread_pool_park() takes the first return of its futex wait for pthread_create()'s wake again, as it did before #925, so a park an abort ended runs the thread's last function a second time: pthread_test's parked thread, aborted while thread_info() says it waits, must be seen running its function twice
+Run: --entry 14 600 -smp 4
+Expect: a parked thread whose park is aborted stays parked: FAIL
+
+diff --git a/uros/src/lib/libpthreads/pthread.c b/uros/src/lib/libpthreads/pthread.c
+index b1e72c57..39f4c7a2 100644
+--- a/uros/src/lib/libpthreads/pthread.c
++++ b/uros/src/lib/libpthreads/pthread.c
+@@ -567,8 +567,8 @@ _pthread_pool_park(pthread_t self)
+ 	 * Acquire, against the release in pthread_create(): once the word
+ 	 * reads changed, fun and arg read as the creator wrote them.
+ 	 */
+-	while (__atomic_load_n(&self->pool_wake, __ATOMIC_ACQUIRE) == wake_seq)
+-		(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
++	/* 925-park-takes-first-return: the first return is the wake */
++	(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
+ 
+ 	/*
+ 	 * Woken up — self->fun and self->arg have been set by pthread_create.
