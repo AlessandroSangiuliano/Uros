@@ -311,3 +311,47 @@ routine proc_reap_zombie(
 	out	pid		: proc_pid_t;
 	out	exit_code	: int;
 	out	result		: int);
+
+/*
+ * proc_wait(parent_pid, which, options, notify) -- every form of POSIX's
+ * wait (#934).  `which' is read as waitpid() reads its pid: a child's pid,
+ * -1 for any child, 0 for a child in parent_pid's process group, below -1
+ * for a child in the group -which.  `options' are PROC_WAIT_* (proc_types.h).
+ *
+ *   result == PROC_OK            -- a matching child is reported now: pid,
+ *                                   status and usage are valid, and an exit
+ *                                   is reaped unless PROC_WAIT_NOWAIT
+ *   result == PROC_ERR_NOT_FOUND -- PROC_WAIT_NOHANG, and nothing to report
+ *   result == PROC_ERR_NO_CHILD  -- no child matches (ECHILD)
+ *   result == PROC_WAIT_QUEUED   -- notify was kept; the first matching
+ *                                   report comes on it as a proc_wait_msg_t,
+ *                                   and an exit is reaped once it is queued
+ *
+ * notify may be MACH_PORT_NULL with PROC_WAIT_NOHANG.  Unlike
+ * proc_subscribe_exit(), a zombie is reaped only once its report reached
+ * the waiter, so a waiter that went away loses no child's status.
+ */
+routine proc_wait(
+		proc_port	: mach_port_t;
+	in	parent_pid	: proc_pid_t;
+	in	which		: int;
+	in	options		: int;
+	in	notify		: mach_port_make_send_once_t;
+	out	pid		: proc_pid_t;
+	out	status		: int;
+	out	usage		: proc_rusage_t;
+	out	result		: int);
+
+/*
+ * proc_stop(pid, signo) -- stop pid as the default action of a stop signal
+ * does (#934).  A program's own signal thread asks this for SIGTSTP,
+ * SIGTTIN or SIGTTOU left at SIG_DFL; proc_server suspends the task, once,
+ * and records the stop for its parent's WUNTRACED, with signo for WSTOPSIG.
+ * The caller's thread is suspended with its task, and has the reply when
+ * the task is continued.
+ */
+routine proc_stop(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	in	signo		: int;
+	out	result		: int);
