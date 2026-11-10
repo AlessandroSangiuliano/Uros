@@ -822,3 +822,30 @@ routine host_processor_info(
 routine urmach_cap_server_set(
 		host_priv	: host_priv_t;
 		task		: task_t);
+
+/*
+ *	A range of a task's memory named by a port (#911): the pages from
+ *	address to address + size, cut into segments that end at ends[] and
+ *	may be mapped with at most prots[].  vm_map() takes the port in place
+ *	of a memory object and maps the same pages, and nothing else of the
+ *	task comes with them.  No segment may allow more than the task's own
+ *	mapping allows, and the range lies in one mapping.  The entry holds
+ *	the pages until its last send right goes.  <mach/memory_entry.h>.
+ */
+/*
+ *	Fixed arrays and a count after them, not variable ones: a count of
+ *	four bytes before an array of eight-byte ends puts four bytes of
+ *	padding in the compiler's layout that MIG's packed message does not
+ *	have.  In this order nothing needs padding on either target.
+ */
+type urmach_memory_entry_ends_t = array[8] of vm_size_t;
+type urmach_memory_entry_prots_t = array[8] of vm_prot_t;
+
+routine urmach_make_memory_entry(
+		target_task	: vm_task_t;
+		address		: vm_address_t;
+		size		: vm_size_t;
+		ends		: urmach_memory_entry_ends_t;
+		prots		: urmach_memory_entry_prots_t;
+		segments	: natural_t;
+	out	entry		: mach_port_t);

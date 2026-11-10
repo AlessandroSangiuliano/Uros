@@ -1669,7 +1669,7 @@ parse_proc_path(const char *path, proc_pid_t *out_pid)
 kern_return_t
 vfs_open(
     mach_port_t fs_port,
-    mach_port_t client_task,
+    mach_port_t client_token,
     vfs_path_t path,
     int flags,
     int mode,
@@ -1681,10 +1681,17 @@ vfs_open(
     struct pid_entry *e;
 
     (void)fs_port; (void)flags; (void)mode;
-    /* #385: /proc handles are virtual (no fs_server fid pool), so we don't
-     * need the client-task reclaim hook — just drop the send right. */
-    (void)mach_port_deallocate(mach_task_self(), client_task);
 
+    /*
+     * #385: /proc handles are virtual (no fs_server fid pool), so the right
+     * the client sends to say when it dies is of no use here -- and it is
+     * let go on the success path only (#911).  A routine that fails has its
+     * request destroyed by mach_msg_server(), the right with it; this let it
+     * go first as well, so a failed open released it twice.  Before #911 the
+     * right was the client's task port, and when the client was a process
+     * registered here the second release took the reference proc_server
+     * keeps for it.
+     */
     *handle_out = 0;
     *type_out   = VFS_FT_UNKNOWN;
 
@@ -1704,6 +1711,7 @@ vfs_open(
     *handle_out = e->stat_handle_id;
     *type_out   = VFS_FT_REG;
     pthread_mutex_unlock(&pid_lock);
+    (void)mach_port_deallocate(mach_task_self(), client_token);
     return KERN_SUCCESS;
 }
 

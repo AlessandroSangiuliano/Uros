@@ -26,8 +26,8 @@
  * flipc2_endpoint_connect to establish a pair of SPSC channels.
  *
  * The server creates two channels (fwd: server→client, rev:
- * client→server), maps them into the client's address space via
- * vm_remap, and returns the addresses + semaphore send rights.
+ * client→server) and answers a memory entry for each, which the
+ * client maps into its own address space (#911).
  */
 
 subsystem flipc2_endpoint 2960;
@@ -40,37 +40,37 @@ import "flipc2_endpoint_types.h";
 
 /*
  * Connect to an endpoint: the server creates a bidirectional SPSC
- * channel pair, maps both into the client's address space, and
- * returns the addresses plus semaphore send rights.
+ * channel pair and answers a memory entry for each channel, with the
+ * protections the client's role allows on each of its sections; the
+ * client maps them itself.
  *
- * client_task:     client's task port (for vm_remap)
- * channel_size:    requested channel size (0 = server default)
- * ring_entries:    requested ring entries (0 = server default)
- * fwd_addr/rev_addr: channel base in CLIENT's address space
- * fwd_sem/rev_sem: consumer wakeup semaphore send rights
- * fwd_sem_prod/rev_sem_prod: producer wakeup semaphore send rights
+ * 🔑 The client sends a token, not its task port (#911).  The token is a
+ * port the client made for this connection and holds the receive right
+ * of: the server asks for a dead-name notification on it, and the
+ * connection ends when it dies -- with the client, or when the client
+ * destroys it, which is how a client disconnects.  Before #911 the
+ * client sent its task port and the server vm_remap()ped the channels
+ * into it, so every endpoint held, for as long as a connection lasted,
+ * the right to read and write all of the connected client's memory.
+ * MAKE_SEND is the point of the type: the kernel makes the right from a
+ * receive right the sender holds, and no task holds the receive right
+ * of a task port, so no task port can travel here, even by mistake.
+ *
+ * client_token:	the client's token, a send right made in transit
+ * channel_size:	requested channel size (0 = server default)
+ * ring_entries:	requested ring entries (0 = server default)
+ * fwd_entry/rev_entry:	memory entries for the two channels
  * size_out/entries_out: actual parameters used by server
+ *
+ * There is no disconnect routine: a connection ends with its token.
  */
 routine flipc2_endpoint_connect_rpc(
 		server_port	: mach_port_t;
-	in	client_task	: mach_port_copy_send_t;
+	in	client_token	: mach_port_make_send_t;
 	in	channel_size	: unsigned32;
 	in	ring_entries	: unsigned32;
-	out	fwd_addr	: unsigned32;
-	out	rev_addr	: unsigned32;
-	out	fwd_sem		: mach_port_copy_send_t;
-	out	fwd_sem_prod	: mach_port_copy_send_t;
-	out	rev_sem		: mach_port_copy_send_t;
-	out	rev_sem_prod	: mach_port_copy_send_t;
+	out	fwd_entry	: mach_port_move_send_t;
+	out	rev_entry	: mach_port_move_send_t;
 	out	size_out	: unsigned32;
 	out	entries_out	: unsigned32
-	);
-
-/*
- * Graceful disconnect: client notifies server before detaching.
- * simpleroutine = fire-and-forget (no reply needed).
- */
-simpleroutine flipc2_endpoint_disconnect_rpc(
-		server_port	: mach_port_t;
-	in	client_task	: mach_port_copy_send_t
 	);

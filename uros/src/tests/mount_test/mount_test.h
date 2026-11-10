@@ -35,6 +35,22 @@ enum {
 extern volatile uint32_t liar_mach_reads[LIAR_FILES];
 extern volatile uint32_t liar_flipc_reads[LIAR_FILES];
 
+/*
+ * #911: what the liar's fs_open was handed to learn its client's death by --
+ * how many opens it answered, and how many of them came with a task port.
+ */
+extern volatile uint32_t liar_opens;
+extern volatile uint32_t liar_opens_with_a_task;
+
+/*
+ * #911: whether `name', in this task's space, is a task port, asked of the
+ * kernel by a trap that sends nothing: vm_deallocate() of nothing answers
+ * KERN_SUCCESS for a task and refuses every other port.  A message would be
+ * no question at all -- sent to a port that is not the kernel's, it would sit
+ * there unanswered.
+ */
+int mt_is_task(mach_port_t name);
+
 /* Serve `port' on a thread of its own.  NULL, or what failed. */
 const char *liar_start(mach_port_t port);
 

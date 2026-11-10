@@ -39,7 +39,8 @@
 #include <mach/mach_interface.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_port.h>
-#include <mach/mach_host.h>
+#include <mach/mach_host.h>	/* urmach_make_memory_entry() (#911) */
+#include <mach_init.h>		/* vm_page_size (#911) */
 #include <string.h>
 
 static int
@@ -120,6 +121,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
     ch->ring = (struct flipc2_desc *)(base + hdr->ring_offset);
     ch->data = base + hdr->data_offset;
     ch->mem_port = MACH_PORT_NULL;
+    ch->conn_token = MACH_PORT_NULL;
 
     /* Cache constants from header */
     ch->ring_entries = hdr->ring_entries;
@@ -497,6 +499,31 @@ flipc2_channel_share(
 }
 
 /*
+ * What a peer in `role' may do to each section of an isolated channel: the
+ * constants page is read-only for both, a producer writes its own page and
+ * the ring and only reads the consumer's page, and a consumer the other way
+ * round.  The one table flipc2_channel_share_isolated() and
+ * flipc2_channel_make_entry() both read (#911).
+ */
+static void
+flipc2_role_protections(
+    uint32_t            role,
+    vm_prot_t          *prod_prot,
+    vm_prot_t          *cons_prot,
+    vm_prot_t          *ring_prot)
+{
+    if (role == FLIPC2_ROLE_PRODUCER) {
+        *prod_prot = VM_PROT_READ | VM_PROT_WRITE;
+        *cons_prot = VM_PROT_READ;
+        *ring_prot = VM_PROT_READ | VM_PROT_WRITE;
+    } else {
+        *prod_prot = VM_PROT_READ;
+        *cons_prot = VM_PROT_READ | VM_PROT_WRITE;
+        *ring_prot = VM_PROT_READ;
+    }
+}
+
+/*
  * flipc2_channel_share_isolated — Share with per-role page protections.
  *
  * Maps the entire channel into target_task (one vm_remap for contiguous
@@ -539,15 +566,7 @@ flipc2_channel_share_isolated(
     cs = channel->hdr->channel_size;
 
     /* Determine protections based on role */
-    if (target_role == FLIPC2_ROLE_PRODUCER) {
-        prod_prot = VM_PROT_READ | VM_PROT_WRITE;
-        cons_prot = VM_PROT_READ;
-        ring_prot = VM_PROT_READ | VM_PROT_WRITE;
-    } else {
-        prod_prot = VM_PROT_READ;
-        cons_prot = VM_PROT_READ | VM_PROT_WRITE;
-        ring_prot = VM_PROT_READ;
-    }
+    flipc2_role_protections(target_role, &prod_prot, &cons_prot, &ring_prot);
 
     /* Constants page (page 0): read-only for both */
     kr = vm_protect(target_task,
@@ -588,6 +607,66 @@ flipc2_channel_share_isolated(
 
     *out_addr = base;
     return FLIPC2_SUCCESS;
+}
+
+/*
+ * flipc2_channel_make_entry — a memory entry for a channel this task made
+ * (#911), for a peer in `role' to map into itself.
+ *
+ * flipc2_channel_share() maps into the peer, and takes the peer's task port
+ * to do it: whoever shares holds the whole peer.  An entry goes the other
+ * way.  The peer maps it with vm_map() and nobody holds anybody's task; and
+ * the entry carries the most the peer may have on each section, so an
+ * isolated channel's sections hold even against a peer that would vm_protect()
+ * them up, which the current protections share_isolated() sets never could.
+ * A flat channel is one read-write segment: both sides write its one header.
+ *
+ * `size' is the size the channel was made with, not the header's: the header
+ * is in memory the peer will write.
+ */
+flipc2_return_t
+flipc2_channel_make_entry(
+    flipc2_channel_t    channel,
+    uint32_t            size,
+    uint32_t            role,
+    mach_port_t        *entry)
+{
+    urmach_memory_entry_ends_t  ends;
+    urmach_memory_entry_prots_t prots;
+    vm_size_t                   span;
+    natural_t                   n, i;
+    vm_prot_t                   prod_prot, cons_prot, ring_prot;
+    kern_return_t               kr;
+
+    if (!channel || !channel->hdr || !entry)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+    if (role != FLIPC2_ROLE_PRODUCER && role != FLIPC2_ROLE_CONSUMER)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    span = ((vm_size_t)size + vm_page_size - 1) & ~(vm_page_size - 1);
+    for (i = 0; i < URMACH_MEMORY_ENTRY_SEGMENTS_MAX; i++) {
+        ends[i] = 0;
+        prots[i] = VM_PROT_NONE;
+    }
+    if (channel->hdr->layout_flags & FLIPC2_LAYOUT_ISOLATED) {
+        if (span <= FLIPC2_ISO_RING_OFFSET)
+            return FLIPC2_ERR_INVALID_ARGUMENT;
+        flipc2_role_protections(role, &prod_prot, &cons_prot, &ring_prot);
+        ends[0] = FLIPC2_ISO_PROD_OFFSET;   prots[0] = VM_PROT_READ;
+        ends[1] = FLIPC2_ISO_CONS_OFFSET;   prots[1] = prod_prot;
+        ends[2] = FLIPC2_ISO_RING_OFFSET;   prots[2] = cons_prot;
+        ends[3] = span;                     prots[3] = ring_prot;
+        n = 4;
+    } else {
+        ends[0] = span;
+        prots[0] = VM_PROT_READ | VM_PROT_WRITE;
+        n = 1;
+    }
+
+    kr = urmach_make_memory_entry(mach_task_self(),
+                                  (vm_address_t)channel->hdr, span,
+                                  ends, prots, n, entry);
+    return (kr == KERN_SUCCESS) ? FLIPC2_SUCCESS : FLIPC2_ERR_MAP_FAILED;
 }
 
 /*

@@ -34,6 +34,8 @@
 #include <mach/bootstrap.h>		/* the privileged host port it takes */
 #include <mach/mach_interface.h>
 #include <mach/mach_syscalls.h>
+#include <mach/memory_entry.h>	/* arms nine to fourteen (#911) */
+#include <mach_debug/mach_debug.h>	/* host_zone_info(), arm twelve */
 
 #include <stdio.h>
 
@@ -680,6 +682,690 @@ reprotect_keeps_copy(void)
 }
 
 /*
+ * ── Arms nine to fourteen: memory entries (#911) ──────────────────────────
+ *
+ * urmach_make_memory_entry() names a range of a task's memory by a port, and
+ * vm_map() maps the port: the same pages, in this task or in another, and no
+ * task port changes hands.  Until it existed the only way to put a page of one
+ * task into another was vm_remap(), which takes the other task's port -- and
+ * FLIPC's endpoint was handed the port of every client that connected, for
+ * that one call.
+ *
+ * Here because an entry is sharing, and this program is where sharing and
+ * copying are asked of the VM: arm fourteen forks a task that maps an entry,
+ * and the fork's copy must not end the sharing.
+ */
+#define ME_PAGES	4
+#define RW		(VM_PROT_READ | VM_PROT_WRITE)
+
+/*
+ * Arm twelve's rounds and its threshold.  An element taken from a per-processor
+ * magazine moves no zone count, and the magazines hold fifteen each, so a
+ * count can move by up to fifteen for each processor without anything having
+ * leaked.  256 entries that all stayed would move it by far more than half of
+ * 256; ones that went move it by no more than the magazines' slack.
+ */
+#define ME_ROUNDS	256
+#define ME_GREW		(ME_ROUNDS / 2)
+
+static word_t
+me_word(vm_address_t base, int page)
+{
+	return (word_t) (base + (vm_offset_t) page * vm_page_size);
+}
+
+/* urmach_make_memory_entry() over this task: `n' segments from ends[], prots[]. */
+static kern_return_t
+me_make(vm_address_t address, vm_size_t size, natural_t n,
+	const vm_size_t *ends, const vm_prot_t *prots, mach_port_t *entry)
+{
+	urmach_memory_entry_ends_t	e;
+	urmach_memory_entry_prots_t	p;
+	natural_t			i;
+
+	for (i = 0; i < URMACH_MEMORY_ENTRY_SEGMENTS_MAX; i++) {
+		e[i] = (i < n) ? ends[i] : 0;
+		p[i] = (i < n) ? prots[i] : VM_PROT_NONE;
+	}
+	*entry = MACH_PORT_NULL;
+	return urmach_make_memory_entry(mach_task_self(), address, size, e, p,
+					n, entry);
+}
+
+/* An entry mapped anywhere in `task', from `offset' for `size'. */
+static kern_return_t
+me_map(mach_port_t task, mach_port_t entry, vm_offset_t offset, vm_size_t size,
+       vm_prot_t cur, vm_prot_t max, vm_address_t *at)
+{
+	*at = 0;
+	return vm_map(task, at, size, 0, TRUE, entry, offset, FALSE, cur, max,
+		      VM_INHERIT_DEFAULT);
+}
+
+/* The current and maximum protection of the page at `address' in `task'. */
+static kern_return_t
+me_protections(mach_port_t task, vm_address_t address, vm_prot_t *cur,
+	       vm_prot_t *max)
+{
+	vm_address_t			found = address;
+	vm_size_t			size = 0;
+	vm_region_basic_info_data_t	info;
+	mach_msg_type_number_t		count = VM_REGION_BASIC_INFO_COUNT;
+	mach_port_t			name = MACH_PORT_NULL;
+	kern_return_t			kr;
+
+	kr = vm_region(task, &found, &size, VM_REGION_BASIC_INFO,
+		       (vm_region_info_t) &info, &count, &name);
+	if (name != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), name);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (found > address)		/* the next region: this page is not mapped */
+		return KERN_INVALID_ADDRESS;
+	*cur = info.protection;
+	*max = info.max_protection;
+	return KERN_SUCCESS;
+}
+
+static void
+me_release(mach_port_t *entry)
+{
+	if (*entry != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), *entry);
+	*entry = MACH_PORT_NULL;
+}
+
+/*
+ * Arm nine: an entry shares.  Three pages, an entry over them with one
+ * segment, the entry mapped again: the second mapping reads what the first
+ * wrote, each sees the other's writes, and the pages outlive the first
+ * mapping, which is what the entry holds them for.
+ */
+static int
+entry_shares(void)
+{
+	vm_size_t	size = 3 * vm_page_size;
+	vm_size_t	ends[1];
+	vm_prot_t	prots[1] = { RW };
+	vm_address_t	first = 0, second = 0;
+	mach_port_t	entry = MACH_PORT_NULL;
+	kern_return_t	kr;
+	int		i, read = 0, both = 0, kept = 0;
+
+	ends[0] = size;
+	kr = vm_allocate(mach_task_self(), &first, size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [9] vm_allocate failed (%d) — WRONG\n", kr);
+		return 0;
+	}
+	for (i = 0; i < 3; i++)
+		*me_word(first, i) = 0x9a00 + i;
+	kr = me_make(first, size, 1, ends, prots, &entry);
+	if (kr == KERN_SUCCESS)
+		kr = me_map(mach_task_self(), entry, 0, size, RW, RW, &second);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [9] urmach_make_memory_entry() or vm_map() of "
+		       "it failed (%d) — WRONG\n", kr);
+		me_release(&entry);
+		(void) vm_deallocate(mach_task_self(), first, size);
+		return 0;
+	}
+
+	for (i = 0; i < 3; i++)
+		if (*me_word(second, i) == (unsigned long long) (0x9a00 + i))
+			read++;
+	*me_word(second, 1) = 0x9b01;
+	*me_word(first, 2) = 0x9c02;
+	if (*me_word(first, 1) == 0x9b01 && *me_word(second, 2) == 0x9c02)
+		both = 1;
+	(void) vm_deallocate(mach_task_self(), first, size);
+	if (*me_word(second, 0) == 0x9a00 && *me_word(second, 1) == 0x9b01 &&
+	    *me_word(second, 2) == 0x9c02)
+		kept = 1;
+
+	(void) vm_deallocate(mach_task_self(), second, size);
+	me_release(&entry);
+
+	if (read != 3 || !both || !kept) {
+		printf("cow_test: [9] an entry mapped again read %d of 3 pages "
+		       "the first mapping wrote, the two %s each other's writes, "
+		       "and the pages %s the first mapping — WRONG\n", read,
+		       both ? "saw" : "did NOT see",
+		       kept ? "outlived" : "did NOT outlive");
+		return 0;
+	}
+	printf("cow_test: [9] three pages made into an entry and mapped again: "
+	       "the second mapping read the first one's words, each saw the "
+	       "other's writes, and the pages outlived the first mapping — PASS "
+	       "(#911)\n");
+	return 1;
+}
+
+/*
+ * Arm ten: the segments hold.  Four pages cut into four segments, read-only
+ * and read-write in turn, mapped asking for read-write throughout: every page
+ * must come out with its segment's protection as both its current and its
+ * maximum, and a read-only page must refuse vm_protect() to write.  The control
+ * is the read-write page beside it, which takes a protect down and back up and
+ * a write the maker sees.  And a mapping asking for less than a segment allows
+ * gets less.
+ */
+static int
+entry_segments_hold(void)
+{
+	vm_size_t	size = ME_PAGES * vm_page_size;
+	vm_size_t	ends[ME_PAGES];
+	vm_prot_t	prots[ME_PAGES] = {
+		VM_PROT_READ, RW, VM_PROT_READ, RW
+	};
+	vm_address_t	maker = 0, mapped = 0, narrow = 0;
+	mach_port_t	entry = MACH_PORT_NULL;
+	vm_prot_t	cur, max;
+	kern_return_t	kr, refused, lowered = KERN_FAILURE;
+	int		i, right = 0, control = 0, less = 0;
+
+	for (i = 0; i < ME_PAGES; i++)
+		ends[i] = (vm_size_t) (i + 1) * vm_page_size;
+	kr = vm_allocate(mach_task_self(), &maker, size, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = me_make(maker, size, ME_PAGES, ends, prots, &entry);
+	if (kr == KERN_SUCCESS)
+		kr = me_map(mach_task_self(), entry, 0, size, RW, RW, &mapped);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [10] vm_allocate(), urmach_make_memory_entry() "
+		       "or vm_map() failed (%d) — WRONG\n", kr);
+		me_release(&entry);
+		if (maker != 0)
+			(void) vm_deallocate(mach_task_self(), maker, size);
+		return 0;
+	}
+
+	for (i = 0; i < ME_PAGES; i++) {
+		kr = me_protections(mach_task_self(),
+				    mapped + (vm_offset_t) i * vm_page_size,
+				    &cur, &max);
+		if (kr != KERN_SUCCESS)
+			printf("cow_test: [10] vm_region() of page %d failed (%d)"
+			       " — WRONG\n", i, kr);
+		else if (cur != prots[i] || max != prots[i])
+			printf("cow_test: [10] page %d is mapped %d, at most %d, "
+			       "and its segment allows %d — WRONG\n", i, cur, max,
+			       prots[i]);
+		else
+			right++;
+	}
+
+	refused = vm_protect(mach_task_self(), mapped, vm_page_size, FALSE, RW);
+
+	kr = vm_protect(mach_task_self(), mapped + vm_page_size, vm_page_size,
+			FALSE, VM_PROT_READ);
+	if (kr == KERN_SUCCESS)
+		kr = vm_protect(mach_task_self(), mapped + vm_page_size,
+				vm_page_size, FALSE, RW);
+	if (kr == KERN_SUCCESS) {
+		*me_word(mapped, 1) = 0xa101;
+		control = (*me_word(maker, 1) == 0xa101);
+	}
+
+	kr = me_map(mach_task_self(), entry, 0, size, VM_PROT_READ,
+		    VM_PROT_READ, &narrow);
+	if (kr == KERN_SUCCESS) {
+		lowered = me_protections(mach_task_self(),
+					 narrow + vm_page_size, &cur, &max);
+		less = (lowered == KERN_SUCCESS && max == VM_PROT_READ);
+		(void) vm_deallocate(mach_task_self(), narrow, size);
+	}
+
+	(void) vm_deallocate(mach_task_self(), mapped, size);
+	(void) vm_deallocate(mach_task_self(), maker, size);
+	me_release(&entry);
+
+	if (!control) {
+		printf("cow_test: [10] CONTROL FAILED: the read-write page did "
+		       "not take a protect down and back up and a write the "
+		       "maker sees\n");
+		return 0;
+	}
+	if (right != ME_PAGES || refused != KERN_PROTECTION_FAILURE || !less) {
+		printf("cow_test: [10] %d of %d pages had their segment's "
+		       "protection, a read-only page asked to write was answered "
+		       "%d (KERN_PROTECTION_FAILURE is %d), and a mapping asking "
+		       "for read only got %s — WRONG\n", right, ME_PAGES, refused,
+		       KERN_PROTECTION_FAILURE,
+		       less ? "it" : "more");
+		return 0;
+	}
+	printf("cow_test: [10] four segments, read-only and read-write in turn: "
+	       "each page mapped with its segment's protection at most, a "
+	       "read-only one not made writable, and less when less is asked "
+	       "— PASS (#911)\n");
+	return 1;
+}
+
+/*
+ * One answer of arm eleven: `got' must be `want'.  An entry made where one
+ * should have been refused is let go, so that it does not hold pages.
+ */
+static int
+me_answer(const char *what, kern_return_t got, kern_return_t want,
+	  mach_port_t *entry)
+{
+	me_release(entry);
+	if (got == want)
+		return 1;
+	printf("cow_test: [11] %s: answered %d, not %d — WRONG\n", what, got,
+	       want);
+	return 0;
+}
+
+/*
+ * Arm eleven: what an entry refuses.  Ten requests to make one that must each
+ * be refused, and three mappings of a good one that must be: the answers are
+ * named, so a kernel that let one through says which.  The control is a fourth
+ * mapping of the good one that asks for something it may have and gets it, as
+ * arm nine's request got its entry.
+ */
+static int
+entry_refusals(void)
+{
+	vm_size_t	page = vm_page_size;
+	vm_address_t	region = 0, readonly = 0, hole = 0, at = 0;
+	vm_size_t	ends[URMACH_MEMORY_ENTRY_SEGMENTS_MAX + 1];
+	vm_prot_t	prots[URMACH_MEMORY_ENTRY_SEGMENTS_MAX + 1];
+	mach_port_t	entry = MACH_PORT_NULL, good = MACH_PORT_NULL;
+	kern_return_t	kr;
+	int		i, right = 0, asked = 0, control = 0;
+
+	for (i = 0; i <= URMACH_MEMORY_ENTRY_SEGMENTS_MAX; i++) {
+		ends[i] = (vm_size_t) (i + 1) * page;
+		prots[i] = RW;
+	}
+	kr = vm_allocate(mach_task_self(), &region, 2 * page, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = vm_allocate(mach_task_self(), &readonly, page, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = vm_protect(mach_task_self(), readonly, page, TRUE,
+				VM_PROT_READ);
+	if (kr == KERN_SUCCESS)
+		kr = vm_allocate(mach_task_self(), &hole, 2 * page, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = vm_deallocate(mach_task_self(), hole + page, page);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [11] the regions to ask about could not be "
+		       "made (%d) — WRONG\n", kr);
+		return 0;
+	}
+
+	asked++;
+	right += me_answer("a segment allowing write over a mapping that is "
+			   "read-only at most",
+			   me_make(readonly, page, 1, ends, prots, &entry),
+			   KERN_PROTECTION_FAILURE, &entry);
+	asked++;
+	right += me_answer("no segment",
+			   me_make(region, 2 * page, 0, ends, prots, &entry),
+			   KERN_INVALID_ARGUMENT, &entry);
+	asked++;
+	right += me_answer("one segment more than an entry holds",
+			   me_make(region, ends[URMACH_MEMORY_ENTRY_SEGMENTS_MAX],
+				   URMACH_MEMORY_ENTRY_SEGMENTS_MAX + 1, ends,
+				   prots, &entry),
+			   KERN_INVALID_ARGUMENT, &entry);
+	{
+		vm_size_t	down[2] = { 2 * page, page };
+		vm_size_t	shortfall[1] = { page };
+		vm_size_t	ragged[2] = { 100, 2 * page };
+		vm_prot_t	strange[1] = { VM_PROT_ALL + 1 };
+
+		asked++;
+		right += me_answer("segment ends going down",
+				   me_make(region, 2 * page, 2, down, prots,
+					   &entry),
+				   KERN_INVALID_ARGUMENT, &entry);
+		asked++;
+		right += me_answer("segments ending short of the range",
+				   me_make(region, 2 * page, 1, shortfall,
+					   prots, &entry),
+				   KERN_INVALID_ARGUMENT, &entry);
+		asked++;
+		right += me_answer("a segment ending inside a page",
+				   me_make(region, 2 * page, 2, ragged, prots,
+					   &entry),
+				   KERN_INVALID_ARGUMENT, &entry);
+		asked++;
+		right += me_answer("a protection that is no set of VM_PROT_ bits",
+				   me_make(region, page, 1, ends, strange,
+					   &entry),
+				   KERN_INVALID_ARGUMENT, &entry);
+	}
+	asked++;
+	right += me_answer("an address inside a page",
+			   me_make(region + 8, page, 1, ends, prots, &entry),
+			   KERN_INVALID_ARGUMENT, &entry);
+	asked++;
+	right += me_answer("no range",
+			   me_make(region, 0, 1, ends, prots, &entry),
+			   KERN_INVALID_ARGUMENT, &entry);
+	asked++;
+	right += me_answer("a range with an unmapped page in it",
+			   me_make(hole, 2 * page, 1, &ends[1], prots, &entry),
+			   KERN_INVALID_ADDRESS, &entry);
+
+	kr = me_make(region, 2 * page, 1, &ends[1], prots, &good);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [11] the good entry was refused (%d) — WRONG\n",
+		       kr);
+	} else {
+		at = 0;
+		asked++;
+		right += me_answer("a mapping asking for a copy",
+				   vm_map(mach_task_self(), &at, page, 0, TRUE,
+					  good, 0, TRUE, RW, RW,
+					  VM_INHERIT_DEFAULT),
+				   KERN_INVALID_ARGUMENT, &entry);
+		asked++;
+		right += me_answer("a mapping running past the entry",
+				   me_map(mach_task_self(), good, page,
+					  2 * page, RW, RW, &at),
+				   KERN_INVALID_ARGUMENT, &entry);
+		asked++;
+		right += me_answer("a mapping from inside a page",
+				   me_map(mach_task_self(), good, 8, page, RW,
+					  RW, &at),
+				   KERN_INVALID_ARGUMENT, &entry);
+		kr = me_map(mach_task_self(), good, page, page, RW, RW, &at);
+		if (kr == KERN_SUCCESS) {
+			*me_word(region, 1) = 0xb111;
+			control = (*me_word(at, 0) == 0xb111);
+			(void) vm_deallocate(mach_task_self(), at, page);
+		}
+		me_release(&good);
+	}
+
+	(void) vm_deallocate(mach_task_self(), region, 2 * page);
+	(void) vm_deallocate(mach_task_self(), readonly, page);
+	(void) vm_deallocate(mach_task_self(), hole, page);
+
+	if (!control) {
+		printf("cow_test: [11] CONTROL FAILED: the good entry's second "
+		       "page, mapped alone, did not show the maker's write\n");
+		return 0;
+	}
+	if (right != asked)
+		return 0;
+	printf("cow_test: [11] %d requests an entry must refuse were refused "
+	       "with the answer each one calls for, and the good entry's second "
+	       "page, mapped alone, shows the maker's write — PASS (#911)\n",
+	       asked);
+	return 1;
+}
+
+/* How many elements the zone `name' has out; 0 where it cannot be read. */
+static int
+me_zone(const char *name, int *count)
+{
+	zone_name_t		*names = 0;
+	zone_info_t		*info = 0;
+	mach_msg_type_number_t	n = 0, m = 0, i;
+	int			found = 0;
+	const char		*a, *b;
+
+	if (host_zone_info(mach_host_self(), &names, &n, &info, &m) !=
+	    KERN_SUCCESS)
+		return 0;
+	for (i = 0; i < n && i < m; i++) {
+		a = names[i].zn_name;
+		b = name;
+		while (*a != '\0' && *a == *b) {
+			a++;
+			b++;
+		}
+		if (*a == *b) {
+			*count = info[i].zi_count;
+			found = 1;
+		}
+	}
+	(void) vm_deallocate(mach_task_self(), (vm_address_t) names,
+			     n * sizeof *names);
+	(void) vm_deallocate(mach_task_self(), (vm_address_t) info,
+			     m * sizeof *info);
+	return found;
+}
+
+/*
+ * Arm twelve: an entry ends with its last send right.  ME_ROUNDS entries made
+ * and their ports let go one by one must leave the zone where it was, give or
+ * take what the magazines hide.  The control is the same number kept: the
+ * count must rise by more than the threshold while they are held -- or the
+ * instrument could not see a leak -- and come back down when they go.
+ */
+static int
+entry_ends_with_its_port(void)
+{
+	static mach_port_t	kept[ME_ROUNDS];
+	vm_address_t		region = 0;
+	vm_size_t		ends[1];
+	vm_prot_t		prots[1] = { RW };
+	int			before, made, held, after;
+	int			i, failed = 0;
+	kern_return_t		kr;
+
+	ends[0] = vm_page_size;
+	if (!me_zone("memory entries", &before)) {
+		printf("cow_test: [12] no zone \"memory entries\" in "
+		       "host_zone_info() — WRONG\n");
+		return 0;
+	}
+	kr = vm_allocate(mach_task_self(), &region, vm_page_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [12] vm_allocate failed (%d) — WRONG\n", kr);
+		return 0;
+	}
+	for (i = 0; i < ME_ROUNDS; i++) {
+		mach_port_t	entry;
+
+		if (me_make(region, vm_page_size, 1, ends, prots, &entry) !=
+		    KERN_SUCCESS)
+			failed++;
+		me_release(&entry);
+	}
+	(void) me_zone("memory entries", &made);
+	for (i = 0; i < ME_ROUNDS; i++)
+		if (me_make(region, vm_page_size, 1, ends, prots, &kept[i]) !=
+		    KERN_SUCCESS)
+			failed++;
+	(void) me_zone("memory entries", &held);
+	for (i = 0; i < ME_ROUNDS; i++)
+		me_release(&kept[i]);
+	(void) me_zone("memory entries", &after);
+	(void) vm_deallocate(mach_task_self(), region, vm_page_size);
+
+	if (failed != 0) {
+		printf("cow_test: [12] %d of %d entries could not be made — "
+		       "WRONG\n", failed, 2 * ME_ROUNDS);
+		return 0;
+	}
+	if (held - made < ME_GREW) {
+		printf("cow_test: [12] CONTROL FAILED: %d entries held moved the "
+		       "zone by %d, under %d, so a leak would not show\n",
+		       ME_ROUNDS, held - made, ME_GREW);
+		return 0;
+	}
+	if (made - before >= ME_GREW || after - made >= ME_GREW) {
+		printf("cow_test: [12] %d entries whose ports went one by one "
+		       "moved the zone by %d, and %d more held and let go left "
+		       "it %d above where they found it — WRONG, entries outlive "
+		       "their ports\n", ME_ROUNDS, made - before, ME_ROUNDS,
+		       after - made);
+		return 0;
+	}
+	printf("cow_test: [12] %d entries whose ports went one by one moved the "
+	       "zone by %d; %d held moved it by %d and, let go, left it %d from "
+	       "there — PASS (#911)\n", ME_ROUNDS, made - before, ME_ROUNDS,
+	       held - made, after - made);
+	return 1;
+}
+
+/*
+ * Arm thirteen: another task maps the entry.  A child with none of this
+ * task's memory maps it; what the maker writes the child's mapping holds, what
+ * is written into the child's mapping the maker sees, and the read-only
+ * segment holds there too: a vm_write() into it is refused.
+ *
+ * ⚠️ Refused with KERN_INVALID_ADDRESS, not KERN_PROTECTION_FAILURE.  Eight
+ * bytes travel as a kernel buffer, which vm_map_copy_overwrite() puts in place
+ * with a copyout into the child's map, and a copyout that faults on a
+ * read-only page answers KERN_INVALID_ADDRESS.  The same eight bytes into the
+ * read-write segment beside it, the same way, are the control.
+ */
+static int
+entry_in_another_task(void)
+{
+	vm_size_t	size = 2 * vm_page_size;
+	vm_size_t	ends[2];
+	vm_prot_t	prots[2] = { RW, VM_PROT_READ };
+	vm_address_t	maker = 0, at = 0;
+	mach_port_t	entry = MACH_PORT_NULL, kid = MACH_PORT_NULL;
+	unsigned long long word;
+	vm_size_t	got = 0;
+	vm_prot_t	cur = VM_PROT_NONE, max = VM_PROT_NONE;
+	kern_return_t	kr, refused = KERN_SUCCESS;
+	int		seen = 0, back = 0;
+
+	ends[0] = vm_page_size;
+	ends[1] = size;
+	kr = vm_allocate(mach_task_self(), &maker, size, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = me_make(maker, size, 2, ends, prots, &entry);
+	if (kr == KERN_SUCCESS)
+		kr = task_create(mach_task_self(), (ledger_port_array_t) 0, 0,
+				 FALSE, &kid);
+	if (kr == KERN_SUCCESS)
+		kr = me_map(kid, entry, 0, size, RW, RW, &at);
+	if (kr == KERN_SUCCESS) {
+		*me_word(maker, 0) = 0xd100;
+		*me_word(maker, 1) = 0xd101;
+		kr = vm_read_overwrite(kid, at, size, (vm_address_t) mirror,
+				       &got);
+	}
+	if (kr == KERN_SUCCESS) {
+		seen = (*(unsigned long long *) mirror == 0xd100 &&
+			*(unsigned long long *) (mirror + vm_page_size) ==
+			0xd101);
+		word = 0xd200;
+		kr = vm_write(kid, at, (vm_offset_t) &word, sizeof word);
+		back = (kr == KERN_SUCCESS && *me_word(maker, 0) == 0xd200);
+		refused = vm_write(kid, at + vm_page_size, (vm_offset_t) &word,
+				   sizeof word);
+		kr = me_protections(kid, at + vm_page_size, &cur, &max);
+	}
+	if (kr != KERN_SUCCESS)
+		printf("cow_test: [13] the child, its mapping of the entry or a "
+		       "read of it failed (%d) — WRONG\n", kr);
+
+	if (kid != MACH_PORT_NULL) {
+		(void) task_terminate(kid);
+		(void) mach_port_deallocate(mach_task_self(), kid);
+	}
+	me_release(&entry);
+	if (maker != 0)
+		(void) vm_deallocate(mach_task_self(), maker, size);
+	if (kr != KERN_SUCCESS)
+		return 0;
+
+	if (!seen || !back || refused == KERN_SUCCESS ||
+	    max != VM_PROT_READ) {
+		printf("cow_test: [13] in another task the entry's mapping "
+		       "%s the maker's writes, the maker %s one written into it, "
+		       "a write into its read-only segment was answered %d, and "
+		       "that segment is mapped at most %d — WRONG\n",
+		       seen ? "held" : "did NOT hold",
+		       back ? "saw" : "did NOT see", refused, max);
+		return 0;
+	}
+	printf("cow_test: [13] a child with none of this task's memory maps the "
+	       "entry: each side sees the other's writes, and its read-only "
+	       "segment refuses one (%d) — PASS (#911)\n", refused);
+	return 1;
+}
+
+/*
+ * Arm fourteen: a fork does not end the sharing.  The maker's pages and the
+ * entry's mapping of them are both copied into a child by a fork, as anything
+ * is by default.  After it, this task's two mappings must still be one set of
+ * pages -- a write through either shows in the other -- and the child's copy
+ * must still hold what was there before the fork.  An object shared through an
+ * entry has its copies made by the delayed strategy; the symmetric one would
+ * mark each mapping to be copied on its next write, and the first write
+ * through the entry's mapping would give it pages of its own.
+ */
+static int
+entry_survives_fork(void)
+{
+	vm_size_t	size = 2 * vm_page_size;
+	vm_size_t	ends[1];
+	vm_prot_t	prots[1] = { RW };
+	vm_address_t	maker = 0, mapped = 0;
+	mach_port_t	entry = MACH_PORT_NULL, kid = MACH_PORT_NULL;
+	vm_size_t	got = 0;
+	kern_return_t	kr;
+	int		shared = 0, copied = 0;
+
+	ends[0] = size;
+	kr = vm_allocate(mach_task_self(), &maker, size, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = me_make(maker, size, 1, ends, prots, &entry);
+	if (kr == KERN_SUCCESS)
+		kr = me_map(mach_task_self(), entry, 0, size, RW, RW, &mapped);
+	if (kr == KERN_SUCCESS) {
+		*me_word(maker, 0) = 0xe000;
+		*me_word(maker, 1) = 0xe001;
+		kr = task_create(mach_task_self(), (ledger_port_array_t) 0, 0,
+				 TRUE, &kid);
+	}
+	if (kr == KERN_SUCCESS) {
+		*me_word(mapped, 0) = 0xf000;
+		*me_word(maker, 1) = 0xf001;
+		shared = (*me_word(maker, 0) == 0xf000 &&
+			  *me_word(mapped, 1) == 0xf001);
+		kr = vm_read_overwrite(kid, mapped, size, (vm_address_t) mirror,
+				       &got);
+	}
+	if (kr == KERN_SUCCESS)
+		copied = (*(unsigned long long *) mirror == 0xe000 &&
+			  *(unsigned long long *) (mirror + vm_page_size) ==
+			  0xe001);
+	else
+		printf("cow_test: [14] the entry, its mapping, the fork or the "
+		       "read of the child failed (%d) — WRONG\n", kr);
+
+	if (kid != MACH_PORT_NULL) {
+		(void) task_terminate(kid);
+		(void) mach_port_deallocate(mach_task_self(), kid);
+	}
+	if (mapped != 0)
+		(void) vm_deallocate(mach_task_self(), mapped, size);
+	if (maker != 0)
+		(void) vm_deallocate(mach_task_self(), maker, size);
+	me_release(&entry);
+	if (kr != KERN_SUCCESS)
+		return 0;
+
+	if (!shared || !copied) {
+		printf("cow_test: [14] after a fork this task's two mappings of "
+		       "the entry %s each other's writes and the child's copy %s "
+		       "what was there before — WRONG\n",
+		       shared ? "saw" : "did NOT see",
+		       copied ? "held" : "did NOT hold");
+		return 0;
+	}
+	printf("cow_test: [14] after a fork the maker's mapping and the entry's "
+	       "still see each other's writes, and the child's copy holds what "
+	       "was there before the fork — PASS (#911)\n");
+	return 1;
+}
+
+/*
  * Everything between the allocation and the verdict.  Split out so that a
  * failure part-way can return a count rather than jump, and so that the child
  * task is terminated on every path by the one caller that owns it.
@@ -949,11 +1635,18 @@ run_the_arms(void)
 	 * and not "is it right", and a measurement given a pass/fail would need
 	 * a threshold that nothing here is entitled to choose.  It is last
 	 * because it leaves six terminated tasks behind it.  Arm six, after it,
-	 * has none either; arms seven and eight do, and are counted.
+	 * has none either; arms seven and eight do, and are counted, and so do
+	 * nine to fourteen, on memory entries (#911).
 	 */
 	measure_chain_depth();
 	passed += ask_the_fault_count();
 	passed += reprotect_keeps_copy();
+	passed += entry_shares();
+	passed += entry_segments_hold();
+	passed += entry_refusals();
+	passed += entry_ends_with_its_port();
+	passed += entry_in_another_task();
+	passed += entry_survives_fork();
 
 	return passed;
 }
@@ -985,7 +1678,7 @@ main(int argc, char **argv)
 	if (child != MACH_PORT_NULL)
 		(void) task_terminate(child);
 
-	printf("cow_test: %d of 5 arms passed\n", passed);
+	printf("cow_test: %d of 11 arms passed\n", passed);
 
 	/*
 	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
@@ -1004,5 +1697,5 @@ main(int argc, char **argv)
 	 * This program is single-threaded, so it is the last thread and the
 	 * task goes with it.
 	 */
-	return passed == 5 ? 0 : 1;
+	return passed == 11 ? 0 : 1;
 }

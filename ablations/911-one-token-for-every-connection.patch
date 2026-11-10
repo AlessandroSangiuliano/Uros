@@ -1,0 +1,65 @@
+Kind: ablation
+Issue: #911
+Takes out: one token for one connection (953d5d2d) -- a client connects under one token of its own for all of its connections, as it did under its task port, and the endpoint takes a second connection under a token it already holds; the second dead-name request replaces the first, and a client that dies with two connections ends one
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[30\] WRONG — `mount_test die' made 2 connection\(s\), 1 seen to end
+
+diff --git a/uros/src/lib/libflipc2/flipc2_endpoint.c b/uros/src/lib/libflipc2/flipc2_endpoint.c
+index 761e0167..281878f4 100644
+--- a/uros/src/lib/libflipc2/flipc2_endpoint.c
++++ b/uros/src/lib/libflipc2/flipc2_endpoint.c
+@@ -358,8 +358,7 @@ ds_flipc2_endpoint_connect_rpc(
+     slot = -1;
+     for (i = 0; i < ep->max_clients; i++) {
+         if (ep->conns[i].active) {
+-            if (ep->conns[i].client_token == client_token)
+-                return KERN_INVALID_ARGUMENT;
++            continue;
+         } else if (slot < 0) {
+             slot = (int)i;
+         }
+@@ -776,18 +775,21 @@ flipc2_endpoint_connect_port(
+ 
+     /* The connection's token: this task keeps the receive right, and the
+      * server gets a send right made from it in transit (#911). */
+-    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+-                            &token);
+-    if (kr != KERN_SUCCESS)
+-        return FLIPC2_ERR_KERNEL;
++    {
++        static mach_port_t one;
++
++        if (one == MACH_PORT_NULL &&
++            mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
++                               &one) != KERN_SUCCESS)
++            return FLIPC2_ERR_KERNEL;
++        token = one;
++    }
+ 
+     kr = flipc2_endpoint_connect_rpc(server_port, token,
+                                      channel_size, ring_entries,
+                                      &fwd_e, &rev_e,
+                                      &size_out, &entries_out);
+     if (kr != KERN_SUCCESS) {
+-        (void)mach_port_mod_refs(mach_task_self(), token,
+-                                 MACH_PORT_RIGHT_RECEIVE, -1);
+         if (kr == KERN_RESOURCE_SHORTAGE)
+             return FLIPC2_ERR_MAX_CLIENTS;
+         return FLIPC2_ERR_KERNEL;
+@@ -820,8 +822,6 @@ flipc2_endpoint_connect_port(
+             flipc2_channel_detach(fwd_ch);
+         else if (fwd_addr)
+             (void)vm_deallocate(mach_task_self(), fwd_addr, size_out);
+-        (void)mach_port_mod_refs(mach_task_self(), token,
+-                                 MACH_PORT_RIGHT_RECEIVE, -1);
+         return ret;
+     }
+ 
+@@ -832,7 +832,6 @@ flipc2_endpoint_connect_port(
+     flipc2_channel_set_semaphores(fwd_ch, MACH_PORT_NULL, MACH_PORT_NULL);
+     flipc2_channel_set_semaphores(rev_ch, MACH_PORT_NULL, MACH_PORT_NULL);
+ 
+-    fwd_ch->conn_token = token;
+     *fwd_ch_out = fwd_ch;
+     *rev_ch_out = rev_ch;
+     return FLIPC2_SUCCESS;

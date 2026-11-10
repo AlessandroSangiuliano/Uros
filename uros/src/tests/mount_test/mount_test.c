@@ -50,6 +50,19 @@
  * interface takes.  Both servers sized their buffers by hand, the name server
  * at 256 and bootstrap at 128, and a subsystem's maxsize, which they could
  * have used, is its largest reply and not its largest request (#716).
+ *
+ * ── What a server is handed (#911) ──
+ *
+ * libvfs sent its task port with every open, and FLIPC's connect sent it to
+ * every endpoint: each server held all of each client, to learn when it died.
+ * [27] asks what the liar's fs_open is handed now, and has the kernel refuse
+ * this task's port offered by hand; [28] the same of FLIPC's connect.  [29]
+ * and [30] are what the right was for: a connection ends with its token, when
+ * the client lets it go and when the client dies with two of them -- `mount_test
+ * die' connects twice to an endpoint this run serves, and dies.  [31] is the
+ * real ext_server keeping a client's right through a failed open: it let the
+ * right go and so did the request's destruction, and the second release came
+ * out of the reference an open file was counting on.
  */
 
 #include <mach.h>
@@ -70,11 +83,15 @@
 #include <libcap.h>
 #include <libvfs.h>
 #include <vfs_flipc.h>
+#include <flipc2.h>
+#include <pthread.h>
 
+#include "vfs.h"			/* fs_open(), fs_close(): [27], [31] */
+#include "flipc2_endpoint.h"		/* flipc2_endpoint_connect_rpc(): [28] */
 #include "mount_test.h"
 
 #define	MT_PREFIX	"/mount_test"
-#define	MT_ARMS		26
+#define	MT_ARMS		31
 #define	MT_WAIT_STEPS	1200		/* x 100 ms: "/" has 120 s to appear */
 
 /* #574: what `mount_test die' checks in and dies with, and the word it waits
@@ -82,6 +99,11 @@
 #define	MT_DEAD_PREFIX	"/mount_test_dead"
 #define	MT_DEAD_NAME	"mount_test_dead"
 #define	MT_SEEN_NAME	"mount_test_seen"
+
+/* #911: the endpoints [29] and [30] connect to, served by this run; `mount_test
+ * die' connects to the second twice before it dies. */
+#define	MT_OWN_EP	"flipc.mount_test_own"
+#define	MT_PAIR_EP	"flipc.mount_test_pair"
 
 static int	passed, arms;
 
@@ -181,9 +203,110 @@ mt_print_buf(char *out, size_t size)
 }
 
 /*
+ * #911: an endpoint this run serves for [29] and [30], and what its pump has
+ * seen: connections made, and connections ended -- by a token's dead name,
+ * the only way a connection ends now.
+ */
+struct mt_ep {
+	const char		*name;
+	uint32_t		max;
+	flipc2_endpoint_t	ep;
+	volatile uint32_t	news;
+	volatile uint32_t	deads;
+};
+
+static struct mt_ep	mt_own = { MT_OWN_EP, 1, 0, 0, 0 };
+static struct mt_ep	mt_pair = { MT_PAIR_EP, 2, 0, 0, 0 };
+
+static void *
+mt_ep_pump(void *arg)
+{
+	struct mt_ep		*e = arg;
+	flipc2_ep_event_t	ev;
+
+	for (;;) {
+		if (flipc2_endpoint_pump(e->ep, 100, &ev) != FLIPC2_SUCCESS) {
+			thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+			continue;
+		}
+		if (ev.type == FLIPC2_EP_EVENT_NEW) {
+			e->news++;
+		} else if (ev.type == FLIPC2_EP_EVENT_DEAD) {
+			flipc2_channel_destroy(ev.fwd_ch);
+			flipc2_channel_destroy(ev.rev_ch);
+			e->deads++;
+		}
+	}
+	return NULL;
+}
+
+/* NULL, or what failed. */
+static const char *
+mt_ep_start(struct mt_ep *e)
+{
+	pthread_t	t;
+
+	if (flipc2_endpoint_create(e->name, e->max, VFS_FLIPC_CHANNEL_SIZE,
+				   VFS_FLIPC_RING_ENTRIES, 0, &e->ep)
+	    != FLIPC2_SUCCESS)
+		return "flipc2_endpoint_create failed";
+	if (pthread_create(&t, NULL, mt_ep_pump, e) != 0)
+		return "pthread_create failed";
+	return NULL;
+}
+
+/* Wait up to `tenths' tenths of a second for `*counter' to reach `want'. */
+static int
+mt_reaches(volatile uint32_t *counter, uint32_t want, unsigned int tenths)
+{
+	unsigned int	i;
+
+	for (i = 0; i < tenths && *counter < want; i++)
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	return *counter >= want;
+}
+
+/*
+ * `mount_test die''s half of [30]: two connections to the main run's pair
+ * endpoint, which this task's death must end, both of them.  The endpoint may
+ * not be up yet, so the first connect is tried until it is.  How many were
+ * made.
+ */
+static int
+mt_die_connect(void)
+{
+	flipc2_channel_t	fwd, rev;
+	flipc2_return_t		ret = FLIPC2_ERR_NAME_NOT_FOUND;
+	unsigned int		step;
+	int			made = 0;
+
+	for (step = 0; step < MT_WAIT_STEPS; step++) {
+		ret = flipc2_endpoint_connect(MT_PAIR_EP, 0, 0, &fwd, &rev);
+		if (ret != FLIPC2_ERR_NAME_NOT_FOUND)
+			break;
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	}
+	if (ret == FLIPC2_SUCCESS) {
+		made++;
+		ret = flipc2_endpoint_connect(MT_PAIR_EP, 0, 0, &fwd, &rev);
+		if (ret == FLIPC2_SUCCESS)
+			made++;
+	}
+	if (made == 2)
+		printf("mount_test (die): two connections to " MT_PAIR_EP
+		       "\n");
+	else
+		printf("mount_test (die): WRONG — %d of 2 connections to "
+		       MT_PAIR_EP ", the last answered %d\n", made, ret);
+	return made;
+}
+
+/*
  * `mount_test die' (#574): check a name and a mount in, both signed, wait for
  * the main run to say it has seen the mount, and terminate this task with both
  * still checked in -- no exit path and no cleanup, as a server that faults.
+ * Since #911 it also connects twice to the main run's pair endpoint first, and
+ * dies with both connections open.
  */
 static int
 mt_die(void)
@@ -220,6 +343,8 @@ mt_die(void)
 	else
 		printf("mount_test (die): WRONG — the mount: %d, the name: %d\n",
 		       km, kn);
+
+	(void)mt_die_connect();			/* [30], #911 */
 
 	for (step = 0; step < MT_WAIT_STEPS; step++) {
 		seen = MACH_PORT_NULL;
@@ -378,6 +503,277 @@ mt_death_arms(mach_port_t sig, mach_port_t other)
 		(void)mach_port_deallocate(mach_task_self(), dead);
 }
 
+/*
+ * #911 [31]: whether a no-senders notification is waiting on `notify', within
+ * `tenths' tenths of a second.
+ */
+static int
+mt_no_senders(mach_port_t notify, unsigned int tenths)
+{
+	union {
+		mach_msg_header_t	h;
+		char			bytes[256];
+	} m;
+	mach_msg_return_t	mr;
+
+	mr = mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof m,
+		      notify, tenths * 100, MACH_PORT_NULL);
+	return mr == MACH_MSG_SUCCESS &&
+	       m.h.msgh_id == MACH_NOTIFY_NO_SENDERS;
+}
+
+/*
+ * [27] to [31] (#911), with the liar's port, "/"'s when there is one, and why
+ * the two endpoints did not start when they did not.  See the top of this
+ * file.
+ */
+static void
+mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
+	       const char *eps_why)
+{
+	uint32_t		opens = liar_opens;
+	uint32_t		tasks = liar_opens_with_a_task;
+	mach_port_t		ep = MACH_PORT_NULL;
+	mach_port_t		fe = MACH_PORT_NULL, re = MACH_PORT_NULL;
+	mach_port_t		token = MACH_PORT_NULL, notify = MACH_PORT_NULL;
+	mach_port_t		prev = MACH_PORT_NULL;
+	flipc2_channel_t	f1, r1, f2, r2;
+	flipc2_return_t		first, again, a, b;
+	kern_return_t		full;
+	vfs_u64_t		handle = 0, absent = 0;
+	vfs_u32_t		type = 0;
+	unsigned32		so = 0, eo = 0;
+	kern_return_t		raw = KERN_FAILURE, kr, kn = KERN_FAILURE;
+	kern_return_t		closed = KERN_FAILURE;
+	int			control, early = 0, late = 0, ok;
+
+	/*
+	 * [27] fs_open hands the liar no task port.  Every open [13] to [19]
+	 * made of /mount_test reached it, and it asked the right each one came
+	 * with; [20] has unmounted it since, so the offer by hand goes to its
+	 * port, which it still serves.  The control is the probe asked of this
+	 * task's own port: if it could not see a task port where there is one,
+	 * "none" would say nothing.
+	 */
+	control = mt_is_task(mach_task_self());
+	raw = fs_open(liar, mach_task_self(), "/honest", VFS_O_RDONLY, 0,
+		      &handle, &type);
+	if (raw == KERN_SUCCESS)
+		(void)fs_close(liar, handle);
+	ok = control && opens > 0 && tasks == 0 &&
+	     raw == MACH_SEND_INVALID_RIGHT;
+	mt_result(ok);
+	if (ok)
+		printf("mount_test: [27] %u opens handed the liar a right that "
+		       "is no task port, and this task's port offered by hand is "
+		       "refused by the kernel: MACH_SEND_INVALID_RIGHT\n",
+		       (unsigned)opens);
+	else
+		printf("mount_test: [27] WRONG — %u open(s) answered, %u with a "
+		       "task port; this task's port offered by hand: %d, not "
+		       "MACH_SEND_INVALID_RIGHT (%d)%s\n", (unsigned)opens,
+		       (unsigned)tasks, raw, MACH_SEND_INVALID_RIGHT,
+		       control ? "" : "; and the probe does not see this "
+		       "task's own port as a task");
+
+	/*
+	 * [28] FLIPC's connect: the same offer, to [29]'s endpoint.  Not the
+	 * liar's: that one accepts once, for libvfs in [17], and is served by
+	 * nobody after, so a request that got through would wait for its answer
+	 * for good.  This one is pumped for as long as this task lives; a
+	 * request that got through would be answered, and take its free slot.
+	 */
+	raw = KERN_FAILURE;
+	kr = netname_look_up(name_server_port, "", MT_OWN_EP, &ep);
+	if (kr == NETNAME_SUCCESS && MACH_PORT_VALID(ep)) {
+		raw = flipc2_endpoint_connect_rpc(ep, mach_task_self(), 0, 0,
+						  &fe, &re, &so, &eo);
+		if (raw == KERN_SUCCESS) {
+			(void)mach_port_deallocate(mach_task_self(), fe);
+			(void)mach_port_deallocate(mach_task_self(), re);
+		}
+		(void)mach_port_deallocate(mach_task_self(), ep);
+	}
+	mt_result(raw == MACH_SEND_INVALID_RIGHT);
+	if (raw == MACH_SEND_INVALID_RIGHT)
+		printf("mount_test: [28] this task's port offered to a FLIPC "
+		       "endpoint as a connection's token is refused by the "
+		       "kernel: MACH_SEND_INVALID_RIGHT\n");
+	else
+		printf("mount_test: [28] WRONG — this task's port offered to a "
+		       "FLIPC endpoint as a connection's token: %d (look-up %d), "
+		       "not MACH_SEND_INVALID_RIGHT (%d)\n", raw, kr,
+		       MACH_SEND_INVALID_RIGHT);
+
+	/*
+	 * [29] A connection ends with its token.  The endpoint holds one; the
+	 * control is a second connect refused while the first is held, without
+	 * which a reconnect would show nothing.  That refusal is asked by hand,
+	 * with a token this arm keeps: a refused request is destroyed with the
+	 * right it brought, so the token's no-senders notification must come
+	 * the moment it is asked for -- the endpoint's pump used to keep the
+	 * right of every connect it refused.
+	 */
+	if (eps_why != NULL) {
+		printf("mount_test: [29] WRONG — not asked: %s\n", eps_why);
+		mt_result(0);
+	} else {
+		int	left = 0;
+
+		first = flipc2_endpoint_connect(MT_OWN_EP, 0, 0, &f1, &r1);
+		full = KERN_FAILURE;
+		token = notify = ep = MACH_PORT_NULL;
+		if (netname_look_up(name_server_port, "", MT_OWN_EP, &ep)
+		    == NETNAME_SUCCESS &&
+		    mach_port_allocate(mach_task_self(),
+				       MACH_PORT_RIGHT_RECEIVE, &token)
+		    == KERN_SUCCESS &&
+		    mach_port_allocate(mach_task_self(),
+				       MACH_PORT_RIGHT_RECEIVE, &notify)
+		    == KERN_SUCCESS) {
+			full = flipc2_endpoint_connect_rpc(ep, token, 0, 0,
+							   &fe, &re, &so, &eo);
+			if (full == KERN_SUCCESS) {
+				(void)mach_port_deallocate(mach_task_self(),
+							   fe);
+				(void)mach_port_deallocate(mach_task_self(),
+							   re);
+			} else if (mach_port_request_notification(
+					   mach_task_self(), token,
+					   MACH_NOTIFY_NO_SENDERS, 1, notify,
+					   MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev)
+				   == KERN_SUCCESS) {
+				left = !mt_no_senders(notify, 20);
+			}
+		}
+		if (MACH_PORT_VALID(token))
+			(void)mach_port_mod_refs(mach_task_self(), token,
+						 MACH_PORT_RIGHT_RECEIVE, -1);
+		if (MACH_PORT_VALID(notify))
+			(void)mach_port_mod_refs(mach_task_self(), notify,
+						 MACH_PORT_RIGHT_RECEIVE, -1);
+		if (MACH_PORT_VALID(ep))
+			(void)mach_port_deallocate(mach_task_self(), ep);
+		token = notify = MACH_PORT_NULL;
+		if (first == FLIPC2_SUCCESS)
+			(void)flipc2_endpoint_disconnect(f1, r1);
+		ok = mt_reaches(&mt_own.deads, 1, 50);
+		again = flipc2_endpoint_connect(MT_OWN_EP, 0, 0, &f2, &r2);
+		if (again == FLIPC2_SUCCESS)
+			(void)flipc2_endpoint_disconnect(f2, r2);
+		ok = ok && first == FLIPC2_SUCCESS &&
+		     full == KERN_RESOURCE_SHORTAGE && !left &&
+		     again == FLIPC2_SUCCESS;
+		mt_result(ok);
+		if (ok)
+			printf("mount_test: [29] an endpoint of one slot, held: "
+			       "a second connect refused with nothing of it "
+			       "kept, and once the first let its token go the "
+			       "endpoint saw it end and took a new one\n");
+		else
+			printf("mount_test: [29] WRONG — a connect: %d; another "
+			       "while it held the slot: %d "
+			       "(KERN_RESOURCE_SHORTAGE is %d)%s; ended seen %u "
+			       "time(s); a connect after: %d\n", first, full,
+			       KERN_RESOURCE_SHORTAGE,
+			       left ? ", and its right kept" : "",
+			       (unsigned)mt_own.deads, again);
+	}
+
+	/*
+	 * [30] `mount_test die' connected twice and died: both connections
+	 * end, and both slots take a new one.
+	 */
+	if (eps_why != NULL) {
+		printf("mount_test: [30] WRONG — not asked: %s\n", eps_why);
+		mt_result(0);
+	} else {
+		uint32_t	die_news, die_deads;
+
+		ok = mt_reaches(&mt_pair.deads, 2, 100);
+		die_news = mt_pair.news;	/* before this arm's own */
+		die_deads = mt_pair.deads;
+		a = flipc2_endpoint_connect(MT_PAIR_EP, 0, 0, &f1, &r1);
+		b = flipc2_endpoint_connect(MT_PAIR_EP, 0, 0, &f2, &r2);
+		if (a == FLIPC2_SUCCESS)
+			(void)flipc2_endpoint_disconnect(f1, r1);
+		if (b == FLIPC2_SUCCESS)
+			(void)flipc2_endpoint_disconnect(f2, r2);
+		ok = ok && die_news == 2 && a == FLIPC2_SUCCESS &&
+		     b == FLIPC2_SUCCESS;
+		mt_result(ok);
+		if (ok)
+			printf("mount_test: [30] `mount_test die' connected twice "
+			       "and died: the endpoint saw both connections end, "
+			       "and both slots took a new one\n");
+		else
+			printf("mount_test: [30] WRONG — `mount_test die' made %u "
+			       "connection(s), %u seen to end; two new ones: %d "
+			       "and %d\n", (unsigned)die_news,
+			       (unsigned)die_deads, a, b);
+	}
+
+	/*
+	 * [31] ext_server keeps a client's right through a failed open.  The
+	 * token is this arm's own, so its only send rights are the ones
+	 * ext_server holds: an open of a directory every "/" has, the
+	 * notification asked for, a failed open, and no notification -- then
+	 * the close lets the last right go, and the notification that comes is
+	 * the control.
+	 */
+	if (!have_root) {
+		printf("mount_test: [31] WRONG — not asked: no \"/\"\n");
+		mt_result(0);
+	} else {
+		kr = mach_port_allocate(mach_task_self(),
+					MACH_PORT_RIGHT_RECEIVE, &token);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_allocate(mach_task_self(),
+						MACH_PORT_RIGHT_RECEIVE,
+						&notify);
+		if (kr == KERN_SUCCESS)
+			kr = fs_open(root, token, "/mach_servers",
+				     VFS_O_RDONLY, 0, &handle, &type);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_request_notification(mach_task_self(),
+				token, MACH_NOTIFY_NO_SENDERS, 1, notify,
+				MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+		if (kr == KERN_SUCCESS) {
+			kn = fs_open(root, token, "/mount_test_911_absent",
+				     VFS_O_RDONLY, 0, &absent, &type);
+			early = mt_no_senders(notify, 2);
+		}
+		if (kr == KERN_SUCCESS) {
+			closed = fs_close(root, handle);
+			late = mt_no_senders(notify, 20);
+		}
+		if (MACH_PORT_VALID(token))
+			(void)mach_port_mod_refs(mach_task_self(), token,
+						 MACH_PORT_RIGHT_RECEIVE, -1);
+		if (MACH_PORT_VALID(notify))
+			(void)mach_port_mod_refs(mach_task_self(), notify,
+						 MACH_PORT_RIGHT_RECEIVE, -1);
+		ok = kr == KERN_SUCCESS && kn != KERN_SUCCESS && !early &&
+		     closed == KERN_SUCCESS && late;
+		mt_result(ok);
+		if (ok)
+			printf("mount_test: [31] ext_server held a client's right "
+			       "through a failed open (%d) and let it go at the "
+			       "close\n", kn);
+		else if (kr != KERN_SUCCESS)
+			printf("mount_test: [31] WRONG — not asked: the open of "
+			       "/mach_servers or the notification failed (%d)\n",
+			       kr);
+		else
+			printf("mount_test: [31] WRONG — after a failed open "
+			       "(%d) ext_server held %s of the client's right; "
+			       "the close: %d, %s\n", kn,
+			       early ? "NONE" : "some",
+			       closed, late ? "and then none"
+			       : "and still some -- the control failed");
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -387,7 +783,7 @@ main(int argc, char **argv)
 	struct uros_cap	tok;
 	char		tok_blob[CAP_TOKEN_MAX];
 	int		have_root = 0, have_tok = 0, mounted = 0;
-	const char	*why;
+	const char	*why, *eps_why;
 	kern_return_t	kr;
 	unsigned int	step;
 	char		shown[LIAR_SIZE + 1];
@@ -415,6 +811,12 @@ main(int argc, char **argv)
 		printf("mount_test: 0 of %d arms passed\n", MT_ARMS);
 		return 1;
 	}
+
+	/* #911: [29]'s and [30]'s endpoints, early -- `mount_test die' looks
+	 * for the second from the moment it starts. */
+	eps_why = mt_ep_start(&mt_own);
+	if (eps_why == NULL)
+		eps_why = mt_ep_start(&mt_pair);
 
 	/*
 	 * [1] "/" is ext_server's.  The presence every arm about "/" stands on:
@@ -1051,6 +1453,8 @@ main(int argc, char **argv)
 			       KERN_INVALID_ARGUMENT, kr == MIG_SERVER_DIED ?
 			       ": bootstrap never saw it" : "");
 	}
+
+	mt_rights_arms(mine, root, have_root, eps_why);	/* [27] to [31], #911 */
 
 	if (have_root)
 		(void)mach_port_deallocate(mach_task_self(), root);

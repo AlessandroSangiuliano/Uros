@@ -907,6 +907,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_init.c
     ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_kern.c
     ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_map.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_memory_entry.c
     ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_object.c
     ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_pageout.c
     ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_resident.c
@@ -1459,6 +1460,7 @@ set(VM_SOURCES
     vm/vm_init.c
     vm/vm_kern.c
     vm/vm_map.c
+    vm/vm_memory_entry.c
     vm/vm_object.c
     vm/vm_pageout.c
     vm/vm_resident.c

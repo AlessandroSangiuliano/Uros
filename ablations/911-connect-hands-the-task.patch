@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #911
+Takes out: the connection's token in FLIPC's connect (953d5d2d) -- the client sends its task port, as a copied send right, and the endpoint holds it for as long as the connection lasts
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[28\] WRONG — this task's port offered to a FLIPC endpoint as a connection's token: 0 \(look-up 0\)
+
+diff --git a/uros/src/lib/libflipc2/flipc2_endpoint.c b/uros/src/lib/libflipc2/flipc2_endpoint.c
+index 761e0167..b5d20105 100644
+--- a/uros/src/lib/libflipc2/flipc2_endpoint.c
++++ b/uros/src/lib/libflipc2/flipc2_endpoint.c
+@@ -776,10 +776,7 @@ flipc2_endpoint_connect_port(
+ 
+     /* The connection's token: this task keeps the receive right, and the
+      * server gets a send right made from it in transit (#911). */
+-    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+-                            &token);
+-    if (kr != KERN_SUCCESS)
+-        return FLIPC2_ERR_KERNEL;
++    token = mach_task_self();
+ 
+     kr = flipc2_endpoint_connect_rpc(server_port, token,
+                                      channel_size, ring_entries,
+diff --git a/uros/src/lib/libflipc2/flipc2_endpoint.defs b/uros/src/lib/libflipc2/flipc2_endpoint.defs
+index cbd026c8..276a4aab 100644
+--- a/uros/src/lib/libflipc2/flipc2_endpoint.defs
++++ b/uros/src/lib/libflipc2/flipc2_endpoint.defs
+@@ -66,7 +66,7 @@ import "flipc2_endpoint_types.h";
+  */
+ routine flipc2_endpoint_connect_rpc(
+ 		server_port	: mach_port_t;
+-	in	client_token	: mach_port_make_send_t;
++	in	client_token	: mach_port_copy_send_t;
+ 	in	channel_size	: unsigned32;
+ 	in	ring_entries	: unsigned32;
+ 	out	fwd_entry	: mach_port_move_send_t;

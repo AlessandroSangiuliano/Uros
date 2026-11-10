@@ -123,6 +123,15 @@ extern	mach_port_t	urmach_cap_server_port;
 extern	kern_return_t	urmach_netname_signature(mach_port_t *sig);
 
 /*
+ *	The port a server learns this task's death by and nothing else (#911,
+ *	lifetime_port.c): the task holds the receive right, a server is given
+ *	a send right made from it, and the right turns into a dead name when
+ *	the task dies.  What a server was handed the task port for, without
+ *	the task.  Not the signature above, which is an authority.
+ */
+extern	kern_return_t	urmach_lifetime_port(mach_port_t *port);
+
+/*
  *	Where these ports occur in the "mach_ports_register"
  *	collection... only servers or the runtime library need know.
  */
