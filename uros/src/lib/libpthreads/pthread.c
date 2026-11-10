@@ -541,8 +541,34 @@ _pthread_pool_park(pthread_t self)
 	wake_seq = 0;
 	UNLOCK(_thread_pool_lock);
 
-	/* Park: block until pthread_create publishes fun/arg and bumps our word */
-	(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
+	/*
+	 * Park until pthread_create() has published fun/arg and bumped our
+	 * word, and not merely until the wait returns (#925).
+	 *
+	 * The kernel's futex_wait() answers KERN_SUCCESS for every end of the
+	 * wait but a timeout: a wake on the word, an abort that interrupted
+	 * the wait, a TH_ABORT still pending when the thread blocked.  And it
+	 * hands wakes on to other waiters on purpose (#460), on the
+	 * understanding that a waiter woken for nothing looks at its word
+	 * again.  This park took the first return for pthread_create()'s
+	 * wake.  A thread whose park ended any other way ran its last function
+	 * again, on fun/arg nobody had set, with its entry still in the pool:
+	 *
+	 *   - parked again, it was in the pool twice, and two pthread_create()s
+	 *     each memset() this one structure, the second over a thread
+	 *     running the first's function -- one join slept for ever on a
+	 *     structure whose joiners the memset had taken away;
+	 *   - with the pool full it terminated, and the pthread_create() that
+	 *     later took the entry it left woke nobody and handed out a
+	 *     structure no thread would ever run on.
+	 *
+	 * Both are how act_test's arm [39] hung in pthread_join().
+	 *
+	 * Acquire, against the release in pthread_create(): once the word
+	 * reads changed, fun and arg read as the creator wrote them.
+	 */
+	while (__atomic_load_n(&self->pool_wake, __ATOMIC_ACQUIRE) == wake_seq)
+		(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
 
 	/*
 	 * Woken up — self->fun and self->arg have been set by pthread_create.
@@ -1050,9 +1076,12 @@ pthread_create(pthread_t *thread,
 			t->arg = arg;
 			t->fun = start_routine;
 			/* Wake the parked thread (bump its seq) — it will run
-			 * _pthread_pool_trampoline and read fun/arg. */
+			 * _pthread_pool_trampoline and read fun/arg.  Release:
+			 * the park reads the word without the kernel now, and
+			 * goes on to fun/arg as soon as it reads it bumped
+			 * (#925). */
 			_pthread_live_enter();
-			(*wake_word)++;
+			(void) __atomic_add_fetch(wake_word, 1, __ATOMIC_RELEASE);
 			_pthread_futex_wake_one(wake_word);
 			return (ESUCCESS);
 		}
