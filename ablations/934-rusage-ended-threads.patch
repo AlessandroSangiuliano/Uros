@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #934
+Takes out: the time of the threads still running -- TASK_BASIC_INFO alone, which counts the threads that have ended: musl_test's [38] must see wait4() give a child that spun for 500 ms almost no time
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[38\] WRONG -- .*its time was NOT there
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..10b16d3e 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -1928,11 +1928,8 @@ query_kernel_rusage(mach_port_t task_port, proc_rusage_t *out)
+         task_thread_times_info_data_t live;
+         mach_msg_type_number_t lcnt = TASK_THREAD_TIMES_INFO_COUNT;
+ 
+-        if (task_info(task_port, TASK_THREAD_TIMES_INFO,
+-                      (task_info_t)&live, &lcnt) == KERN_SUCCESS) {
+-            time_value_add(&basic.user_time, &live.user_time);
+-            time_value_add(&basic.system_time, &live.system_time);
+-        }
++        (void)live;                     /* 934-rusage-ended-threads */
++        (void)lcnt;
+     }
+     out->utime_sec   = (uint32_t)basic.user_time.seconds;
+     out->utime_usec  = (uint32_t)basic.user_time.microseconds;

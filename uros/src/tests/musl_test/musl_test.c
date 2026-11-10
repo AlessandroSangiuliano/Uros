@@ -2462,9 +2462,10 @@ arm_waitid(void)
  *
  * proc_server reaped a child the moment it sent the report, even to a port
  * nobody received on any more.  This program's thread waits for a child
- * that ends after 500 ms, and the program then execs itself: the thread is
- * gone with the old image, and the new one, the same process, must find the
- * child's exit.
+ * that ends after 3 s, and the program then execs itself: the thread is gone
+ * with the old image, and the new one, the same process, must find the
+ * child's exit.  The 3 s are for the exec to be over first, under TCG too:
+ * a report that reached the thread before it was gone would be its own.
  */
 static pid_t	wgone_child;
 
@@ -2490,7 +2491,7 @@ wait_gone_run(void)
 	if (wgone_child < 0)
 		return 64;
 	if (wgone_child == 0) {
-		nap_ms(500);
+		nap_ms(3000);
 		_exit(9);
 	}
 	if (pthread_create(&t, NULL, wgone_waiter, NULL) != 0)

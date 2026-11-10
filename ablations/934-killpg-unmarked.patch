@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #934
+Takes out: killpg()'s marked stop -- the group's tasks are suspended bare, as they were: musl_test's [37] must see its wait for killpg()'s stop not return in its 60 s
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[37\] WRONG -- .*the waits did not end in 60 s
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..dab6523a 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -1484,9 +1484,8 @@ proc_S_killpg(
+              * kill(pid, SIGCONT), which resumes what is marked, left a group
+              * stopped here as it was.
+              */
+-            case PROC_SIGSTOP:
+-                kr = stop_task(uncatch[i].pid, signo) == PROC_OK
+-                     ? KERN_SUCCESS : KERN_FAILURE;
++            case PROC_SIGSTOP:          /* 934-killpg-unmarked */
++                kr = task_suspend(uncatch[i].port);
+                 break;
+             case PROC_SIGCONT: {
+                 struct pid_entry *ce;

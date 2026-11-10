@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #934
+Takes out: the process group of a wait -- waitpid(0) and waitpid(-group) take any child: musl_test's [36] must see waitpid(-group) give one of this group's two, which ended first
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[36\] WRONG -- .*the other group's wait gave another child
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..ea32c6e3 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -233,11 +233,8 @@ wait_matches_locked(const struct pid_entry *e, proc_pid_t parent,
+         return 0;
+     if (which > 0)
+         return e->pid == (proc_pid_t)which;
+-    if (which == -1)
+-        return 1;
+-    if (which == 0)
+-        return e->pgrp_id == pgrp;
+-    return e->pgrp_id == (proc_pid_t)(0u - (unsigned)which);
++    (void)pgrp;
++    return 1;                   /* 934-group-is-any: any child, group or not */
+ }
+ 
+ /* What `e' has for a wait with `options'.  Caller holds pid_lock. */

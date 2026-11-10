@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #934
+Takes out: kill() of a process group -- kill(-group) goes to proc_kill() as a pid, and reaches nobody: musl_test's [37] must see its wait for killpg()'s stop not return in its 60 s
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[37\] WRONG -- .*the waits did not end in 60 s
+
+diff --git a/uros/src/lib/libposix-uros/handlers.c b/uros/src/lib/libposix-uros/handlers.c
+index 0ce88e43..50976319 100644
+--- a/uros/src/lib/libposix-uros/handlers.c
++++ b/uros/src/lib/libposix-uros/handlers.c
+@@ -772,8 +772,7 @@ static long h_kill(long pid, long sig, long a3,
+                    long a4, long a5, long a6)
+ {
+     (void)a3; (void)a4; (void)a5; (void)a6;
+-    if ((int)pid <= 0)              /* a process group (#934) */
+-        return __uros_kill_group((int)pid, (int)sig);
++    /* 934-kill-group-as-pid: a group's pid to proc_kill() as it is */
+     return __uros_kill((unsigned int)pid, (int)sig);
+ }
+ 
