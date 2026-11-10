@@ -5,10 +5,10 @@ Run: --entry 14 600 -smp 4
 Expect: musl_test: \[31\] WRONG -- .*and 22 crossed
 
 diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
-index bf883ed8..0e9055dc 100644
+index 83a25e92..db916a44 100644
 --- a/uros/src/lib/libposix-uros/posix_fd.c
 +++ b/uros/src/lib/libposix-uros/posix_fd.c
-@@ -917,7 +917,7 @@ long __uros_dup3(int oldfd, int newfd, int flags)
+@@ -1025,7 +1025,7 @@ long __uros_dup3(int oldfd, int newfd, int flags)
          return -EINVAL;
      if (oldfd == newfd)
          return -EINVAL;
@@ -16,4 +16,4 @@ index bf883ed8..0e9055dc 100644
 +    return dup_onto(oldfd, newfd, 0);	/* 897-dup3-no-cloexec: O_CLOEXEC dropped */
  }
  
- #ifdef __x86_64__
+ /*
