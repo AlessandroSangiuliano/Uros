@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #935
+Over: 935-widen-create-terminate.patch
+Takes out: the NULL check -- thread_terminate()s empty-activation branch, which the detach now routes a threadless activation to, ip_unlock()s a NULL pool port.  A deterministic fault at a small address from inside thread_terminate()
+Run: --entry 14 300 -smp 4
+Expect: <thread_terminate\+0x
+faulting address 0x0+2[0-9a-f]
+
+diff --git b/uros/src/mach_kernel/kern/thread_act.c a/uros/src/mach_kernel/kern/thread_act.c
+index ee1a7746..d7131552 100644
+--- b/uros/src/mach_kernel/kern/thread_act.c
++++ a/uros/src/mach_kernel/kern/thread_act.c
+@@ -308,16 +308,8 @@ thread_terminate(
+ 		/*
+ 		 * Release locks individually. (`act_unlock_thread()'
+ 		 * will not work since `pool_port' field has changed.)
+-		 *
+-		 * 🔴 ONLY IF THERE IS ONE (#935).  act_lock_thread() locks the
+-		 * pool_port when the activation has one, and a threadless
+-		 * activation that never had a pool_port -- the one a failed
+-		 * thread_create_in() now hands here -- has none, so this would
+-		 * ip_unlock() a NULL port.  The AGRESSIVE_ABORT path above
+-		 * guards it the same way.
+ 		 */
+-		if (iplock != IP_NULL)
+-			ip_unlock(iplock);
++		ip_unlock(iplock);
+ 		act_unlock(thr_act);
+ 	}
+ 	else {

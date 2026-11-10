@@ -1,0 +1,22 @@
+Kind: widen
+Issue: #935
+Holds open: delays thread_create_in() 2 ms before it attaches the new thread, so that an activation listed on the task before it has a thread -- which the 935-list-in-act-create ablation restores -- stays on the list, threadless, long enough for a task_info(TASK_THREAD_TIMES_INFO) to walk it.  Harmless in the fixed tree, where the activation is not listed until it is whole
+Run: --entry 14 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index 1d05e9f1..943684c3 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1146,6 +1146,12 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
+ 	wake_lock_init(new_thread);
+ 	new_thread->sleep_stamp = sched_tick;
+ 
++	{
++		extern void delay(int);
++
++		delay(2000);	/* 935-widen-create-listed: hold the window before the thread is attached */
++	}
++
+ 	/*
+ 	 * Inherit the creator's name, WITHIN the same task only (#425).
+ 	 *
