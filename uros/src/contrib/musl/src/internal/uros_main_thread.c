@@ -30,6 +30,7 @@
 
 #include <elf.h>
 #include <limits.h>
+#include <unistd.h>		/* __environ (#916) */
 #include "pthread_impl.h"
 #include "libc.h"
 
@@ -62,8 +63,23 @@ void *__uros_mach_thread_state(void)
 	return &__pthread_self()->uros_mach_state;
 }
 
-void __uros_libc_init(void)
+void __uros_libc_init(char **envp, char *pn)
 {
+	size_t i;
+
+	/*
+	 * #916: the two things __init_libc() takes from the entry stack that
+	 * this init had been leaving out.  crt0 has both, from the bootstrap
+	 * server or from the stack exec_server built, and hands them over:
+	 * without the first getenv() answered NULL for every name and execv()
+	 * passed on an empty environment, and without the second err() and
+	 * warn() named the program "(null)".
+	 */
+	__environ = envp;
+	if (!pn) pn = "";
+	__progname = __progname_full = pn;
+	for (i = 0; pn[i]; i++) if (pn[i] == '/') __progname = pn + i + 1;
+
 	/* Minimal synthetic auxv.  Indexed up to AT_RANDOM; everything
 	 * not set stays zero. */
 	size_t aux[AT_RANDOM + 1] = { 0 };
