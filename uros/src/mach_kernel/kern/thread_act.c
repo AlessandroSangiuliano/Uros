@@ -308,8 +308,16 @@ thread_terminate(
 		/*
 		 * Release locks individually. (`act_unlock_thread()'
 		 * will not work since `pool_port' field has changed.)
+		 *
+		 * 🔴 ONLY IF THERE IS ONE (#935).  act_lock_thread() locks the
+		 * pool_port when the activation has one, and a threadless
+		 * activation that never had a pool_port -- the one a failed
+		 * thread_create_in() now hands here -- has none, so this would
+		 * ip_unlock() a NULL port.  The AGRESSIVE_ABORT path above
+		 * guards it the same way.
 		 */
-		ip_unlock(iplock);
+		if (iplock != IP_NULL)
+			ip_unlock(iplock);
 		act_unlock(thr_act);
 	}
 	else {
@@ -1070,6 +1078,16 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 	int rc;
 	vm_map_t map;
 
+	/*
+	 * 🔴 NO TASK, NO ACTIVATION (#935).  thread_create()'s MIG server
+	 * hands on what convert_port_to_task() gave it, and for a port whose
+	 * task has been terminated that is TASK_NULL; nothing between there
+	 * and here checked it.  All three creating paths come through this
+	 * call, so the refusal is here, before anything is allocated.
+	 */
+	if (task == TASK_NULL)
+		return(KERN_INVALID_ARGUMENT);
+
 	thr_act = (thread_act_t)zalloc(thr_act_zone);
 	if (thr_act == 0)
 		return(KERN_RESOURCE_SHORTAGE);
@@ -1139,20 +1157,19 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 		}
 	}
 
-	task_lock(task);
-
-	/* Chain the thr_act onto the task's list */
-	mutex_lock(&task->act_list_lock);
-	thr_act->thr_acts.next = task->thr_acts.next;
-	thr_act->thr_acts.prev = &task->thr_acts;
-	task->thr_acts.next->prev = &thr_act->thr_acts;
-	task->thr_acts.next = &thr_act->thr_acts;
-	task->thr_act_count++;
-	/* no need to check for transition from 0 -> 1 here */
-	task->res_act_count++;
-	mutex_unlock(&task->act_list_lock);
-
-	task_unlock(task);
+	/*
+	 * 🔴 NOT ON THE TASK'S LIST YET (#935).  The chaining moved to
+	 * thread_create_in(), which does it under the task lock once the
+	 * thread is attached and the task is still active -- so an activation
+	 * is discoverable through task->thr_acts only when it is whole.
+	 * Before, act_create() listed it here, with no thread; task_info(
+	 * TASK_THREAD_TIMES_INFO) and task_assign() walk that list and assert
+	 * a thread on every activation without a pool_port, and one caught a
+	 * half-built activation between here and the attach.  thr_acts.next is
+	 * NULL (bzero above), which act_disable_task_locked() reads as "not
+	 * listed", so an activation freed before it is listed unwinds
+	 * cleanly.
+	 */
 
 	/* Cache the task's map and take a reference to it */
 	thr_act->map = task->map;
