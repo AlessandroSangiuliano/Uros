@@ -70,3 +70,37 @@ set_target_properties(libflipc2 PROPERTIES
   OUTPUT_NAME "flipc2"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
+
+# ---------------------------------------------------------------------------
+# The channel code, PIC, for the umbrella libc.so (#904).
+#
+# libc.so's libposix-uros makes pipes, and a pipe is a FLIPC channel: it
+# creates one and lets go of it, and the produce and consume paths are the
+# inline functions of flipc2.h.  So this is flipc2_channel.c alone, and libc.so
+# still carries no endpoint, buffer group or pollset, which are servers' and
+# reach for what a program of musl has no business with.  Built as libvfs-pic
+# is, the other FLIPC user in libc.so: musl's headers first, no stack
+# protector, position independent.  A static program's libc.a takes the whole
+# libflipc2 already.
+# ---------------------------------------------------------------------------
+if(UROS_BUILD_MUSL)
+  add_library(libflipc2-pic STATIC flipc2_channel.c)
+  add_dependencies(libflipc2-pic mig_device_header mig_mach_public_headers
+                   musl_extproj)
+  set_target_properties(libflipc2-pic PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    OUTPUT_NAME "flipc2-pic")
+  target_compile_options(libflipc2-pic PRIVATE
+    -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -ffreestanding
+    -fno-stack-protector -include stdint.h
+  )
+  target_include_directories(libflipc2-pic PRIVATE
+    ${CMAKE_BINARY_DIR}/src/contrib/musl-install/include   # musl headers FIRST
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/generated/include
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include
+    ${UROS_ARCH_INCLUDE}
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel
+    ${CMAKE_SOURCE_DIR}/include
+  )
+endif()

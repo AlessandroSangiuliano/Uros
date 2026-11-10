@@ -73,9 +73,10 @@ set_target_properties(libvfs PROPERTIES
 # PIC variant for the umbrella libc.so (#234 incr 2b).
 #
 # Two deliberate differences from the static libvfs:
-#   1. Linked with vfs_flipc_stub.c instead of vfs_flipc.c — no FLIPC code
-#      (or libflipc2 dependency) leaks into libc.so; the dynamic linker and
-#      every dynamic app read via plain Mach RPC.
+#   1. Linked with vfs_flipc_stub.c instead of vfs_flipc.c — no FLIPC fast
+#      path for reads in libc.so; the dynamic linker and every dynamic app
+#      read via plain Mach RPC.  (libc.so does carry FLIPC's channel code
+#      since #904, for pipes: libflipc2-pic, and nothing of it here.)
 #   2. Compiled against the MUSL headers (not the custom libpthreads/sa_mach
 #      ones) so pthread_mutex_t et al. match musl's ABI — libc.so's own
 #      pthread_mutex_lock operates on these objects.  The static libvfs keeps

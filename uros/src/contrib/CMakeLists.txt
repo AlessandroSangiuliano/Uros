@@ -188,7 +188,7 @@ if(UROS_BUILD_MUSL)
     OUTPUT ${MUSL_UMBRELLA_STAMP}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${MUSL_BUILD}/lib/libc.so
     COMMAND ${CMAKE_COMMAND} -E env make -C ${MUSL_BUILD} lib/libc.so
-            "EXTRA_OBJS=${MACH_EXPORT_OBJS} -Wl,--whole-archive $<TARGET_FILE:libposix-uros-pic> -Wl,--no-whole-archive -Wl,--start-group $<TARGET_FILE:libvfs-pic> $<TARGET_FILE:libmach_core-pic> $<TARGET_FILE:libnetname-pic> $<TARGET_FILE:libcap-pic> -Wl,--end-group"
+            "EXTRA_OBJS=${MACH_EXPORT_OBJS} -Wl,--whole-archive $<TARGET_FILE:libposix-uros-pic> -Wl,--no-whole-archive -Wl,--start-group $<TARGET_FILE:libvfs-pic> $<TARGET_FILE:libflipc2-pic> $<TARGET_FILE:libmach_core-pic> $<TARGET_FILE:libnetname-pic> $<TARGET_FILE:libcap-pic> -Wl,--end-group"
     COMMAND sh ${UROS_UMBRELLA_CHECK} --must-refuse ${CMAKE_NM} ${MUSL_BUILD}/lib/libc.so
     COMMAND sh ${UROS_UMBRELLA_CHECK} ${CMAKE_NM} ${MUSL_BUILD}/lib/libc.so ${UROS_UMBRELLA_EXPORTS}
     COMMAND ${CMAKE_COMMAND} -E copy ${MUSL_BUILD}/lib/libc.so ${MUSL_SO}
@@ -196,9 +196,9 @@ if(UROS_BUILD_MUSL)
     DEPENDS musl_extproj ${MUSL_OUT}
             libposix-uros-pic libvfs-pic libmach_core-pic
             libmach_export_objs $<TARGET_OBJECTS:libmach_export_objs>
-            libnetname-pic libcap-pic
+            libnetname-pic libcap-pic libflipc2-pic
             ${UROS_UMBRELLA_EXPORTS} ${UROS_UMBRELLA_CHECK}
-    COMMENT "Linking umbrella libc.so (musl + Uros PIC backend: posix-uros/vfs/mach/netname/cap)"
+    COMMENT "Linking umbrella libc.so (musl + Uros PIC backend: posix-uros/vfs/flipc2 channel/mach/netname/cap)"
     VERBATIM
   )
   add_custom_target(musl_umbrella ALL DEPENDS ${MUSL_UMBRELLA_STAMP})
@@ -220,8 +220,8 @@ if(UROS_BUILD_MUSL)
   # libc.a (#929; libc-uros.a until then) holds what libc.so holds, for a
   # program of musl that links
   # statically: libc-musl.a and everything of ours that goes under it --
-  # libvfs-musl and not libvfs, and libflipc2 as well, which libc.so leaves
-  # out.
+  # libvfs-musl and not libvfs, and libflipc2 whole, where libc.so takes its
+  # channel code alone, for pipes (#904).
   #
   # Eight programs used to write this list out by hand, and that is how the
   # libvfs built for the servers came to be in all of them, with the pthreads
