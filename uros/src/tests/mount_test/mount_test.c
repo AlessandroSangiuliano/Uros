@@ -577,13 +577,14 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 		       "task's own port as a task");
 
 	/*
-	 * [28] FLIPC's connect: the same offer to the liar's endpoint.  Its
-	 * one slot is libvfs's since [17], so a request that got through would
-	 * be answered KERN_RESOURCE_SHORTAGE and take nothing.
+	 * [28] FLIPC's connect: the same offer, to [29]'s endpoint.  Not the
+	 * liar's: that one accepts once, for libvfs in [17], and is served by
+	 * nobody after, so a request that got through would wait for its answer
+	 * for good.  This one is pumped for as long as this task lives; a
+	 * request that got through would be answered, and take its free slot.
 	 */
 	raw = KERN_FAILURE;
-	kr = netname_look_up(name_server_port, "",
-			     VFS_FLIPC_ENDPOINT_PREFIX "mount_test", &ep);
+	kr = netname_look_up(name_server_port, "", MT_OWN_EP, &ep);
 	if (kr == NETNAME_SUCCESS && MACH_PORT_VALID(ep)) {
 		raw = flipc2_endpoint_connect_rpc(ep, mach_task_self(), 0, 0,
 						  &fe, &re, &so, &eo);
@@ -671,8 +672,8 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 			       "endpoint saw it end and took a new one\n");
 		else
 			printf("mount_test: [29] WRONG — a connect: %d; another "
-			       "while it held the slot: %d, not "
-			       "KERN_RESOURCE_SHORTAGE (%d)%s; ended seen %u "
+			       "while it held the slot: %d "
+			       "(KERN_RESOURCE_SHORTAGE is %d)%s; ended seen %u "
 			       "time(s); a connect after: %d\n", first, full,
 			       KERN_RESOURCE_SHORTAGE,
 			       left ? ", and its right kept" : "",
@@ -687,14 +688,18 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 		printf("mount_test: [30] WRONG — not asked: %s\n", eps_why);
 		mt_result(0);
 	} else {
+		uint32_t	die_news, die_deads;
+
 		ok = mt_reaches(&mt_pair.deads, 2, 100);
+		die_news = mt_pair.news;	/* before this arm's own */
+		die_deads = mt_pair.deads;
 		a = flipc2_endpoint_connect(MT_PAIR_EP, 0, 0, &f1, &r1);
 		b = flipc2_endpoint_connect(MT_PAIR_EP, 0, 0, &f2, &r2);
 		if (a == FLIPC2_SUCCESS)
 			(void)flipc2_endpoint_disconnect(f1, r1);
 		if (b == FLIPC2_SUCCESS)
 			(void)flipc2_endpoint_disconnect(f2, r2);
-		ok = ok && mt_pair.news >= 2 && a == FLIPC2_SUCCESS &&
+		ok = ok && die_news == 2 && a == FLIPC2_SUCCESS &&
 		     b == FLIPC2_SUCCESS;
 		mt_result(ok);
 		if (ok)
@@ -704,8 +709,8 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 		else
 			printf("mount_test: [30] WRONG — `mount_test die' made %u "
 			       "connection(s), %u seen to end; two new ones: %d "
-			       "and %d\n", (unsigned)mt_pair.news,
-			       (unsigned)mt_pair.deads, a, b);
+			       "and %d\n", (unsigned)die_news,
+			       (unsigned)die_deads, a, b);
 	}
 
 	/*
