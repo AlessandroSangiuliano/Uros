@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #935
 Over: 935-widen-create-listed.patch
-Takes out: the move -- act_create() lists the activation before it has a thread, and thread_create_in() does not; the widen holds it threadless on the list while task_info(TASK_THREAD_TIMES_INFO) walks it and asserts
+Takes out: the move -- act_create() lists the activation before it has a thread, and thread_create_in() does not; the widen holds it threadless on the list while task_info(TASK_THREAD_TIMES_INFO) walks it and asserts.  Caught 6 of 6 on victus (10/11)
 Run: --entry 14 300 -smp 4
 Expect: Assertion failed.*task\.c.*170[0-9].*thread
 <task_info\+0x
