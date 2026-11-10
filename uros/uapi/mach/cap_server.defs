@@ -161,9 +161,12 @@ routine cap_subscribe_revoke(
  *	returned cap_port.  manifest is the .cmf binary, validated
  *	against <mach/cap_manifest.h> before installation.
  *
- *	Trust model in v2.1: any caller can invoke this; the secure
- *	gating to "bootstrap only" arrives in a follow-up issue
- *	(setup-port pattern).
+ *	Who may ask (#743): only a request on cap_server's provisioning
+ *	port is answered, and bootstrap holds that port's one send right
+ *	(bootstrap_cap_provisioner()).  On the port every task inherits,
+ *	or on a per-task port, the answer is CAP_ERR_NOT_PROVISIONER.
+ *	Until #743 any task could provision itself with a manifest of
+ *	its own writing and then acquire whatever it said.
  *
  *	The per-task port comes back MADE, not copied (#743): cap_server
  *	keeps its receive right and no send right, so once the task and

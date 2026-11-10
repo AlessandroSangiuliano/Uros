@@ -763,11 +763,22 @@ cap_task_port_gone(mach_port_t port)
 
 /*
  * cap_provision_task (#216 v2.1).  Validate the manifest and make a per-task
- * port for `task_port' with it.  The caller stamps the port as the child's
- * TASK_CAP_PORT and gives its own copy back.
+ * port for `task_port' with it.  The caller -- bootstrap, and nobody else --
+ * stamps the port as the child's TASK_CAP_PORT and gives its own copy back.
  *
- * Trust: any caller can invoke this in v2.1; gating to bootstrap-
- * only via a setup-port pattern is a follow-up.
+ * 🔴 IT ANSWERED ANYONE (#743).  `server' was discarded, the port every task
+ * inherits took the request as well as a per-task port did, and the manifest
+ * was whatever the caller sent: a task could provision itself with a manifest
+ * of its own writing, take the per-task port it got back, and acquire through
+ * it whatever that manifest said.  The manifests bound only the tasks that
+ * did not try.
+ *
+ * 🔑 Now the port the request arrived on decides, and only the provisioning
+ * port is answered.  Its one send right is bootstrap's: it is made here and
+ * handed over on this server's own bootstrap port, which bootstrap knows to be
+ * the cap_server it started, before bootstrap provisions anything.  A task
+ * exec'd later gets its port by derivation from its caller's, which can only
+ * narrow what the caller holds (cap_derive_task).
  */
 kern_return_t
 cap_provision_task(mach_port_t            server,
@@ -782,6 +793,14 @@ cap_provision_task(mach_port_t            server,
 
     (void)server;
     *out_task_cap_port = MACH_PORT_NULL;
+
+    if (provision_port == MACH_PORT_NULL ||
+        g_request_local_port != provision_port) {
+        printf("cap: DENY provision_task on port 0x%x — only bootstrap's "
+               "provisioning port provisions (#743)\n",
+               (unsigned)g_request_local_port);
+        return CAP_ERR_NOT_PROVISIONER;
+    }
 
     vrc = cap_manifest_validate(manifest_buf, (uint32_t)manifest_len, NULL);
     if (vrc != CAP_ERR_NONE) {
