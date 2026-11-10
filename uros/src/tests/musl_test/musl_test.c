@@ -1559,32 +1559,45 @@ arm_dup(void)
  * cross at all.  This program starts itself again holding 20 and 21, one
  * description, and 22, made with O_CLOEXEC; the child reads through 20, looks
  * at 21's offset and at 22, prints what it found, and answers in its status.
+ *
+ * The parent keeps its own 20, 21 and 22 open until the child is done.  Its
+ * copies and the child's share one open file in the file server, and a
+ * close() in either closes it for both, so that the child's read failed:
+ * #932.  This arm asks about the exec, and that is a question of its own.
  */
 #define DUP_LOST	1	/* 20 or 21 did not cross, or at another offset */
 #define DUP_APART	2	/* a read on 20 left 21's offset where it was */
 #define DUP_CLOEXEC	4	/* 22, made with O_CLOEXEC, crossed */
+#define DUP_UNREAD	8	/* the read on 20 itself failed */
 
 static int
 as_dup_child(void)
 {
 	char	buf[DUP_READ];
 	off_t	at20, at21, moved = -1, at22;
-	int	wrong = 0, err22;
+	ssize_t	got = -2;		/* -2: not asked */
+	int	wrong = 0, err_read = 0, err22;
 
 	at20 = lseek(20, 0, SEEK_CUR);
 	at21 = lseek(21, 0, SEEK_CUR);
-	if (at20 != DUP_READ || at21 != DUP_READ)
+	if (at20 != DUP_READ || at21 != DUP_READ) {
 		wrong |= DUP_LOST;
-	else if (read(20, buf, sizeof buf) != (ssize_t)sizeof buf
-		 || (moved = lseek(21, 0, SEEK_CUR)) != 2 * DUP_READ)
-		wrong |= DUP_APART;
+	} else {
+		got = read(20, buf, sizeof buf);
+		err_read = errno;
+		if (got != (ssize_t)sizeof buf)
+			wrong |= DUP_UNREAD;
+		else if ((moved = lseek(21, 0, SEEK_CUR)) != 2 * DUP_READ)
+			wrong |= DUP_APART;
+	}
 	at22 = lseek(22, 0, SEEK_CUR);
 	err22 = errno;
 	if (at22 != -1 || err22 != EBADF)
 		wrong |= DUP_CLOEXEC;
-	printf("musl_test (dup child): 20 at %ld and 21 at %ld; after %d "
-	       "bytes read on 20, 21 at %ld; 22 answered %ld errno %d\n",
-	       (long)at20, (long)at21, DUP_READ, (long)moved, (long)at22,
+	printf("musl_test (dup child): 20 at %ld and 21 at %ld; a read of %d "
+	       "bytes on 20 gave %ld errno %d, and 21 was then at %ld; 22 "
+	       "answered %ld errno %d\n", (long)at20, (long)at21, DUP_READ,
+	       (long)got, got < 0 ? err_read : 0, (long)moved, (long)at22,
 	       err22);
 	return wrong;
 }
@@ -1639,12 +1652,14 @@ arm_dup_across_exec(void)
 		(void)execve(argv[0], argv, envp);
 		_exit(127);
 	}
+	got = waitpid(pid, &status, 0);
+	/* Only now: a close before the child's read closed the file for the
+	 * child too (#932, and the comment above). */
 	(void)close(20);
 	(void)close(21);
 	(void)close(22);
-	got = waitpid(pid, &status, 0);
 	wrong = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-	if (got != pid || wrong < 0 || wrong > 7)
+	if (got != pid || wrong < 0 || wrong > 15)
 		verdict(31, 0, "a child exec'd holding 20, 21 and 22 ended "
 			"with status %#x", (unsigned)status);
 	else
@@ -1654,6 +1669,7 @@ arm_dup_across_exec(void)
 			(wrong & DUP_LOST) ? "did not both cross at that offset"
 			: "crossed at that offset",
 			(wrong & DUP_LOST) ? "the read was not asked"
+			: (wrong & DUP_UNREAD) ? "the read on 20 failed"
 			: (wrong & DUP_APART) ? "a read on 20 left 21 where it was"
 			: "a read on 20 moved 21",
 			(wrong & DUP_CLOEXEC) ? "crossed" : "did not cross");
