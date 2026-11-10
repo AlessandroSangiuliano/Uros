@@ -66,6 +66,11 @@
 
 #include "uros/libposix.h"
 
+/* #934: below, used by the handler thread above them. */
+void __uros_die_of_signal(int signo) __attribute__((noreturn));
+void __uros_stop_self(int signo);
+void __uros_record_signal_death(int signo);
+
 /* ------------------------------------------------------------------ */
 /* State                                                              */
 /* ------------------------------------------------------------------ */
@@ -164,9 +169,18 @@ __uros_sig_loop(void)
             case 'I':   /* ignore */
                 continue;
             case 'T':   /* terminate */
-                __uros_syscall1(SYS_exit_group, 128 + signo);
+                __uros_die_of_signal(signo);
                 continue;     /* unreachable */
-            case 'S':   /* stop — Phase 4b will handle properly */
+            case 'S':
+                /*
+                 * #934: stopped, as SIGSTOP stops it, with this signal's
+                 * number for the parent's WSTOPSIG.  The stop is proc_server's
+                 * to make: it suspends the task, this thread with it, and the
+                 * reply comes when a SIGCONT resumes it.  The signal was
+                 * dropped here, so a program of musl went on through ^Z.
+                 */
+                __uros_stop_self(signo);
+                continue;
             default:
                 continue;
             }
@@ -344,6 +358,40 @@ __uros_record_exit_code(int status)
     int rc = 0;
     (void)proc_set_exit_code(__uros_proc_port,
                              __uros_my_pid, status, &rc);
+}
+
+/*
+ * #934: record a death by signal `signo' as one.  It was recorded as the
+ * exit code 128 + signo, which an exit(128 + signo) also records, so a
+ * parent took exit(130) for a death by SIGINT.  PROC_EXIT_SIGNALED tells
+ * proc_server which it is.
+ */
+void
+__uros_record_signal_death(int signo)
+{
+    __uros_record_exit_code(PROC_EXIT_SIGNALED | (signo & 0x7f));
+}
+
+/* A signal's default action ended the process: say so, and end.  Not
+ * through exit_group(), whose handler would record an exit over it. */
+void
+__uros_die_of_signal(int signo)
+{
+    __uros_record_signal_death(signo);
+    (void)task_terminate(mach_task_self());
+    for (;;)
+        ;
+}
+
+/* A stop signal's default action (#934): proc_server stops this process. */
+void
+__uros_stop_self(int signo)
+{
+    int rc = 0;
+
+    if (__uros_proc_port == MACH_PORT_NULL || __uros_my_pid == 0)
+        return;
+    (void)proc_stop(__uros_proc_port, __uros_my_pid, signo, &rc);
 }
 
 /* ------------------------------------------------------------------ */

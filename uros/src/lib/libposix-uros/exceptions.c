@@ -45,6 +45,7 @@
  * kept handy. */
 extern unsigned int __uros_my_pid;
 extern void __uros_record_exit_code(int status);
+extern void __uros_record_signal_death(int signo);	/* #934 */
 
 mach_port_t  __uros_exc_port = MACH_PORT_NULL;
 
@@ -119,8 +120,9 @@ catch_exception_raise(mach_port_t exception_port,
            (int)exception, name, (unsigned)thread, sub0, subcode);
 #endif
 
-    /* So that waitpid says what ended this task (#496). */
-    __uros_record_exit_code(128 + signo);
+    /* So that waitpid says what ended this task (#496), and that it was a
+     * signal and not an exit with the same number (#934). */
+    __uros_record_signal_death(signo);
     (void)task_terminate(task);
     return KERN_SUCCESS;
 }
