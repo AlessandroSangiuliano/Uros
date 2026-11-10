@@ -1326,12 +1326,25 @@ pthread_join(pthread_t thread,
 		{
 			int j_snap;
 			thread->num_joiners++;
-			j_snap = *PTH_FW(thread->joiners);  /* snapshot under lock */
-			UNLOCK(thread->lock);
-			/* Block until exit/detach bumps the joiners futex. */
-			(void) _pthread_futex_wait(PTH_FW(thread->joiners),
-						   j_snap, 0);
-			LOCK(thread->lock);
+			/*
+			 * Block until an exit or a detach has made the thread
+			 * no longer joinable, and not merely until the wait
+			 * returns (#925): futex_wait() answers KERN_SUCCESS
+			 * for an interrupted wait as well, and this took any
+			 * return for the exit, answering EINVAL for a thread
+			 * that was still running.  Each turn reads the word
+			 * under the lock, as the exit bumps it, so an exit
+			 * between two turns makes the next wait return at
+			 * once.
+			 */
+			while (thread->detached == PTHREAD_CREATE_JOINABLE)
+			{
+				j_snap = *PTH_FW(thread->joiners);
+				UNLOCK(thread->lock);
+				(void) _pthread_futex_wait(PTH_FW(thread->joiners),
+							   j_snap, 0);
+				LOCK(thread->lock);
+			}
 			thread->num_joiners--;
 		}
 		if (thread->detached == _PTHREAD_EXITED)
@@ -1401,17 +1414,29 @@ pthread_timedjoin_np(pthread_t thread,
 		int j_snap;
 
 		thread->num_joiners++;
-		j_snap = *PTH_FW(thread->joiners);  /* snapshot under lock */
-		UNLOCK(thread->lock);
+		/*
+		 * Until the thread is no longer joinable or the deadline has
+		 * passed, as in pthread_join(), and not until the first return
+		 * (#925): an interrupted wait answers KERN_SUCCESS, and this
+		 * then answered EINVAL for a thread still running, well before
+		 * its deadline.  Each turn waits for what is left of it.
+		 */
+		kern_res = KERN_SUCCESS;
+		while (thread->detached == PTHREAD_CREATE_JOINABLE &&
+		       kern_res != KERN_OPERATION_TIMED_OUT) {
+			j_snap = *PTH_FW(thread->joiners);
+			UNLOCK(thread->lock);
 
-		/* #324: deadline already passed -> immediate timeout (don't
-		 * pass 0 ms to the futex, which would mean "wait forever"). */
-		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
-			kern_res = KERN_OPERATION_TIMED_OUT;
-		else
-			kern_res = _pthread_futex_wait(PTH_FW(thread->joiners),
-						       j_snap, tmo_ms);
-		LOCK(thread->lock);
+			/* #324: deadline already passed -> immediate timeout
+			 * (don't pass 0 ms to the futex, which would mean
+			 * "wait forever"). */
+			if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
+				kern_res = KERN_OPERATION_TIMED_OUT;
+			else
+				kern_res = _pthread_futex_wait(
+				    PTH_FW(thread->joiners), j_snap, tmo_ms);
+			LOCK(thread->lock);
+		}
 		thread->num_joiners--;
 
 		if (kern_res == KERN_OPERATION_TIMED_OUT &&
