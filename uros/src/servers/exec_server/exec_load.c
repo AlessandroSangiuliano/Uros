@@ -413,16 +413,20 @@ extract_manifest(const elf_image_t *img,
 }
 
 /*
- * Provision a per-task cap_port for `new_task` from the manifest
- * embedded in `img` (or the empty default).  Best-effort: failure
- * here is logged but non-fatal — the spawned task boots without a
- * TASK_CAP_PORT and falls through to the legacy permissive
- * well-known cap_server path, same behaviour as exec_server before
- * #235.  Returns 1 on a successful install, 0 otherwise.
+ * Give `new_task' its per-task cap_port, derived from its caller's (#743):
+ * what the manifest embedded in `img' asks for -- or the empty default --
+ * cut to what the caller's manifest may hand on.  Best-effort: a task left
+ * without a TASK_CAP_PORT is refused every capability it asks for (#511).
+ * Returns 1 when the port is installed, 0 otherwise.
+ *
+ * 🔴 THE PROGRAM'S OWN FILE USED TO BE ITS POLICY.  This provisioned the
+ * manifest in the binary as it stood, so whoever could write a binary that
+ * something would exec wrote what it was allowed.  The file still says what
+ * the program asks for; what it gets is the caller's to give.
  */
 static int
-provision_cap_port(mach_port_t new_task, const elf_image_t *img,
-                   const char *path)
+derive_cap_port(mach_port_t new_task, const elf_image_t *img,
+                const char *path, mach_port_t parent_caps)
 {
     const void   *blob;
     uint32_t      blen;
@@ -431,10 +435,16 @@ provision_cap_port(mach_port_t new_task, const elf_image_t *img,
 
     extract_manifest(img, &blob, &blen);
 
-    kr = cap_provision(cap_server_port(), new_task, blob, blen, &cap_port);
+    if (!MACH_PORT_VALID(parent_caps)) {
+        printf("exec: %s -> no TASK_CAP_PORT: its caller has none to derive "
+               "one from (#743)\n", path ? path : "(?)");
+        return 0;
+    }
+
+    kr = cap_derive_child(parent_caps, new_task, blob, blen, &cap_port);
     if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
-        printf("exec: cap_provision(%s) failed kr=%d — legacy path\n",
-               path ? path : "(?)", kr);
+        printf("exec: cap_derive_child(%s) failed kr=%d — it runs without a "
+               "TASK_CAP_PORT (#743)\n", path ? path : "(?)", kr);
         return 0;
     }
 
@@ -446,7 +456,8 @@ provision_cap_port(mach_port_t new_task, const elf_image_t *img,
         return 0;
     }
 
-    printf("exec: %s -> TASK_CAP_PORT=0x%x (manifest %u bytes%s)\n",
+    printf("exec: %s -> TASK_CAP_PORT=0x%x, derived from its caller's "
+           "(manifest %u bytes%s) (#743)\n",
            path ? path : "(?)", (unsigned)cap_port, blen,
            (blob == &default_manifest_blob) ? ", default" : "");
 
@@ -459,7 +470,8 @@ provision_cap_port(mach_port_t new_task, const elf_image_t *img,
 }
 
 int
-exec_do_load(mach_port_t client_task, const char *path,
+exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
+             const char *path,
              const void *argv_blob, mach_msg_type_number_t argv_len,
              const void *envp_blob, mach_msg_type_number_t envp_len,
              mach_port_t *out_task, mach_port_t *out_thread)
@@ -552,11 +564,12 @@ exec_do_load(mach_port_t client_task, const char *path,
         start_entry = (uintptr_t)(elf_entry(&img) + main_bias);
     }
 
-    /* 4.25. Provision the child's per-task cap_port from the binary's
-     *       .uros_manifest section (#235).  Done before vDSO + stack
-     *       so libmach init reads TASK_CAP_PORT on the very first
-     *       instruction.  Best-effort — see provision_cap_port. */
-    (void)provision_cap_port(new_task, &img, path);
+    /* 4.25. Derive the child's per-task cap_port from its caller's, by
+     *       what the binary's .uros_manifest section asks for (#235,
+     *       #743).  Done before vDSO + stack so libmach init reads
+     *       TASK_CAP_PORT on the very first instruction.  Best-effort
+     *       — see derive_cap_port. */
+    (void)derive_cap_port(new_task, &img, path, parent_caps);
 
     /* 4.5. Install the vDSO placeholder (v0.4.0 / #236).  Failure
      *      here is non-fatal — the binary can still run, libposix

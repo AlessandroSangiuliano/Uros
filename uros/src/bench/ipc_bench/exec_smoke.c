@@ -22,6 +22,7 @@
 extern kern_return_t exec_load(
     mach_port_t exec_port,
     mach_port_t client_task,
+    mach_port_t parent_caps,
     char *path,
     pointer_t argv_blob, mach_msg_type_number_t argv_blobCnt,
     pointer_t envp_blob, mach_msg_type_number_t envp_blobCnt,
@@ -53,7 +54,7 @@ bench_exec_smoke(void)
         return;
     }
 
-    kr = exec_load(exec_port, mach_task_self(),
+    kr = exec_load(exec_port, mach_task_self(), mach_cap_port,
                    (char *)"/hello_exec",
                    (pointer_t)argv, sizeof(argv),
                    (pointer_t)envp, sizeof(envp),

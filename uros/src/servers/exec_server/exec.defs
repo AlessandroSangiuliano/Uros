@@ -52,6 +52,13 @@ type exec_blob_t = pointer_t;
  *   client_task — parent task.  v0.1.0: the new task is created as a
  *                 clone of this task's IPC space (caps inherited
  *                 raw); v0.3.0 will derive caps via cap_server.
+ *   parent_caps — the caller's per-task cap port (its TASK_CAP_PORT,
+ *                 libmach's mach_cap_port), or MACH_PORT_NULL (#743).
+ *                 The new program's port is derived from it: what the
+ *                 program's .uros_manifest asks for, cut to what the
+ *                 caller's manifest may hand on.  With none, the
+ *                 program gets no port and is refused every
+ *                 capability (#511).
  *   path        — absolute path to the binary, resolved through
  *                 libvfs by exec_server.
  *   argv_blob   — serialised argv (see exec_blob_t in exec_types.h).
@@ -67,6 +74,7 @@ type exec_blob_t = pointer_t;
 routine exec_load(
 		exec_port	: mach_port_t;
 	in	client_task	: task_t;
+	in	parent_caps	: mach_port_t;
 	in	path		: exec_path_t;
 	in	argv_blob	: exec_blob_t;
 	in	envp_blob	: exec_blob_t;

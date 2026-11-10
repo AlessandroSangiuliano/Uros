@@ -166,8 +166,11 @@ __uros_spawn(const char *path,
     memcpy(path_buf, path, path_len + 1);
 
     rc = EXEC_ERR_PARSE;
+    /* #743: the new program's policy is derived from ours, so our
+     * per-task port goes with the request (mach_cap_port, or null). */
     kr = exec_load(__uros_exec_port,
                    mach_task_self(),
+                   mach_cap_port,
                    path_buf,
                    (vm_offset_t)argv_blob, (mach_msg_type_number_t)argv_n,
                    (vm_offset_t)envp_blob, (mach_msg_type_number_t)envp_n,
