@@ -1,14 +1,15 @@
 Kind: ablation
 Issue: #904
-Takes out: the writers' lock -- two tasks writing one pipe both take the slot and the bytes at prod_tail at once, as FLIPC's single producer protocol does when nothing makes them take turns: musl_test's [33] must see its reader find a torn record, records out of order, a failed read, or children still blocked
+Over: 904-widen-write-window.patch
+Takes out: the writers' lock -- two tasks writing one pipe both take the slot and the bytes at prod_tail at once, as FLIPC's single producer protocol does when nothing makes them take turns, and over the widen's millisecond the second always finds the first's slot unpublished: musl_test's [33] must see its reader find a torn record, records out of order, a failed read, or children still blocked
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[33\] WRONG -- 
 
 diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
-index 6dc7bf93..dda96080 100644
+index f21df38b..d36a5d7d 100644
 --- a/uros/src/lib/libposix-uros/posix_pipe.c
 +++ b/uros/src/lib/libposix-uros/posix_pipe.c
-@@ -319,7 +319,7 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
+@@ -325,7 +325,7 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
  	if (total == 0)
  		return 0;
  
@@ -17,7 +18,7 @@ index 6dc7bf93..dda96080 100644
  	/* Another task's writer moved cons_head on since this handle looked. */
  	ch->cached_cons_head = *ch->cons_head;
  	while (done < total) {
-@@ -380,7 +380,6 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
+@@ -388,7 +388,6 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
  		flipc2_produce_commit(ch);
  		done += chunk;
  	}
