@@ -260,18 +260,18 @@ extern kern_return_t mig_cap_provision_task(mach_port_t cap_server,
                                             mach_port_t *task_cap_port);
 
 kern_return_t
-cap_provision(mach_port_t task_port,
+cap_provision(mach_port_t provisioner,
+              mach_port_t task_port,
               const void *manifest_blob,
               unsigned int manifest_len,
               mach_port_t *out_task_cap_port)
 {
-    mach_port_t srv = cap_server_port();
-    if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
+    if (!MACH_PORT_VALID(provisioner)) return CAP_ERR_NOT_PROVISIONER;
     if (!manifest_blob || manifest_len == 0 || !out_task_cap_port)
         return CAP_ERR_INVALID_TOKEN;
 
     *out_task_cap_port = MACH_PORT_NULL;
-    return mig_cap_provision_task(srv, task_port,
+    return mig_cap_provision_task(provisioner, task_port,
                                   (char *)manifest_blob,
                                   (mach_msg_type_number_t)manifest_len,
                                   out_task_cap_port);

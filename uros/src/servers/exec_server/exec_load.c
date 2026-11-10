@@ -431,7 +431,7 @@ provision_cap_port(mach_port_t new_task, const elf_image_t *img,
 
     extract_manifest(img, &blob, &blen);
 
-    kr = cap_provision(new_task, blob, blen, &cap_port);
+    kr = cap_provision(cap_server_port(), new_task, blob, blen, &cap_port);
     if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
         printf("exec: cap_provision(%s) failed kr=%d — legacy path\n",
                path ? path : "(?)", kr);

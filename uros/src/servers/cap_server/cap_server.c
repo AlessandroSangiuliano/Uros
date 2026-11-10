@@ -74,6 +74,14 @@ static mach_port_t root_ledger_paged;
 static mach_port_t cap_port;
 
 /*
+ * The provisioning port (#743): cap_provision_task answers on this port and
+ * on no other.  Its one send right is bootstrap's, given at start-up on this
+ * server's own bootstrap port (bootstrap_cap_provisioner()); the port every
+ * task inherits and the per-task ports are refused.
+ */
+static mach_port_t provision_port;
+
+/*
  * Port set that covers cap_port + every per-task cap_port allocated
  * by cap_provision_task.  mach_msg_server receives from the set;
  * the demux uses in->msgh_local_port to identify the caller.
@@ -755,8 +763,8 @@ cap_task_port_gone(mach_port_t port)
 
 /*
  * cap_provision_task (#216 v2.1).  Validate the manifest and make a per-task
- * port for `task_port' with it.  The caller (bootstrap today) stamps the port
- * as the child's TASK_CAP_PORT and gives its own copy back.
+ * port for `task_port' with it.  The caller stamps the port as the child's
+ * TASK_CAP_PORT and gives its own copy back.
  *
  * Trust: any caller can invoke this in v2.1; gating to bootstrap-
  * only via a setup-port pattern is a follow-up.
@@ -918,6 +926,33 @@ main(int argc, char **argv)
 
     printf("cap: serving CAP_SERVER_SLOT's port 0x%x, which the name server "
            "publishes as \"cap_server\" (#744)\n", (unsigned)cap_port);
+
+    /*
+     * The provisioning port (#743), and bootstrap's one send right to it,
+     * given on this server's own bootstrap port so that bootstrap knows the
+     * cap_server it started gave it.  bootstrap provisions nothing, itself
+     * included, until it has it; a request it sends before the loop below
+     * starts waits in the port's queue.
+     *
+     * ⚠️ Without it nothing can be provisioned, and bootstrap would wait for
+     * it as long as this task lives: so this task ends, and bootstrap, told
+     * of the death, runs the rest without manifests and says so.
+     */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &provision_port);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_move_member(mach_task_self(), provision_port,
+                                   cap_port_set);
+    if (kr == KERN_SUCCESS)
+        kr = bootstrap_cap_provisioner(bootstrap_port, provision_port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: the provisioning port did not reach bootstrap (%d) — "
+               "nothing could be provisioned, so cap_server ends (#743)\n",
+               kr);
+        return 1;
+    }
+    printf("cap: provisioning port 0x%x given to bootstrap, the only task "
+           "that provisions (#743)\n", (unsigned)provision_port);
 
     /* #209: cap_server boots before gpu_server in bootstrap.conf
      * (gpu_server cap_subscribe_revoke's against us at startup), so
