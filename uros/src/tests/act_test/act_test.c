@@ -2996,6 +2996,132 @@ arm_fourteen_terminate_inside_traps(void)
 }
 
 /*
+ * ── Arm fifty-four: create threads in a task as it is terminated (#935) ──
+ *
+ * thread_create() on another task runs thread_create_in() against THAT task,
+ * which checks its active flag last, after it has attached the new thread to
+ * the activation.  A task_terminate() that wins the race clears the flag, the
+ * create fails, and two things broke: the activation was left pointing at the
+ * thread it then freed, so the caller's thread_terminate() wrote through freed
+ * memory; and, for the window between act_create() listing the activation and
+ * the attach, task_info(TASK_THREAD_TIMES_INFO) walked the task's threads and
+ * asserted a thread on one that had none yet.  Both took a kernel down in
+ * #934's A/Bs on OMEGA.
+ *
+ * So: a child task, one thread of this task making and unmaking threads in
+ * it, another reading its thread times, and then this thread terminating it.
+ * The kernel has to come through every round.  The widens hold each window
+ * open; the ablations put each defect back.
+ */
+#define	ARM54_ROUNDS	20
+#define	ARM54_RUN_MS	5
+
+static mach_port_t		arm54_child;
+static volatile int		arm54_stop;
+static volatile unsigned	arm54_made;
+static volatile unsigned	arm54_asked;
+
+/* Make and unmake threads in the child until told to stop or it is gone. */
+static void *
+arm54_creator(void *arg)
+{
+	mach_port_t	me = mach_task_self();
+
+	(void) arg;
+	while (!arm54_stop) {
+		mach_port_t	t = MACH_PORT_NULL;
+
+		if (thread_create(arm54_child, &t) != KERN_SUCCESS)
+			continue;	/* the child is gone, or will be */
+		arm54_made++;
+		(void) thread_terminate(t);
+		(void) mach_port_deallocate(me, t);
+	}
+	return NULL;
+}
+
+/* Read the child's thread times, which walks its activation list. */
+static void *
+arm54_poller(void *arg)
+{
+	(void) arg;
+	while (!arm54_stop) {
+		task_thread_times_info_data_t	times;
+		mach_msg_type_number_t		n = TASK_THREAD_TIMES_INFO_COUNT;
+
+		if (task_info(arm54_child, TASK_THREAD_TIMES_INFO,
+			      (task_info_t) &times, &n) == KERN_SUCCESS)
+			arm54_asked++;
+	}
+	return NULL;
+}
+
+static int
+arm_fifty_four_create_on_a_dying_task(void)
+{
+	mach_port_t	me = mach_task_self();
+	int		round;
+
+	for (round = 0; round < ARM54_ROUNDS; round++) {
+		pthread_t		creator, poller;
+		mach_port_type_t	type;
+		kern_return_t		kr;
+
+		arm54_child = MACH_PORT_NULL;
+		arm54_stop = 0;
+		kr = task_create(me, NULL, 0, FALSE, &arm54_child);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [54] round %d: task_create answered "
+			       "%d — WRONG\n", round, kr);
+			return 0;
+		}
+		if (pthread_create(&creator, NULL, arm54_creator, NULL) != 0 ||
+		    pthread_create(&poller, NULL, arm54_poller, NULL) != 0) {
+			printf("act_test: [54] round %d: pthread_create failed "
+			       "— WRONG\n", round);
+			arm54_stop = 1;
+			(void) task_terminate(arm54_child);
+			(void) mach_port_deallocate(me, arm54_child);
+			return 0;
+		}
+
+		nap(ARM54_RUN_MS);
+
+		/*
+		 * Terminate while a create may be mid-flight: the create then
+		 * meets the cleared active flag.  Stop the helpers only after,
+		 * so one is as likely as not to be inside thread_create_in().
+		 */
+		kr = task_terminate(arm54_child);
+		arm54_stop = 1;
+		(void) pthread_join(creator, NULL);
+		(void) pthread_join(poller, NULL);
+
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_type(me, arm54_child, &type);
+		(void) mach_port_deallocate(me, arm54_child);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [54] round %d: terminating the child, "
+			       "or asking about its port after, answered %d — "
+			       "WRONG\n", round, kr);
+			return 0;
+		}
+		if (!(type & MACH_PORT_TYPE_DEAD_NAME)) {
+			printf("act_test: [54] round %d: the terminated child's "
+			       "port is not a dead name (type 0x%x) — WRONG\n",
+			       round, type);
+			return 0;
+		}
+	}
+
+	printf("act_test: [54] %d tasks terminated while a thread made and "
+	       "unmade threads in each (%u made) and another read its thread "
+	       "times (%u read), and the kernel came through (#935)\n",
+	       ARM54_ROUNDS, arm54_made, arm54_asked);
+	return 1;
+}
+
+/*
  * Arm twenty: thread_activation_create() makes nothing (#783).
  *
  * It made an empty activation -- no thread behind it -- in a port's thread
@@ -8913,6 +9039,8 @@ main(int argc, char **argv)
 	passed += arm_fifty_two_fs_base_goes_with_the_thread();
 	arms++;		/* arm fifty-three, #414 */
 	passed += arm_fifty_three_threads_fault_together();
+	arms++;		/* arm fifty-four, #935 */
+	passed += arm_fifty_four_create_on_a_dying_task();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
