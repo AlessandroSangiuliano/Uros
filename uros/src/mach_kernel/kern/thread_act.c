@@ -1078,6 +1078,16 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 	int rc;
 	vm_map_t map;
 
+	/*
+	 * 🔴 NO TASK, NO ACTIVATION (#935).  thread_create()'s MIG server
+	 * hands on what convert_port_to_task() gave it, and for a port whose
+	 * task has been terminated that is TASK_NULL; nothing between there
+	 * and here checked it.  All three creating paths come through this
+	 * call, so the refusal is here, before anything is allocated.
+	 */
+	if (task == TASK_NULL)
+		return(KERN_INVALID_ARGUMENT);
+
 	thr_act = (thread_act_t)zalloc(thr_act_zone);
 	if (thr_act == 0)
 		return(KERN_RESOURCE_SHORTAGE);
