@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #911
 Takes out: the connection's token in FLIPC's connect (953d5d2d) -- the client sends its task port, as a copied send right, and the endpoint holds it for as long as the connection lasts
 Run: --entry 14 1200 -smp 1
-Expect: mount_test: \[28\] WRONG — this task's port offered to a FLIPC endpoint as a connection's token: 6
+Expect: mount_test: \[28\] WRONG — this task's port offered to a FLIPC endpoint as a connection's token: 0 \(look-up 0\)
 
 diff --git a/uros/src/lib/libflipc2/flipc2_endpoint.c b/uros/src/lib/libflipc2/flipc2_endpoint.c
 index 761e0167..b5d20105 100644

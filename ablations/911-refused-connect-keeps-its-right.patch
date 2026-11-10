@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #911
 Takes out: the destruction of a request the endpoint's pump refused (953d5d2d) -- the pump keeps what the request brought, the client's token among it, for good
 Run: --entry 14 1200 -smp 1
-Expect: mount_test: \[29\] WRONG .*KERN_RESOURCE_SHORTAGE \(6\), and its right kept
+Expect: mount_test: \[29\] WRONG .*\(KERN_RESOURCE_SHORTAGE is 6\), and its right kept
 
 diff --git a/uros/src/lib/libflipc2/flipc2_endpoint.c b/uros/src/lib/libflipc2/flipc2_endpoint.c
 index 761e0167..0ca09523 100644
