@@ -3326,9 +3326,9 @@ arm_fifty_five_created_while_suspended(void)
  * futex waits on a word nobody touches.
  *
  *   - The first must time out.  A millisecond is far longer than an interrupt
- *     takes to arrive, and far shorter than the 10 ms between ticks: without
- *     the interrupt the abort is still pending unless a tick fell inside it,
- *     and the wait ends at once.
+ *     takes to arrive, and far shorter than the 10 ms between ticks, so
+ *     without the interrupt the abort is mostly still pending and the wait
+ *     ends at once.
  *   - The second must time out whatever the first did.  A first wait ended by
  *     the abort is still a switch away and back -- thread_select() keeps the
  *     running thread only at exactly TH_RUN, which TH_ABORT is not -- and the
@@ -3337,7 +3337,11 @@ arm_fifty_five_created_while_suspended(void)
  *
  * Before the interrupt, with the go given at once: at four processors the
  * first ended early in 300 rounds of 300 and the second in none; at one
- * processor neither, the abort reaching the thread at its switch-in.
+ * processor neither, the abort reaching the thread at its switch-in.  With
+ * the millisecond, 925-apc-no-interrupt at four processors: the first in 195
+ * rounds of 200 under KVM and 174 of 200 under TCG (one boot 28 of 50), the
+ * second in none; the fixed tree in none of 400, nor of 200 at one and two
+ * processors (victus, 11/11).
  */
 #define	A56_ROUNDS	50
 #define	A56_WAIT_MS	20
