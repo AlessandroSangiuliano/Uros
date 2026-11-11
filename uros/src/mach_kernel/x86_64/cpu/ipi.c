@@ -330,7 +330,8 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
  * lives on the return path".  The return path, trap_take_ast(), looks at
  * need_ast[cpu], and nothing had set it.  ast_check() is what does: it
  * copies the running activation's ASTs into that word -- act_set_apc()
- * reaches only its caller's own processor -- and raises AST_BLOCK when a
+ * reaches only its caller's own processor by itself, and sends this interrupt
+ * to the one a running thread is on (#925) -- and raises AST_BLOCK when a
  * switch is due.  i386's handler calls it ("MP_AST: cross-CPU reschedule
  * request"); on this machine only the tick did.
  *
