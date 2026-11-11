@@ -849,3 +849,15 @@ routine urmach_make_memory_entry(
 		prots		: urmach_memory_entry_prots_t;
 		segments	: natural_t;
 	out	entry		: mach_port_t);
+
+/*
+ *	A reduced port of a task (#927): it carries the rights in `rights'
+ *	(<mach/task_rights.h>) and nothing else of the task.  Made from the
+ *	full task port and from nothing else; one per set and per task, the
+ *	same one when asked again; it dies with the task, so a dead-name
+ *	request on it says the task has died.
+ */
+routine urmach_task_rights_port(
+		task		: task_t;
+		rights		: natural_t;
+	out	port		: mach_port_t);

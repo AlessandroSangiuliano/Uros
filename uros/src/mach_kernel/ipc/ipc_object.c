@@ -1046,6 +1046,7 @@ char *ikot_print_array[IKOT_MAX_TYPE] = {
 	"(CLOCK)            ",
 	"(CLOCK_CTRL)       ",	/* 26 */
 	"(MEMORY_ENTRY)     ",	/* 27, #911 */
+	"(TASK_RIGHTS)      ",	/* 28, #927 */
 				/* << new entries here	*/
 	"(UNKNOWN)     "	/* magic catchall	*/
 };	/* Please keep in sync with kern/ipc_kobject.h	*/

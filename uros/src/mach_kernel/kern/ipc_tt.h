@@ -141,6 +141,15 @@ extern task_t convert_port_to_task(
 extern boolean_t ref_task_port_locked(
 	ipc_port_t port, task_t *ptask);
 
+/* #927: from the full task port, or a reduced one with the right */
+extern task_t convert_port_to_task_inspect(
+	ipc_port_t	port);
+extern task_t convert_port_to_task_lifecycle(
+	ipc_port_t	port);
+
+/* #927: the zone of the reduced ports' records, from task_init() */
+extern void ipc_task_rights_init(void);
+
 /* Convert from a port to a space */
 extern ipc_space_t convert_port_to_space(
 	ipc_port_t	port);
