@@ -850,6 +850,197 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
 }
 
 /*
+ * How many of `task''s names hold a send right to the port this task names
+ * `mine' -- with `need' MACH_PORT_TYPE_RECEIVE, the receive right as well.
+ * Each such right is copied out, compared and given back: a task holds one
+ * name for all its rights to one port, so a copy that comes in under `mine'
+ * is a right to it.  -1 when `task''s names cannot be read (#926).
+ *
+ * 🔴 COPIED, NEVER MADE.  A send right made from another task's receive right
+ * and dropped again would end that port's senders as far as a no-senders
+ * request can tell, and cap_server gives a per-task port's slot back on
+ * exactly that (#743).  A copy adds a sender and takes it away.
+ */
+static int
+rights_to(mach_port_t task, mach_port_t mine, mach_port_type_t need)
+{
+    mach_port_t            me = mach_task_self();
+    mach_port_array_t      names = 0;
+    mach_port_type_array_t types = 0;
+    mach_msg_type_number_t nn = 0, nt = 0, i;
+    int                    held = 0;
+
+    if (mach_port_names(task, &names, &nn, &types, &nt) != KERN_SUCCESS)
+        return -1;
+    for (i = 0; i < nn && i < nt; i++) {
+        mach_port_t          copy = MACH_PORT_NULL;
+        mach_msg_type_name_t got = 0;
+
+        if (!(types[i] & MACH_PORT_TYPE_SEND) || (types[i] & need) != need)
+            continue;
+        if (mach_port_extract_right(task, names[i], MACH_MSG_TYPE_COPY_SEND,
+                                    &copy, &got) != KERN_SUCCESS)
+            continue;
+        if (copy == mine)
+            held++;
+        (void)mach_port_deallocate(me, copy);
+    }
+    (void)vm_deallocate(me, (vm_address_t)names, nn * sizeof(*names));
+    (void)vm_deallocate(me, (vm_address_t)types, nt * sizeof(*types));
+    return held;
+}
+
+/* How many of `task''s names are dead: rights to ports that have gone. */
+static int
+dead_names(mach_port_t task)
+{
+    mach_port_t            me = mach_task_self();
+    mach_port_array_t      names = 0;
+    mach_port_type_array_t types = 0;
+    mach_msg_type_number_t nn = 0, nt = 0, i;
+    int                    dead = 0;
+
+    if (mach_port_names(task, &names, &nn, &types, &nt) != KERN_SUCCESS)
+        return -1;
+    for (i = 0; i < nt; i++)
+        if (types[i] & MACH_PORT_TYPE_DEAD_NAME)
+            dead++;
+    (void)vm_deallocate(me, (vm_address_t)names, nn * sizeof(*names));
+    (void)vm_deallocate(me, (vm_address_t)types, nt * sizeof(*types));
+    return dead;
+}
+
+/*
+ * The task that receives on the port this task names `port': the one among
+ * the default processor set's tasks with a name holding both the receive
+ * right and a send right to it (#926).  The tasks come through the
+ * privileged host port bootstrap hands this task (#546).  A server that
+ * inserts a send right under its receive right's name, as exec_server does
+ * with its service port, is found; one that does not is not.
+ */
+static kern_return_t
+the_task_receiving_on(mach_port_t host_priv, mach_port_t port,
+                      mach_port_t *out)
+{
+    mach_port_t            me = mach_task_self();
+    mach_port_t            host = mach_host_self();
+    mach_port_t            name = MACH_PORT_NULL, pset = MACH_PORT_NULL;
+    task_port_array_t      tasks = 0;
+    mach_msg_type_number_t ntasks = 0, i;
+    kern_return_t          kr;
+
+    *out = MACH_PORT_NULL;
+    kr = processor_set_default(host, &name);
+    if (kr == KERN_SUCCESS)
+        kr = host_processor_set_priv(host_priv, name, &pset);
+    if (kr == KERN_SUCCESS)
+        kr = processor_set_tasks(pset, &tasks, &ntasks);
+    for (i = 0; kr == KERN_SUCCESS && i < ntasks; i++) {
+        if (*out == MACH_PORT_NULL && tasks[i] != me &&
+            rights_to(tasks[i], port, MACH_PORT_TYPE_RECEIVE) > 0)
+            *out = tasks[i];
+        else
+            (void)mach_port_deallocate(me, tasks[i]);
+    }
+    if (tasks != 0)
+        (void)vm_deallocate(me, (vm_address_t)tasks,
+                            ntasks * sizeof(*tasks));
+    if (MACH_PORT_VALID(pset))
+        (void)mach_port_deallocate(me, pset);
+    if (MACH_PORT_VALID(name))
+        (void)mach_port_deallocate(me, name);
+    (void)mach_port_deallocate(me, host);
+    if (kr == KERN_SUCCESS && *out == MACH_PORT_NULL)
+        kr = KERN_FAILURE;
+    return kr;
+}
+
+/*
+ * Test [44]: exec_server holds nothing of a spawn once it has answered (#926).
+ *
+ * A send right to a task port is the task: its memory, its threads and its
+ * rights.  exec_server needs the task it loads into, for the length of the
+ * call, and nothing of the task that asks; so once exec_load has answered it
+ * must hold no send right to this task, to the program's task or to the
+ * program's first thread.  It is lent the program's task, which this task
+ * makes, and answers the thread moved (exec.defs).  Measured on the tree
+ * before: one right to each of the three, and 26 dead names in its space
+ * at this point of the boot, the ones earlier spawns had left.
+ *
+ * Nobody sees a task's rights but the holder of its task port, so the arm
+ * takes exec_server's (the_task_receiving_on()) and copies out each of its
+ * send rights in turn (rights_to()).  The program is loaded with no per-task
+ * cap port, which keeps [42]'s slots out of it, and ended before it runs.
+ * It runs after [42], which has waited for exec_server's name.
+ */
+static int
+exec_server_holds_nothing_of_a_spawn(mach_port_t host_priv)
+{
+    static char   argv_blob[] = "hello_exec\0";
+    static char   envp_blob[] = "\0";
+    mach_port_t   me = mach_task_self();
+    mach_port_t   exec_port = MACH_PORT_NULL, exec_task = MACH_PORT_NULL;
+    mach_port_t   task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
+    int           rc = -1, spawner, prog, first, dead;
+    kern_return_t kr;
+
+    if (netname_look_up(name_server_port, "", (char *)"exec_server",
+                        &exec_port) != KERN_SUCCESS) {
+        printf("cap_test: [44] exec_server's name is not registered — NOT "
+               "ASKED (#926)\n");
+        return 1;
+    }
+    kr = the_task_receiving_on(host_priv, exec_port, &exec_task);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [44] WRONG — no task among the processor set's "
+               "receives on exec_server's port (%d) (#926)\n", (int)kr);
+        (void)mach_port_deallocate(me, exec_port);
+        return 0;
+    }
+
+    kr = task_create(me, NULL, 0, FALSE, &task);
+    if (kr == KERN_SUCCESS)
+        kr = exec_load(exec_port, task, MACH_PORT_NULL,
+                       (char *)"/hello_exec",
+                       (pointer_t)argv_blob, sizeof(argv_blob),
+                       (pointer_t)envp_blob, sizeof(envp_blob),
+                       &thread, &rc);
+    (void)mach_port_deallocate(me, exec_port);
+    if (kr != KERN_SUCCESS || rc != EXEC_OK) {
+        printf("cap_test: [44] WRONG — /hello_exec did not load: kr %d, "
+               "result %d (#926)\n", (int)kr, rc);
+        if (MACH_PORT_VALID(task)) {
+            (void)task_terminate(task);
+            (void)mach_port_deallocate(me, task);
+        }
+        (void)mach_port_deallocate(me, exec_task);
+        return 0;
+    }
+
+    spawner = rights_to(exec_task, me, MACH_PORT_TYPE_SEND);
+    prog    = rights_to(exec_task, task, MACH_PORT_TYPE_SEND);
+    first   = rights_to(exec_task, thread, MACH_PORT_TYPE_SEND);
+    dead    = dead_names(exec_task);
+    (void)task_terminate(task);
+    (void)mach_port_deallocate(me, task);
+    (void)mach_port_deallocate(me, thread);
+    (void)mach_port_deallocate(me, exec_task);
+
+    if (spawner == 0 && prog == 0 && first == 0) {
+        printf("cap_test: [44] once exec_load had answered, exec_server held "
+               "no send right to the task that asked, to the program's task "
+               "or to its first thread; %d dead name(s) in its space "
+               "(#926)\n", dead);
+        return 1;
+    }
+    printf("cap_test: [44] WRONG — once exec_load had answered, exec_server "
+           "held send rights to the task that asked: %d, to the program's "
+           "task: %d, to its first thread: %d (want 0, 0, 0); %d dead "
+           "name(s) in its space (#926)\n", spawner, prog, first, dead);
+    return 0;
+}
+
+/*
  * Whether the partition behind `part_port` is the boot disk: the one the
  * block server published as "disk0a", which bootstrap stage 2 loads servers
  * from.  1 if it is, 0 if disk0a is another partition, -1 if disk0a is not
@@ -4983,6 +5174,8 @@ main(int argc, char **argv)
     /* #743: last, because exec_server starts well after this task. */
     if (!an_execd_program_gets_what_its_caller_may_hand_on())
         pass = 0;
+    if (!exec_server_holds_nothing_of_a_spawn(host_port))
+        pass = 0;		/* #926 */
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");
