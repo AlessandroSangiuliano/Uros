@@ -653,17 +653,22 @@ only_cap_server_gives_the_provisioning_port(void)
 
 /*
  * Test [42]: a program this task execs gets what its file asks for, cut to
- * what this task may hand on, and its slot comes back when it ends (#743).
+ * what its caller may hand on, and both slots come back when it ends (#743).
  *
  * /hello_exec's manifest asks for block devices READ|WRITE and DMA buffers,
- * and this task may hand on block devices READ alone.  The exec carries this
- * task's per-task port, as libposix-uros's does, and exec_server derives the
+ * and this task may hand on block devices READ alone.  The exec carries a
+ * per-task port of the caller's, as libposix-uros's carries the caller's
+ * own; here it is one derived from this task's for the purpose, so that a
+ * copy exec_server kept of it would be seen.  exec_server derives the
  * program's port from it.  The program comes back suspended, and its
  * TASK_CAP_PORT must grant block devices READ and refuse WRITE and DMA
- * buffers with CAP_ERR_NOT_IN_MANIFEST.  It is ended before it runs, and the
- * slots cap_slots reports must come back to their count before the exec
- * within two seconds: a copy of the program's port kept by exec_server would
- * hold its slot for good.
+ * buffers with CAP_ERR_NOT_IN_MANIFEST.  It is ended before it runs, the
+ * caller's port is given back, and the slots cap_slots reports must come back
+ * to their count before, within two seconds: a copy of either port kept by
+ * exec_server would hold its slot for good.
+ *
+ * It runs last: bootstrap.conf starts exec_server well after this task, and
+ * its name is waited for, in time.  NOT ASKED only when it never comes.
  *
  * ⚠️ A count and not a name, so another task taking a slot meanwhile would
  * read as one kept.  Today no other task derives one, and bootstrap makes
@@ -674,32 +679,50 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
 {
     static char   argv_blob[] = "hello_exec\0";
     static char   envp_blob[] = "\0";
-    mach_port_t   exec_port = MACH_PORT_NULL;
+    static uint64_t pblob[64];
+    static const cap_manifest_entry_t caller[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID,
+          CAP_OP_BLK_READ | CAP_OP_BLK_WRITE },
+    };
+    uint32_t      plen = manifest_make(pblob, sizeof(pblob),
+                                       "cap_test_exec_caller", caller, 1,
+                                       caller, 1);
+    mach_port_t   exec_port = MACH_PORT_NULL, parent = MACH_PORT_NULL;
     mach_port_t   task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
     mach_port_t   port = MACH_PORT_NULL;
     natural_t     before = 0, after = 0, size = 0;
-    unsigned      waits;
+    unsigned      waits, waited;
     int           rc = -1, ok;
     kern_return_t kr, rd = -1, wr = -1, dma = -1;
 
-    if (netname_look_up(name_server_port, "", (char *)"exec_server",
-                        &exec_port) != KERN_SUCCESS) {
-        printf("cap_test: [42] exec_server is not registered — NOT ASKED "
-               "(#743)\n");
-        return 1;
+    for (waited = 0; ; waited += 100) {
+        if (netname_look_up(name_server_port, "", (char *)"exec_server",
+                            &exec_port) == KERN_SUCCESS)
+            break;
+        if (waited >= 30000) {
+            printf("cap_test: [42] exec_server's name did not come in 30 s "
+                   "— NOT ASKED (#743)\n");
+            return 1;
+        }
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
     }
-    if (mig_cap_slots(mach_cap_port, &before, &size) != KERN_SUCCESS) {
-        printf("cap_test: [42] WRONG — cap_slots refused (#743)\n");
+    if (plen == 0 ||
+        mig_cap_slots(mach_cap_port, &before, &size) != KERN_SUCCESS ||
+        cap_derive_child(mach_cap_port, mach_task_self(), pblob, plen,
+                         &parent) != KERN_SUCCESS) {
+        printf("cap_test: [42] WRONG — no slot count, or no caller's port "
+               "derived for the exec (#743)\n");
         (void)mach_port_deallocate(mach_task_self(), exec_port);
         return 0;
     }
 
-    kr = exec_load(exec_port, mach_task_self(), mach_cap_port,
+    kr = exec_load(exec_port, mach_task_self(), parent,
                    (char *)"/hello_exec",
                    (pointer_t)argv_blob, sizeof(argv_blob),
                    (pointer_t)envp_blob, sizeof(envp_blob),
                    &task, &thread, &rc);
     (void)mach_port_deallocate(mach_task_self(), exec_port);
+    (void)mach_port_deallocate(mach_task_self(), parent);
     if (kr != KERN_SUCCESS || rc != EXEC_OK) {
         printf("cap_test: [42] WRONG — /hello_exec did not load: kr %d, "
                "result %d (#743)\n", (int)kr, rc);
@@ -729,18 +752,21 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
          dma == CAP_ERR_NOT_IN_MANIFEST && after <= before;
     if (ok)
         printf("cap_test: [42] /hello_exec, which asks for block devices "
-               "READ|WRITE and DMA buffers, exec'd by this task: its port "
-               "granted block devices READ and refused WRITE and DMA buffers "
-               "with CAP_ERR_NOT_IN_MANIFEST, and once it ended the slots "
-               "were back to %u of %u after %u wait(s) of 10 ms (#743)\n",
-               (unsigned)after, (unsigned)size, waits);
+               "READ|WRITE and DMA buffers, exec'd with a caller's port that "
+               "may hand on block devices READ: its port granted READ and "
+               "refused WRITE and DMA buffers with CAP_ERR_NOT_IN_MANIFEST, "
+               "and once both ports were given back the slots were back to "
+               "%u of %u after %u wait(s) of 10 ms; exec_server's name came "
+               "after %u ms (#743)\n", (unsigned)after, (unsigned)size, waits,
+               waited);
     else
-        printf("cap_test: [42] WRONG — /hello_exec exec'd by this task: "
-               "block devices READ %d (want 0), WRITE %d and DMA buffers %d "
-               "(want CAP_ERR_NOT_IN_MANIFEST %d); slots %u before the exec "
-               "and %u after it ended and %u wait(s) of 10 ms (#743)\n",
-               (int)rd, (int)wr, (int)dma, CAP_ERR_NOT_IN_MANIFEST,
-               (unsigned)before, (unsigned)after, waits);
+        printf("cap_test: [42] WRONG — /hello_exec exec'd with a caller's "
+               "port: block devices READ %d (want 0), WRITE %d and DMA "
+               "buffers %d (want CAP_ERR_NOT_IN_MANIFEST %d); slots %u "
+               "before the exec and %u after both ports were given back and "
+               "%u wait(s) of 10 ms (#743)\n", (int)rd, (int)wr, (int)dma,
+               CAP_ERR_NOT_IN_MANIFEST, (unsigned)before, (unsigned)after,
+               waits);
     return ok;
 }
 
@@ -4367,8 +4393,6 @@ main(int argc, char **argv)
         pass = 0;
     if (!only_cap_server_gives_the_provisioning_port())
         pass = 0;
-    if (!an_execd_program_gets_what_its_caller_may_hand_on())
-        pass = 0;
 
     /*
      * #395 probe.  Fill xmm0..7 with a known pattern, cross the kernel once,
@@ -4874,6 +4898,10 @@ main(int argc, char **argv)
         }
         (void)mach_port_deallocate(mach_task_self(), p);
     }
+
+    /* #743: last, because exec_server starts well after this task. */
+    if (!an_execd_program_gets_what_its_caller_may_hand_on())
+        pass = 0;
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");
