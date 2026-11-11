@@ -87,9 +87,13 @@ bench_exec_smoke(void)
                        0, sizeof(hdr), waste,
                        /* timeout ms */ 200,
                        MACH_PORT_NULL);
-        (void)mach_port_deallocate(mach_task_self(), waste);
+        /* A receive right goes with its last reference, not with
+         * mach_port_deallocate(), which gives back send rights. */
+        (void)mach_port_mod_refs(mach_task_self(), waste,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
     }
 
     (void)task_terminate(new_task);
+    (void)mach_port_deallocate(mach_task_self(), new_task);
     (void)mach_port_deallocate(mach_task_self(), new_thread);
 }

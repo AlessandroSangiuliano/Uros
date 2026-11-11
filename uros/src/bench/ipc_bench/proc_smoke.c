@@ -95,6 +95,8 @@ bench_proc_smoke(void)
         printf("  proc: proc_register failed kr=%d rc=%d pid=%u "
                "— FAIL\n", kr, rc, pid);
         (void)task_terminate(new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_thread);
         return;
     }
     printf("  proc: proc_register -> pid=%u\n", pid);
@@ -197,4 +199,7 @@ bench_proc_smoke(void)
         (void)mach_port_destroy(mach_task_self(), notify_recv);
     if (new_thread != MACH_PORT_NULL)
         (void)mach_port_deallocate(mach_task_self(), new_thread);
+    /* Ended above on the way that got that far; a second end is refused. */
+    (void)task_terminate(new_task);
+    (void)mach_port_deallocate(mach_task_self(), new_task);
 }
