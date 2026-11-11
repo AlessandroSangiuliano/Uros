@@ -3134,6 +3134,182 @@ arm_fifty_four_create_on_a_dying_task(void)
 }
 
 /*
+ * ── Arm fifty-five: a thread made while its task is being suspended runs
+ *    only once the task does (#935) ──
+ *
+ * A new thread carries one hold for its user stop and one for each
+ * task_suspend() in force on its task.  thread_create_in() read the task's
+ * count at its top, with no lock, and listed the activation on the task much
+ * later, under the task lock that task_suspend() and task_resume() count and
+ * walk under.  A suspend that landed in between held every thread of the task
+ * but the new one, which then ran in a suspended task once its user stop was
+ * resumed.  (Before #935 the list came first and the same suspend was counted
+ * twice: the thread stayed held after its task was resumed.)
+ *
+ * So, each round: a child that shares this program's text, a helper that
+ * suspends it while this thread creates a thread in it, and the new thread set
+ * to spin in that text, its user stop resumed.  While the task is suspended the
+ * thread must not run; once the task is resumed it must.  The widen
+ * 935-widen-create-terminate holds the window open: it delays the create
+ * between attaching the thread and taking the task lock.
+ */
+#define	ARM55_ROUNDS	20
+#define	ARM55_STACK	(4 * 4096)
+#define	ARM55_SETTLE_MS	20
+#define	ARM55_SAMPLES	10	/* five milliseconds apart */
+#define	ARM55_BOUND_MS	2000
+
+static mach_port_t		arm55_child;
+static volatile int		arm55_go;
+static volatile kern_return_t	arm55_suspend_kr;
+
+/* Where the new thread runs, in the child's copy of this text. */
+static void
+arm55_spin(void)
+{
+	for (;;)
+		__asm__ __volatile__("pause");
+}
+
+/* Suspend the child the moment this thread's creator starts its create. */
+static void *
+arm55_suspender(void *arg)
+{
+	(void) arg;
+	while (!arm55_go)
+		continue;
+	arm55_suspend_kr = task_suspend(arm55_child);
+	return NULL;
+}
+
+/* The thread's run state, or -1 when it cannot be read. */
+static int
+arm55_run_state(mach_port_t t)
+{
+	thread_basic_info_data_t	info;
+	mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
+
+	if (thread_info(t, THREAD_BASIC_INFO, (thread_info_t) &info, &n)
+	    != KERN_SUCCESS)
+		return -1;
+	return info.run_state;
+}
+
+/*
+ * One round; 1 when the thread ran exactly when its task let it.  A held
+ * thread can read RUNNING for a moment, woken to look at its count again, so
+ * it is taken for running only when every sample says so: a thread that
+ * spins says so every time.
+ */
+static int
+arm55_round(mach_port_t me, int round)
+{
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	vm_address_t			stack = 0;
+	mach_port_t			t = MACH_PORT_NULL;
+	pthread_t			helper;
+	kern_return_t			kr;
+	int				ok = 0, rs = -1, i, running, waited;
+
+	arm55_child = MACH_PORT_NULL;
+	arm55_go = 0;
+	arm55_suspend_kr = KERN_FAILURE;
+	kr = task_create(me, NULL, 0, TRUE, &arm55_child);
+	if (kr == KERN_SUCCESS)
+		kr = vm_allocate(arm55_child, &stack, ARM55_STACK, TRUE);
+	if (kr != KERN_SUCCESS)
+		printf("act_test: [55] round %d: no child to create in (%d) — "
+		       "WRONG\n", round, kr);
+	if (kr == KERN_SUCCESS &&
+	    pthread_create(&helper, NULL, arm55_suspender, NULL) != 0) {
+		printf("act_test: [55] round %d: pthread_create failed — "
+		       "WRONG\n", round);
+		kr = KERN_FAILURE;
+	} else if (kr == KERN_SUCCESS) {
+		/* Both at once: the suspend lands while the create runs. */
+		arm55_go = 1;
+		kr = thread_create(arm55_child, &t);
+		(void) pthread_join(helper, NULL);
+		if (kr != KERN_SUCCESS || arm55_suspend_kr != KERN_SUCCESS) {
+			printf("act_test: [55] round %d: thread_create answered "
+			       "%d and task_suspend %d — WRONG\n", round, kr,
+			       arm55_suspend_kr);
+			kr = KERN_FAILURE;
+		}
+	}
+	if (kr == KERN_SUCCESS) {
+		kr = thread_get_state(t, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, &count);
+		if (kr == KERN_SUCCESS) {
+			state.rip = (uint64_t) (uintptr_t) arm55_spin;
+			state.rsp = (uint64_t) (stack + ARM55_STACK - 8);
+			kr = thread_set_state(t, x86_64_THREAD_STATE,
+					      (thread_state_t) &state, count);
+		}
+		if (kr == KERN_SUCCESS)
+			kr = thread_resume(t);
+		if (kr != KERN_SUCCESS)
+			printf("act_test: [55] round %d: setting the thread up "
+			       "answered %d — WRONG\n", round, kr);
+	}
+	if (kr == KERN_SUCCESS) {
+		/* Its task still suspended, the thread must stay put. */
+		nap(ARM55_SETTLE_MS);
+		for (i = running = 0; i < ARM55_SAMPLES; i++) {
+			if ((rs = arm55_run_state(t)) == TH_STATE_RUNNING)
+				running++;
+			nap(5);
+		}
+		if (running == ARM55_SAMPLES)
+			printf("act_test: [55] round %d: a thread made while its "
+			       "task was being suspended runs with the task "
+			       "still suspended (%d of %d samples) — WRONG "
+			       "(#935)\n", round, running, ARM55_SAMPLES);
+		else {
+			/* The task resumed, it must run. */
+			(void) task_resume(arm55_child);
+			for (waited = 0; waited < ARM55_BOUND_MS; waited += 5) {
+				if ((rs = arm55_run_state(t))
+				    == TH_STATE_RUNNING)
+					break;
+				nap(5);
+			}
+			if (rs == TH_STATE_RUNNING)
+				ok = 1;
+			else
+				printf("act_test: [55] round %d: the thread is "
+				       "still held %d ms after its task was "
+				       "resumed (run state %d) — WRONG (#935)\n",
+				       round, ARM55_BOUND_MS, rs);
+		}
+	}
+	if (arm55_child != MACH_PORT_NULL) {
+		(void) task_terminate(arm55_child);
+		(void) mach_port_deallocate(me, arm55_child);
+	}
+	if (t != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, t);
+	return ok;
+}
+
+static int
+arm_fifty_five_created_while_suspended(void)
+{
+	mach_port_t	me = mach_task_self();
+	int		round;
+
+	for (round = 0; round < ARM55_ROUNDS; round++)
+		if (!arm55_round(me, round))
+			return 0;
+
+	printf("act_test: [55] %d threads made while their task was being "
+	       "suspended stayed put while it was suspended and ran once it "
+	       "was resumed (#935)\n", ARM55_ROUNDS);
+	return 1;
+}
+
+/*
  * Arm twenty: thread_activation_create() makes nothing (#783).
  *
  * It made an empty activation -- no thread behind it -- in a port's thread
@@ -9365,6 +9541,8 @@ main(int argc, char **argv)
 	passed += arm_fifty_two_fs_base_goes_with_the_thread();
 	arms++;		/* arm fifty-three, #414 */
 	passed += arm_fifty_three_threads_fault_together();
+	arms++;		/* arm fifty-five, #935: before [54], which [16] follows */
+	passed += arm_fifty_five_created_while_suspended();
 	arms++;		/* arm fifty-four, #935 */
 	passed += arm_fifty_four_create_on_a_dying_task();
 
