@@ -18,17 +18,14 @@
 #include <stdio.h>
 #include <string.h>
 
-/* MIG user stub generated from exec.defs (subsystem 3100). */
-extern kern_return_t exec_load(
-    mach_port_t exec_port,
-    mach_port_t client_task,
-    mach_port_t parent_caps,
-    char *path,
-    pointer_t argv_blob, mach_msg_type_number_t argv_blobCnt,
-    pointer_t envp_blob, mach_msg_type_number_t envp_blobCnt,
-    mach_port_t *new_task,
-    mach_port_t *new_thread,
-    int *result_code);
+/*
+ * The MIG user stub's own header, generated from exec.defs into this
+ * directory's build, so a call that disagrees with the routine does not
+ * compile.  proc_smoke.c's hand-written prototype went on declaring
+ * exec_load() without the parent_caps it gained in #743.
+ */
+#include "exec_types.h"
+#include "exec.h"
 
 void
 bench_exec_smoke(void)
