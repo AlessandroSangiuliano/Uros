@@ -1177,13 +1177,16 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 		      sizeof new_thread->name);
 
 	/*
-	 * No need to lock thr_act, since it can't be known to anyone --
-	 * we set its suspend_count to one more than the task suspend_count
-	 * by calling thread_hold.
+	 * No need to lock thr_act, since it can't be known to anyone yet.
+	 * This is the user stop the creator hands back with the thread; the
+	 * task's own holds go on below, under the task lock that also puts
+	 * the activation on the task's list (#935).  task_suspend() and
+	 * task_resume() count and walk the list under that lock, so a count
+	 * read here, without it, missed a suspend that landed before the
+	 * activation was listed: the thread ran in a suspended task.
 	 */
 	thr_act->user_stop_count = 1;
-	for (sc = thr_act->task->suspend_count + 1; sc; --sc)
-		thread_hold(thr_act);
+	thread_hold(thr_act);
 
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
@@ -1317,6 +1320,16 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 		thread_deallocate(new_thread);
 		return(KERN_FAILURE);
 	}
+
+	/*
+	 * The task's holds, one per task_suspend() in force, read under the
+	 * task lock that task_suspend() and task_resume() take to count and
+	 * to walk the list this activation joins next: every suspend is in
+	 * the count or finds the activation listed, and each resume finds it
+	 * listed.  Still unlisted, it can't be known to anyone, as above.
+	 */
+	for (sc = parent_task->suspend_count; sc; --sc)
+		thread_hold(thr_act);
 
 	/*
 	 * 🔴 CHAIN IT ONTO THE TASK NOW, WHOLE (#935).  act_create() used to
