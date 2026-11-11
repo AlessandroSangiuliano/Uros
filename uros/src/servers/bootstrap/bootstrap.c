@@ -2156,25 +2156,38 @@ do_bootstrap_ports(mach_port_t bootstrap,
 /*
  * #743: cap_server's provisioning port.  Taken from the cap_server this file
  * started, asking on its own bootstrap port -- which the request arriving
- * there proves, since the receive right is ours (#620) -- and only once: a
- * second offer, or an offer from any other task, would make that task the
- * judge of who provisions.  A refused right goes back with the request.
+ * there proves, since the receive right is ours (#620): from any other task it
+ * would make that task the judge of who provisions, and is refused with
+ * KERN_NO_ACCESS.  And taken once: provision_cap_port_for_child() reads
+ * cap_provisioner without start_mutex once cap_server_checked_in() has seen
+ * it, which holds only for a port that is never written again, so a second
+ * offer is refused with KERN_NAME_EXISTS.
+ *
+ * Two rules, two answers.  An offer made after cap_server has given its port
+ * breaks both, and only the answer says which one refused it: cap_test [41]
+ * wants KERN_NO_ACCESS, so it sees the first rule go even with the second in
+ * place.  A refused right goes back with the request.
  */
 kern_return_t
 do_bootstrap_cap_provisioner(mach_port_t bootstrap, mach_port_t provisioner)
 {
 	struct server	*sp = server_by_bootstrap_port(bootstrap);
 
-	if (sp == NULL || sp != cap_server_sp ||
-	    cap_provisioner != MACH_PORT_NULL) {
+	if (sp == NULL || sp != cap_server_sp) {
 		BOOTSTRAP_IO_LOCK();
 		printf("%s: bootstrap_cap_provisioner: refused to %s (#743)\n",
 		       program_name,
 		       sp == NULL ? "a task asking on the shared service port" :
-		       sp != cap_server_sp ? sp->symtab_name :
-		       "cap_server, which gave one already");
+		       sp->symtab_name);
 		BOOTSTRAP_IO_UNLOCK();
 		return KERN_NO_ACCESS;
+	}
+	if (cap_provisioner != MACH_PORT_NULL) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: bootstrap_cap_provisioner: refused to cap_server, "
+		       "which gave one already (#743)\n", program_name);
+		BOOTSTRAP_IO_UNLOCK();
+		return KERN_NAME_EXISTS;
 	}
 	cap_provisioner = provisioner;
 	bootstrap_wake();		/* cap_server_checked_in() */
