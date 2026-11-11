@@ -189,6 +189,26 @@ type task_t = mach_port_t ctype: mach_port_t
 		;
 #endif	/* KERNEL_SERVER */
 
+/*
+ *	#927: a task named by a port that may be a reduced one
+ *	(<mach/task_rights.h>), for the routines that name the right they
+ *	need.  The full task port converts as task_t's does; a reduced port
+ *	converts only if it carries the right.
+ */
+type task_inspect_t = mach_port_t ctype: mach_port_t
+#if	KERNEL_SERVER
+		intran: task_t convert_port_to_task_inspect(mach_port_t) destructor: task_deallocate(task_t) ;
+#else
+		;
+#endif	/* KERNEL_SERVER */
+
+type task_lifecycle_t = mach_port_t ctype: mach_port_t
+#if	KERNEL_SERVER
+		intran: task_t convert_port_to_task_lifecycle(mach_port_t) destructor: task_deallocate(task_t) ;
+#else
+		;
+#endif	/* KERNEL_SERVER */
+
 type thread_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
 		intran: thread_t convert_port_to_thread(mach_port_t) outtran: mach_port_t convert_thread_to_port(thread_t) destructor: thread_deallocate(thread_t) ;
