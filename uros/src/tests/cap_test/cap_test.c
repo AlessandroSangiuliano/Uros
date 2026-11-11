@@ -788,16 +788,23 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
         return 0;
     }
 
-    kr = exec_load(exec_port, mach_task_self(), parent,
-                   (char *)"/hello_exec",
-                   (pointer_t)argv_blob, sizeof(argv_blob),
-                   (pointer_t)envp_blob, sizeof(envp_blob),
-                   &task, &thread, &rc);
+    /* #926: the program's task is made here and lent to exec_server. */
+    kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
+    if (kr == KERN_SUCCESS)
+        kr = exec_load(exec_port, task, parent,
+                       (char *)"/hello_exec",
+                       (pointer_t)argv_blob, sizeof(argv_blob),
+                       (pointer_t)envp_blob, sizeof(envp_blob),
+                       &thread, &rc);
     (void)mach_port_deallocate(mach_task_self(), exec_port);
     (void)mach_port_deallocate(mach_task_self(), parent);
     if (kr != KERN_SUCCESS || rc != EXEC_OK) {
         printf("cap_test: [42] WRONG — /hello_exec did not load: kr %d, "
                "result %d (#743)\n", (int)kr, rc);
+        if (MACH_PORT_VALID(task)) {
+            (void)task_terminate(task);
+            (void)mach_port_deallocate(mach_task_self(), task);
+        }
         return 0;
     }
 

@@ -60,29 +60,37 @@ static mach_port_t      exec_port;      /* our service port */
 kern_return_t
 exec_S_load(
     mach_port_t                 server_port,
-    mach_port_t                      client_task,
+    mach_port_t                 task,
     mach_port_t                 parent_caps,
     exec_path_t                 path,
     pointer_t                   argv_blob,
     mach_msg_type_number_t      argv_blobCnt,
     pointer_t                   envp_blob,
     mach_msg_type_number_t      envp_blobCnt,
-    mach_port_t                      *new_task,
-    mach_port_t                    *new_thread,
-    int                         *result_code)
+    mach_port_t                *new_thread,
+    int                        *result_code)
 {
     int rc;
 
     (void)server_port;
 
-    *new_task   = MACH_PORT_NULL;
     *new_thread = MACH_PORT_NULL;
 
-    rc = exec_do_load(client_task, parent_caps, path,
+    rc = exec_do_load(task, parent_caps, path,
                       (const void *)argv_blob, argv_blobCnt,
                       (const void *)envp_blob, envp_blobCnt,
-                      new_task, new_thread);
+                      new_thread);
     *result_code = rc;
+
+    /*
+     * #926: the task is the caller's, lent for the length of this call, and
+     * the send right to it is this server's to give back, whatever the
+     * result: kept, it would be the caller's child in this server's hands
+     * for good.  The first thread goes back MOVED (exec.defs), so nothing
+     * of it stays here either.
+     */
+    if (MACH_PORT_VALID(task))
+        (void)mach_port_deallocate(mach_task_self(), task);
 
     /*
      * #743: the caller's per-task port is ours to give back, whatever the

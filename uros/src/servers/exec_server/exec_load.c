@@ -339,10 +339,14 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
 /*  Top-level: orchestrate a full exec                                  */
 /* ------------------------------------------------------------------ */
 
+/*
+ * A load that failed after it began on the task.  The task is the caller's
+ * (#926): it is left as it is, half loaded, for the caller to terminate --
+ * this server does not end a task it was only lent.
+ */
 static int
-fail_after_task(mach_port_t new_task, elf_image_t *img, void *file_buf, int rc)
+fail_after_task(elf_image_t *img, void *file_buf, int rc)
 {
-    (void)task_terminate(new_task);
     elf_close(img);
     free(file_buf);
     return rc;
@@ -470,16 +474,15 @@ derive_cap_port(mach_port_t new_task, const elf_image_t *img,
 }
 
 int
-exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
+exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
              const char *path,
              const void *argv_blob, mach_msg_type_number_t argv_len,
              const void *envp_blob, mach_msg_type_number_t envp_len,
-             mach_port_t *out_task, mach_port_t *out_thread)
+             mach_port_t *out_thread)
 {
     void *file_buf = NULL;
     vm_size_t file_sz = 0;
     elf_image_t img;
-    mach_port_t new_task = MACH_PORT_NULL;
     mach_port_t new_thread = MACH_PORT_NULL;
     vm_address_t stack_top;
     vm_address_t main_bias = 0;     /* ET_DYN load bias, 0 for ET_EXEC */
@@ -489,7 +492,6 @@ exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
     int rc;
     kern_return_t kr;
 
-    *out_task   = MACH_PORT_NULL;
     *out_thread = MACH_PORT_NULL;
 
     /* 1. Read the binary. */
@@ -514,15 +516,12 @@ exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
         }
     }
 
-    /* 3. Create the child task — IPC space inherited from the
-     *    requester (caps copy through), VM is fresh. */
-    kr = task_create(client_task, (ledger_port_array_t)0, 0,
-                     FALSE, &new_task);
-    if (kr != KERN_SUCCESS) {
-        elf_close(&img);
-        free(file_buf);
-        return EXEC_ERR_TASK_CREATE;
-    }
+    /*
+     * 3. The task is the caller's, made empty by the caller (#926): this
+     *    server was handed it to load into, and is handed nothing else of
+     *    the caller.  It used to be handed the caller's own task, to make
+     *    this one with, and kept it.
+     */
 
     /*
      * Page zero is nobody's (#421).  A task starts with an empty map, and an
@@ -539,8 +538,7 @@ exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
                     VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_COPY);
         if (kr != KERN_SUCCESS) {
             printf("exec: reserving page zero kr=%d\n", kr);
-            return fail_after_task(new_task, &img, file_buf,
-                                   EXEC_ERR_VM_SETUP);
+            return fail_after_task(&img, file_buf, EXEC_ERR_VM_SETUP);
         }
     }
 
@@ -550,7 +548,7 @@ exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
     /* 4. Map every PT_LOAD into the child. */
     rc = install_segments(new_task, &img, main_bias);
     if (rc != EXEC_OK)
-        return fail_after_task(new_task, &img, file_buf, rc);
+        return fail_after_task(&img, file_buf, rc);
 
     /* 4.1. If the image names a dynamic linker (PT_INTERP), load it and
      *      hand control to its entry instead of the app's e_entry; the
@@ -559,7 +557,7 @@ exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
     if (interp != NULL) {
         rc = load_interp(new_task, interp, &interp_base, &start_entry);
         if (rc != EXEC_OK)
-            return fail_after_task(new_task, &img, file_buf, rc);
+            return fail_after_task(&img, file_buf, rc);
     } else {
         start_entry = (uintptr_t)(elf_entry(&img) + main_bias);
     }
@@ -625,18 +623,17 @@ exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
                               envp_blob, envp_len, &hints, &stack_top);
     }
     if (rc != EXEC_OK)
-        return fail_after_task(new_task, &img, file_buf, rc);
+        return fail_after_task(&img, file_buf, rc);
 
     /* 6. Bring up the entry thread — at the interpreter's entry when a
      *    PT_INTERP was present, otherwise at the app's (biased) entry. */
     rc = start_thread(new_task, start_entry, stack_top, &new_thread);
     if (rc != EXEC_OK)
-        return fail_after_task(new_task, &img, file_buf, rc);
+        return fail_after_task(&img, file_buf, rc);
 
     elf_close(&img);
     free(file_buf);
 
-    *out_task   = new_task;
     *out_thread = new_thread;
     return EXEC_OK;
 }

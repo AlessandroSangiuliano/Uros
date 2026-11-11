@@ -51,18 +51,24 @@ bench_exec_smoke(void)
         return;
     }
 
-    kr = exec_load(exec_port, mach_task_self(), mach_cap_port,
+    /* #926: the task is made here, and lent to exec_server to load into. */
+    kr = task_create(mach_task_self(), NULL, 0, FALSE, &new_task);
+    if (kr != KERN_SUCCESS) {
+        printf("  exec: task_create failed kr=%d — FAIL\n", kr);
+        return;
+    }
+    kr = exec_load(exec_port, new_task, mach_cap_port,
                    (char *)"/hello_exec",
                    (pointer_t)argv, sizeof(argv),
                    (pointer_t)envp, sizeof(envp),
-                   &new_task, &new_thread, &rc);
-    if (kr != KERN_SUCCESS) {
-        printf("  exec: exec_load RPC failed kr=%d — FAIL\n", kr);
-        return;
-    }
-
-    if (rc != 0) {
-        printf("  exec: exec_load returned EXEC_ERR=%d — FAIL\n", rc);
+                   &new_thread, &rc);
+    if (kr != KERN_SUCCESS || rc != 0) {
+        if (kr != KERN_SUCCESS)
+            printf("  exec: exec_load RPC failed kr=%d — FAIL\n", kr);
+        else
+            printf("  exec: exec_load returned EXEC_ERR=%d — FAIL\n", rc);
+        (void)task_terminate(new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_task);
         return;
     }
 
