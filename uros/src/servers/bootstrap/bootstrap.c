@@ -825,6 +825,24 @@ provision_cap_port_for_child(task_port_t child_task,
 	 * task was gone.
 	 */
 	(void)mach_port_deallocate(mach_task_self(), cap_port);
+
+	/*
+	 * And checked, because nothing else can see it: a right kept here is a
+	 * sender no other task can count, and cap_server only ever learns of
+	 * the last one going.
+	 */
+	{
+		mach_port_type_t	type;
+
+		if (mach_port_type(mach_task_self(), cap_port, &type)
+		    == KERN_SUCCESS && (type & MACH_PORT_TYPE_SEND)) {
+			BOOTSTRAP_IO_LOCK();
+			printf("%s: %s: still holds a send right to its "
+			       "TASK_CAP_PORT after giving it back — WRONG "
+			       "(#743)\n", program_name, symtab_name);
+			BOOTSTRAP_IO_UNLOCK();
+		}
+	}
 	return 1;
 }
 
