@@ -41,7 +41,7 @@ add_executable(cap_test_server
   cap_test.c ${CT_MIG_GENERATED}
 )
 
-add_dependencies(cap_test_server mig_mach_public_headers)
+add_dependencies(cap_test_server mig_mach_public_headers libcap)
 
 target_compile_options(cap_test_server PRIVATE
   -std=gnu11
@@ -67,6 +67,9 @@ target_include_directories(cap_test_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
+  # #743: cap_server.h, the MIG stubs libcap links in, for the arms that ask
+  # a port of their own choosing.  Last, so that it shadows nothing.
+  ${CMAKE_BINARY_DIR}/generated
 )
 
 target_link_libraries(cap_test_server PRIVATE
