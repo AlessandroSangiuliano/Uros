@@ -1175,7 +1175,8 @@ trap_take_ast(struct trap_frame *frame)
 	 * act_set_apc() writes a stop into the activation, and copies it into
 	 * need_ast[] only on its caller's own processor.  For an activation
 	 * running on another one, the copy waits for that processor's AST
-	 * interrupt, whose handler runs ast_check(), or for its tick.  Under
+	 * interrupt, whose handler runs ast_check() -- act_set_apc() sends it
+	 * since #925, thread_wait() before that -- or for its tick.  Under
 	 * KVM on five of six GitHub runners with an AMD EPYC 9V45, act_test's
 	 * arm seven touched up to 1645 pages inside thread_suspend(), against
 	 * at most 50 on the other runners: the copy came hundreds of faults

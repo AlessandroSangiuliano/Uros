@@ -2097,6 +2097,11 @@ special_handler(
  * Ensures that the activation will execute its returnhandlers
  * before it next executes any of its user-level code.
  *
+ * ⚠️ "Next" counts from when its processor hears of it (#925).  A thread in
+ * user mode on another processor runs on until the interrupt act_set_apc()
+ * sends there arrives -- and until #925 nothing was sent, so it ran on until
+ * that processor's tick.
+ *
  * Called with thr_act's act_lock() and "appropriate" thread-related
  * locks held.  (See act_lock_thread().)  Returns same way.
  */
@@ -2316,8 +2321,15 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 	gss.rh.next = thr_act->handlers;
 	thr_act->handlers = &gss.rh;
 
+	/*
+	 * Under the thread's lock, as act_set_apc() is called everywhere else:
+	 * it is what makes the processor that function reads the right one.
+	 */
+	assert(thr_act->thread);	/* Callers must ensure these */
 	s = splsched();
+	thread_lock(thr_act->thread);
 	act_set_apc(thr_act);
+	thread_unlock(thr_act->thread);
 	splx(s);
 
 #if	MACH_ASSERT
@@ -2331,7 +2343,6 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 	}
 #endif	/* MACH_ASSERT */
 
-	assert(thr_act->thread);	/* Callers must ensure these */
 	assert(thr_act != current_act());
 	for (;;) {
 		nudge(thr_act);
@@ -2451,16 +2462,50 @@ act_get_state(thread_act_t thr_act, int flavor, thread_state_t state,
 /*
  * These two should be called at splsched()
  * Set/clear indicator to run APC (layered on ASTs)
+ *
+ * 🔴 AND THE SETTING REACHES THE PROCESSOR THE THREAD RUNS ON (#925).
+ *
+ * The bit goes into the activation, and a return to user mode reads its own
+ * processor's need_ast[], so the bit means nothing to a running thread until
+ * something copies it across: ast_propagate() below for the caller's own
+ * activation, ast_check() on the processor of any other.  Nothing asked that
+ * processor, so only its tick did, every 10 ms.  A thread running in user mode
+ * there ran on with the stop pending, and an abort was answered by its next
+ * wait, whenever that came, ending at once with KERN_SUCCESS: act_test [56],
+ * at four processors, 300 rounds in 300.  cause_ast_check() asks, as
+ * thread_wait() does.
+ *
+ * ⚠️ With the thread's lock held, which is what makes last_processor the
+ * right processor: thread_invoke() writes it under that lock before
+ * ast_context() reads the activation's bits, so a switch-in either comes after
+ * this and reads the bit, or came before and is the processor asked.  Only the
+ * top activation, because ast_check() copies current_act()'s bits and no
+ * other's.  Not this processor: a thread that last ran here and is not its
+ * caller is on a run queue, and its switch-in reads the bit.
  */
 void
 act_set_apc(thread_act_t thr_act)
 {
+#if	NCPUS > 1
+	thread_t	thread = thr_act->thread;
+	processor_t	processor;
+#endif	/* NCPUS > 1 */
+
 	thread_ast_set(thr_act, AST_APC);
 	if (thr_act == current_act()) {
 		mp_disable_preemption();
 		ast_propagate(thr_act, cpu_number());
 		mp_enable_preemption();
+		return;
 	}
+#if	NCPUS > 1
+	if (thread == THREAD_NULL || thread->top_act != thr_act ||
+	    !(thread->state & TH_RUN))
+		return;
+	processor = thread->last_processor;
+	if (processor != PROCESSOR_NULL && processor != current_processor())
+		cause_ast_check(processor);
+#endif	/* NCPUS > 1 */
 }
 
 void
