@@ -685,11 +685,9 @@ a_no_senders_forgery_ends_nothing(void)
  * own bootstrap port, which names it to bootstrap (#620), a port of this
  * task's must be refused with KERN_NO_ACCESS.
  *
- * ⚠️ What this can see is the refusal as a whole.  By now cap_server has
- * given its port, so the rule that takes one port only would refuse this
- * offer too; the rule that takes it from cap_server and nobody else matters
- * before then, to a task bootstrap.conf lists ahead of cap_server, and no arm
- * runs that early.
+ * By now cap_server has given its port, so the rule that takes one port only
+ * would refuse this offer too -- with KERN_NAME_EXISTS, a different answer, so
+ * that a refusal by that rule alone is not read as the rule this arm is about.
  */
 static int
 only_cap_server_gives_the_provisioning_port(void)
@@ -710,6 +708,14 @@ only_cap_server_gives_the_provisioning_port(void)
                "as the provisioning port on this task's own bootstrap port: "
                "refused with KERN_NO_ACCESS (#743)\n");
         return 1;
+    }
+    if (kr == KERN_NAME_EXISTS) {
+        printf("cap_test: [41] WRONG — a port of this task's, offered to "
+               "bootstrap as the provisioning port: refused with "
+               "KERN_NAME_EXISTS, because cap_server gave one already — not "
+               "with KERN_NO_ACCESS, because this task is not cap_server "
+               "(#743)\n");
+        return 0;
     }
     printf("cap_test: [41] WRONG — a port of this task's, offered to "
            "bootstrap as the provisioning port: %d, not KERN_NO_ACCESS(%d) "
