@@ -45,12 +45,18 @@ set_target_properties(hello_exec_bin PROPERTIES
 set(HELLO_EXEC_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/hello_exec.manifest)
 set(HELLO_EXEC_CMF         ${CMAKE_CURRENT_BINARY_DIR}/hello_exec.cmf)
 
+# The step below runs only when the binary is linked, and DEPENDS means
+# nothing to a build event: a manifest edited alone stayed out of the
+# binary, which went on carrying the old one (#743).  So the link depends
+# on the manifest, and mkmanifest is built first.
+set_property(TARGET hello_exec_bin APPEND PROPERTY LINK_DEPENDS ${HELLO_EXEC_MANIFEST_SRC})
+add_dependencies(hello_exec_bin mkmanifest)
+
 add_custom_command(TARGET hello_exec_bin POST_BUILD
   COMMAND $<TARGET_FILE:mkmanifest> -o ${HELLO_EXEC_CMF} ${HELLO_EXEC_MANIFEST_SRC}
   COMMAND ${CMAKE_OBJCOPY} --add-section .uros_manifest=${HELLO_EXEC_CMF}
             --set-section-flags .uros_manifest=noload,readonly,contents
             $<TARGET_FILE:hello_exec_bin>
-  DEPENDS mkmanifest ${HELLO_EXEC_MANIFEST_SRC}
   COMMENT "embed .uros_manifest into hello_exec"
   VERBATIM
 )

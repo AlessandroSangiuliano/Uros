@@ -73,12 +73,18 @@ set_target_properties(virtual_terminal_server_bin PROPERTIES
 set(VTS_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/virtual_terminal_server.manifest)
 set(VTS_CMF          ${CMAKE_CURRENT_BINARY_DIR}/virtual_terminal_server.cmf)
 
+# The step below runs only when the binary is linked, and DEPENDS means
+# nothing to a build event: a manifest edited alone stayed out of the
+# binary, which went on carrying the old one (#743).  So the link depends
+# on the manifest, and mkmanifest is built first.
+set_property(TARGET virtual_terminal_server_bin APPEND PROPERTY LINK_DEPENDS ${VTS_MANIFEST_SRC})
+add_dependencies(virtual_terminal_server_bin mkmanifest)
+
 add_custom_command(TARGET virtual_terminal_server_bin POST_BUILD
   COMMAND $<TARGET_FILE:mkmanifest> -o ${VTS_CMF} ${VTS_MANIFEST_SRC}
   COMMAND ${CMAKE_OBJCOPY} --add-section .uros_manifest=${VTS_CMF}
             --set-section-flags .uros_manifest=noload,readonly,contents
             $<TARGET_FILE:virtual_terminal_server_bin>
-  DEPENDS mkmanifest ${VTS_MANIFEST_SRC}
   COMMENT "embed .uros_manifest into virtual_terminal_server"
   VERBATIM
 )

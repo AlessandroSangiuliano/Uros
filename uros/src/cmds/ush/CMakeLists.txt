@@ -73,12 +73,18 @@ set_target_properties(ush_bin PROPERTIES
 set(USH_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/ush.manifest)
 set(USH_CMF         ${CMAKE_CURRENT_BINARY_DIR}/ush.cmf)
 
+# The step below runs only when the binary is linked, and DEPENDS means
+# nothing to a build event: a manifest edited alone stayed out of the
+# binary, which went on carrying the old one (#743).  So the link depends
+# on the manifest, and mkmanifest is built first.
+set_property(TARGET ush_bin APPEND PROPERTY LINK_DEPENDS ${USH_MANIFEST_SRC})
+add_dependencies(ush_bin mkmanifest)
+
 add_custom_command(TARGET ush_bin POST_BUILD
   COMMAND $<TARGET_FILE:mkmanifest> -o ${USH_CMF} ${USH_MANIFEST_SRC}
   COMMAND ${CMAKE_OBJCOPY} --add-section .uros_manifest=${USH_CMF}
             --set-section-flags .uros_manifest=noload,readonly,contents
             $<TARGET_FILE:ush_bin>
-  DEPENDS mkmanifest ${USH_MANIFEST_SRC}
   COMMENT "embed .uros_manifest into ush"
   VERBATIM
 )
