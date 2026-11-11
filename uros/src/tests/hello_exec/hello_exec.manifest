@@ -2,11 +2,25 @@
 #
 # hello_exec is the canonical exec_server smoke binary: bare _start
 # that walks the AUXV and loops on mach_null.  It never calls
-# cap_request, so the legitimate cap set is empty — same situation
-# as hello_server.  Any cap_request from this task should come back
-# as CAP_ERR_NOT_IN_MANIFEST under v2.1 enforcement.
+# cap_request, so what it asks for here it never uses.
 
 name hello_exec
 
-# No `required` lines.
+# ── And yet it asks (#743) ────────────────────────────────────────────
+#
+# Block devices READ|WRITE (4, any, 0x3) and DMA buffers (10, any, 0x3),
+# which nothing that execs it may hand on in full.
+#
+# 🔴 UNTIL #743 THIS FILE WAS THE PROGRAM'S POLICY.  exec_server
+# provisioned whatever manifest the binary carried, so these two lines
+# would have been granted as written: whoever writes a binary that
+# something execs wrote what it may do.
+#
+# 🔑 Now the program gets what it asks for cut to what its caller's
+# manifest may hand on.  cap_test [42] execs it with a manifest that hands
+# on block devices READ alone, and its port must grant that and refuse
+# WRITE and DMA buffers.  A caller with no per-task port gives it nothing.
+required 4 any 0x3
+required 10 any 0x3
+
 # No `delegatable` lines.
