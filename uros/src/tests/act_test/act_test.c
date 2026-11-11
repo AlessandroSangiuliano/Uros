@@ -5430,6 +5430,90 @@ arm_sixteen_spin(void)
 }
 
 /*
+ * What one name of this task's space is, for [16]'s WRONG (#935): its rights
+ * and, for a send right, whether it names a thread or a task.  The campaigns of
+ * 0a30077e and 36617991 said "1 name(s) left behind" a hundred times and never
+ * which.  Called only after the second count, so nothing here is counted.
+ */
+static void
+arm_sixteen_say_name(const char *how, mach_port_t name, mach_port_type_t type)
+{
+	mach_port_t		me = mach_task_self();
+	mach_port_urefs_t	refs = 0;
+
+	if (type & MACH_PORT_TYPE_RECEIVE) {
+		mach_port_status_t	st;
+		mach_msg_type_number_t	n = MACH_PORT_RECEIVE_STATUS_COUNT;
+
+		if (mach_port_get_attributes(me, name, MACH_PORT_RECEIVE_STATUS,
+					     (mach_port_info_t) &st, &n)
+		    == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a receive "
+			       "right, %u queued, seqno %u, send rights %s, %u "
+			       "send-once\n", how, name, type, st.mps_msgcount,
+			       st.mps_seqno, st.mps_srights ? "out" : "none",
+			       st.mps_sorights);
+		else
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a receive "
+			       "right whose status could not be read\n", how,
+			       name, type);
+	} else if (type & MACH_PORT_TYPE_SEND) {
+		thread_basic_info_data_t	tb;
+		task_basic_info_data_t		kb;
+		mach_msg_type_number_t		tn = THREAD_BASIC_INFO_COUNT;
+		mach_msg_type_number_t		kn = TASK_BASIC_INFO_COUNT;
+
+		(void) mach_port_get_refs(me, name, MACH_PORT_RIGHT_SEND, &refs);
+		if (thread_info(name, THREAD_BASIC_INFO, (thread_info_t) &tb,
+				&tn) == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to a thread, run state %d, suspend "
+			       "count %d\n", how, name, type, refs, tb.run_state,
+			       tb.suspend_count);
+		else if (task_info(name, TASK_BASIC_INFO, (task_info_t) &kb,
+				   &kn) == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to a task, suspend count %d\n", how,
+			       name, type, refs, kb.suspend_count);
+		else
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to neither a live thread nor a live "
+			       "task\n", how, name, type, refs);
+	} else if (type & MACH_PORT_TYPE_DEAD_NAME) {
+		(void) mach_port_get_refs(me, name, MACH_PORT_RIGHT_DEAD_NAME,
+					  &refs);
+		printf("act_test: [16]   %s 0x%x, type 0x%x: a dead name "
+		       "(%u urefs)\n", how, name, type, refs);
+	} else
+		printf("act_test: [16]   %s 0x%x, type 0x%x\n", how, name, type);
+}
+
+/* Every name that came, went or changed between two counts of the space. */
+static void
+arm_sixteen_say_difference(mach_port_array_t bn, mach_port_type_array_t bt,
+			   mach_msg_type_number_t bc, mach_port_array_t an,
+			   mach_port_type_array_t at, mach_msg_type_number_t ac)
+{
+	mach_msg_type_number_t	i, j;
+
+	for (i = 0; i < ac; i++) {
+		for (j = 0; j < bc && bn[j] != an[i]; j++)
+			continue;
+		if (j == bc)
+			arm_sixteen_say_name("came:", an[i], at[i]);
+		else if (bt[j] != at[i])
+			arm_sixteen_say_name("changed:", an[i], at[i]);
+	}
+	for (j = 0; j < bc; j++) {
+		for (i = 0; i < ac && an[i] != bn[j]; i++)
+			continue;
+		if (i == ac)
+			printf("act_test: [16]   went: 0x%x, type 0x%x\n", bn[j],
+			       bt[j]);
+	}
+}
+
+/*
  * ── [16] A creation whose name cannot be copied out leaves no name behind ──
  *
  * syscall_thread_create(), syscall_thread_create_running() and
@@ -5453,9 +5537,9 @@ arm_sixteen_name_not_copied_out(void)
 {
 	mach_port_t			me = mach_task_self();
 	vm_address_t			ro = 0, stack = 0;
-	mach_port_array_t		names = 0;
-	mach_port_type_array_t		types = 0;
-	mach_msg_type_number_t		nn = 0, nt = 0;
+	mach_port_array_t		names = 0, bnames = 0;
+	mach_port_type_array_t		types = 0, btypes = 0;
+	mach_msg_type_number_t		nn = 0, nt = 0, bnn = 0, bnt = 0;
 	struct x86_64_thread_state	rstate;
 	mach_msg_type_number_t		rcount = x86_64_THREAD_STATE_COUNT;
 	mach_port_t			tmp = MACH_PORT_NULL;
@@ -5472,16 +5556,14 @@ arm_sixteen_name_not_copied_out(void)
 		return 0;
 	}
 
-	kr = mach_port_names(me, &names, &nn, &types, &nt);
+	kr = mach_port_names(me, &bnames, &bnn, &btypes, &bnt);
 	if (kr != KERN_SUCCESS) {
 		printf("act_test: [16] mach_port_names before (%d) — WRONG\n",
 		       kr);
 		(void) vm_deallocate(me, ro, vm_page_size);
 		return 0;
 	}
-	before = (int) nn;
-	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
-	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+	before = (int) bnn;	/* the list is kept, to say what changed */
 
 	/*
 	 * #756: a valid x86-64 state for thread_create_running, so it creates
@@ -5520,19 +5602,49 @@ arm_sixteen_name_not_copied_out(void)
 	if (kr != KERN_SUCCESS) {
 		printf("act_test: [16] mach_port_names after (%d) — WRONG\n",
 		       kr);
+		(void) vm_deallocate(me, (vm_address_t) bnames,
+				     bnn * sizeof(*bnames));
+		(void) vm_deallocate(me, (vm_address_t) btypes,
+				     bnt * sizeof(*btypes));
 		return 0;
 	}
 	after = (int) nn;
-	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
-	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
 
 	if (after != before) {
+		mach_port_array_t	lnames = 0;
+		mach_port_type_array_t	ltypes = 0;
+		mach_msg_type_number_t	lnn = 0, lnt = 0;
+
 		printf("act_test: [16] %d name(s) left behind after creations "
 		       "whose name could not be copied out (%d -> %d): a right "
 		       "the caller was never told and cannot release — WRONG "
 		       "(#662)\n", after - before, before, after);
-		return 0;
+		/*
+		 * #935: which names, and whether they stay.  A count back
+		 * where it was three seconds on says the names were another
+		 * thread's, passing through, and not rights the traps left.
+		 */
+		arm_sixteen_say_difference(bnames, btypes, bnn, names, types,
+					   nn);
+		nap(3000);
+		if (mach_port_names(me, &lnames, &lnn, &ltypes, &lnt)
+		    == KERN_SUCCESS) {
+			printf("act_test: [16]   3 s later the space holds %u "
+			       "names (%d before the traps, %d after)\n", lnn,
+			       before, after);
+			(void) vm_deallocate(me, (vm_address_t) lnames,
+					     lnn * sizeof(*lnames));
+			(void) vm_deallocate(me, (vm_address_t) ltypes,
+					     lnt * sizeof(*ltypes));
+		}
 	}
+	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
+	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+	(void) vm_deallocate(me, (vm_address_t) bnames, bnn * sizeof(*bnames));
+	(void) vm_deallocate(me, (vm_address_t) btypes, bnt * sizeof(*btypes));
+
+	if (after != before)
+		return 0;
 
 	printf("act_test: [16] a creation whose name could not be copied out "
 	       "left no name behind: %d names before and after, trap codes "
