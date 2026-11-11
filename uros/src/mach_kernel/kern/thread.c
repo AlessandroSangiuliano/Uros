@@ -596,7 +596,11 @@ kern_return_t
 		thread_create_in(
 			thread_act_t thr_act,
 			void (*start_pos)(void),
-			thread_t *child_thread);
+			thread_t *child_thread,
+			boolean_t start);
+static void	thread_start_running(
+			thread_act_t thr_act,
+			thread_t thread);
 
 extern void             Load_context(
                                 thread_t                thread);
@@ -1123,7 +1127,7 @@ thread_terminate_self(void)
  */
 kern_return_t
 thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
-						thread_t *child_thread)
+		 thread_t *child_thread, boolean_t start)
 {
 	task_t			parent_task = thr_act->task;
 	thread_t		new_thread;
@@ -1173,13 +1177,16 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 		      sizeof new_thread->name);
 
 	/*
-	 * No need to lock thr_act, since it can't be known to anyone --
-	 * we set its suspend_count to one more than the task suspend_count
-	 * by calling thread_hold.
+	 * No need to lock thr_act, since it can't be known to anyone yet.
+	 * This is the user stop the creator hands back with the thread; the
+	 * task's own holds go on below, under the task lock that also puts
+	 * the activation on the task's list (#935).  task_suspend() and
+	 * task_resume() count and walk the list under that lock, so a count
+	 * read here, without it, missed a suspend that landed before the
+	 * activation was listed: the thread ran in a suspended task.
 	 */
 	thr_act->user_stop_count = 1;
-	for (sc = thr_act->task->suspend_count + 1; sc; --sc)
-		thread_hold(thr_act);
+	thread_hold(thr_act);
 
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
@@ -1315,6 +1322,16 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 	}
 
 	/*
+	 * The task's holds, one per task_suspend() in force, read under the
+	 * task lock that task_suspend() and task_resume() take to count and
+	 * to walk the list this activation joins next: every suspend is in
+	 * the count or finds the activation listed, and each resume finds it
+	 * listed.  Still unlisted, it can't be known to anyone, as above.
+	 */
+	for (sc = parent_task->suspend_count; sc; --sc)
+		thread_hold(thr_act);
+
+	/*
 	 * 🔴 CHAIN IT ONTO THE TASK NOW, WHOLE (#935).  act_create() used to
 	 * do this, before the thread existed; a task_info(TASK_THREAD_TIMES_
 	 * INFO) that walked thr_acts in that window asserted on an activation
@@ -1331,6 +1348,34 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 	parent_task->thr_act_count++;
 	parent_task->res_act_count++;
 	mutex_unlock(&parent_task->act_list_lock);
+
+	/*
+	 * 🔴 AND START IT BEFORE THE LOCKS GO, if the caller wants it running
+	 * (#935).  Listed, the thread can be reached: task_terminate() walks
+	 * the list, task_threads() hands out its port.  thread_create() used
+	 * to start it after this function returned, and a thread_terminate()
+	 * that reached it first found a thread neither running nor waiting:
+	 * thread_stop() set TH_SUSP, thread_wait() had no TH_RUN to wait for,
+	 * and thread_unstop() took exactly TH_SUSP for a stopped runnable
+	 * thread and put it on a run queue.  thread_create() then put it on
+	 * one again -- twice on a queue (thread_setrun()'s runq assertion),
+	 * on two processors at once, or back on a queue after it had
+	 * terminated and given up its activation (switch_context()'s new_act
+	 * assertion): act_test [54], in the campaigns of 0a30077e and
+	 * 36617991.  Started here, it is runnable before anyone can find it,
+	 * and every thread_stop() meets a thread that has been started.
+	 *
+	 * Asked for unstarted, the thread is listed and waits for its caller
+	 * to start it.  The callers that ask make it where no user task can
+	 * reach it in between: thread_create_unstarted() in the bootstrap's
+	 * first task, before any port to it is out; thread_create_at() in the
+	 * kernel task, or in a task a kernel test has made for itself.
+	 */
+	if (start) {
+		if (parent_task->kernel_loaded)
+			thread_user_to_kernel(new_thread);
+		thread_start_running(thr_act, new_thread);
+	}
 
 	task_unlock(parent_task);
 	pset_unlock(pset);
@@ -1408,8 +1453,8 @@ thread_create_unstarted(task_t task, thread_act_t *new_act,
 	if ((rc = act_create(task, 0, 0, &thr_act)) != KERN_SUCCESS)
 		return(rc);
 
-	if ((rc = thread_create_in(thr_act, thread_bootstrap_return, &thread))
-							    != KERN_SUCCESS) {
+	if ((rc = thread_create_in(thr_act, thread_bootstrap_return, &thread,
+				   FALSE)) != KERN_SUCCESS) {
 		thread_terminate(thr_act);
 		act_deallocate(thr_act);
 		return(rc);
@@ -1436,7 +1481,6 @@ thread_create(task_t task, thread_act_t *new_act)
 	thread_t thread;
 	thread_act_t thr_act;
 	int rc;
-	spl_t s;
 	extern void thread_bootstrap_return(void);
 
 #if	MACH_ASSERT
@@ -1448,30 +1492,17 @@ thread_create(task_t task, thread_act_t *new_act)
 		return(rc);
 	}
 
-	if ((rc = thread_create_in(thr_act, thread_bootstrap_return, &thread))
-							    != KERN_SUCCESS) {
+	/*
+	 * Started running (it will immediately suspend itself) inside
+	 * thread_create_in(), under the task lock that lists it (#935).
+	 */
+	if ((rc = thread_create_in(thr_act, thread_bootstrap_return, &thread,
+				   TRUE)) != KERN_SUCCESS) {
 		thread_terminate(thr_act);
 		act_deallocate(thr_act);
 		return(rc);
 	}
 
-	if (task->kernel_loaded)
-		thread_user_to_kernel(thread);
-
-	/* Start the thread running (it will immediately suspend itself).  */
-	s = splsched();
-	thread_ast_set(thr_act, AST_APC);
-	thread_lock(thread);
-	thread->state |= TH_RUN;
-#if     (THREAD_SWAPPER && ((NCPUS > 1) || MACH_RT))
-	if (thread->state & TH_SWAPPED_OUT)
-		thread_swapin(thread->top_act, FALSE);
-	else
-#endif  /* (THREAD_SWAPPER && ((NCPUS > 1) || MACH_RT)) */
-		thread_setrun(thread, FALSE, TAIL_Q);
-	thread_unlock(thread);
-	splx(s);
-	
 	/*****
 	act_lock_thread(thr_act);
 	thread_dowait( thr_act, FALSE);
@@ -1504,7 +1535,7 @@ thread_create_at(task_t parent_task, thread_t *child_thread,
 	if ((rc = act_create_kernel(parent_task, (vm_offset_t) 0, 
 				    (vm_size_t) 0, &thr_act)) != KERN_SUCCESS)
 		return rc;
-	if ((rc = thread_create_in(thr_act, start_pos, child_thread))
+	if ((rc = thread_create_in(thr_act, start_pos, child_thread, FALSE))
 							!= KERN_SUCCESS) {
 		thread_terminate(thr_act);
 		return rc;

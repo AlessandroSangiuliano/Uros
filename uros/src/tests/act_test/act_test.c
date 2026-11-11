@@ -3020,6 +3020,7 @@ arm_fourteen_terminate_inside_traps(void)
 static mach_port_t		arm54_child;
 static volatile int		arm54_stop;
 static volatile unsigned	arm54_made;
+static volatile unsigned	arm54_late;
 static volatile unsigned	arm54_asked;
 
 /* Make and unmake threads in the child until told to stop or it is gone. */
@@ -3031,8 +3032,17 @@ arm54_creator(void *arg)
 	(void) arg;
 	while (!arm54_stop) {
 		mach_port_t	t = MACH_PORT_NULL;
+		kern_return_t	kr = thread_create(arm54_child, &t);
 
-		if (thread_create(arm54_child, &t) != KERN_SUCCESS)
+		/*
+		 * KERN_FAILURE comes from one place only: thread_create_in()
+		 * finding the task inactive after it had attached the thread,
+		 * the late failure (#935).  act_create() refuses a task
+		 * already gone with KERN_INVALID_ARGUMENT.
+		 */
+		if (kr == KERN_FAILURE)
+			arm54_late++;
+		if (kr != KERN_SUCCESS)
 			continue;	/* the child is gone, or will be */
 		arm54_made++;
 		(void) thread_terminate(t);
@@ -3116,9 +3126,186 @@ arm_fifty_four_create_on_a_dying_task(void)
 	}
 
 	printf("act_test: [54] %d tasks terminated while a thread made and "
-	       "unmade threads in each (%u made) and another read its thread "
-	       "times (%u read), and the kernel came through (#935)\n",
-	       ARM54_ROUNDS, arm54_made, arm54_asked);
+	       "unmade threads in each (%u made, %u met the task gone after "
+	       "the thread was attached) and another read its thread times "
+	       "(%u read), and the kernel came through (#935)\n",
+	       ARM54_ROUNDS, arm54_made, arm54_late, arm54_asked);
+	return 1;
+}
+
+/*
+ * ── Arm fifty-five: a thread made while its task is being suspended runs
+ *    only once the task does (#935) ──
+ *
+ * A new thread carries one hold for its user stop and one for each
+ * task_suspend() in force on its task.  thread_create_in() read the task's
+ * count at its top, with no lock, and listed the activation on the task much
+ * later, under the task lock that task_suspend() and task_resume() count and
+ * walk under.  A suspend that landed in between held every thread of the task
+ * but the new one, which then ran in a suspended task once its user stop was
+ * resumed.  (Before #935 the list came first and the same suspend was counted
+ * twice: the thread stayed held after its task was resumed.)
+ *
+ * So, each round: a child that shares this program's text, a helper that
+ * suspends it while this thread creates a thread in it, and the new thread set
+ * to spin in that text, its user stop resumed.  While the task is suspended the
+ * thread must not run; once the task is resumed it must.  The widen
+ * 935-widen-create-terminate holds the window open: it delays the create
+ * between attaching the thread and taking the task lock.
+ */
+#define	ARM55_ROUNDS	20
+#define	ARM55_STACK	(4 * 4096)
+#define	ARM55_SETTLE_MS	20
+#define	ARM55_SAMPLES	10	/* five milliseconds apart */
+#define	ARM55_BOUND_MS	2000
+
+static mach_port_t		arm55_child;
+static volatile int		arm55_go;
+static volatile kern_return_t	arm55_suspend_kr;
+
+/* Where the new thread runs, in the child's copy of this text. */
+static void
+arm55_spin(void)
+{
+	for (;;)
+		__asm__ __volatile__("pause");
+}
+
+/* Suspend the child the moment this thread's creator starts its create. */
+static void *
+arm55_suspender(void *arg)
+{
+	(void) arg;
+	while (!arm55_go)
+		continue;
+	arm55_suspend_kr = task_suspend(arm55_child);
+	return NULL;
+}
+
+/* The thread's run state, or -1 when it cannot be read. */
+static int
+arm55_run_state(mach_port_t t)
+{
+	thread_basic_info_data_t	info;
+	mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
+
+	if (thread_info(t, THREAD_BASIC_INFO, (thread_info_t) &info, &n)
+	    != KERN_SUCCESS)
+		return -1;
+	return info.run_state;
+}
+
+/*
+ * One round; 1 when the thread ran exactly when its task let it.  A held
+ * thread can read RUNNING for a moment, woken to look at its count again, so
+ * it is taken for running only when every sample says so: a thread that
+ * spins says so every time.
+ */
+static int
+arm55_round(mach_port_t me, int round)
+{
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	vm_address_t			stack = 0;
+	mach_port_t			t = MACH_PORT_NULL;
+	pthread_t			helper;
+	kern_return_t			kr;
+	int				ok = 0, rs = -1, i, running, waited;
+
+	arm55_child = MACH_PORT_NULL;
+	arm55_go = 0;
+	arm55_suspend_kr = KERN_FAILURE;
+	kr = task_create(me, NULL, 0, TRUE, &arm55_child);
+	if (kr == KERN_SUCCESS)
+		kr = vm_allocate(arm55_child, &stack, ARM55_STACK, TRUE);
+	if (kr != KERN_SUCCESS)
+		printf("act_test: [55] round %d: no child to create in (%d) — "
+		       "WRONG\n", round, kr);
+	if (kr == KERN_SUCCESS &&
+	    pthread_create(&helper, NULL, arm55_suspender, NULL) != 0) {
+		printf("act_test: [55] round %d: pthread_create failed — "
+		       "WRONG\n", round);
+		kr = KERN_FAILURE;
+	} else if (kr == KERN_SUCCESS) {
+		/* Both at once: the suspend lands while the create runs. */
+		arm55_go = 1;
+		kr = thread_create(arm55_child, &t);
+		(void) pthread_join(helper, NULL);
+		if (kr != KERN_SUCCESS || arm55_suspend_kr != KERN_SUCCESS) {
+			printf("act_test: [55] round %d: thread_create answered "
+			       "%d and task_suspend %d — WRONG\n", round, kr,
+			       arm55_suspend_kr);
+			kr = KERN_FAILURE;
+		}
+	}
+	if (kr == KERN_SUCCESS) {
+		kr = thread_get_state(t, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, &count);
+		if (kr == KERN_SUCCESS) {
+			state.rip = (uint64_t) (uintptr_t) arm55_spin;
+			state.rsp = (uint64_t) (stack + ARM55_STACK - 8);
+			kr = thread_set_state(t, x86_64_THREAD_STATE,
+					      (thread_state_t) &state, count);
+		}
+		if (kr == KERN_SUCCESS)
+			kr = thread_resume(t);
+		if (kr != KERN_SUCCESS)
+			printf("act_test: [55] round %d: setting the thread up "
+			       "answered %d — WRONG\n", round, kr);
+	}
+	if (kr == KERN_SUCCESS) {
+		/* Its task still suspended, the thread must stay put. */
+		nap(ARM55_SETTLE_MS);
+		for (i = running = 0; i < ARM55_SAMPLES; i++) {
+			if ((rs = arm55_run_state(t)) == TH_STATE_RUNNING)
+				running++;
+			nap(5);
+		}
+		if (running == ARM55_SAMPLES)
+			printf("act_test: [55] round %d: a thread made while its "
+			       "task was being suspended runs with the task "
+			       "still suspended (%d of %d samples) — WRONG "
+			       "(#935)\n", round, running, ARM55_SAMPLES);
+		else {
+			/* The task resumed, it must run. */
+			(void) task_resume(arm55_child);
+			for (waited = 0; waited < ARM55_BOUND_MS; waited += 5) {
+				if ((rs = arm55_run_state(t))
+				    == TH_STATE_RUNNING)
+					break;
+				nap(5);
+			}
+			if (rs == TH_STATE_RUNNING)
+				ok = 1;
+			else
+				printf("act_test: [55] round %d: the thread is "
+				       "still held %d ms after its task was "
+				       "resumed (run state %d) — WRONG (#935)\n",
+				       round, ARM55_BOUND_MS, rs);
+		}
+	}
+	if (arm55_child != MACH_PORT_NULL) {
+		(void) task_terminate(arm55_child);
+		(void) mach_port_deallocate(me, arm55_child);
+	}
+	if (t != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, t);
+	return ok;
+}
+
+static int
+arm_fifty_five_created_while_suspended(void)
+{
+	mach_port_t	me = mach_task_self();
+	int		round;
+
+	for (round = 0; round < ARM55_ROUNDS; round++)
+		if (!arm55_round(me, round))
+			return 0;
+
+	printf("act_test: [55] %d threads made while their task was being "
+	       "suspended stayed put while it was suspended and ran once it "
+	       "was resumed (#935)\n", ARM55_ROUNDS);
 	return 1;
 }
 
@@ -5430,6 +5617,90 @@ arm_sixteen_spin(void)
 }
 
 /*
+ * What one name of this task's space is, for [16]'s WRONG (#935): its rights
+ * and, for a send right, whether it names a thread or a task.  The campaigns of
+ * 0a30077e and 36617991 said "1 name(s) left behind" a hundred times and never
+ * which.  Called only after the second count, so nothing here is counted.
+ */
+static void
+arm_sixteen_say_name(const char *how, mach_port_t name, mach_port_type_t type)
+{
+	mach_port_t		me = mach_task_self();
+	mach_port_urefs_t	refs = 0;
+
+	if (type & MACH_PORT_TYPE_RECEIVE) {
+		mach_port_status_t	st;
+		mach_msg_type_number_t	n = MACH_PORT_RECEIVE_STATUS_COUNT;
+
+		if (mach_port_get_attributes(me, name, MACH_PORT_RECEIVE_STATUS,
+					     (mach_port_info_t) &st, &n)
+		    == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a receive "
+			       "right, %u queued, seqno %u, send rights %s, %u "
+			       "send-once\n", how, name, type, st.mps_msgcount,
+			       st.mps_seqno, st.mps_srights ? "out" : "none",
+			       st.mps_sorights);
+		else
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a receive "
+			       "right whose status could not be read\n", how,
+			       name, type);
+	} else if (type & MACH_PORT_TYPE_SEND) {
+		thread_basic_info_data_t	tb;
+		task_basic_info_data_t		kb;
+		mach_msg_type_number_t		tn = THREAD_BASIC_INFO_COUNT;
+		mach_msg_type_number_t		kn = TASK_BASIC_INFO_COUNT;
+
+		(void) mach_port_get_refs(me, name, MACH_PORT_RIGHT_SEND, &refs);
+		if (thread_info(name, THREAD_BASIC_INFO, (thread_info_t) &tb,
+				&tn) == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to a thread, run state %d, suspend "
+			       "count %d\n", how, name, type, refs, tb.run_state,
+			       tb.suspend_count);
+		else if (task_info(name, TASK_BASIC_INFO, (task_info_t) &kb,
+				   &kn) == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to a task, suspend count %d\n", how,
+			       name, type, refs, kb.suspend_count);
+		else
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to neither a live thread nor a live "
+			       "task\n", how, name, type, refs);
+	} else if (type & MACH_PORT_TYPE_DEAD_NAME) {
+		(void) mach_port_get_refs(me, name, MACH_PORT_RIGHT_DEAD_NAME,
+					  &refs);
+		printf("act_test: [16]   %s 0x%x, type 0x%x: a dead name "
+		       "(%u urefs)\n", how, name, type, refs);
+	} else
+		printf("act_test: [16]   %s 0x%x, type 0x%x\n", how, name, type);
+}
+
+/* Every name that came, went or changed between two counts of the space. */
+static void
+arm_sixteen_say_difference(mach_port_array_t bn, mach_port_type_array_t bt,
+			   mach_msg_type_number_t bc, mach_port_array_t an,
+			   mach_port_type_array_t at, mach_msg_type_number_t ac)
+{
+	mach_msg_type_number_t	i, j;
+
+	for (i = 0; i < ac; i++) {
+		for (j = 0; j < bc && bn[j] != an[i]; j++)
+			continue;
+		if (j == bc)
+			arm_sixteen_say_name("came:", an[i], at[i]);
+		else if (bt[j] != at[i])
+			arm_sixteen_say_name("changed:", an[i], at[i]);
+	}
+	for (j = 0; j < bc; j++) {
+		for (i = 0; i < ac && an[i] != bn[j]; i++)
+			continue;
+		if (i == ac)
+			printf("act_test: [16]   went: 0x%x, type 0x%x\n", bn[j],
+			       bt[j]);
+	}
+}
+
+/*
  * ── [16] A creation whose name cannot be copied out leaves no name behind ──
  *
  * syscall_thread_create(), syscall_thread_create_running() and
@@ -5453,9 +5724,9 @@ arm_sixteen_name_not_copied_out(void)
 {
 	mach_port_t			me = mach_task_self();
 	vm_address_t			ro = 0, stack = 0;
-	mach_port_array_t		names = 0;
-	mach_port_type_array_t		types = 0;
-	mach_msg_type_number_t		nn = 0, nt = 0;
+	mach_port_array_t		names = 0, bnames = 0;
+	mach_port_type_array_t		types = 0, btypes = 0;
+	mach_msg_type_number_t		nn = 0, nt = 0, bnn = 0, bnt = 0;
 	struct x86_64_thread_state	rstate;
 	mach_msg_type_number_t		rcount = x86_64_THREAD_STATE_COUNT;
 	mach_port_t			tmp = MACH_PORT_NULL;
@@ -5472,16 +5743,14 @@ arm_sixteen_name_not_copied_out(void)
 		return 0;
 	}
 
-	kr = mach_port_names(me, &names, &nn, &types, &nt);
+	kr = mach_port_names(me, &bnames, &bnn, &btypes, &bnt);
 	if (kr != KERN_SUCCESS) {
 		printf("act_test: [16] mach_port_names before (%d) — WRONG\n",
 		       kr);
 		(void) vm_deallocate(me, ro, vm_page_size);
 		return 0;
 	}
-	before = (int) nn;
-	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
-	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+	before = (int) bnn;	/* the list is kept, to say what changed */
 
 	/*
 	 * #756: a valid x86-64 state for thread_create_running, so it creates
@@ -5520,19 +5789,49 @@ arm_sixteen_name_not_copied_out(void)
 	if (kr != KERN_SUCCESS) {
 		printf("act_test: [16] mach_port_names after (%d) — WRONG\n",
 		       kr);
+		(void) vm_deallocate(me, (vm_address_t) bnames,
+				     bnn * sizeof(*bnames));
+		(void) vm_deallocate(me, (vm_address_t) btypes,
+				     bnt * sizeof(*btypes));
 		return 0;
 	}
 	after = (int) nn;
-	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
-	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
 
 	if (after != before) {
+		mach_port_array_t	lnames = 0;
+		mach_port_type_array_t	ltypes = 0;
+		mach_msg_type_number_t	lnn = 0, lnt = 0;
+
 		printf("act_test: [16] %d name(s) left behind after creations "
 		       "whose name could not be copied out (%d -> %d): a right "
 		       "the caller was never told and cannot release — WRONG "
 		       "(#662)\n", after - before, before, after);
-		return 0;
+		/*
+		 * #935: which names, and whether they stay.  A count back
+		 * where it was three seconds on says the names were another
+		 * thread's, passing through, and not rights the traps left.
+		 */
+		arm_sixteen_say_difference(bnames, btypes, bnn, names, types,
+					   nn);
+		nap(3000);
+		if (mach_port_names(me, &lnames, &lnn, &ltypes, &lnt)
+		    == KERN_SUCCESS) {
+			printf("act_test: [16]   3 s later the space holds %u "
+			       "names (%d before the traps, %d after)\n", lnn,
+			       before, after);
+			(void) vm_deallocate(me, (vm_address_t) lnames,
+					     lnn * sizeof(*lnames));
+			(void) vm_deallocate(me, (vm_address_t) ltypes,
+					     lnt * sizeof(*ltypes));
+		}
 	}
+	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
+	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+	(void) vm_deallocate(me, (vm_address_t) bnames, bnn * sizeof(*bnames));
+	(void) vm_deallocate(me, (vm_address_t) btypes, bnt * sizeof(*btypes));
+
+	if (after != before)
+		return 0;
 
 	printf("act_test: [16] a creation whose name could not be copied out "
 	       "left no name behind: %d names before and after, trap codes "
@@ -9242,6 +9541,8 @@ main(int argc, char **argv)
 	passed += arm_fifty_two_fs_base_goes_with_the_thread();
 	arms++;		/* arm fifty-three, #414 */
 	passed += arm_fifty_three_threads_fault_together();
+	arms++;		/* arm fifty-five, #935: before [54], which [16] follows */
+	passed += arm_fifty_five_created_while_suspended();
 	arms++;		/* arm fifty-four, #935 */
 	passed += arm_fifty_four_create_on_a_dying_task();
 

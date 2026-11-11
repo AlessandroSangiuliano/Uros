@@ -4,15 +4,15 @@ Over: 935-widen-create-listed.patch
 Takes out: the move -- act_create() lists the activation before it has a thread, and thread_create_in() does not; the widen holds it threadless on the list while task_info(TASK_THREAD_TIMES_INFO) walks it and asserts.  Caught 6 of 6 on victus (10/11)
 Run: --entry 14 300 -smp 4
 Expect: Assertion failed.*task\.c.*170[0-9].*thread
-<task_info\+0x
+Expect: <task_info\+0x
 
-diff --git b/uros/src/mach_kernel/kern/thread.c a/uros/src/mach_kernel/kern/thread.c
-index 1d05e9f1..8c3a08c1 100644
---- b/uros/src/mach_kernel/kern/thread.c
-+++ a/uros/src/mach_kernel/kern/thread.c
-@@ -1314,24 +1314,6 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
- 		return(KERN_FAILURE);
- 	}
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index 5cfbdcd5..63e75302 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1337,24 +1337,6 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
+ 	for (sc = parent_task->suspend_count; sc; --sc)
+ 		thread_hold(thr_act);
  
 -	/*
 -	 * 🔴 CHAIN IT ONTO THE TASK NOW, WHOLE (#935).  act_create() used to
@@ -32,14 +32,14 @@ index 1d05e9f1..8c3a08c1 100644
 -	parent_task->res_act_count++;
 -	mutex_unlock(&parent_task->act_list_lock);
 -
- 	task_unlock(parent_task);
- 	pset_unlock(pset);
- 
-diff --git b/uros/src/mach_kernel/kern/thread_act.c a/uros/src/mach_kernel/kern/thread_act.c
-index 8bb61605..ee1a7746 100644
---- b/uros/src/mach_kernel/kern/thread_act.c
-+++ a/uros/src/mach_kernel/kern/thread_act.c
-@@ -1147,19 +1147,20 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
+ 	/*
+ 	 * 🔴 AND START IT BEFORE THE LOCKS GO, if the caller wants it running
+ 	 * (#935).  Listed, the thread can be reached: task_terminate() walks
+diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
+index e5d95c7c..a9db7b00 100644
+--- a/uros/src/mach_kernel/kern/thread_act.c
++++ b/uros/src/mach_kernel/kern/thread_act.c
+@@ -1164,19 +1164,20 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
  		}
  	}
  

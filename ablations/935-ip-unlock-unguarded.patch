@@ -3,7 +3,7 @@ Issue: #935
 Over: 935-widen-create-terminate.patch
 Takes out: the NULL check -- thread_terminate()s empty-activation branch, which the detach routes a threadless activation to, ip_unlock()s a NULL pool port.  A deterministic write fault at address 0x38 inside thread_terminate()
 Run: --entry 14 300 -smp 4
-Expect: faulting address 0x0+38
+Expect: faulting address 0x0{14}38
 
 diff --git b/uros/src/mach_kernel/kern/thread_act.c a/uros/src/mach_kernel/kern/thread_act.c
 index ee1a7746..d7131552 100644
