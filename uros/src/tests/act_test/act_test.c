@@ -3020,6 +3020,7 @@ arm_fourteen_terminate_inside_traps(void)
 static mach_port_t		arm54_child;
 static volatile int		arm54_stop;
 static volatile unsigned	arm54_made;
+static volatile unsigned	arm54_late;
 static volatile unsigned	arm54_asked;
 
 /* Make and unmake threads in the child until told to stop or it is gone. */
@@ -3031,8 +3032,17 @@ arm54_creator(void *arg)
 	(void) arg;
 	while (!arm54_stop) {
 		mach_port_t	t = MACH_PORT_NULL;
+		kern_return_t	kr = thread_create(arm54_child, &t);
 
-		if (thread_create(arm54_child, &t) != KERN_SUCCESS)
+		/*
+		 * KERN_FAILURE comes from one place only: thread_create_in()
+		 * finding the task inactive after it had attached the thread,
+		 * the late failure (#935).  act_create() refuses a task
+		 * already gone with KERN_INVALID_ARGUMENT.
+		 */
+		if (kr == KERN_FAILURE)
+			arm54_late++;
+		if (kr != KERN_SUCCESS)
 			continue;	/* the child is gone, or will be */
 		arm54_made++;
 		(void) thread_terminate(t);
@@ -3116,9 +3126,10 @@ arm_fifty_four_create_on_a_dying_task(void)
 	}
 
 	printf("act_test: [54] %d tasks terminated while a thread made and "
-	       "unmade threads in each (%u made) and another read its thread "
-	       "times (%u read), and the kernel came through (#935)\n",
-	       ARM54_ROUNDS, arm54_made, arm54_asked);
+	       "unmade threads in each (%u made, %u met the task gone after "
+	       "the thread was attached) and another read its thread times "
+	       "(%u read), and the kernel came through (#935)\n",
+	       ARM54_ROUNDS, arm54_made, arm54_late, arm54_asked);
 	return 1;
 }
 
