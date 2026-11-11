@@ -4,7 +4,7 @@ Over: 935-widen-create-terminate.patch
 Takes out: the detach in thread_create_in()s late failure -- the thread is freed with thr_act->thread still pointing at it, and the callers thread_terminate() runs act_abort() through freed memory, faulting in thread_unstop()/thread_setrun() off a freed thread.  The widen makes the race certain
 Run: --entry 14 300 -smp 4
 Expect: <thread_unstop\+0x
-<thread_setrun\+0x
+Expect: <thread_setrun\+0x
 
 diff --git b/uros/src/mach_kernel/kern/thread.c a/uros/src/mach_kernel/kern/thread.c
 index 8c3a08c1..12fee386 100644
