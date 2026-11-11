@@ -3311,30 +3311,37 @@ arm_fifty_five_created_while_suspended(void)
 }
 
 /*
- * ── Arm fifty-six: an abort of a thread running in user mode is spent by its
- *    first return to user mode (#925) ──
+ * ── Arm fifty-six: an abort of a thread running in user mode reaches it there,
+ *    and does not outlive its return (#925) ──
  *
  * thread_abort() of a thread that is not waiting sets TH_ABORT, and every wait
  * the thread blocks in while the bit is set ends at once.  special_handler()
- * clears it when it runs, and nudge()'s comment promises that runs "before it
- * next executes any of its USER-level code".  Read in the code, for a thread
- * on another processor nothing makes it so: act_set_apc() raises AST_APC in
- * need_ast[] only for the caller's own activation and sends no interrupt, and
- * the SYSCALL return (thread_return_ast(), #475) reads need_ast[] alone.  The
- * bit could then outlive any number of system calls, and each wait among them
- * would end interrupted, until an interrupt in ring 3 or a context switch let
- * the handler run.
+ * clears it, run through AST_APC on the way back to user mode.  For a thread
+ * running in user mode on another processor that AST is only in its activation
+ * until the processor copies it into need_ast[], which only its tick did, every
+ * 10 ms, until act_set_apc() sent it the interrupt that does it (#925).
  *
- * Measured, not argued: a thread spins in user mode, with no system call, while
- * this thread aborts it; then it makes two timed futex waits on a word nobody
- * touches.  The first may end interrupted: the abort lands on the first kernel
- * entry.  The second must time out: by then the thread has been back in user
- * mode once.  The arm says how often the first ended early, which is how often
- * the abort was still pending when the thread got there, so that a pass that
- * never met the window says so.
+ * So a thread spins in user mode, with no system call, while this one aborts
+ * it, waits a millisecond by the clock and lets it go; then it makes two timed
+ * futex waits on a word nobody touches.
+ *
+ *   - The first must time out.  A millisecond is far longer than an interrupt
+ *     takes to arrive, and far shorter than the 10 ms between ticks: without
+ *     the interrupt the abort is still pending unless a tick fell inside it,
+ *     and the wait ends at once.
+ *   - The second must time out whatever the first did.  A first wait ended by
+ *     the abort is still a switch away and back -- thread_select() keeps the
+ *     running thread only at exactly TH_RUN, which TH_ABORT is not -- and the
+ *     switch-in copies the activation's ASTs.  A bit that outlived that would
+ *     end every wait after the abort.
+ *
+ * Before the interrupt, with the go given at once: at four processors the
+ * first ended early in 300 rounds of 300 and the second in none; at one
+ * processor neither, the abort reaching the thread at its switch-in.
  */
 #define	A56_ROUNDS	50
 #define	A56_WAIT_MS	20
+#define	A56_GAP_US	1000
 
 static volatile int		a56_spinning;
 static volatile int		a56_go;
@@ -3353,6 +3360,27 @@ a56_ms_between(const struct timespec *a, const struct timespec *b)
 {
 	return (long) (b->tv_sec - a->tv_sec) * 1000 +
 	       (long) (b->tv_nsec - a->tv_nsec) / 1000000;
+}
+
+/*
+ * Wait at least `us' microseconds by the clock -- a count of turns is no time
+ * under TCG -- and answer how many it read, or -1 if it could not read it.
+ */
+static long
+a56_gap(long us)
+{
+	struct timespec	t0, t;
+	long		d;
+
+	if (getclock(TIMEOFDAY, &t0) != 0)
+		return -1;
+	do {
+		if (getclock(TIMEOFDAY, &t) != 0)
+			return -1;
+		d = (long) (t.tv_sec - t0.tv_sec) * 1000000 +
+		    (long) (t.tv_nsec - t0.tv_nsec) / 1000;
+	} while (d < us);
+	return d;
 }
 
 /* Spin in user mode until told, then wait twice on a word nobody wakes. */
@@ -3380,12 +3408,13 @@ a56_victim(void *arg)
 }
 
 static int
-arm_fifty_six_abort_spent_in_user_mode(void)
+arm_fifty_six_abort_reaches_user_mode(void)
 {
 	mach_port_t	me = mach_task_self();
-	int		round, first = 0, second = 0;
-	long		worst = 0;
-	kern_return_t	kr, worst_kr = KERN_OPERATION_TIMED_OUT;
+	int		round, i, early[2] = { 0, 0 };
+	long		gap, shortest_gap = 0, worst[2] = { 0, 0 };
+	kern_return_t	kr, worst_kr[2] = { KERN_OPERATION_TIMED_OUT,
+					    KERN_OPERATION_TIMED_OUT };
 
 	for (round = 0; round < A56_ROUNDS; round++) {
 		pthread_t	victim;
@@ -3402,6 +3431,7 @@ arm_fifty_six_abort_spent_in_user_mode(void)
 			__asm__ __volatile__("pause");
 		/* It is in its loop, in user mode, making no system call. */
 		kr = thread_abort(a56_self);
+		gap = a56_gap(A56_GAP_US);
 		a56_go = 1;
 		(void) pthread_join(victim, NULL);
 		(void) mach_port_deallocate(me, a56_self);
@@ -3410,29 +3440,46 @@ arm_fifty_six_abort_spent_in_user_mode(void)
 			       "%d — WRONG\n", round, kr);
 			return 0;
 		}
-		if (a56_kr[0] != KERN_OPERATION_TIMED_OUT)
-			first++;
-		if (a56_kr[1] != KERN_OPERATION_TIMED_OUT) {
-			second++;
-			if (second == 1 || a56_ms[1] < worst) {
-				worst = a56_ms[1];
-				worst_kr = a56_kr[1];
+		if (gap < 0) {
+			printf("act_test: [56] round %d: the clock could not be "
+			       "read to wait after the abort — WRONG\n", round);
+			return 0;
+		}
+		if (round == 0 || gap < shortest_gap)
+			shortest_gap = gap;
+		for (i = 0; i < 2; i++) {
+			if (a56_kr[i] == KERN_OPERATION_TIMED_OUT)
+				continue;
+			if (++early[i] == 1 || a56_ms[i] < worst[i]) {
+				worst[i] = a56_ms[i];
+				worst_kr[i] = a56_kr[i];
 			}
 		}
 	}
 
-	if (second > 0) {
+	if (early[0] > 0) {
+		printf("act_test: [56] an abort of a thread spinning in user mode "
+		       "was still pending when it waited, %ld us or more later: "
+		       "the first of two %d ms futex waits ended early in %d of "
+		       "%d rounds (the shortest after %ld ms, answering 0x%x), "
+		       "the second in %d — WRONG (#925)\n", shortest_gap,
+		       A56_WAIT_MS, early[0], A56_ROUNDS, worst[0], worst_kr[0],
+		       early[1]);
+		return 0;
+	}
+	if (early[1] > 0) {
 		printf("act_test: [56] an abort of a thread spinning in user mode "
 		       "outlived its return there: the second of two %d ms futex "
 		       "waits ended early in %d of %d rounds (the shortest after "
-		       "%ld ms, answering 0x%x), the first in %d — WRONG (#925)\n",
-		       A56_WAIT_MS, second, A56_ROUNDS, worst, worst_kr, first);
+		       "%ld ms, answering 0x%x), the first in none — WRONG "
+		       "(#925)\n", A56_WAIT_MS, early[1], A56_ROUNDS, worst[1],
+		       worst_kr[1]);
 		return 0;
 	}
 	printf("act_test: [56] an abort of a thread spinning in user mode was "
-	       "spent by its first return there: in %d rounds the second of two "
-	       "%d ms futex waits always timed out; the first ended early in %d "
-	       "(#925)\n", A56_ROUNDS, A56_WAIT_MS, first);
+	       "spent before it waited: in %d rounds both of two %d ms futex "
+	       "waits made %ld us or more after it timed out (#925)\n",
+	       A56_ROUNDS, A56_WAIT_MS, shortest_gap);
 	return 1;
 }
 
@@ -9669,7 +9716,7 @@ main(int argc, char **argv)
 	arms++;		/* arm fifty-three, #414 */
 	passed += arm_fifty_three_threads_fault_together();
 	arms++;		/* arm fifty-six, #925 */
-	passed += arm_fifty_six_abort_spent_in_user_mode();
+	passed += arm_fifty_six_abort_reaches_user_mode();
 	arms++;		/* arm fifty-five, #935: before [54], which [16] follows */
 	passed += arm_fifty_five_created_while_suspended();
 	arms++;		/* arm fifty-four, #935 */
