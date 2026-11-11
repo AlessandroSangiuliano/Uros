@@ -64,4 +64,10 @@
 #define	URMACH_TASK_RIGHTS_PROCESS	(URMACH_TASK_RIGHT_INFO | \
 					 URMACH_TASK_RIGHT_LIFECYCLE)
 
+/*
+ * What urmach_task_port_rights() answers for the full task port: every
+ * right, the ones named here and the ones no bit names.
+ */
+#define	URMACH_TASK_RIGHTS_FULL		0xffffffffU
+
 #endif	/* _MACH_TASK_RIGHTS_H_ */

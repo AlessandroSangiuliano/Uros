@@ -1127,6 +1127,50 @@ urmach_task_rights_port(
 }
 
 /*
+ *	Routine:	urmach_task_port_rights [kernel call]
+ *	Purpose:
+ *		#927: the rights `port' carries on a task:
+ *		URMACH_TASK_RIGHTS_FULL for the full task port, the set it was
+ *		made with for a reduced one.  Asked of the host and not of the
+ *		port, so that a port which is no kernel object is answered too,
+ *		instead of queuing a request nobody would ever answer -- which
+ *		is what asking the port itself would do.
+ *	Conditions:
+ *		Nothing locked.  On success the send right the request
+ *		carried is consumed here; on an error it is left to the
+ *		request's destruction, as every kernel call leaves it.
+ *	Returns:
+ *		KERN_SUCCESS		*rightsp is the port's rights.
+ *		KERN_INVALID_ARGUMENT	no host, or not a live task port.
+ */
+kern_return_t
+urmach_task_port_rights(
+	host_t		host,
+	ipc_port_t	port,
+	natural_t	*rightsp)
+{
+	kern_return_t	kr = KERN_INVALID_ARGUMENT;
+
+	*rightsp = 0;
+	if (host == HOST_NULL || !IP_VALID(port))
+		return KERN_INVALID_ARGUMENT;
+
+	ip_lock(port);
+	if (ip_active(port) && ip_kotype(port) == IKOT_TASK) {
+		*rightsp = URMACH_TASK_RIGHTS_FULL;
+		kr = KERN_SUCCESS;
+	} else if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS) {
+		*rightsp = ((struct task_rights *) port->ip_kobject)->tr_rights;
+		kr = KERN_SUCCESS;
+	}
+	ip_unlock(port);
+
+	if (kr == KERN_SUCCESS)
+		ipc_port_release_send(port);
+	return kr;
+}
+
+/*
  *	Routine:	convert_port_to_space
  *	Purpose:
  *		Convert from a port to a space.

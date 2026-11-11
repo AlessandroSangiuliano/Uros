@@ -861,3 +861,15 @@ routine urmach_task_rights_port(
 		task		: task_t;
 		rights		: natural_t;
 	out	port		: mach_port_t);
+
+/*
+ *	The rights a port carries on a task (#927): URMACH_TASK_RIGHTS_FULL
+ *	for the full task port, its set for a reduced one, and
+ *	KERN_INVALID_ARGUMENT for anything else.  Asked of the host, so a
+ *	port that is no kernel object is answered too: asked of the port
+ *	itself, the request would wait for a reply nobody sends.
+ */
+routine urmach_task_port_rights(
+		host		: host_t;
+		port		: mach_port_t;
+	out	rights		: natural_t);
