@@ -3338,7 +3338,12 @@ arm_fifty_five_created_while_suspended(void)
 
 static volatile int		a56_spinning;
 static volatile int		a56_go;
-static mach_port_t		a56_self;
+/*
+ * Volatile like the flag it is published under: a plain global could be read
+ * before the victim wrote it, the loop on a56_spinning being no barrier to the
+ * compiler -- under KVM at four processors round 11 aborted MACH_PORT_NULL.
+ */
+static volatile mach_port_t	a56_self;
 static volatile unsigned int	a56_word;	/* nobody wakes it */
 static volatile kern_return_t	a56_kr[2];
 static volatile long		a56_ms[2];
