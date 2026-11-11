@@ -905,6 +905,20 @@ cap_derive_task(mach_port_t            server,
     return KERN_SUCCESS;
 }
 
+/*
+ * cap_slots (#743).  The table's census, on any port: a count of tasks says
+ * nothing about any one of them, and it is the only way a test can see a slot
+ * come back.
+ */
+kern_return_t
+cap_slots(mach_port_t server, natural_t *in_use, natural_t *size)
+{
+    (void)server;
+    *in_use = (natural_t)cap_manifest_table_in_use();
+    *size   = (natural_t)cap_manifest_table_size();
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 cap_verify(mach_port_t             server,
            cap_token_t            token_buf,

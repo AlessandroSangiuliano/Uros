@@ -148,6 +148,23 @@ cap_manifest_table_task(mach_port_t task_cap_port)
     return MACH_PORT_NULL;
 }
 
+unsigned
+cap_manifest_table_in_use(void)
+{
+    unsigned n = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use)
+            n++;
+    return n;
+}
+
+unsigned
+cap_manifest_table_size(void)
+{
+    return CAP_MANIFEST_TABLE_SIZE;
+}
+
 mach_port_t
 cap_manifest_table_remove(mach_port_t task_cap_port)
 {

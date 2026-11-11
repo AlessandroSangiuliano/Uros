@@ -204,3 +204,18 @@ routine cap_derive_task(
 	in	task_port	: mach_port_t;
 	in	manifest	: cap_manifest_blob_t;
 	out	task_cap_port	: mach_port_make_send_t);
+
+/*
+ *	cap_slots (#743) — how many of cap_server's manifest slots hold a
+ *	task's per-task port, and how many slots there are.  Answered on
+ *	any port: a count of tasks says nothing about any one of them.
+ *
+ *	It is how a test sees a slot come back.  A right a provisioner
+ *	keeps is a sender no other task can count, and only cap_server
+ *	learns, by a no-senders notification, that a port has none left.
+ *	Appended: MIG numbers routines by position.
+ */
+routine cap_slots(
+		cap_server	: mach_port_t;
+	out	in_use		: natural_t;
+	out	size		: natural_t);

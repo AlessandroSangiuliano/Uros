@@ -76,6 +76,10 @@ mach_port_t cap_manifest_table_task(mach_port_t task_cap_port);
  */
 mach_port_t cap_manifest_table_remove(mach_port_t task_cap_port);
 
+/* How many slots hold a per-task port now, and how many there are (#743). */
+unsigned cap_manifest_table_in_use(void);
+unsigned cap_manifest_table_size(void);
+
 /*
  * What a child that asks for `asked' may have, from a parent whose manifest
  * is `parent' (#743): each of the child's lists cut to the parent's
