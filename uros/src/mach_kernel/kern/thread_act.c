@@ -2316,8 +2316,15 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 	gss.rh.next = thr_act->handlers;
 	thr_act->handlers = &gss.rh;
 
+	/*
+	 * Under the thread's lock, as act_set_apc() is called everywhere else:
+	 * it is what makes the processor that function reads the right one.
+	 */
+	assert(thr_act->thread);	/* Callers must ensure these */
 	s = splsched();
+	thread_lock(thr_act->thread);
 	act_set_apc(thr_act);
+	thread_unlock(thr_act->thread);
 	splx(s);
 
 #if	MACH_ASSERT
@@ -2331,7 +2338,6 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 	}
 #endif	/* MACH_ASSERT */
 
-	assert(thr_act->thread);	/* Callers must ensure these */
 	assert(thr_act != current_act());
 	for (;;) {
 		nudge(thr_act);
