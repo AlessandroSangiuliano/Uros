@@ -54,6 +54,8 @@
 #include "ahci_batch.h"	/* #432: a disk reading into a page it does not own */
 #include <libcap.h>
 #include <mach/cap_manifest.h>	/* #743: the manifests [38]-[40] send */
+#include <mach/notify.h>	/* #743: [43]'s forged no-senders */
+#include <mach/ndr.h>		/* #743: NDR_record, for the same */
 #include "cap_server.h"		/* #743: the stubs, asked on ports of the arms' choosing */
 #include "exec.h"		/* #743: [42]'s exec_load */
 #include "exec_types.h"		/* #743: EXEC_OK */
@@ -607,6 +609,70 @@ a_port_given_back_gives_its_slot_back(void)
     printf("cap_test: [40] WRONG — port %u of 80 refused with %d after %u "
            "wait(s) of 10 ms: the slots of the ports given back did not "
            "come back (#743)\n", i + 1, (int)kr, waits);
+    return 0;
+}
+
+/*
+ * Test [43]: a no-senders notification is the kernel's to send (#743).
+ *
+ * cap_server gives a per-task port's slot back, and destroys the port, on a
+ * no-senders notification.  Any holder of a send right can send a message
+ * with that id: forged, it would end the port of whatever task it names, for
+ * every holder at once.  The kernel's comes through the send-once right
+ * cap_server made for the request, and a forgery through a send right, which
+ * is what this arm sends to a port derived for the purpose -- after which the
+ * port must still answer, granting block devices READ.  The port is given
+ * back at the end.
+ */
+static int
+a_no_senders_forgery_ends_nothing(void)
+{
+    static uint64_t blob[64];
+    static const cap_manifest_entry_t read_only[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
+    uint32_t       len = manifest_make(blob, sizeof(blob), "cap_test_forged",
+                                       read_only, 1, NULL, 0);
+    mach_no_senders_notification_t fake;
+    mach_port_t    port = MACH_PORT_NULL;
+    mach_msg_return_t mr;
+    kern_return_t  kr, after = -1;
+
+    if (len == 0 ||
+        (kr = cap_derive_child(mach_cap_port, mach_task_self(), blob, len,
+                               &port)) != KERN_SUCCESS) {
+        printf("cap_test: [43] WRONG — no port derived to forge to (#743)\n");
+        return 0;
+    }
+
+    memset(&fake, 0, sizeof(fake));
+    fake.not_header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    fake.not_header.msgh_size = (mach_msg_size_t)(sizeof(fake) -
+                                                  sizeof(fake.trailer));
+    fake.not_header.msgh_remote_port = port;
+    fake.not_header.msgh_local_port = MACH_PORT_NULL;
+    fake.not_header.msgh_id = MACH_NOTIFY_NO_SENDERS;
+    fake.NDR = NDR_record;
+    fake.not_count = 1;
+    mr = mach_msg(&fake.not_header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                  fake.not_header.msgh_size, 0, MACH_PORT_NULL, 1000,
+                  MACH_PORT_NULL);
+
+    /* Behind the forgery on the same port, so it is handled after it. */
+    if (mr == MACH_MSG_SUCCESS)
+        after = acquire_on(port, RESOURCE_BLK_DEVICE, 0x743,
+                           CAP_OP_BLK_READ);
+    (void)mach_port_deallocate(mach_task_self(), port);
+
+    if (mr == MACH_MSG_SUCCESS && after == KERN_SUCCESS) {
+        printf("cap_test: [43] a no-senders notification forged through a "
+               "send right to a derived port ended nothing: the port still "
+               "granted block devices READ (#743)\n");
+        return 1;
+    }
+    printf("cap_test: [43] WRONG — a no-senders notification forged through "
+           "a send right: sent 0x%x, then block devices READ on the port: %d, "
+           "not 0 (#743)\n", (unsigned)mr, (int)after);
     return 0;
 }
 
@@ -4392,6 +4458,8 @@ main(int argc, char **argv)
     if (!a_port_given_back_gives_its_slot_back())
         pass = 0;
     if (!only_cap_server_gives_the_provisioning_port())
+        pass = 0;
+    if (!a_no_senders_forgery_ends_nothing())
         pass = 0;
 
     /*
