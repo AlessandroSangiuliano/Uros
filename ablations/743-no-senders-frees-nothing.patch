@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #743
+Takes out: the end of a per-task port with no senders (380521e5) -- the notification is taken and the slot, the task port and the receive right stay
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[40\] WRONG — port [0-9]+ of 80 refused with 2415 after 200 wait\(s\) of 10 ms: the slots of the ports given back did not come back
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index b19628dd..fbb4a3fc 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -753,12 +753,7 @@ cap_task_port_gone(mach_port_t port)
+         return;
+     }
+ 
+-    task = cap_manifest_table_remove(port);
+-    (void)mach_port_destroy(mach_task_self(), port);
+-    if (MACH_PORT_VALID(task))
+-        (void)mach_port_deallocate(mach_task_self(), task);
+-    printf("cap: cap_port=0x%x has no senders — its slot and its task's "
+-           "port are given back (#743)\n", (unsigned)port);
++    (void)task;
+ }
+ 
+ /*
