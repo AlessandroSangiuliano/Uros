@@ -362,7 +362,16 @@ while q != head and nt < 64:
             # A thread asleep on a mutex: who holds it, from own_thr, as
             # quiet_census does.  That census cannot speak while another
             # task polls, and this one asks no one (#889).
-            if int(th["wait_from"]) and "_mutex_lock" in ksym(th["wait_from"]):
+            #
+            # ⚠️ Only while it waits on an event (#940).  wait_from is where
+            # its last event wait was declared, and an IPC park declares
+            # none: a thread asleep in a receive after a mutex wait read as
+            # asleep on the mutex at 0 - offsetof(locked).  The walk printed
+            # "mutex -0x1" for act_test [54]'s helper, with the BIOS vectors
+            # for its holder, or, on a processor whose CR3 maps nothing
+            # there, lost the thread's stack to "Cannot access memory".
+            if int(th["wait_event"]) and int(th["wait_from"]) and \
+               "_mutex_lock" in ksym(th["wait_from"]):
                 lock = int(th["wait_event"]) - int(ev("(long) &((mutex_t *) 0)->locked"))
                 mx = gdb.Value(lock).cast(gdb.lookup_type("mutex_t").pointer())
                 print("      mutex %#x held-by=%#x taken-at=%s locked=%d" % (
