@@ -3352,11 +3352,13 @@ arm_fifty_five_created_while_suspended(void)
  * its loop, and at one processor the victim depresses its priority first (see
  * a56_victim()).  The nap's end preempts the victim there, in user mode; the
  * abort finds it preempted, and the question at one processor is whether the
- * switch back delivers it before the first wait.  The rounds then took 4.3 to
- * 4.4 s at one processor, and 4.0 s at four, where they had taken 3.0: the
- * nap costs two ticks a round.  925-apc-no-interrupt was caught 4 of 4, the
- * fixed tree passing 4 of 4 (entry 14 on OMEGA, KVM and TCG, the trees
- * alternated, 12/11).
+ * switch back delivers it before the first wait.  The rounds take 4.0 s at one
+ * processor and at four, where they had taken 3.0: the nap costs two ticks a
+ * round.  As merged in 86d46d6a the depression was SWITCH_OPTION_DEPRESS's,
+ * given back before thread_switch() returned, and the rounds took 4.2 to 4.4 s
+ * at one processor on the aging rule (victus and OMEGA, 12/11).
+ * 925-apc-no-interrupt was caught 4 of 4, the fixed tree passing 4 of 4 (entry
+ * 14 on OMEGA, KVM and TCG, the trees alternated, 12/11).
  */
 #define	A56_ROUNDS	50
 #define	A56_WAIT_MS	20
@@ -3417,20 +3419,29 @@ a56_victim(void *arg)
 	(void) arg;
 	a56_self = mach_thread_self();
 	/*
-	 * At one processor, below any priority the main thread can have, so
-	 * that the end of its nap preempts this thread in its loop, in user
-	 * mode: thread_setrun() preempts only for a better priority.  Without
-	 * this the nap's end preempted it too, in every boot measured -- it
-	 * had used the processor while the main thread slept, and usage is
-	 * what a timesharing priority is made of -- but that is the aging
-	 * rule's doing, not anything asked for here; the depression is the
-	 * lowest priority there is, by thread_switch()'s contract, and cost
-	 * nothing measurable.  At more processors this one keeps its priority
-	 * and its processor, and is running there when the abort comes (#925).
+	 * 🔴 AT ONE PROCESSOR, DEPRESSED IN ITS LOOP -- BY SWITCH_OPTION_IDLE,
+	 * WHOSE DEPRESSION LASTS (#925).
+	 *
+	 * Below any priority the main thread can have, so that the end of its
+	 * nap preempts this thread in its loop, in user mode: thread_setrun()
+	 * preempts only for a better priority.  thread_switch() gives the
+	 * depression back before it returns, for every option but
+	 * SWITCH_OPTION_IDLE (syscall_subr.c: "Restore depressed priority unless
+	 * we just did a SWITCH_OPTION_IDLE"), so SWITCH_OPTION_DEPRESS depresses
+	 * a thread only while it waits to run again.  As merged in 86d46d6a this
+	 * asked for DEPRESS, and the victim read itself depressed in its loop in
+	 * none of 100 rounds at one processor (victus, 12/11).  The nap's end
+	 * preempted it all the same, because it had used the processor while
+	 * the main thread slept, and usage is what a timesharing priority is
+	 * made of -- the aging rule's doing, which is what the depression was
+	 * there to take the rounds off.  With IDLE, depressed in 100 of 100,
+	 * and the rounds take at one processor the 4.0 s they take at four.  At
+	 * more processors this one keeps its priority and its processor, and is
+	 * running there when the abort comes.
 	 */
 	if (a56_alone)
 		a56_depressed = thread_switch(MACH_PORT_NULL,
-					      SWITCH_OPTION_DEPRESS,
+					      SWITCH_OPTION_IDLE,
 					      A56_DEPRESS_MS);
 	a56_spinning = 1;
 	while (!a56_go)
@@ -3510,7 +3521,8 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		}
 		if (a56_depressed != KERN_SUCCESS) {
 			printf("act_test: [56] round %d: thread_switch() with "
-			       "SWITCH_OPTION_DEPRESS answered %d — WRONG "
+			       "SWITCH_OPTION_IDLE answered %d: the victim's "
+			       "depression was gone before it returned — WRONG "
 			       "(#925)\n", round, a56_depressed);
 			return 0;
 		}
