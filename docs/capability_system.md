@@ -458,6 +458,39 @@ driver reads a disk by writing an address into the device's own descriptor and
 poking a register — no system call, nothing to see, nowhere to put a check.
 That is not a gap; it is why the IOMMU is required.
 
+### Rights on a task (#927)
+
+A send right to a task port is the whole task: its memory, its threads, its
+port rights and its special ports. A server that needed a little of that used
+to be handed all of it. The kernel now names rights on a task
+(`<mach/task_rights.h>`), and a routine that takes a task names the one it
+needs:
+
+| right | routines |
+|---|---|
+| `URMACH_TASK_RIGHT_INFO` | `task_info()` |
+| `URMACH_TASK_RIGHT_LIFECYCLE` | `task_terminate()`, `task_suspend()`, `task_resume()` |
+| the full port only | everything else: memory, threads, port rights, special ports |
+
+**A reduced port carries a set of these rights.**
+
+- `urmach_task_rights_port(task, rights)` makes it, from the full task port
+  and from nothing else, so a right is taken away and never added.
+- There is one per set and per task, so two registrations of one process
+  name it alike.
+- It dies with the task, so a dead-name request on it reports the death, as
+  one on the task port does.
+- The set with no bits is the task's identity.
+
+`urmach_task_port_rights(host, port)` says what a port carries. It is asked of
+the host, so that a plain port gets an answer, where asking the port itself
+would send a request nobody reads.
+
+proc_server is handed each process's reduced port with the info and lifecycle
+rights, and refuses a full one with `PROC_ERR_FULL_TASK`. A right is named
+when a routine comes to check it: reading a task's memory, for a debugger, is
+not named yet, and cap_server's identity-only port is #938.
+
 ---
 
 ## 8. Worked example: a browser
@@ -616,13 +649,15 @@ Stated so nobody reads this document as a description of a finished system.
   `DIRECTORY`, `PRINTER`, `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values
   with no enforcement behind them — the browser example above is therefore
   *architecture*, not a transcript.
-- **proc_server still holds every process's task port**, to terminate,
-  suspend and resume it, read its counters and see it die, and a task port
-  is much more than that (#927). exec_server held the port of every task that
-  spawned a program, and of every program and first thread it started, until
-  #926: the caller now makes the task and lends it, and exec_server gives it
-  back before it answers and answers the first thread moved. Both were found
-  while enumerating for #911.
+- **cap_server still holds full task ports**, of every task with a manifest,
+  for the DMA owner check, which needs only to tell which task a region
+  belongs to (#938). Two other servers held task ports they did not need, as
+  found while enumerating for #911:
+  - exec_server held the port of every task that spawned a program, and of
+    every program and first thread it started, until #926. The caller now
+    makes the task and lends it, and exec_server gives it back.
+  - proc_server held every process's task port until #927. It now holds the
+    process's reduced port (§7).
 - **A manifest decides every capability.** A task that ships none is refused
   all of them (`cap_manifest_allows()`, #511). In the x86-64 build fourteen
   programs ship one: ten in the bundle, for the tasks bootstrap starts
@@ -669,6 +704,7 @@ this is where to look, and what to break to confirm it still works.
 | bootstrap keeps no task's port | `bootstrap: … still holds a send right to its TASK_CAP_PORT …` | `ablations/743-bootstrap-keeps-its-copy` |
 | a no-senders notification forged by a holder ends nothing | `cap_test [43]` | `ablations/743-forged-no-senders-taken` |
 | exec_server holds nothing of a spawn once it has answered | `cap_test [44]` | `ablations/926-exec-server-keeps-the-task`, `926-first-thread-copied` |
+| proc_server holds a process's reduced port, and it reaches no more | `cap_test [45]` | `ablations/927-proc-server-takes-full-ports`, `927-reduced-port-reaches-memory`, `927-rights-not-checked`, `927-mint-from-a-reduced-port` |
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers
