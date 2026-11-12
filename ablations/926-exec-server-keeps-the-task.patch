@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #926
+Takes out: exec_server giving back the task it is lent (292abf92) -- it keeps a send right to every program's task
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[44\] WRONG — once exec_load had answered, exec_server held send rights to the task that asked: 0, to the program's task: 1, to its first thread: 0
+
+diff --git a/uros/src/servers/exec_server/exec_main.c b/uros/src/servers/exec_server/exec_main.c
+index 7a81b653..432b79e9 100644
+--- a/uros/src/servers/exec_server/exec_main.c
++++ b/uros/src/servers/exec_server/exec_main.c
+@@ -89,8 +89,7 @@ exec_S_load(
+      * for good.  The first thread goes back MOVED (exec.defs), so nothing
+      * of it stays here either.
+      */
+-    if (MACH_PORT_VALID(task))
+-        (void)mach_port_deallocate(mach_task_self(), task);
++    (void)task;
+ 
+     /*
+      * #743: the caller's per-task port is ours to give back, whatever the
