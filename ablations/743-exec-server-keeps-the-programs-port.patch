@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #743
 Takes out: exec_server giving back the port it derived for a program (c0b1a6b5, 2d9ca190) -- it keeps a copy of every one
 Run: --entry 14 600 -smp 4
-Expect: cap_test: \[42\] WRONG — /hello_exec exec'd with a caller's port: block devices READ 0 \(want 0\), WRITE 2413 and DMA buffers 2413 \(want CAP_ERR_NOT_IN_MANIFEST 2413\); slots [0-9]+ before the exec and [0-9]+ after both ports were given back and 200 wait\(s\) of 10 ms
+Expect: cap_test: \[42\] WRONG — the slots were [0-9]+ before the exec and [0-9]+ after both ports were given back and 200 wait\(s\) of 10 ms
 
 diff --git a/uros/src/servers/exec_server/exec_load.c b/uros/src/servers/exec_server/exec_load.c
 index aee95556..3a699788 100644
