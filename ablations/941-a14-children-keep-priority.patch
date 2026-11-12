@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #941
+Takes out: the depression of act_test [14]'s children at one processor -- they keep the priority they start with, better than the main thread's, so each start and the end of each nap wait for a child's quantum and the rounds take about 20 s, which the bound at one processor is there to call WRONG
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[14\] the rounds took [0-9]+ ms at one processor, more than
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index ab3180a7..0f985775 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -2962,7 +2962,7 @@ arm_fourteen_terminate_inside_traps(void)
+ 	long			took;
+ 
+ 	/* Before the first child: each inherits it with this task's memory. */
+-	arm14_alone = cpus <= 1;
++	arm14_alone = 0;
+ 
+ 	/*
+ 	 * The third thread's question, asked here first: a message the kernel
