@@ -65,10 +65,12 @@ whichever task checked it in first, with a null signature, and the key to
 whichever task sent one first.
 
 🔑 **Identity is a port.** cap_server knows a requester as the port its message
-arrived on, not as a task id or a name. `cap_provision_task` returns a fresh
-per-task `cap_port`; only the holder of that send right lands on the matching
-receive port, so the port name *is* the principal. There is no "who is calling"
-question to answer.
+arrived on, not as a task id or a name. `cap_provision_task` and
+`cap_derive_task` return a fresh per-task `cap_port`; only the holder of that
+send right lands on the matching receive port, so the port name *is* the
+principal. There is no "who is calling" question to answer — and for the same
+reason who may provision is decided by a port too, cap_server's provisioning
+port, whose one send right is bootstrap's (#743).
 
 ---
 
@@ -205,17 +207,62 @@ permission wider than its author believed.
 
 ### How a manifest reaches a task
 
+Two ways, and only two (#743).
+
+**Provisioned, by bootstrap, for the tasks it starts.**
+
 ```
+cap_server makes its provisioning port
+   └─ bootstrap_cap_provisioner(its bootstrap port, that port) ──▶ bootstrap
+       └─ taken from the cap_server bootstrap started, once
 bootstrap creates the child task
    └─ looks up "<symtab>.cmf" in the boot bundle
-       └─ cap_provision_task(cap_server, task_port, blob) ──▶ cap_server
+       └─ cap_provision_task(provisioning port, task_port, blob) ──▶ cap_server
            └─ validates, installs in the per-task table keyed by a NEW port
-           ◀── returns a send right to that port
+           ◀── makes the caller a send right to that port
    └─ task_set_special_port(child, TASK_CAP_PORT, that port)
+   └─ gives its own send right back
 ```
 
 The manifest comes from the **bundle**, from a source the task cannot alter,
 and is handed to cap_server directly — the child never sees it pass.
+`cap_provision_task` answers on the provisioning port and on no other, and
+bootstrap holds that port's one send right: on the port every task inherits,
+or on a per-task port, the answer is `CAP_ERR_NOT_PROVISIONER`. Until #743 any
+task could provision itself with a manifest of its own writing and acquire
+whatever it said. bootstrap takes the provisioning port from the cap_server it
+started and from no other task, which it refuses with `KERN_NO_ACCESS`; and it
+takes it once, since the loader reads it without a lock once it has seen it,
+so a second offer from cap_server is refused with `KERN_NAME_EXISTS`. Two
+answers, so that a test made after cap_server has given its port, when both
+rules refuse it, can tell which one did.
+
+**Derived, by exec_server, for a program a task execs.**
+
+```
+the caller ── exec_load(…, its per-task port, path, …) ──▶ exec_server
+   └─ reads the program's .uros_manifest (or an empty default)
+       └─ cap_derive_task(the caller's port, task_port, blob) ──▶ cap_server
+           └─ the program's lists, cut by the caller's delegatable[]
+           ◀── makes exec_server a send right to the new port
+   └─ task_set_special_port(program, TASK_CAP_PORT, that port)
+   └─ gives both ports back
+```
+
+The program's file says what it **asks** for; what it **gets** is its caller's
+to give. An entry survives for the types, the instances and the operations the
+caller's `delegatable[]` names, and its own `delegatable[]` is cut the same
+way, so a chain of execs never widens. A caller with no per-task port has
+nothing to hand on, and its program runs with none. Until #743 exec_server
+provisioned the file's manifest as it stood: whoever wrote a binary that
+something exec'd wrote its policy.
+
+🔑 A per-task port has no senders once its task and everyone it was handed to
+have let it go: cap_server keeps none, and the provisioner gives its own back.
+The no-senders notification frees the table slot and the task port kept for
+#432. Only the kernel can send that notification — it comes through the
+send-once right cap_server made for the request — so a holder that forges one
+through a send right ends nothing.
 
 ⚠️ A task with **no** manifest has no per-task port and is refused every
 capability it asks for (`cap_manifest_allows()`, #511) — and every permission:
@@ -227,6 +274,14 @@ on the compiled **file**, not on the target that produces it. In Ninja a target
 dependency is an ordering dependency: the bundle will not notice the file
 changed. A policy that is compiled and not shipped is worse than none, because
 it looks like one.
+
+⚠️ The same holds for a manifest embedded in a binary as `.uros_manifest`. A
+`POST_BUILD` step runs only when the binary is linked, and CMake ignores the
+`DEPENDS` of a build event, so the link itself must depend on the manifest
+(`LINK_DEPENDS`). Without it, hello_exec went on carrying the manifest it was
+first linked with after its file had changed (#743). Read the section back with
+`objcopy --dump-section`: `-O binary` copies only what is loaded, and the
+section is not.
 
 ---
 
@@ -241,7 +296,9 @@ it looks like one.
 | `cap_revoke(cap_id)` | a holder / an authority | revoke it and its whole subtree |
 | `cap_verify(token, op, id)` | anyone | slow path; the trap is the fast one |
 | `cap_subscribe_revoke(port)` | a task whose manifest grants `RESOURCE_REVOKE_NOTICES`, on its per-task port (#744) | receive `cap_revoke_notify`, sent without blocking |
-| `cap_provision_task(task_port, manifest) → cap_port` | bootstrap only (by convention) | install a policy, return the principal port |
+| `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy, return the principal port |
+| `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]` |
+| `cap_slots() → in_use, size` | anyone | how many manifest slots are taken: how a test sees one come back (#743) |
 
 ### Traps — `syscall_sw.h`
 
@@ -309,8 +366,11 @@ honest thing it can say — and the kernel says whether *this* buffer is that
 task's to give away, which it knows because it made the allocation.
 
 ⚠️ The bridge between the two halves is the **task port** that
-`cap_provision_task` carries. cap_server knows a requester as a port; the kernel
-knows an owner as a task; the port is what turns one into the other.
+`cap_provision_task` and `cap_derive_task` carry. cap_server knows a requester as a port; the kernel
+knows an owner as a task; the port is what turns one into the other. For a
+derivation it is the parent's word: cap_server does not check that the task is
+the parent's child. It does not need to, because a parent can only name a task
+it holds a send right to, and that right is control of the task already.
 
 ### 6.2 Checking
 
@@ -536,8 +596,18 @@ Stated so nobody reads this document as a description of a finished system.
   from the design docs do not exist.
 - **cap_server is single-shard and single-threaded.** No 64 shards, no revoke /
   snapshot / policy threads.
-- **`cap_provision_task` is not gated to bootstrap.** Any caller can invoke it;
-  the setup-port pattern that would restrict it is a follow-up.
+- **The manifest table holds 64 per-task ports at once, and nothing bounds
+  how many one task takes.** Slots come back when a per-task port has no
+  senders (#743), so the limit is on the ports alive, not on how many tasks
+  have ever run. But every `cap_derive_task` takes one, an empty derivation
+  included, and a task with a per-task port can derive and hold until the
+  table is full: from then on bootstrap starts its tasks without their
+  manifests. In #743's ablations that leave the slots taken, ext_server,
+  mount_test and proc_server ran without theirs in every boot, and the block
+  server too in every TCG boot, and the boot stopped. The bound is #937.
+- **Only `cap_test`'s manifest delegates anything.** It hands on block devices
+  READ, to show a derivation cut; every other task's programs get nothing,
+  whatever their files ask for.
 - **Most resource types have no server checking them.** Only
   `RESOURCE_BLK_DEVICE`, `RESOURCE_PCI_DEVICE`, `RESOURCE_DMA_BUFFER` and
   `RESOURCE_MOUNT_POINT` are verified anywhere today, and
@@ -551,8 +621,15 @@ Stated so nobody reads this document as a description of a finished system.
   terminate, suspend and resume it and to see it die, and a task port is
   much more than that. Found while enumerating for #911: #926 and #927.
 - **A manifest decides every capability.** A task that ships none is refused
-  all of them (`cap_manifest_allows()`, #511). Eighteen programs ship one: the
-  drivers, the tests that claim devices, `cap_test` and a few commands.
+  all of them (`cap_manifest_allows()`, #511). In the x86-64 build fourteen
+  programs ship one: ten in the bundle, for the tasks bootstrap starts
+  (block_device_server, hal_server, ext_server, proc_server, `cap_test`,
+  mount_test, dma_reclaim_test, irq_claim_test, ipc_bench when it is bundled,
+  and bootstrap's own stage 2), and four in the binary itself as
+  `.uros_manifest` (`hello_exec`, `ush`, `hello_dyn_world`, `mach_error_dyn`).
+  For those four and every other program exec'd rather than started by
+  bootstrap, the file says only what they ask for: what they get is cut by
+  their caller's `delegatable[]` (#743).
 - **Budgets do not exist.** `RESOURCE_BUDGET` is a reserved number.
 
 ## 10. Where the checks can be seen to fail
@@ -581,6 +658,19 @@ this is where to look, and what to break to confirm it still works.
 | a failed open leaves the client's right alone | `mount_test [31]` | `ablations/911-failed-open-released-twice` |
 | an entry's segments hold, and never exceed its maker's mapping | `cow_test [10]`, `[11]` | `ablations/911-segments-not-enforced`, `911-entry-allows-more-than-its-maker` |
 | an entry ends with its last send right, and a fork keeps it shared | `cow_test [12]`, `[14]` | `ablations/911-entry-outlives-its-port`, `911-symmetric-copy-kept` |
+| a task cannot provision itself | `cap_test [38]` | `ablations/743-anyone-provisions` |
+| a derived child gets what its parent may hand on, and no more | `cap_test [39]`, `[42]` | `ablations/743-child-gets-what-it-asks` |
+| a per-task port given back gives its slot back | `cap_test [40]` | `ablations/743-no-senders-frees-nothing`, `743-cap-server-keeps-a-copy` |
+| only cap_server gives bootstrap the provisioning port | `cap_test [41]` | `ablations/743-provisioner-from-anyone` |
+| exec_server keeps neither the program's port nor its caller's | `cap_test [42]` | `ablations/743-exec-server-keeps-the-programs-port`, `743-exec-server-keeps-the-callers-port` |
+| bootstrap keeps no task's port | `bootstrap: … still holds a send right to its TASK_CAP_PORT …` | `ablations/743-bootstrap-keeps-its-copy` |
+| a no-senders notification forged by a holder ends nothing | `cap_test [43]` | `ablations/743-forged-no-senders-taken` |
+
+⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
+port. Only cap_server can offer one, on its own bootstrap port, and it offers
+one; the rule is there for the loader's unlocked read, not against another
+task. What `[41]` needs from it is its different answer, `KERN_NAME_EXISTS`, so
+that the rule against other tasks is seen to refuse on its own.
 
 ⚠️ `[11]` asks `device_dma_owned` *before* trying, because a test written as
 "try it and see" would claim any device nobody had claimed yet — a self-test
