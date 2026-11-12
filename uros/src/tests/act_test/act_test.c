@@ -3342,10 +3342,28 @@ arm_fifty_five_created_while_suspended(void)
  * rounds of 200 under KVM and 174 of 200 under TCG (one boot 28 of 50), the
  * second in none; the fixed tree in none of 400, nor of 200 at one and two
  * processors (victus, 11/11).
+ *
+ * At one processor the two threads take turns on it, and a spin on either
+ * side lasted until the spinner was preempted.  With the main thread spinning
+ * until the victim was in its loop and the victim spinning until the go, the
+ * rounds took 56.8 to 71.0 s, in a boot of 122 to 136 s that took 62 to 64 s
+ * without them, and the push campaign of 78a623e2 ran out of its 330 minutes
+ * on that (run 43042768930).  So the main thread naps until the victim is in
+ * its loop, and at one processor the victim depresses its priority first (see
+ * a56_victim()).  The nap's end preempts the victim there, in user mode; the
+ * abort finds it preempted, and the question at one processor is whether the
+ * switch back delivers it before the first wait.  The rounds then took 4.3 to
+ * 4.4 s at one processor, and 4.0 s at four, where they had taken 3.0: the
+ * nap costs two ticks a round.  925-apc-no-interrupt was caught 4 of 4, the
+ * fixed tree passing 4 of 4 (entry 14 on OMEGA, KVM and TCG, the trees
+ * alternated, 12/11).
  */
 #define	A56_ROUNDS	50
 #define	A56_WAIT_MS	20
 #define	A56_GAP_US	1000
+#define	A56_NAP_MS	1	/* two ticks: convert_ipc_timeout_to_ticks() */
+#define	A56_DEPRESS_MS	100	/* longer than any nap: see a56_victim() */
+#define	A56_ALONE_MAX_MS 30000	/* the rounds at one processor: see the end */
 
 static volatile int		a56_spinning;
 static volatile int		a56_go;
@@ -3358,6 +3376,8 @@ static volatile mach_port_t	a56_self;
 static volatile unsigned int	a56_word;	/* nobody wakes it */
 static volatile kern_return_t	a56_kr[2];
 static volatile long		a56_ms[2];
+static int			a56_alone;	/* one processor */
+static volatile kern_return_t	a56_depressed;
 
 static long
 a56_ms_between(const struct timespec *a, const struct timespec *b)
@@ -3396,6 +3416,22 @@ a56_victim(void *arg)
 
 	(void) arg;
 	a56_self = mach_thread_self();
+	/*
+	 * At one processor, below any priority the main thread can have, so
+	 * that the end of its nap preempts this thread in its loop, in user
+	 * mode: thread_setrun() preempts only for a better priority.  Without
+	 * this the nap's end preempted it too, in every boot measured -- it
+	 * had used the processor while the main thread slept, and usage is
+	 * what a timesharing priority is made of -- but that is the aging
+	 * rule's doing, not anything asked for here; the depression is the
+	 * lowest priority there is, by thread_switch()'s contract, and cost
+	 * nothing measurable.  At more processors this one keeps its priority
+	 * and its processor, and is running there when the abort comes (#925).
+	 */
+	if (a56_alone)
+		a56_depressed = thread_switch(MACH_PORT_NULL,
+					      SWITCH_OPTION_DEPRESS,
+					      A56_DEPRESS_MS);
 	a56_spinning = 1;
 	while (!a56_go)
 		__asm__ __volatile__("pause");
@@ -3415,24 +3451,52 @@ static int
 arm_fifty_six_abort_reaches_user_mode(void)
 {
 	mach_port_t	me = mach_task_self();
+	unsigned	cpus = processors();
 	int		round, i, early[2] = { 0, 0 };
-	long		gap, shortest_gap = 0, worst[2] = { 0, 0 };
+	long		gap, shortest_gap = 0, worst[2] = { 0, 0 }, took;
 	kern_return_t	kr, worst_kr[2] = { KERN_OPERATION_TIMED_OUT,
 					    KERN_OPERATION_TIMED_OUT };
+	struct timespec	start, end;
 
+	/*
+	 * How long the rounds take, read by the clock and said on the line:
+	 * at one processor they cost every boot about 75 s, and only the
+	 * campaign's running out of time showed it (#925).
+	 */
+	if (getclock(TIMEOFDAY, &start) != 0) {
+		printf("act_test: [56] the clock could not be read to time "
+		       "the rounds — WRONG (#925)\n");
+		return 0;
+	}
+	a56_alone = cpus <= 1;
 	for (round = 0; round < A56_ROUNDS; round++) {
 		pthread_t	victim;
+		kern_return_t	napped = MACH_RCV_TIMED_OUT;
 
 		a56_spinning = a56_go = 0;
 		a56_self = MACH_PORT_NULL;
 		a56_kr[0] = a56_kr[1] = KERN_FAILURE;
+		a56_depressed = KERN_SUCCESS;
 		if (pthread_create(&victim, NULL, a56_victim, NULL) != 0) {
 			printf("act_test: [56] round %d: pthread_create failed "
 			       "— WRONG\n", round);
 			return 0;
 		}
-		while (!a56_spinning)
-			__asm__ __volatile__("pause");
+		/*
+		 * Asleep until it is in its loop, a nap at a time: a spin here
+		 * held, at one processor, the processor the victim needed to
+		 * get there until the quantum ran out (#925).
+		 */
+		while (!a56_spinning && napped == MACH_RCV_TIMED_OUT)
+			napped = nap(A56_NAP_MS);
+		if (napped != MACH_RCV_TIMED_OUT) {
+			a56_go = 1;
+			(void) pthread_join(victim, NULL);
+			(void) mach_port_deallocate(me, a56_self);
+			printf("act_test: [56] round %d: a nap answered 0x%x, not "
+			       "a timeout — WRONG (#925)\n", round, napped);
+			return 0;
+		}
 		/* It is in its loop, in user mode, making no system call. */
 		kr = thread_abort(a56_self);
 		gap = a56_gap(A56_GAP_US);
@@ -3442,6 +3506,12 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		if (kr != KERN_SUCCESS) {
 			printf("act_test: [56] round %d: thread_abort answered "
 			       "%d — WRONG\n", round, kr);
+			return 0;
+		}
+		if (a56_depressed != KERN_SUCCESS) {
+			printf("act_test: [56] round %d: thread_switch() with "
+			       "SWITCH_OPTION_DEPRESS answered %d — WRONG "
+			       "(#925)\n", round, a56_depressed);
 			return 0;
 		}
 		if (gap < 0) {
@@ -3480,10 +3550,38 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		       worst_kr[1]);
 		return 0;
 	}
+	if (getclock(TIMEOFDAY, &end) != 0) {
+		printf("act_test: [56] the clock could not be read to time "
+		       "the rounds — WRONG (#925)\n");
+		return 0;
+	}
+	took = a56_ms_between(&start, &end);
+	/*
+	 * 🔴 AT ONE PROCESSOR THE ROUNDS STAND ON THE SCHEDULER, AND ARE JUDGED
+	 * FOR IT (#925, #785).
+	 *
+	 * The nap's end preempts the victim only because thread_setrun() gives
+	 * the processor to a woken thread of better priority.  With the two
+	 * threads spinning for each other, each round waited for a quantum,
+	 * and the rounds took 56.8 to 71.0 s where they take 4.3 to 4.4 (OMEGA,
+	 * 12/11) -- a cost no line said, until a campaign ran out of its time
+	 * on it.  The bound is seven times what they take, and what they take
+	 * is ticks, the nap's and the waits', more than processor time: a
+	 * change to the preemption rule meets this line first.
+	 */
+	if (cpus <= 1 && took > A56_ALONE_MAX_MS) {
+		printf("act_test: [56] the rounds took %ld ms at one processor, "
+		       "more than %d ms: the end of the main thread's nap is to "
+		       "preempt the victim at once, and rounds that waited for "
+		       "its quantum took 57 to 71 s — WRONG (#925, #785)\n",
+		       took, A56_ALONE_MAX_MS);
+		return 0;
+	}
 	printf("act_test: [56] an abort of a thread spinning in user mode was "
 	       "spent before it waited: in %d rounds both of two %d ms futex "
-	       "waits made %ld us or more after it timed out (#925)\n",
-	       A56_ROUNDS, A56_WAIT_MS, shortest_gap);
+	       "waits made %ld us or more after it timed out; the rounds took "
+	       "%ld ms at %u processor(s) (#925)\n",
+	       A56_ROUNDS, A56_WAIT_MS, shortest_gap, took, cpus);
 	return 1;
 }
 
