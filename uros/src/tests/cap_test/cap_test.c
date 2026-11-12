@@ -1069,6 +1069,9 @@ exec_server_holds_nothing_of_a_spawn(mach_port_t host_priv)
  *   - the kernel, what the reduced port carries: the process set;
  *   - the word, through the task port (there) and the reduced one (refused);
  *   - the child's counters through the reduced port (granted);
+ *   - the traps of task_info() and task_suspend(), asked directly with the
+ *     reduced port (granted): when a trap refuses, libmach goes through
+ *     MIG, which answers the same, so only the trap can say it refused;
  *   - a stop through an identity port, a reduced port with no rights
  *     (refused), and a process port made from an info-only port (refused:
  *     a right is taken away, never added);
@@ -1098,7 +1101,8 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
     int           ok;
     kern_return_t kr, kr_rights = -1, kr_full_read = -1, kr_read = -1;
     kern_return_t kr_info = -1, kr_idstop = -1, kr_amp = -1, kr_odd = -1;
-    kern_return_t kr_end = -1;
+    kern_return_t kr_end = -1, kr_trap_info = -1, kr_trap_stop = -1;
+    mach_msg_type_number_t tcnt = TASK_BASIC_INFO_COUNT;
 
     for (waited = 0; ; waited += 100) {
         if (netname_look_up(name_server_port, "", (char *)"proc_server",
@@ -1154,6 +1158,11 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
     if (kr_read == KERN_SUCCESS)
         (void)vm_deallocate(me, data, cnt);
     kr_info = task_info(pp, TASK_BASIC_INFO, (task_info_t)&info, &icnt);
+    kr_trap_info = syscall_task_info(pp, TASK_BASIC_INFO, (task_info_t)&info,
+                                     &tcnt);
+    kr_trap_stop = syscall_task_suspend(pp);
+    if (kr_trap_stop == KERN_SUCCESS)
+        (void)task_resume(pp);
 
     if (urmach_task_rights_port(child, 0, &idp) == KERN_SUCCESS) {
         kr_idstop = task_suspend(idp);
@@ -1177,6 +1186,7 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
          kr_rights == KERN_SUCCESS && rights == URMACH_TASK_RIGHTS_PROCESS &&
          kr_full_read == KERN_SUCCESS && read_back == word &&
          kr_read != KERN_SUCCESS && kr_info == KERN_SUCCESS &&
+         kr_trap_info == KERN_SUCCESS && kr_trap_stop == KERN_SUCCESS &&
          kr_idstop != KERN_SUCCESS && kr_amp != KERN_SUCCESS &&
          kr_odd == KERN_INVALID_VALUE && frc == PROC_ERR_FULL_TASK &&
          kr_end == KERN_SUCCESS;
@@ -1189,6 +1199,8 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
                "info-only port could not make a process port, a right no "
                "routine names was refused, and a registration by the task "
                "port with PROC_ERR_FULL_TASK (#927)\n");
+        printf("cap_test: [45] the traps of task_info and task_suspend took "
+               "the reduced port themselves (#927)\n");
     }
     /*
      * One line per check that failed, each short and its own: a long line is
@@ -1220,6 +1232,12 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
     if (kr_info != KERN_SUCCESS)
         printf("cap_test: [45] WRONG — task_info through the reduced port: "
                "%d (#927)\n", (int)kr_info);
+    if (kr_trap_info != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_info's trap refused the reduced "
+               "port: %d (#927)\n", (int)kr_trap_info);
+    if (kr_trap_stop != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_suspend's trap refused the "
+               "reduced port: %d (#927)\n", (int)kr_trap_stop);
     if (kr_idstop == KERN_SUCCESS)
         printf("cap_test: [45] WRONG — an identity port stopped the child "
                "(#927)\n");
