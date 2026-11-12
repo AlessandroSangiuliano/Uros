@@ -3342,6 +3342,21 @@ arm_fifty_five_created_while_suspended(void)
  * rounds of 200 under KVM and 174 of 200 under TCG (one boot 28 of 50), the
  * second in none; the fixed tree in none of 400, nor of 200 at one and two
  * processors (victus, 11/11).
+ *
+ * At one processor the two threads take turns on it, and a spin on either
+ * side lasted until the spinner was preempted.  With the main thread spinning
+ * until the victim was in its loop and the victim spinning until the go, the
+ * rounds took 56.8 to 71.0 s, in a boot of 122 to 136 s that took 62 to 64 s
+ * without them, and the push campaign of 78a623e2 ran out of its 330 minutes
+ * on that (run 43042768930).  So the main thread naps until the victim is in
+ * its loop, and at one processor the victim depresses its priority first (see
+ * a56_victim()).  The nap's end preempts the victim there, in user mode; the
+ * abort finds it preempted, and the question at one processor is whether the
+ * switch back delivers it before the first wait.  The rounds then took 4.3 to
+ * 4.4 s at one processor, and 4.0 s at four, where they had taken 3.0: the
+ * nap costs two ticks a round.  925-apc-no-interrupt was caught 4 of 4, the
+ * fixed tree passing 4 of 4 (entry 14 on OMEGA, KVM and TCG, the trees
+ * alternated, 12/11).
  */
 #define	A56_ROUNDS	50
 #define	A56_WAIT_MS	20
