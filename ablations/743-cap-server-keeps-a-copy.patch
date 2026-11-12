@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #743
+Takes out: the per-task port made and not copied (3bd8308d) -- cap_server makes a send right of its own again, so no per-task port ever has no senders
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[40\] WRONG — port [0-9]+ of 80 refused with 2415 after 200 wait\(s\) of 10 ms: the slots of the ports given back did not come back
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index b19628dd..48bbfc4f 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -732,6 +732,8 @@ cap_task_port_make(mach_port_t task_port, const void *blob, uint32_t len,
+         (void)mach_port_destroy(mach_task_self(), new_port);
+         return vrc;
+     }
++    (void)mach_port_insert_right(mach_task_self(), new_port, new_port,
++                                 MACH_MSG_TYPE_MAKE_SEND);
+ 
+     *out_port = new_port;
+     return KERN_SUCCESS;
