@@ -984,47 +984,71 @@ ref_task_port_locked( ipc_port_t port, task_t *ptask )
 }
 
 /*
- *	Routine:	convert_port_to_task_right
+ *	Routine:	ref_task_right_port_locked
  *	Purpose:
- *		#927: convert from a port to a task, if the port carries
- *		`need' (URMACH_TASK_RIGHT_*).  The full task port carries
- *		every right and converts as convert_port_to_task() does; a
- *		reduced port carries the rights it was made with.  Doesn't
- *		consume the port ref; produces a task ref, which may be null.
+ *		#927: THE check of a port's rights on a task, the one every
+ *		path takes -- MIG's conversions below and the traps'
+ *		port_name_to_task_right() -- so that no path can accept a
+ *		reduced port without asking it.  `port' carries `need'
+ *		(URMACH_TASK_RIGHT_*) if it is the full task port, which
+ *		carries every right, or a reduced port made with it.  Then
+ *		*ptask is its task, referenced; otherwise TASK_NULL.
  *	Conditions:
- *		Nothing locked.
+ *		`port' locked; unlocked on return.  FALSE if the task's lock
+ *		was contended and nothing was done: the caller locks the port
+ *		and asks again, as with ref_task_port_locked().
  */
-static task_t
-convert_port_to_task_right(
+boolean_t
+ref_task_right_port_locked(
 	ipc_port_t	port,
-	natural_t	need)
+	natural_t	need,
+	task_t		*ptask)
 {
 	struct task_rights	*tr;
 	task_t			task = TASK_NULL;
 
-	while (IP_VALID(port)) {
-		ip_lock(port);
-		if (ip_active(port) && ip_kotype(port) == IKOT_TASK) {
-			if (ref_task_port_locked(port, &task))
-				break;		/* port unlocked */
-			continue;		/* port unlocked, contended */
-		}
-		if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS) {
-			tr = (struct task_rights *) port->ip_kobject;
-			if ((tr->tr_rights & need) == need) {
-				/* As ref_task_port_locked(): out of order. */
-				if (!task_lock_try(tr->tr_task)) {
-					ip_unlock(port);
-					mutex_pause();
-					continue;
-				}
-				task = tr->tr_task;
-				task->ref_count++;
-				task_unlock(task);
+	if (ip_active(port) && ip_kotype(port) == IKOT_TASK)
+		return ref_task_port_locked(port, ptask);	/* unlocks */
+	if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS) {
+		tr = (struct task_rights *) port->ip_kobject;
+		if ((tr->tr_rights & need) == need) {
+			/* As ref_task_port_locked(): out of order. */
+			if (!task_lock_try(tr->tr_task)) {
+				ip_unlock(port);
+				mutex_pause();
+				return FALSE;
 			}
+			task = tr->tr_task;
+			task->ref_count++;
+			task_unlock(task);
 		}
-		ip_unlock(port);
-		break;
+	}
+	*ptask = task;
+	ip_unlock(port);
+	return TRUE;
+}
+
+/*
+ *	Routine:	convert_port_to_task_right
+ *	Purpose:
+ *		#927: convert from a port to a task, if the port carries
+ *		`need' (ref_task_right_port_locked()).  Doesn't consume the
+ *		port ref; produces a task ref, which may be null.
+ *	Conditions:
+ *		Nothing locked.
+ */
+task_t
+convert_port_to_task_right(
+	ipc_port_t	port,
+	natural_t	need)
+{
+	boolean_t	r = FALSE;
+	task_t		task = TASK_NULL;
+
+	while (!r && IP_VALID(port)) {
+		ip_lock(port);
+		r = ref_task_right_port_locked(port, need, &task);
+		/* port unlocked */
 	}
 	return task;
 }

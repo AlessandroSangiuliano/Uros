@@ -142,6 +142,13 @@ extern boolean_t ref_task_port_locked(
 	ipc_port_t port, task_t *ptask);
 
 /* #927: from the full task port, or a reduced one with the right */
+extern boolean_t ref_task_right_port_locked(
+	ipc_port_t	port,
+	natural_t	need,
+	task_t		*ptask);
+extern task_t convert_port_to_task_right(
+	ipc_port_t	port,
+	natural_t	need);
 extern task_t convert_port_to_task_inspect(
 	ipc_port_t	port);
 extern task_t convert_port_to_task_lifecycle(
