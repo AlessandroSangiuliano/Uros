@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #927
+Takes out: a reduced port's reach stopping short of memory (97042db7) -- convert_port_to_map() takes a reduced port with the info right, and vm_read() reads through it
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[45\] WRONG — the reduced port read the child's memory
+
+diff --git a/uros/src/mach_kernel/kern/ipc_tt.c b/uros/src/mach_kernel/kern/ipc_tt.c
+index 873be74e..d0f7c90b 100644
+--- a/uros/src/mach_kernel/kern/ipc_tt.c
++++ b/uros/src/mach_kernel/kern/ipc_tt.c
+@@ -1261,7 +1261,7 @@ convert_port_to_map(
+ 	task_t task;
+ 	vm_map_t map;
+ 
+-	task = convert_port_to_task(port);
++	task = convert_port_to_task_inspect(port);
+ 
+ 	if (task == TASK_NULL)
+ 		return VM_MAP_NULL;
