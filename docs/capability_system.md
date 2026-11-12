@@ -473,9 +473,14 @@ needs:
 | the full port only | everything else: memory, threads, port rights, special ports |
 
 The traps of `task_terminate()`, `task_suspend()` and `task_info()`, which
-libmach tries before MIG, take a reduced port the same way and through the
-same check (`ref_task_right_port_locked()`), so a reduced port is as quick as
-the full one there.
+libmach tries before MIG, take a reduced port the same way: one lookup of the
+name, the one a task port gets, and the same check
+(`ref_task_right_port_locked()`). On omen under KVM the difference is within
+the spread of five boots each: `task_info()` took 0.61 µs by a reduced port
+against 0.59 by the task port, and a suspend and resume 1.44 against 1.45
+(x86-64; on i386 0.86 against 0.84, and 1.87 against 1.87). `cap_test [45]`
+calls the traps themselves, because when a trap refuses, libmach goes through
+MIG, which gives the same answer, only slower.
 
 **A reduced port carries a set of these rights.**
 
@@ -710,6 +715,7 @@ this is where to look, and what to break to confirm it still works.
 | a no-senders notification forged by a holder ends nothing | `cap_test [43]` | `ablations/743-forged-no-senders-taken` |
 | exec_server holds nothing of a spawn once it has answered | `cap_test [44]` | `ablations/926-exec-server-keeps-the-task`, `926-first-thread-copied` |
 | proc_server holds a process's reduced port, and it reaches no more | `cap_test [45]` | `ablations/927-proc-server-takes-full-ports`, `927-reduced-port-reaches-memory`, `927-rights-not-checked`, `927-mint-from-a-reduced-port` |
+| a reduced port takes the traps itself, not through MIG | `cap_test [45]` | `ablations/927-traps-refuse-a-reduced-port` |
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers
