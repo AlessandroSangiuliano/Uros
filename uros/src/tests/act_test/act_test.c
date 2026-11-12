@@ -3363,6 +3363,7 @@ arm_fifty_five_created_while_suspended(void)
 #define	A56_GAP_US	1000
 #define	A56_NAP_MS	1	/* two ticks: convert_ipc_timeout_to_ticks() */
 #define	A56_DEPRESS_MS	100	/* longer than any nap: see a56_victim() */
+#define	A56_ALONE_MAX_MS 30000	/* the rounds at one processor: see the end */
 
 static volatile int		a56_spinning;
 static volatile int		a56_go;
@@ -3452,7 +3453,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	mach_port_t	me = mach_task_self();
 	unsigned	cpus = processors();
 	int		round, i, early[2] = { 0, 0 };
-	long		gap, shortest_gap = 0, worst[2] = { 0, 0 };
+	long		gap, shortest_gap = 0, worst[2] = { 0, 0 }, took;
 	kern_return_t	kr, worst_kr[2] = { KERN_OPERATION_TIMED_OUT,
 					    KERN_OPERATION_TIMED_OUT };
 	struct timespec	start, end;
@@ -3554,12 +3555,33 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		       "the rounds — WRONG (#925)\n");
 		return 0;
 	}
+	took = a56_ms_between(&start, &end);
+	/*
+	 * 🔴 AT ONE PROCESSOR THE ROUNDS STAND ON THE SCHEDULER, AND ARE JUDGED
+	 * FOR IT (#925, #785).
+	 *
+	 * The nap's end preempts the victim only because thread_setrun() gives
+	 * the processor to a woken thread of better priority.  With the two
+	 * threads spinning for each other, each round waited for a quantum,
+	 * and the rounds took 56.8 to 71.0 s where they take 4.3 to 4.4 (OMEGA,
+	 * 12/11) -- a cost no line said, until a campaign ran out of its time
+	 * on it.  The bound is seven times what they take, and what they take
+	 * is ticks, the nap's and the waits', more than processor time: a
+	 * change to the preemption rule meets this line first.
+	 */
+	if (cpus <= 1 && took > A56_ALONE_MAX_MS) {
+		printf("act_test: [56] the rounds took %ld ms at one processor, "
+		       "more than %d ms: the end of the main thread's nap is to "
+		       "preempt the victim at once, and rounds that waited for "
+		       "its quantum took 57 to 71 s — WRONG (#925, #785)\n",
+		       took, A56_ALONE_MAX_MS);
+		return 0;
+	}
 	printf("act_test: [56] an abort of a thread spinning in user mode was "
 	       "spent before it waited: in %d rounds both of two %d ms futex "
 	       "waits made %ld us or more after it timed out; the rounds took "
 	       "%ld ms at %u processor(s) (#925)\n",
-	       A56_ROUNDS, A56_WAIT_MS, shortest_gap,
-	       a56_ms_between(&start, &end), cpus);
+	       A56_ROUNDS, A56_WAIT_MS, shortest_gap, took, cpus);
 	return 1;
 }
 
