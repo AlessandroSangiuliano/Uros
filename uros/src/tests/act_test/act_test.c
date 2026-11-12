@@ -2827,6 +2827,33 @@ arm_thirteen_message_to_a_receiver_being_read(void)
 #define	ARM14_RUN_MS		5
 #define	ARM14_TASK_INFO_ID	2098	/* task_info()'s msgh_id in mach.defs,
 					   as the generated mach_user.c sends it */
+#define	ARM14_DEPRESS_MS	1000	/* longer than a round: see below */
+
+static int	arm14_alone;	/* one processor; the child reads its copy */
+
+/*
+ * 🔴 AT ONE PROCESSOR A CHILD'S THREAD STEPS ASIDE AS IT STARTS (#941).
+ *
+ * Just started, it has a better priority than the main thread, which has used
+ * the processor.  So thread_resume() handed it the processor at once, and the
+ * main thread had it back only when the child's quantum ran out; the end of
+ * the main thread's nap did not preempt it either.  At one processor the
+ * three starts took 240 ms a round and the 5 ms nap 120 ms, and the arm 19.4
+ * to 19.7 s against 1.1 s at four (victus, 12/11).  Depressed, the thread
+ * runs while the main thread sleeps and is preempted when it wakes, at the
+ * points where its quantum's end would have preempted it.  SWITCH_OPTION_IDLE,
+ * whose depression lasts: SWITCH_OPTION_DEPRESS's is given back before
+ * thread_switch() returns (#925).  thread_switch() is the trap, like
+ * everything the child calls, and the child inherited arm14_alone with this
+ * task's memory.
+ */
+static void
+arm_fourteen_step_aside(void)
+{
+	if (arm14_alone)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_IDLE,
+				     ARM14_DEPRESS_MS);
+}
 
 static void
 arm_fourteen_trap_loop(void)
@@ -2835,6 +2862,7 @@ arm_fourteen_trap_loop(void)
 	struct task_basic_info	info;
 	mach_msg_type_number_t	n;
 
+	arm_fourteen_step_aside();
 	for (;;) {
 		n = TASK_BASIC_INFO_COUNT;
 		(void) syscall_task_info(self, TASK_BASIC_INFO,
@@ -2884,6 +2912,7 @@ arm_fourteen_rpc_loop(void)
 	mach_port_t	reply = mach_reply_port();
 	union arm14_msg	m;
 
+	arm_fourteen_step_aside();
 	for (;;)
 		(void) arm_fourteen_ask(self, reply, &m);
 }
@@ -2927,6 +2956,10 @@ arm_fourteen_terminate_inside_traps(void)
 	mach_port_type_t	type;
 	kern_return_t		kr;
 	int			round;
+	unsigned		cpus = processors();
+
+	/* Before the first child: each inherits it with this task's memory. */
+	arm14_alone = cpus <= 1;
 
 	/*
 	 * The third thread's question, asked here first: a message the kernel
