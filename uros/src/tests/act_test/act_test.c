@@ -3346,6 +3346,7 @@ arm_fifty_five_created_while_suspended(void)
 #define	A56_ROUNDS	50
 #define	A56_WAIT_MS	20
 #define	A56_GAP_US	1000
+#define	A56_NAP_MS	1	/* two ticks: convert_ipc_timeout_to_ticks() */
 
 static volatile int		a56_spinning;
 static volatile int		a56_go;
@@ -3434,6 +3435,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	}
 	for (round = 0; round < A56_ROUNDS; round++) {
 		pthread_t	victim;
+		kern_return_t	napped = MACH_RCV_TIMED_OUT;
 
 		a56_spinning = a56_go = 0;
 		a56_self = MACH_PORT_NULL;
@@ -3443,8 +3445,21 @@ arm_fifty_six_abort_reaches_user_mode(void)
 			       "— WRONG\n", round);
 			return 0;
 		}
-		while (!a56_spinning)
-			__asm__ __volatile__("pause");
+		/*
+		 * Asleep until it is in its loop, a nap at a time: a spin here
+		 * held, at one processor, the processor the victim needed to
+		 * get there until the quantum ran out (#925).
+		 */
+		while (!a56_spinning && napped == MACH_RCV_TIMED_OUT)
+			napped = nap(A56_NAP_MS);
+		if (napped != MACH_RCV_TIMED_OUT) {
+			a56_go = 1;
+			(void) pthread_join(victim, NULL);
+			(void) mach_port_deallocate(me, a56_self);
+			printf("act_test: [56] round %d: a nap answered 0x%x, not "
+			       "a timeout — WRONG (#925)\n", round, napped);
+			return 0;
+		}
 		/* It is in its loop, in user mode, making no system call. */
 		kr = thread_abort(a56_self);
 		gap = a56_gap(A56_GAP_US);
