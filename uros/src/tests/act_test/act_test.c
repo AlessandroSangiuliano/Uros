@@ -3347,6 +3347,7 @@ arm_fifty_five_created_while_suspended(void)
 #define	A56_WAIT_MS	20
 #define	A56_GAP_US	1000
 #define	A56_NAP_MS	1	/* two ticks: convert_ipc_timeout_to_ticks() */
+#define	A56_DEPRESS_MS	100	/* longer than any nap: see a56_victim() */
 
 static volatile int		a56_spinning;
 static volatile int		a56_go;
@@ -3359,6 +3360,8 @@ static volatile mach_port_t	a56_self;
 static volatile unsigned int	a56_word;	/* nobody wakes it */
 static volatile kern_return_t	a56_kr[2];
 static volatile long		a56_ms[2];
+static int			a56_alone;	/* one processor */
+static volatile kern_return_t	a56_depressed;
 
 static long
 a56_ms_between(const struct timespec *a, const struct timespec *b)
@@ -3397,6 +3400,22 @@ a56_victim(void *arg)
 
 	(void) arg;
 	a56_self = mach_thread_self();
+	/*
+	 * At one processor, below any priority the main thread can have, so
+	 * that the end of its nap preempts this thread in its loop, in user
+	 * mode: thread_setrun() preempts only for a better priority.  Without
+	 * this the nap's end preempted it too, in every boot measured -- it
+	 * had used the processor while the main thread slept, and usage is
+	 * what a timesharing priority is made of -- but that is the aging
+	 * rule's doing, not anything asked for here; the depression is the
+	 * lowest priority there is, by thread_switch()'s contract, and cost
+	 * nothing measurable.  At more processors this one keeps its priority
+	 * and its processor, and is running there when the abort comes (#925).
+	 */
+	if (a56_alone)
+		a56_depressed = thread_switch(MACH_PORT_NULL,
+					      SWITCH_OPTION_DEPRESS,
+					      A56_DEPRESS_MS);
 	a56_spinning = 1;
 	while (!a56_go)
 		__asm__ __volatile__("pause");
@@ -3433,6 +3452,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		       "the rounds — WRONG (#925)\n");
 		return 0;
 	}
+	a56_alone = cpus <= 1;
 	for (round = 0; round < A56_ROUNDS; round++) {
 		pthread_t	victim;
 		kern_return_t	napped = MACH_RCV_TIMED_OUT;
@@ -3440,6 +3460,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		a56_spinning = a56_go = 0;
 		a56_self = MACH_PORT_NULL;
 		a56_kr[0] = a56_kr[1] = KERN_FAILURE;
+		a56_depressed = KERN_SUCCESS;
 		if (pthread_create(&victim, NULL, a56_victim, NULL) != 0) {
 			printf("act_test: [56] round %d: pthread_create failed "
 			       "— WRONG\n", round);
@@ -3469,6 +3490,12 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		if (kr != KERN_SUCCESS) {
 			printf("act_test: [56] round %d: thread_abort answered "
 			       "%d — WRONG\n", round, kr);
+			return 0;
+		}
+		if (a56_depressed != KERN_SUCCESS) {
+			printf("act_test: [56] round %d: thread_switch() with "
+			       "SWITCH_OPTION_DEPRESS answered %d — WRONG "
+			       "(#925)\n", round, a56_depressed);
 			return 0;
 		}
 		if (gap < 0) {
