@@ -42,6 +42,7 @@
 #include "proc.h"
 #include "proc_types.h"
 #include "uros_fd_handoff.h"
+#include "internal.h"       /* #927: __uros_process_port */
 
 /* posix_exec_fds.c: serialise the surviving fd set into 'blob'. */
 extern int __uros_serialize_fds(struct uros_fd_handoff *blob);
@@ -267,19 +268,27 @@ __uros_spawn(const char *path,
         if (cl >= sizeof cmd) cl = sizeof cmd - 1;
         memcpy(cmd, path + path_len - cl, cl);
         cmd[cl] = '\0';
+        /* #927: proc_server is handed the child's reduced port, not its
+         * task port, which it would refuse. */
+        mach_port_t proc_task = MACH_PORT_NULL;
+        if (__uros_process_port(new_task, &proc_task) != KERN_SUCCESS)
+            proc_task = MACH_PORT_NULL;
         if (replace_self) {
             /* execve (#287): the caller is about to suicide, so the new
              * task must inherit the caller's *exact* pid — the shell's
              * waitpid()/kill()/job-control all use the pid it got from
              * fork(), which must stay attached to the running program.
              * Hand off our pid to new_task instead of minting a new one. */
-            (void)proc_exec_handoff(__uros_proc_port, __uros_my_pid,
-                                    new_task, cmd, &prc);
+            if (MACH_PORT_VALID(proc_task))
+                (void)proc_exec_handoff(__uros_proc_port, __uros_my_pid,
+                                        proc_task, cmd, &prc);
             new_pid = __uros_my_pid;
-        } else {
+        } else if (MACH_PORT_VALID(proc_task)) {
             (void)proc_register(__uros_proc_port, __uros_my_pid,
-                                new_task, cmd, &new_pid, &prc);
+                                proc_task, cmd, &new_pid, &prc);
         }
+        if (MACH_PORT_VALID(proc_task))
+            (void)mach_port_deallocate(mach_task_self(), proc_task);
     }
 
     /* The initial thread came back suspended (#262 step 3) — start it now
