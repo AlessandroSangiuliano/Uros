@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #743
+Takes out: exec_server giving back its caller's per-task port (2d9ca190) -- it keeps a copy of every caller's
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[42\] WRONG — /hello_exec exec'd with a caller's port: block devices READ 0 \(want 0\), WRITE 2413 and DMA buffers 2413 \(want CAP_ERR_NOT_IN_MANIFEST 2413\); slots [0-9]+ before the exec and [0-9]+ after both ports were given back and 200 wait\(s\) of 10 ms
+
+diff --git a/uros/src/servers/exec_server/exec_main.c b/uros/src/servers/exec_server/exec_main.c
+index 0c8df804..d2c9daae 100644
+--- a/uros/src/servers/exec_server/exec_main.c
++++ b/uros/src/servers/exec_server/exec_main.c
+@@ -90,8 +90,7 @@ exec_S_load(
+      * destroyed for us.  Kept, it would be a sender the caller's port never
+      * loses, and its slot in cap_server would outlive the caller.
+      */
+-    if (MACH_PORT_VALID(parent_caps))
+-        (void)mach_port_deallocate(mach_task_self(), parent_caps);
++    (void)parent_caps;
+ 
+     /* MIG OOL: deallocate the OOL buffers it handed us. */
+     if (argv_blob)
