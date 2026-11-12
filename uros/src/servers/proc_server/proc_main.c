@@ -31,6 +31,7 @@
 #include <mach/task_info.h>
 #include <mach/host_reboot.h>
 #include <mach/mach_host.h>    /* host_reboot user stub */
+#include <mach/task_rights.h>  /* #927 */
 #include <sa_mach.h>
 #include <pthread.h>
 #include <servers/netname.h>
@@ -85,7 +86,9 @@ struct pid_entry {
      * SIGSTOP, cleared on SIGCONT, so a continue can durably resume the
      * whole stopped process group (#247). */
     uint8_t         stopped;
-    mach_port_t     task_port;       /* receive-side perspective */
+    mach_port_t     task_port;       /* #927: the process's reduced port,
+                                        never its task port (see
+                                        is_a_full_task_port()) */
     char            cmdline[PROC_CMDLINE_MAX];
     uint8_t         state;           /* PROC_STATE_* */
     int32_t         exit_code;
@@ -189,6 +192,30 @@ fire_exit_notify(mach_port_t notify, proc_pid_t pid, int32_t exit_code)
 /*  proc.defs MIG handlers                                              */
 /* ------------------------------------------------------------------ */
 
+/*
+ * #927: this server holds no task port.  A process is registered by its
+ * reduced port (<mach/task_rights.h>, URMACH_TASK_RIGHTS_PROCESS), which can
+ * end, stop and resume it, read its counters and see it die, and nothing
+ * else; a task port is its memory, its threads and its port rights as well.
+ * So a full task port is refused, whatever a caller sends, and given back.
+ *
+ * The kernel is asked through the host, never through the port: sig_test
+ * registers plain ports as processes, and a request sent to one of those
+ * would wait for a reply that never comes.  A port that is no task port at
+ * all is not refused here; only the full one is.
+ */
+static int
+is_a_full_task_port(mach_port_t port)
+{
+    mach_port_t   host = mach_host_self();
+    natural_t     rights = 0;
+    kern_return_t kr;
+
+    kr = urmach_task_port_rights(host, port, &rights);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    return kr == KERN_SUCCESS && rights == URMACH_TASK_RIGHTS_FULL;
+}
+
 kern_return_t
 proc_S_register(
     mach_port_t                 server_port,
@@ -205,6 +232,13 @@ proc_S_register(
     proc_pid_t pid;
 
     (void)server_port;
+
+    if (is_a_full_task_port(task_port)) {
+        (void)mach_port_deallocate(mach_task_self(), task_port);
+        *new_pid = 0;
+        *result  = PROC_ERR_FULL_TASK;
+        return KERN_SUCCESS;
+    }
 
     pthread_mutex_lock(&pid_lock);
 
@@ -325,6 +359,12 @@ proc_S_exec_handoff(
     kern_return_t kr;
 
     (void)server_port;
+
+    if (is_a_full_task_port(new_task)) {          /* #927 */
+        (void)mach_port_deallocate(mach_task_self(), new_task);
+        *result = PROC_ERR_FULL_TASK;
+        return KERN_SUCCESS;
+    }
 
     pthread_mutex_lock(&pid_lock);
     e = find_by_pid_locked(old_pid);
