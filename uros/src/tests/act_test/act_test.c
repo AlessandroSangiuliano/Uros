@@ -2828,6 +2828,7 @@ arm_thirteen_message_to_a_receiver_being_read(void)
 #define	ARM14_TASK_INFO_ID	2098	/* task_info()'s msgh_id in mach.defs,
 					   as the generated mach_user.c sends it */
 #define	ARM14_DEPRESS_MS	1000	/* longer than a round: see below */
+#define	ARM14_ALONE_MAX_MS	10000	/* the rounds at one processor: see the end */
 
 static int	arm14_alone;	/* one processor; the child reads its copy */
 
@@ -2957,6 +2958,8 @@ arm_fourteen_terminate_inside_traps(void)
 	kern_return_t		kr;
 	int			round;
 	unsigned		cpus = processors();
+	struct timespec		start, end;
+	long			took;
 
 	/* Before the first child: each inherits it with this task's memory. */
 	arm14_alone = cpus <= 1;
@@ -2983,6 +2986,11 @@ arm_fourteen_terminate_inside_traps(void)
 		}
 	}
 
+	if (getclock(TIMEOFDAY, &start) != 0) {
+		printf("act_test: [14] the clock could not be read to time the "
+		       "rounds — WRONG (#941)\n");
+		return 0;
+	}
 	for (round = 0; round < ARM14_ROUNDS; round++) {
 		child = MACH_PORT_NULL;
 		kr = task_create(me, NULL, 0, TRUE, &child);
@@ -3023,6 +3031,35 @@ arm_fourteen_terminate_inside_traps(void)
 		}
 	}
 
+	if (getclock(TIMEOFDAY, &end) != 0) {
+		printf("act_test: [14] the clock could not be read to time the "
+		       "rounds — WRONG (#941)\n");
+		return 0;
+	}
+	took = (long) (end.tv_sec - start.tv_sec) * 1000 +
+	       (long) (end.tv_nsec - start.tv_nsec) / 1000000;
+	/*
+	 * 🔴 AT ONE PROCESSOR THE ROUNDS STAND ON THE SCHEDULER, AND ARE JUDGED
+	 * FOR IT (#941, #785).
+	 *
+	 * The main thread has the processor back at each start and at its nap's
+	 * end only because thread_setrun() gives it to a woken thread of better
+	 * priority than the children's, depressed as they start.  Rounds that
+	 * waited for the children's quanta took 19.4 to 19.7 s, where they take
+	 * what they take at four processors.  A change to the preemption rule, or
+	 * a depression that stops holding, meets this line first.  Judged by the
+	 * processors counted, not by arm14_alone, which the ablation clears.
+	 */
+	if (cpus <= 1 && took > ARM14_ALONE_MAX_MS) {
+		printf("act_test: [14] the rounds took %ld ms at one processor, "
+		       "more than %d ms: the children step aside as they start, "
+		       "and rounds that waited for their quanta took 19.4 to "
+		       "19.7 s — WRONG (#941, #785)\n", took, ARM14_ALONE_MAX_MS);
+		return 0;
+	}
+	/* A line of its own: the one below is near the console's 256 (#802). */
+	printf("act_test: [14] the rounds took %ld ms at %u processor(s) "
+	       "(#941)\n", took, cpus);
 	printf("act_test: [14] %d children terminated, each with two threads "
 	       "in syscall_task_info() and one in task_info()'s message on its "
 	       "own task, and the kernel came through: every child's port "
