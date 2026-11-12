@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #743
+Takes out: bootstrap's rule that takes the provisioning port from cap_server alone (0833a192, 0ccac1a6) -- it takes it from any task, still only once
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[41\] WRONG — a port of this task's, offered to bootstrap as the provisioning port: refused with KERN_NAME_EXISTS
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index bfd2bfac..90e501a2 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -2173,7 +2173,7 @@ do_bootstrap_cap_provisioner(mach_port_t bootstrap, mach_port_t provisioner)
+ {
+ 	struct server	*sp = server_by_bootstrap_port(bootstrap);
+ 
+-	if (sp == NULL || sp != cap_server_sp) {
++	if (0) {
+ 		BOOTSTRAP_IO_LOCK();
+ 		printf("%s: bootstrap_cap_provisioner: refused to %s (#743)\n",
+ 		       program_name,
