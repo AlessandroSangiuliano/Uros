@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #926
+Takes out: the first thread answered moved (292abf92) -- exec_load answers it COPY_SEND again, and exec_server keeps a send right to every program's first thread
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[44\] WRONG — once exec_load had answered, exec_server held send rights to the task that asked: 0, to the program's task: 0, to its first thread: 1
+
+diff --git a/uros/src/servers/exec_server/exec.defs b/uros/src/servers/exec_server/exec.defs
+index aec041bd..2ce68cf0 100644
+--- a/uros/src/servers/exec_server/exec.defs
++++ b/uros/src/servers/exec_server/exec.defs
+@@ -87,5 +87,5 @@ routine exec_load(
+ 	in	path		: exec_path_t;
+ 	in	argv_blob	: exec_blob_t;
+ 	in	envp_blob	: exec_blob_t;
+-	out	new_thread	: mach_port_move_send_t;
++	out	new_thread	: thread_t;
+ 	out	result_code	: int);
