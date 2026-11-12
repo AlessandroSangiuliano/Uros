@@ -3415,11 +3415,23 @@ static int
 arm_fifty_six_abort_reaches_user_mode(void)
 {
 	mach_port_t	me = mach_task_self();
+	unsigned	cpus = processors();
 	int		round, i, early[2] = { 0, 0 };
 	long		gap, shortest_gap = 0, worst[2] = { 0, 0 };
 	kern_return_t	kr, worst_kr[2] = { KERN_OPERATION_TIMED_OUT,
 					    KERN_OPERATION_TIMED_OUT };
+	struct timespec	start, end;
 
+	/*
+	 * How long the rounds take, read by the clock and said on the line:
+	 * at one processor they cost every boot about 75 s, and only the
+	 * campaign's running out of time showed it (#925).
+	 */
+	if (getclock(TIMEOFDAY, &start) != 0) {
+		printf("act_test: [56] the clock could not be read to time "
+		       "the rounds — WRONG (#925)\n");
+		return 0;
+	}
 	for (round = 0; round < A56_ROUNDS; round++) {
 		pthread_t	victim;
 
@@ -3480,10 +3492,17 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		       worst_kr[1]);
 		return 0;
 	}
+	if (getclock(TIMEOFDAY, &end) != 0) {
+		printf("act_test: [56] the clock could not be read to time "
+		       "the rounds — WRONG (#925)\n");
+		return 0;
+	}
 	printf("act_test: [56] an abort of a thread spinning in user mode was "
 	       "spent before it waited: in %d rounds both of two %d ms futex "
-	       "waits made %ld us or more after it timed out (#925)\n",
-	       A56_ROUNDS, A56_WAIT_MS, shortest_gap);
+	       "waits made %ld us or more after it timed out; the rounds took "
+	       "%ld ms at %u processor(s) (#925)\n",
+	       A56_ROUNDS, A56_WAIT_MS, shortest_gap,
+	       a56_ms_between(&start, &end), cpus);
 	return 1;
 }
 
