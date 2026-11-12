@@ -9706,6 +9706,69 @@ arm_fifty_three_threads_fault_together(void)
 	return 1;
 }
 
+/*
+ * ── How long each arm took (#941) ──
+ *
+ * By the clock, around each arm, said at the end in lines of their own, each
+ * under the console's 256 bytes (#802) and printed whole (#644).  The harness
+ * waits for this program in about 80 of the merge test's 94 lines, and
+ * nothing said where the time went: [56] took a minute of every boot at one
+ * processor, and only a campaign that ran out of its time showed it (#925).
+ * An arm whose clock could not be read says so, instead of a time.
+ */
+#define	ARMS_MAX	64
+#define	ARMS_A_LINE	10
+
+static long	arm_ms[ARMS_MAX];
+static int	arm_ran[ARMS_MAX];	/* 1 timed, 2 its clock unread */
+
+static int
+timed(int n, int (*arm)(void))
+{
+	struct timespec	t0, t1;
+	int		r, read;
+
+	read = getclock(TIMEOFDAY, &t0) == 0;
+	r = arm();
+	read = read && getclock(TIMEOFDAY, &t1) == 0;
+	if (n > 0 && n < ARMS_MAX) {
+		arm_ran[n] = read ? 1 : 2;
+		arm_ms[n] = read ? (long) (t1.tv_sec - t0.tv_sec) * 1000 +
+				   (long) (t1.tv_nsec - t0.tv_nsec) / 1000000 : 0;
+	}
+	return r;
+}
+
+/* The arms' times in the order of their numbers, ARMS_A_LINE to a line. */
+static void
+say_arm_times(void)
+{
+	char	line[200];
+	int	n, len = 0, on_line = 0, unread = 0;
+	long	total = 0;
+
+	for (n = 1; n < ARMS_MAX; n++) {
+		if (!arm_ran[n])
+			continue;
+		if (arm_ran[n] == 2) {
+			len += snprintf(line + len, sizeof line - len, " [%d] ?", n);
+			unread++;
+		} else {
+			len += snprintf(line + len, sizeof line - len, " [%d] %ld",
+					n, arm_ms[n]);
+			total += arm_ms[n];
+		}
+		if (++on_line == ARMS_A_LINE) {
+			printf("act_test: arm times in ms (#941):%s\n", line);
+			len = on_line = 0;
+		}
+	}
+	if (on_line > 0)
+		printf("act_test: arm times in ms (#941):%s\n", line);
+	printf("act_test: the arms took %ld ms in all, %d with a clock that "
+	       "could not be read (#941)\n", total, unread);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -9724,61 +9787,61 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	arm_one_passed = arm_one_terminate_in_exception();
+	arm_one_passed = timed(1, arm_one_terminate_in_exception);
 	passed += arm_one_passed;
-	passed += arm_two_abort_in_mach_msg();
-	passed += arm_three_suspend_in_mach_msg();
-	passed += arm_four_state_of_a_thread_in_a_trap();
-	passed += arm_five_registers_a_trap_leaves();
-	passed += arm_seven_suspend_in_page_faults();
+	passed += timed(2, arm_two_abort_in_mach_msg);
+	passed += timed(3, arm_three_suspend_in_mach_msg);
+	passed += timed(4, arm_four_state_of_a_thread_in_a_trap);
+	passed += timed(5, arm_five_registers_a_trap_leaves);
+	passed += timed(7, arm_seven_suspend_in_page_faults);
 
 	/*
 	 * An arm that was not asked is not an arm that passed: at more than
 	 * one processor this one says NOT ASKED, and the count below is of the
 	 * arms that were.
 	 */
-	r = arm_eight_suspend_a_spinner();
+	r = timed(8, arm_eight_suspend_a_spinner);
 	if (r == ARM8_NOT_ASKED)
 		arms--;
 	else
 		passed += r;
 
-	passed += arm_nine_refused_create_running();
-	passed += arm_ten_abort_an_rpc_with_its_reply_on_the_way();
-	passed += arm_eleven_abort_a_thread_that_keeps_asking();
-	passed += arm_twelve_look_at_the_reply_port();
-	r = arm_thirteen_message_to_a_receiver_being_read();
+	passed += timed(9, arm_nine_refused_create_running);
+	passed += timed(10, arm_ten_abort_an_rpc_with_its_reply_on_the_way);
+	passed += timed(11, arm_eleven_abort_a_thread_that_keeps_asking);
+	passed += timed(12, arm_twelve_look_at_the_reply_port);
+	r = timed(13, arm_thirteen_message_to_a_receiver_being_read);
 	if (r == ARM13_NOT_ASKED)	/* not asked is not passed (arm eight) */
 		arms--;
 	else
 		passed += r;
-	passed += arm_fourteen_terminate_inside_traps();
+	passed += timed(14, arm_fourteen_terminate_inside_traps);
 	arms++;		/* arm twenty, #783: counted here, beside its call */
-	r = arm_twenty_no_empty_activation();
+	r = timed(20, arm_twenty_no_empty_activation);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-one, #786 */
-	r = arm_twenty_one_set_limit_never_raises();
+	r = timed(21, arm_twenty_one_set_limit_never_raises);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-three, #786: harmless even ablated */
-	r = arm_twenty_three_float_state_is_what_the_thread_finds();
+	r = timed(23, arm_twenty_three_float_state_is_what_the_thread_finds);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-four, #786: harmless even ablated */
-	r = arm_twenty_four_initial_reads_initial();
+	r = timed(24, arm_twenty_four_initial_reads_initial);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-five, #786 */
-	r = arm_twenty_five_fifo_rr_need_the_set();
+	r = timed(25, arm_twenty_five_fifo_rr_need_the_set);
 	if (r < 0)
 		arms--;
 	else
@@ -9790,86 +9853,86 @@ main(int argc, char **argv)
 	 * processor_exit ablation the action thread panics (#453).
 	 */
 	arms++;		/* arm twenty-two, #786 */
-	r = arm_twenty_two_processor_ports_are_privileged();
+	r = timed(22, arm_twenty_two_processor_ports_are_privileged);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-six, #771 */
-	r = arm_twenty_six_a_receive_that_slept_keeps_six();
+	r = timed(26, arm_twenty_six_a_receive_that_slept_keeps_six);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 
 	arms++;		/* arm twenty-seven, #808 */
-	passed += arm_twenty_seven_send_size_cannot_take_the_trailer();
+	passed += timed(27, arm_twenty_seven_send_size_cannot_take_the_trailer);
 	arms++;		/* arm twenty-eight, #808 */
-	passed += arm_twenty_eight_send_past_the_inline_limit();
+	passed += timed(28, arm_twenty_eight_send_past_the_inline_limit);
 	arms++;		/* arm twenty-nine, #808 */
-	passed += arm_twenty_nine_receive_measured_with_its_trailer();
+	passed += timed(29, arm_twenty_nine_receive_measured_with_its_trailer);
 	arms++;		/* arm thirty, #808 */
-	passed += arm_thirty_scatter_list_one_word_short();
+	passed += timed(30, arm_thirty_scatter_list_one_word_short);
 	arms++;		/* arm thirty-one, #840 */
-	passed += arm_thirty_one_descriptor_count_past_the_message();
+	passed += timed(31, arm_thirty_one_descriptor_count_past_the_message);
 	arms++;		/* arm thirty-two, #841 */
-	passed += arm_thirty_two_exception_answered_too_large();
+	passed += timed(32, arm_thirty_two_exception_answered_too_large);
 	arms++;		/* arm thirty-three, #842 */
-	passed += arm_thirty_three_trailer_not_there();
+	passed += timed(33, arm_thirty_three_trailer_not_there);
 	arms++;		/* arm thirty-four, #844 */
-	passed += arm_thirty_four_rpc_reply_seqno();
+	passed += timed(34, arm_thirty_four_rpc_reply_seqno);
 	arms++;		/* arm thirty-five, #843 */
-	passed += arm_thirty_five_port_array_with_no_room();
+	passed += timed(35, arm_thirty_five_port_array_with_no_room);
 	arms++;		/* arm thirty-six, #810 */
-	passed += arm_thirty_six_vm_write_small_physical_copy();
+	passed += timed(36, arm_thirty_six_vm_write_small_physical_copy);
 	arms++;		/* arm thirty-seven, #812 */
-	passed += arm_thirty_seven_snapshot_of_untouched_memory();
+	passed += timed(37, arm_thirty_seven_snapshot_of_untouched_memory);
 	arms++;		/* arm thirty-eight, #813 */
-	passed += arm_thirty_eight_task_wire_unprivileged();
+	passed += timed(38, arm_thirty_eight_task_wire_unprivileged);
 	arms++;		/* arm thirty-nine, #777 */
-	passed += arm_thirty_nine_lost_bet_undone();
+	passed += timed(39, arm_thirty_nine_lost_bet_undone);
 	arms++;		/* arm forty, #777 */
-	passed += arm_forty_nothing_after_the_hand_off();
+	passed += timed(40, arm_forty_nothing_after_the_hand_off);
 	arms++;		/* arm forty-one, #867 */
-	passed += arm_forty_one_body_disposition();
+	passed += timed(41, arm_forty_one_body_disposition);
 	arms++;		/* arm forty-two, #870 */
-	passed += arm_forty_two_simple_message_scattered();
+	passed += timed(42, arm_forty_two_simple_message_scattered);
 	arms++;		/* arm forty-three, #871 */
-	passed += arm_forty_three_receive_gives_back();
+	passed += timed(43, arm_forty_three_receive_gives_back);
 	arms++;		/* arm forty-four, #880 */
-	passed += arm_forty_four_index_zero_name();
+	passed += timed(44, arm_forty_four_index_zero_name);
 	arms++;		/* arm forty-five, #881 */
-	r = arm_forty_five_parked_sender();
+	r = timed(45, arm_forty_five_parked_sender);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm forty-six, #887 */
-	passed += arm_forty_six_exception_flavor();
+	passed += timed(46, arm_forty_six_exception_flavor);
 	arms++;		/* arm forty-seven, #887 */
-	r = arm_forty_seven_failed_state_gives_back();
+	r = timed(47, arm_forty_seven_failed_state_gives_back);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm fifty, #851 */
-	passed += arm_fifty_holes_come_back_zero();
+	passed += timed(50, arm_fifty_holes_come_back_zero);
 	arms++;		/* arm forty-eight, #889 */
-	passed += arm_forty_eight_hint_and_lock_order();
+	passed += timed(48, arm_forty_eight_hint_and_lock_order);
 	arms++;		/* arm forty-nine, #869 */
-	passed += arm_forty_nine_subsystem_released_once();
+	passed += timed(49, arm_forty_nine_subsystem_released_once);
 	arms++;		/* arm fifty-one, #868 */
-	passed += arm_fifty_one_rights_that_left();
+	passed += timed(51, arm_fifty_one_rights_that_left);
 	arms++;		/* arm fifty-two, #414 */
-	passed += arm_fifty_two_fs_base_goes_with_the_thread();
+	passed += timed(52, arm_fifty_two_fs_base_goes_with_the_thread);
 	arms++;		/* arm fifty-three, #414 */
-	passed += arm_fifty_three_threads_fault_together();
+	passed += timed(53, arm_fifty_three_threads_fault_together);
 	arms++;		/* arm fifty-six, #925 */
-	passed += arm_fifty_six_abort_reaches_user_mode();
+	passed += timed(56, arm_fifty_six_abort_reaches_user_mode);
 	arms++;		/* arm fifty-five, #935: before [54], which [16] follows */
-	passed += arm_fifty_five_created_while_suspended();
+	passed += timed(55, arm_fifty_five_created_while_suspended);
 	arms++;		/* arm fifty-four, #935 */
-	passed += arm_fifty_four_create_on_a_dying_task();
+	passed += timed(54, arm_fifty_four_create_on_a_dying_task);
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
@@ -9877,10 +9940,10 @@ main(int argc, char **argv)
 	 * the #752 ablation it provokes the same kind of machine stop arm six
 	 * does, so it belongs down here beside it.
 	 */
-	passed += arm_sixteen_name_not_copied_out();
+	passed += timed(16, arm_sixteen_name_not_copied_out);
 
-	passed += arm_fifteen_kernel_task_needs_privilege();
-	passed += arm_nineteen_last_page_unmapped();
+	passed += timed(15, arm_fifteen_kernel_task_needs_privilege);
+	passed += timed(19, arm_nineteen_last_page_unmapped);
 
 	/*
 	 * ⚠️ Last, and not by accident.  On a healthy tree this is the only arm
@@ -9889,15 +9952,15 @@ main(int argc, char **argv)
 	 * that caused it, nothing after this line runs.  Everything the other
 	 * arms have to say is already printed by the time it is provoked.
 	 */
-	passed += arm_six_non_canonical_return();
+	passed += timed(6, arm_six_non_canonical_return);
 
 	/*
 	 * And the two IRETQ returns after it (#780), for the same reason: each
 	 * can stop the machine on a kernel without the fix, and does nothing to
 	 * one with it.
 	 */
-	passed += arm_seventeen_start_at_a_noncanonical_rip();
-	passed += arm_eighteen_stopped_in_a_trap();
+	passed += timed(17, arm_seventeen_start_at_a_noncanonical_rip);
+	passed += timed(18, arm_eighteen_stopped_in_a_trap);
 
 	/*
 	 * The last thing arm one is owed, asked now that the two arms after it
@@ -9912,6 +9975,7 @@ main(int argc, char **argv)
 			passed--;
 	}
 
+	say_arm_times();
 	printf("act_test: %d of %d arms passed\n", passed, arms);
 
 	/*
