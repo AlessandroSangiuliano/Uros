@@ -102,6 +102,31 @@ def ring(first, nxt, limit=16):
     return out
 
 
+SAFE_EXTERNAL_RECEIVE = -3     # <kern/thread.h>: a sentinel thread_block() keeps
+
+
+def queue_object(mq):
+    # The port or the set whose queue mq is, for a park that recorded the
+    # queue and not the object (#940).  A candidate is believed only if its
+    # type is the one asked for and its own queue is mq.
+    for tname, field, want in (("struct ipc_port", "ip_messages", 0),
+                               ("struct ipc_pset", "ips_messages", 1)):
+        T = gdb.lookup_type(tname)
+        off = [f.bitpos // 8 for f in T.fields() if f.name == field]
+        if not off:
+            continue
+        cand = mq - off[0]
+        try:
+            bits = int(gdb.Value(cand).cast(
+                gdb.lookup_type("struct ipc_object").pointer())["io_bits"]) & 0xffffffff
+            if (bits >> 16) & 0x7fff == want and \
+               int(gdb.Value(cand).cast(T.pointer())[field].address) == mq:
+                return cand
+        except gdb.error:
+            pass
+    return None
+
+
 def receive_port(th):
     # The queue a receive in progress waits on (#925): the port or the set it
     # was asked on, the count and the limit a send is measured against, the
@@ -109,21 +134,41 @@ def receive_port(th):
     # thread is one of them.  A message it never took is either queued with
     # the receiver missing from the list, or was refused at the limit.
     #
-    # Only for a thread asleep in mach_msg_receive_continue: that park writes
-    # the queue and the object it waits on (ipc_mqueue_receive() and
-    # mach_msg_receive()).  The hot path's park and a kernel receive write
-    # neither, and a receive that ended leaves both behind, naming memory that
-    # may since be another port's -- nap()'s port, freed, came back as arm 39's.
+    # For a thread asleep in mach_msg_receive_continue: that park writes the
+    # queue and the object it waits on (ipc_mqueue_receive() and
+    # mach_msg_receive()).  A receive that ended leaves both behind, naming
+    # memory that may since be another port's -- nap()'s port, freed, came
+    # back as arm 39's -- so a record is read only for a park that wrote it.
+    #
+    # 🔴 AND FOR THE HOT PATH'S SLOW RECEIVE, WHICH WRITES THE QUEUE (#940).
+    # This said the hot path's park wrote neither, and an RPC that waited for
+    # good for its reply was walked as "a path that records no queue".  It
+    # parks in ipc_mqueue_receive() with SAFE_EXTERNAL_RECEIVE for its
+    # continuation: not zero, so the queue is written, and a sentinel, so
+    # thread_block_reason() keeps it in at_safe_point and zeroes the
+    # continuation.  A later park with no continuation puts NOT_AT_SAFE_POINT
+    # there: continuation zero and at_safe_point SAFE_EXTERNAL_RECEIVE is this
+    # park and no other.  The object is not written; it is found from the
+    # queue, and the thread must be on the queue's list.
     st = int(th["ith_state"]) & 0xffffffff
     if st not in (0x10004001, 0x10004011):              # MACH_RCV_IN_PROGRESS[_TIMED]
         return
     if not (int(th["state"]) & 1) or int(th["wait_event"]):
         return                                          # not parked on an IPC queue
-    if "mach_msg_receive_continue" not in ksym(th["continuation"]):
+    try:
+        hot = int(th["continuation"]) == 0 and \
+            int(th["at_safe_point"]) == SAFE_EXTERNAL_RECEIVE
+    except gdb.error:
+        hot = False
+    if not hot and "mach_msg_receive_continue" not in ksym(th["continuation"]):
         print("      receive parked by a path that records no queue")
         return
     mq = int(th["saved"]["receive"]["mqueue"])
-    obj = int(th["saved"]["receive"]["object"])
+    if hot:
+        obj = queue_object(mq)
+        print("      the hot path's slow receive: ipc_mqueue_receive() recorded queue %#x (#940)" % mq)
+    else:
+        obj = int(th["saved"]["receive"]["object"])
     try:
         # Every field the two lists are read through, asked for even when a
         # list is empty: an empty one never follows a link, and a name this
@@ -140,6 +185,13 @@ def receive_port(th):
                 for r in ring(int(MQ["imq_threads"]["ithq_base"]),
                               lambda r: int(gdb.Value(r).cast(th.type)["ith_next"]))]
         lists = "messages=[%s] receivers=[%s] (* this thread)" % (" ".join(msgs), " ".join(rcvs))
+        # Absent from the list it is recorded on, a thread is not parked
+        # there: the record is not this park's, whatever the marker said.
+        if not any(r.endswith("*") for r in rcvs):
+            lists += " -- this thread is NOT among the receivers"
+        if obj is None:
+            print("      receive on queue %#x, of no port or set: %s" % (mq, lists))
+            return
         bits = int(gdb.Value(obj).cast(gdb.lookup_type("struct ipc_object").pointer())["io_bits"])
         bits &= 0xffffffff
         otype = (bits >> 16) & 0x7fff
