@@ -3129,8 +3129,13 @@ urmach_msg_overwrite_trap_call(
 		 * this park and the object of an earlier one, and act_test
 		 * [54]'s helper, waiting for good for a reply, could not be
 		 * told the port it waited on.  The two halves of one record.
+		 * A record for the walk, under the switch of the other records
+		 * of IPC waits (<kern/waker_track.h>): one store on a path that
+		 * is about to block, and i386's .text as it was.
 		 */
+#if	WAKER_TRACK
 		self->ith_object = (void *) rcv_object;
+#endif	/* WAKER_TRACK */
 
 		mr = ipc_mqueue_receive(rcv_mqueue,
 					MACH_MSG_OPTION_NONE,
