@@ -472,6 +472,11 @@ needs:
 | `URMACH_TASK_RIGHT_LIFECYCLE` | `task_terminate()`, `task_suspend()`, `task_resume()` |
 | the full port only | everything else: memory, threads, port rights, special ports |
 
+The traps of `task_terminate()`, `task_suspend()` and `task_info()`, which
+libmach tries before MIG, take a reduced port the same way and through the
+same check (`ref_task_right_port_locked()`), so a reduced port is as quick as
+the full one there.
+
 **A reduced port carries a set of these rights.**
 
 - `urmach_task_rights_port(task, rights)` makes it, from the full task port
