@@ -1,0 +1,7 @@
+# blk_write_label_test (#915): asks every partition it finds for a write open
+# and a read open, so it holds block-device rights for any of them.  What it
+# tests is the block server's -W; a manifest pinning it to one partition would
+# test cap_server instead.
+name blk_write_label_test
+
+required 4 any 0x3

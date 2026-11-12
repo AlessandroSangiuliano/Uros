@@ -36,7 +36,7 @@ type klog_data_t = array[*:4096] of char;
  *   next     - new cursor; pass back unchanged next call.
  *
  * The cursor is 32-bit and modular: if the reader falls more than
- * KLOG_BUF_SIZE (64 KiB) behind, the kernel silently snaps the
+ * KLOG_BUF_SIZE (128 KiB) behind, the kernel silently snaps the
  * cursor to the oldest still-buffered byte.  Drop-on-loss matches
  * design doc §11.3 rule 2 — never block printf for a slow drainer.
  */

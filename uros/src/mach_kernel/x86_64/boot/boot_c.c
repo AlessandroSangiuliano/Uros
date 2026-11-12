@@ -49,6 +49,7 @@
 #include <cpu/regs.h>
 #include <cpu/reset.h>		/* #373 */
 #include <ddb/ramoops.h>	/* #373 */
+#include <kern/klog.h>		/* #915: klog_early_putc */
 #include <cpu/tss.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
@@ -111,8 +112,13 @@ static void kputc(char c)
 	 * cons.c needs no initialisation, and its statics are zero because
 	 * the loader zeroes .bss (multiboot2), not because anything here
 	 * ran first.
+	 *
+	 * #915: and kept for klog until klog_init(), so that a log read from
+	 * the ring -- bootlog's, on a machine whose memory a reset clears --
+	 * has the boot's own narration.  Nothing after klog_init().
 	 */
 	cons_putc(c);
+	klog_early_putc(c);
 }
 
 static void kputs(const char *s)

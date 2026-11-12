@@ -1,0 +1,10 @@
+# ext_server as the bundle for a real machine that keeps its boot log on a disk
+# starts it (#915): -p label:@UROS_LOG_LABEL@:/log, one partition, by its
+# label, at one path.  The block-device grant names that partition and no
+# other, so a mistake in the line cannot reach another disk through cap_server
+# either; the block server's -W is the other half.
+name ext_server_log
+
+required 4 name:label:@UROS_LOG_LABEL@ 0x3
+required 10 any 0x3
+required 3 name:/log 0x1
