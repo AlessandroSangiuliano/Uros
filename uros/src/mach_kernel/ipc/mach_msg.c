@@ -3119,6 +3119,18 @@ urmach_msg_overwrite_trap_call(
 		self->ith_option = option;
 		self->ith_scatter_list = MACH_MSG_BODY_NULL;
 		self->ith_scatter_list_size = scatter_list_size;
+		/*
+		 * 🔴 AND THE OBJECT, BESIDE THE QUEUE ipc_mqueue_receive()
+		 * RECORDS (#940).
+		 *
+		 * Called with the sentinel below, ipc_mqueue_receive() writes
+		 * the queue it parks on, and only mach_msg_receive() wrote the
+		 * object.  A thread parked here was walked with the queue of
+		 * this park and the object of an earlier one, and act_test
+		 * [54]'s helper, waiting for good for a reply, could not be
+		 * told the port it waited on.  The two halves of one record.
+		 */
+		self->ith_object = (void *) rcv_object;
 
 		mr = ipc_mqueue_receive(rcv_mqueue,
 					MACH_MSG_OPTION_NONE,
