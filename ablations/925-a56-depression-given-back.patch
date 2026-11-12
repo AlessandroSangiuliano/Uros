@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #925
+Takes out: the lasting depression of act_test [56]'s victim -- SWITCH_OPTION_DEPRESS again, as merged in 86d46d6a, whose depression thread_switch() gives back before it returns, so at one processor the victim spins at its own priority and reads itself not depressed in its loop
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[56\] round [0-9]+: at one processor the victim read itself not depressed in its loop
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 19498796..168ee5f8 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3445,7 +3445,7 @@ a56_victim(void *arg)
+ 		mach_msg_type_number_t		n = POLICY_TIMESHARE_INFO_COUNT;
+ 
+ 		a56_depressed = thread_switch(MACH_PORT_NULL,
+-					      SWITCH_OPTION_IDLE,
++					      SWITCH_OPTION_DEPRESS,
+ 					      A56_DEPRESS_MS);
+ 		/*
+ 		 * And read back: that is how the depression that was not there
