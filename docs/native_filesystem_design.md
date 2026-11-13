@@ -417,6 +417,28 @@ The thresholds are to be set before the first measurement, for example under
 2% on the fast path for everything but encryption, and the aging benchmark
 within rule 5's threshold for the history.
 
+**When a threshold fails**, the threshold does not move. In order:
+
+1. **Confirm the measurement.** Run it again, A and B alternated, with more
+   runs, and check what else could differ: the machine, the accelerator, the
+   clock, the load, the power. A failure that does not repeat is noise to
+   explain, not a result.
+2. **Open an issue** with the numbers. It blocks the release, or the
+   feature's merge.
+3. **Find where the time goes,** from the filesystem's own counters, fresh
+   against aged. For the example's `git status`: nodes read per lookup,
+   segments touched, cache hits, the depth of the tree.
+4. **Fix the cause, and measure everything again** against the same
+   thresholds, not only the metric that failed, since a fix moves others.
+   Then take the fix out and show the metric falls below the threshold
+   again: a fix is verified by removing it, as an ablation is.
+5. **If the cause is the design itself,** a trade-off with no fix inside it,
+   the user decides. Either the design changes, or that one threshold
+   changes for a reason written down beside the numbers, never quietly.
+
+A feature that fails its threshold stays out of the default: off behind its
+flag until it meets it, opt-in if it cannot, or dropped.
+
 ## 10. Lineage, and what may be taken
 
 | rule | where it comes from |
