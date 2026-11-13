@@ -66,15 +66,22 @@ bench_proc_smoke(void)
         return;
     }
 
-    /* 1. Spawn hello_exec via exec_server. */
-    kr = exec_load(exec_port, mach_task_self(), mach_cap_port,
+    /* 1. Spawn hello_exec via exec_server, into a task made here (#926). */
+    kr = task_create(mach_task_self(), NULL, 0, FALSE, &new_task);
+    if (kr != KERN_SUCCESS) {
+        printf("  proc: task_create failed kr=%d — FAIL\n", kr);
+        return;
+    }
+    kr = exec_load(exec_port, new_task, mach_cap_port,
                    (char *)"/hello_exec",
                    (pointer_t)argv, sizeof(argv),
                    (pointer_t)envp, sizeof(envp),
-                   &new_task, &new_thread, &rc);
+                   &new_thread, &rc);
     if (kr != KERN_SUCCESS || rc != 0) {
         printf("  proc: exec_load failed kr=%d rc=%d — FAIL\n",
                kr, rc);
+        (void)task_terminate(new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_task);
         return;
     }
 
@@ -88,6 +95,8 @@ bench_proc_smoke(void)
         printf("  proc: proc_register failed kr=%d rc=%d pid=%u "
                "— FAIL\n", kr, rc, pid);
         (void)task_terminate(new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_thread);
         return;
     }
     printf("  proc: proc_register -> pid=%u\n", pid);
@@ -190,4 +199,7 @@ bench_proc_smoke(void)
         (void)mach_port_destroy(mach_task_self(), notify_recv);
     if (new_thread != MACH_PORT_NULL)
         (void)mach_port_deallocate(mach_task_self(), new_thread);
+    /* Ended above on the way that got that far; a second end is refused. */
+    (void)task_terminate(new_task);
+    (void)mach_port_deallocate(mach_task_self(), new_task);
 }

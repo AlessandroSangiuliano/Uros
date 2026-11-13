@@ -21,11 +21,11 @@
  * segments, build stack, start thread.  Returns EXEC_OK or one of
  * EXEC_ERR_*.  *out_task and *out_thread are set on success.
  */
-int exec_do_load(mach_port_t client_task, mach_port_t parent_caps,
+int exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
                  const char *path,
                  const void *argv_blob, mach_msg_type_number_t argv_len,
                  const void *envp_blob, mach_msg_type_number_t envp_len,
-                 mach_port_t *out_task, mach_port_t *out_thread);
+                 mach_port_t *out_thread);
 
 /*
  * Build the System V ABI initial stack in `new_task` (allocates

@@ -20,8 +20,8 @@
  * exec.defs — MIG interface for exec_server (#228 v0.1.0).
  *
  * Subsystem 3100.  Single routine in v0.1.0: synchronously load an
- * ELF binary from a libvfs-resolvable path and create a new task +
- * initial thread to run it.
+ * ELF binary from a libvfs-resolvable path into a task the caller made,
+ * and create the initial thread to run it (#926).
  *
  * Naming convention (uses the migcom serverstripprefix extension
  * introduced in #227):
@@ -47,11 +47,15 @@ type exec_path_t = c_string[*:1024];
 type exec_blob_t = pointer_t;
 
 /*
- * exec_load — load a static ELF binary into a fresh child task.
+ * exec_load — load a static ELF binary into a fresh task the caller made.
  *
- *   client_task — parent task.  v0.1.0: the new task is created as a
- *                 clone of this task's IPC space (caps inherited
- *                 raw); v0.3.0 will derive caps via cap_server.
+ *   task        — the task to load into: empty, made by the caller with
+ *                 task_create(mach_task_self(), ..., FALSE, &task), so
+ *                 the child is the caller's and inherits from it.
+ *                 exec_server holds it for the length of the call and
+ *                 gives its right back before it answers (#926).  On a
+ *                 failure the task may be half loaded: the caller
+ *                 terminates it.
  *   parent_caps — the caller's per-task cap port (its TASK_CAP_PORT,
  *                 libmach's mach_cap_port), or MACH_PORT_NULL (#743).
  *                 The new program's port is derived from it: what the
@@ -64,20 +68,24 @@ type exec_blob_t = pointer_t;
  *   argv_blob   — serialised argv (see exec_blob_t in exec_types.h).
  *   envp_blob   — serialised envp.
  *
- *   new_task    — task port of the spawned task (with send right).
- *   new_thread  — initial thread port (with send right).  Returned
- *                 SUSPENDED (#262 step 3): the caller hands over any
- *                 inherited fds into the new task, then thread_resume's
- *                 it so the new image starts with a populated fd table.
+ *   new_thread  — initial thread port, MOVED to the caller: exec_server
+ *                 keeps no right to it (#926).  Returned SUSPENDED
+ *                 (#262 step 3): the caller hands over any inherited fds
+ *                 into the new task, then thread_resume's it so the new
+ *                 image starts with a populated fd table.
  *   result_code — EXEC_OK on success, EXEC_ERR_* otherwise.
+ *
+ * 🔴 #926: exec_server used to be handed the CALLER's task, to be the
+ * parent of one it made, and kept it; and it answered the new task and its
+ * thread as plain mach_port_t, COPY_SEND, so it kept those too.  A send right
+ * to a task port is the task.
  */
 routine exec_load(
 		exec_port	: mach_port_t;
-	in	client_task	: task_t;
+	in	task		: task_t;
 	in	parent_caps	: mach_port_t;
 	in	path		: exec_path_t;
 	in	argv_blob	: exec_blob_t;
 	in	envp_blob	: exec_blob_t;
-	out	new_task	: task_t;
-	out	new_thread	: thread_t;
+	out	new_thread	: mach_port_move_send_t;
 	out	result_code	: int);

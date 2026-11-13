@@ -240,13 +240,14 @@ rules refuse it, can tell which one did.
 **Derived, by exec_server, for a program a task execs.**
 
 ```
-the caller ── exec_load(…, its per-task port, path, …) ──▶ exec_server
+the caller makes the program's task: task_create(mach_task_self(), …)
+the caller ── exec_load(…, that task, its per-task port, path, …) ──▶ exec_server
    └─ reads the program's .uros_manifest (or an empty default)
-       └─ cap_derive_task(the caller's port, task_port, blob) ──▶ cap_server
+       └─ cap_derive_task(the caller's port, the task, blob) ──▶ cap_server
            └─ the program's lists, cut by the caller's delegatable[]
            ◀── makes exec_server a send right to the new port
    └─ task_set_special_port(program, TASK_CAP_PORT, that port)
-   └─ gives both ports back
+   └─ gives both ports and the task back (#926)
 ```
 
 The program's file says what it **asks** for; what it **gets** is its caller's
@@ -615,11 +616,13 @@ Stated so nobody reads this document as a description of a finished system.
   `DIRECTORY`, `PRINTER`, `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values
   with no enforcement behind them — the browser example above is therefore
   *architecture*, not a transcript.
-- **Two servers still hold their clients' task ports.** exec_server is
-  handed the port of every task that spawns and keeps it, though it needs
-  only a parent for `task_create()`; proc_server holds every process's, to
-  terminate, suspend and resume it and to see it die, and a task port is
-  much more than that. Found while enumerating for #911: #926 and #927.
+- **proc_server still holds every process's task port**, to terminate,
+  suspend and resume it, read its counters and see it die, and a task port
+  is much more than that (#927). exec_server held the port of every task that
+  spawned a program, and of every program and first thread it started, until
+  #926: the caller now makes the task and lends it, and exec_server gives it
+  back before it answers and answers the first thread moved. Both were found
+  while enumerating for #911.
 - **A manifest decides every capability.** A task that ships none is refused
   all of them (`cap_manifest_allows()`, #511). In the x86-64 build fourteen
   programs ship one: ten in the bundle, for the tasks bootstrap starts
@@ -665,6 +668,7 @@ this is where to look, and what to break to confirm it still works.
 | exec_server keeps neither the program's port nor its caller's | `cap_test [42]` | `ablations/743-exec-server-keeps-the-programs-port`, `743-exec-server-keeps-the-callers-port` |
 | bootstrap keeps no task's port | `bootstrap: … still holds a send right to its TASK_CAP_PORT …` | `ablations/743-bootstrap-keeps-its-copy` |
 | a no-senders notification forged by a holder ends nothing | `cap_test [43]` | `ablations/743-forged-no-senders-taken` |
+| exec_server holds nothing of a spawn once it has answered | `cap_test [44]` | `ablations/926-exec-server-keeps-the-task`, `926-first-thread-copied` |
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers

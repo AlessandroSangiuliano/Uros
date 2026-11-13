@@ -4,8 +4,9 @@
  * On Uros, POSIX execve("path", argv, envp) becomes:
  *   1. Serialise argv + envp into the NUL-separated blob format
  *      exec_server expects (exec_blob_t in exec_types.h).
- *   2. RPC `exec_load` to exec_server: it creates a brand-new task
- *      with the requested ELF already running.
+ *   2. task_create() a child of this task, and RPC `exec_load` to
+ *      exec_server: it loads the requested ELF into that task and
+ *      gives back its first thread, suspended (#926).
  *   3. proc_register the new task with proc_server so SIGCHLD wires
  *      up correctly later.
  *   4. task_terminate(self) — the calling task vanishes, the new task
@@ -165,31 +166,47 @@ __uros_spawn(const char *path,
         return -ENAMETOOLONG;
     memcpy(path_buf, path, path_len + 1);
 
+    /*
+     * #926: the child is made here, and is ours; exec_server is lent it to
+     * load into and is handed nothing else of this task.  It used to be
+     * handed this task's own port, to make the child with, and kept it.
+     */
+    kr = task_create(mach_task_self(), NULL, 0, FALSE, &new_task);
+    if (kr != KERN_SUCCESS)
+        return -EAGAIN;
+
     rc = EXEC_ERR_PARSE;
     /* #743: the new program's policy is derived from ours, so our
      * per-task port goes with the request (mach_cap_port, or null). */
     kr = exec_load(__uros_exec_port,
-                   mach_task_self(),
+                   new_task,
                    mach_cap_port,
                    path_buf,
                    (vm_offset_t)argv_blob, (mach_msg_type_number_t)argv_n,
                    (vm_offset_t)envp_blob, (mach_msg_type_number_t)envp_n,
-                   &new_task, &new_thread, &rc);
-    if (kr != KERN_SUCCESS)
-        return -EIO;
-    switch (rc) {
-    case EXEC_OK:                              break;
-    case EXEC_ERR_NOT_FOUND:                   return -ENOENT;
-    case EXEC_ERR_READ:                        return -EIO;
-    case EXEC_ERR_PARSE:                       return -ENOEXEC;
-    case EXEC_ERR_NOT_STATIC:                  return -ENOEXEC;
-    case EXEC_ERR_TASK_CREATE:                 return -EAGAIN;
-    case EXEC_ERR_VM_SETUP:                    return -ENOMEM;
-    case EXEC_ERR_THREAD_CREATE:               return -EAGAIN;
-    case EXEC_ERR_BAD_BLOB:                    return -EINVAL;
-    case EXEC_ERR_TOO_BIG:                     return -E2BIG;
-    case EXEC_ERR_PERMISSION:                  return -EACCES;
-    default:                                   return -EIO;
+                   &new_thread, &rc);
+    if (kr != KERN_SUCCESS || rc != EXEC_OK) {
+        int err;
+
+        if (kr != KERN_SUCCESS)
+            err = -EIO;
+        else
+            switch (rc) {
+            case EXEC_ERR_NOT_FOUND:           err = -ENOENT;  break;
+            case EXEC_ERR_READ:                err = -EIO;     break;
+            case EXEC_ERR_PARSE:               err = -ENOEXEC; break;
+            case EXEC_ERR_NOT_STATIC:          err = -ENOEXEC; break;
+            case EXEC_ERR_VM_SETUP:            err = -ENOMEM;  break;
+            case EXEC_ERR_THREAD_CREATE:       err = -EAGAIN;  break;
+            case EXEC_ERR_BAD_BLOB:            err = -EINVAL;  break;
+            case EXEC_ERR_TOO_BIG:             err = -E2BIG;   break;
+            case EXEC_ERR_PERMISSION:          err = -EACCES;  break;
+            default:                           err = -EIO;     break;
+            }
+        /* A failed load can leave the child half made; it is ours to end. */
+        (void)task_terminate(new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_task);
+        return err;
     }
 
     /*
