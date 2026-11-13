@@ -299,6 +299,26 @@
  */
 boolean_t zfree_clear __attribute__((section(".data"))) = FALSE;
 
+/*
+ * #940, prova only: before the panic, the zone and the element's first words.
+ * A port element freed twice and given out once holds a live port's fields
+ * here, which say what shares the slot; one freed once holds the stamp and
+ * the freer io_free() left (ip_nsrequest, ip_pdrequest, ip_dnrequests,
+ * ip_pset).
+ */
+static void
+zone_element_report(zone_t zone, vm_offset_t element)
+{
+	vm_offset_t	*w = (vm_offset_t *) element;
+	int		i, n = (int) (zone->elem_size / sizeof (vm_offset_t));
+
+	printf("zone '%s': freed element %p modified, its first words:",
+	       zone->zone_name, (void *) element);
+	for (i = 0; i < n && i < 24; i++)
+		printf("%s%lx", (i % 6) ? " " : "\n  ", (unsigned long) w[i]);
+	printf("\n");
+}
+
 #define ADD_TO_ZONE(zone, element)					\
 MACRO_BEGIN								\
 		if (zfree_clear)					\
@@ -318,6 +338,7 @@ MACRO_BEGIN								\
 	(ret) = (type) (zone)->free_elements;				\
 	if ((ret) != (type) 0) {					\
 	    if (!is_kernel_data_addr(((vm_offset_t *)(ret))[0])) {	\
+		zone_element_report((zone), (vm_offset_t) (ret));	\
 		panic("A freed zone element has been modified.\n");	\
 	    }								\
 	    if (zfree_clear) {						\
