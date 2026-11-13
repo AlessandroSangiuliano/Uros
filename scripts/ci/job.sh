@@ -266,7 +266,7 @@ AUTO=0
 if [ "$ACCEL" = auto ]; then
 	AUTO=1
 	ACCEL=tcg
-	[ "$KVM" = "can be opened" ] && ACCEL=tcg,kvm
+	[ "$KVM" = "can be opened" ] && ACCEL=kvm	# prova (#940): KVM only, where it hung
 fi
 read -r -a A <<< "${ACCEL//,/ }"
 HAS_TCG=0
