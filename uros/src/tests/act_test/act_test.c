@@ -3463,6 +3463,15 @@ a56_victim(void *arg)
 		 * (OMEGA, 13/11).  So the call is timed: KERN_ABORTED after the
 		 * whole depression is asked again, up to A56_DEPRESS_TRIES times
 		 * in a row, and before it is a depression something else ended.
+		 *
+		 * Ten in a row and the round goes on with this thread at its own
+		 * priority, counted as held: in the next merge test it ran out
+		 * ten times in a row in entry 53, whose -t holds the processor
+		 * on purpose (#688).  The round's abort is asked all the same,
+		 * at worst after a quantum, and the bound on the rounds' time
+		 * still holds.  A depressed thread kept off a processor nothing
+		 * else wanted would be counted there too, which is why the line
+		 * says how many rounds were held.
 		 */
 		for (;;) {
 			int	clocked = getclock(TIMEOFDAY, &s[0]) == 0;
@@ -3520,6 +3529,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	mach_port_t	me = mach_task_self();
 	unsigned	cpus = processors();
 	int		round, i, early[2] = { 0, 0 }, depressed = 0, ran_out = 0;
+	int		held = 0;
 	long		gap, shortest_gap = 0, worst[2] = { 0, 0 }, took;
 	kern_return_t	kr, worst_kr[2] = { KERN_OPERATION_TIMED_OUT,
 					    KERN_OPERATION_TIMED_OUT };
@@ -3578,7 +3588,16 @@ arm_fifty_six_abort_reaches_user_mode(void)
 			       "%d — WRONG\n", round, kr);
 			return 0;
 		}
-		if (a56_depressed != KERN_SUCCESS) {
+		/*
+		 * Held: the depression ran out A56_DEPRESS_TRIES times in a row,
+		 * the processor taken by others, and the round went on with the
+		 * victim at its own priority (see a56_victim()).
+		 */
+		if (a56_depressed == KERN_ABORTED &&
+		    a56_switch_ms >= A56_DEPRESS_MS &&
+		    a56_ran_out == A56_DEPRESS_TRIES)
+			held++;
+		else if (a56_depressed != KERN_SUCCESS) {
 			if (a56_depressed != KERN_ABORTED)
 				printf("act_test: [56] round %d: thread_switch() "
 				       "with SWITCH_OPTION_IDLE answered %d — "
@@ -3589,24 +3608,29 @@ arm_fifty_six_abort_reaches_user_mode(void)
 				       "KERN_ABORTED, and the clock could not be "
 				       "read to say whether its depression had run "
 				       "out — WRONG (#925)\n", round);
-			else if (a56_switch_ms >= A56_DEPRESS_MS)
-				printf("act_test: [56] round %d: at one processor "
-				       "the victim's depression ran out %d time(s) "
-				       "in a row before it ran again, the last "
-				       "after %ld ms: something held the processor "
-				       "that long — WRONG (#925)\n", round,
-				       a56_ran_out, a56_switch_ms);
-			else
+			else if (a56_switch_ms < A56_DEPRESS_MS)
 				printf("act_test: [56] round %d: thread_switch() "
 				       "with SWITCH_OPTION_IDLE answered "
 				       "KERN_ABORTED after %ld ms, before its %d ms "
 				       "depression could run out: something ended "
 				       "it early — WRONG (#925)\n", round,
 				       a56_switch_ms, A56_DEPRESS_MS);
+			else if (a56_ran_out < A56_DEPRESS_TRIES)
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim's depression ran out %d time(s) "
+				       "and it asked no more, the last after %ld "
+				       "ms, short of its %d tries — WRONG (#925)\n",
+				       round, a56_ran_out, a56_switch_ms,
+				       A56_DEPRESS_TRIES);
+			else
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim's depression ran out %d time(s) "
+				       "in a row before it ran again, the last "
+				       "after %ld ms: something held the processor "
+				       "that long — WRONG (#925)\n", round,
+				       a56_ran_out, a56_switch_ms);
 			return 0;
-		}
-		ran_out += a56_ran_out;
-		if (a56_alone && a56_was_depressed != 1) {
+		} else if (a56_alone && a56_was_depressed != 1) {
 			printf("act_test: [56] round %d: at one processor the "
 			       "victim %s in its loop, thread_switch() having "
 			       "answered %d: the end of the main thread's nap is "
@@ -3615,9 +3639,9 @@ arm_fifty_six_abort_reaches_user_mode(void)
 			       "could not read its priority" :
 			       "read itself not depressed", a56_depressed);
 			return 0;
-		}
-		if (a56_alone)
+		} else if (a56_alone)
 			depressed++;
+		ran_out += a56_ran_out;
 		if (gap < 0) {
 			printf("act_test: [56] round %d: the clock could not be "
 			       "read to wait after the abort — WRONG\n", round);
@@ -3687,9 +3711,10 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	if (a56_alone)
 		printf("act_test: [56] at one processor the victim read itself "
 		       "depressed in its loop in %d of %d rounds, by "
-		       "SWITCH_OPTION_IDLE; %d of its depressions ran out while "
-		       "it waited to run again, and were asked again (#925)\n",
-		       depressed, A56_ROUNDS, ran_out);
+		       "SWITCH_OPTION_IDLE; %d depressions ran out and were "
+		       "asked again, and %d rounds ran undepressed, the "
+		       "processor held (#925)\n",
+		       depressed, A56_ROUNDS, ran_out, held);
 	printf("act_test: [56] an abort of a thread spinning in user mode was "
 	       "spent before it waited: in %d rounds both of two %d ms futex "
 	       "waits made %ld us or more after it timed out; the rounds took "
