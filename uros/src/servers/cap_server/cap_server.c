@@ -886,6 +886,23 @@ cap_derive_task(mach_port_t            server,
         return vrc;
     }
 
+    /*
+     * 🔑 A DERIVATION THAT KEEPS NOTHING TAKES NO SLOT (#937).  Its port would
+     * grant nothing, as no port does (#511), and it held a slot for as long as
+     * its task lived: every program a caller with nothing to hand on exec'd
+     * took one, and any caller could take as many as it asked for.  The
+     * program runs with no per-task port, as one whose caller has none.
+     */
+    if (((const cap_manifest_header_t *)derived)->required_count == 0 &&
+        ((const cap_manifest_header_t *)derived)->delegatable_count == 0) {
+        printf("cap: derive_task on 0x%x keeps nothing of %u entries — no "
+               "port and no slot (#937)\n", (unsigned)g_request_local_port,
+               (unsigned)(asked->required_count + asked->delegatable_count));
+        free(derived);
+        free(copy);
+        return CAP_ERR_NOTHING_TO_DERIVE;
+    }
+
     kr = cap_task_port_make(task_port, derived, derived_len, &new_port);
     if (kr == KERN_SUCCESS)
         printf("cap: derived task — cap_port=0x%x from 0x%x, %u of %u "

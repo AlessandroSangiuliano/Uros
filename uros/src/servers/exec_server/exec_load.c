@@ -446,6 +446,16 @@ derive_cap_port(mach_port_t new_task, const elf_image_t *img,
     }
 
     kr = cap_derive_child(parent_caps, new_task, blob, blen, &cap_port);
+    /*
+     * #937: nothing the program asks for is the caller's to hand on.  A port
+     * would grant nothing, and cap_server gives none: the program runs with
+     * no TASK_CAP_PORT, as one whose caller has none.
+     */
+    if (kr == CAP_ERR_NOTHING_TO_DERIVE) {
+        printf("exec: %s -> no TASK_CAP_PORT: its caller has nothing it asks "
+               "for to hand on (#937)\n", path ? path : "(?)");
+        return 0;
+    }
     if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
         printf("exec: cap_derive_child(%s) failed kr=%d — it runs without a "
                "TASK_CAP_PORT (#743)\n", path ? path : "(?)", kr);
