@@ -952,6 +952,16 @@ ipc_object_rename(
 
 #if	MACH_ASSERT
 /*
+ * #940, prova only: a port freed twice says so, and who freed it first.  At
+ * its free a port is stamped in fields the zone's free list leaves alone and
+ * ipc_port_init() clears: ip_nsrequest the stamp, ip_pdrequest, ip_dnrequests
+ * and ip_pset the first freer and its two callers.  A port given out again in
+ * between loses the stamp; then it is the free after the next that is caught,
+ * still with the free before it on record.
+ */
+#define	IP_FREED_STAMP	((ipc_port_t) 0xf4eef4eef4eef4eeUL)
+
+/*
  *	Check whether the object is a port; if so, and if it
  *	has a dipc_port extension, then deallocate the dipc_port
  *	before deallocating the port.
@@ -964,7 +974,27 @@ io_free(
 	ipc_port_t	port;
 
 	if (otype == IOT_PORT) {
+		natural_t	cs[4];
+
 		port = (ipc_port_t) object;
+		if (port->ip_nsrequest == IP_FREED_STAMP)
+			panic("io_free: port %p freed twice (#940): the first "
+			      "free came from %p, called from %p, called from "
+			      "%p", port, (void *) port->ip_pdrequest,
+			      (void *) port->ip_dnrequests,
+			      (void *) port->ip_pset);
+		/*
+		 * machine_callstack() keeps the low half of each address,
+		 * which is enough of the kernel's text: cs[0] is this
+		 * function, cs[1] its caller.
+		 */
+		machine_callstack(cs, 4);
+		port->ip_nsrequest = IP_FREED_STAMP;
+		port->ip_pdrequest =
+			(ipc_port_t) (0xffffffff00000000UL | cs[1]);
+		port->ip_dnrequests =
+			(ipc_port_request_t) (0xffffffff00000000UL | cs[2]);
+		port->ip_pset = (ipc_pset_t) (0xffffffff00000000UL | cs[3]);
 #if	MACH_ASSERT && IPC_PORT_TRACK
 		ipc_port_track_dealloc(port);
 #endif	/* MACH_ASSERT */
