@@ -296,6 +296,17 @@ esac
 if [ $DRY = 0 ]; then
 	[ -e "$CSV" ] && die 2 "$CSV already holds a job's rows: give another --out"
 	mkdir -p "$OUT" || die 3 "cannot create $OUT"
+	# prova (#940, never to be merged): Intel only.  A job on another processor
+	# leaves its cpu in job.txt and an empty boots.csv, and installs and boots
+	# nothing, so that its runner is free again in a minute.
+	PCPU=$(sed -n 's/^model name[[:space:]]*: *//p' /proc/cpuinfo | head -n 1 | tr ',' ' ')
+	case "$PCPU" in
+	*Intel*|*INTEL*) ;;
+	*)	echo "cpu:      ${PCPU:-?} -- not Intel: this prova boots nothing (#940)" > "$OUT/job.txt"
+		echo "$HEADER" > "$CSV"
+		sed 's/^/job: /' "$OUT/job.txt"
+		exit 0 ;;
+	esac
 	if [ $INSTALL = 1 ]; then
 		[ "$(id -u)" = 0 ] || die 3 "installing needs root: run this in the container, or with --no-install"
 		echo "job: installing the packages ($OUT/install.log)"
