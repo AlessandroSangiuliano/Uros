@@ -150,6 +150,54 @@ says so.
   block it says whose it is; it is written once, with the data, and never
   updated. The cleaner asks the tree whether the block is still live.
 
+### What contains aging, concretely
+
+No filesystem stops aging under churn. What can be done is to keep it
+bounded, by four layers, and to measure it.
+
+1. **Place well when writing,** since aging is made by bad placement:
+   - **Delayed allocation and transaction groups.** Data is allocated when
+     the group commits, seconds after it was written. A file rewritten at
+     random in that time gets one contiguous extent, not many small ones.
+   - **Locality.** A file's data near its metadata, and the files of one
+     directory in the same open segment, as FFS's cylinder groups and XFS's
+     allocation groups do.
+   - **Temperature.** Metadata, new data, and data the cleaner moves (cold
+     by definition) go to different segments. Segments then end up either
+     nearly all live or nearly all dead, and a nearly dead segment is cheap
+     to clean: LFS's central observation, and F2FS's hot and cold logs.
+   - **Size.** Tiny files inside the tree, small files packed together,
+     large files in large extents, never interleaved.
+   - **Files written at random** (databases, VM images) are recognised by
+     their pattern, and their writes are gathered per file in each group.
+2. **Repair in the background,** within a budget:
+   - **The segment cleaner**, by cost-benefit, moves the live blocks of
+     nearly empty segments into new ones, grouped by file and temperature:
+     it compacts free space and defragments as it goes.
+   - **Defragmentation where measured:** a file whose extents per MiB pass a
+     limit is rewritten contiguously when it is idle, not on every write as
+     btrfs's `autodefrag` does.
+   - **Metadata compaction:** the write-optimized tree's large nodes flush
+     their buffers in batches, and the cleaner rewrites scattered tree and
+     directory nodes into metadata segments, which is what keeps a
+     `git status` on an aged volume fast.
+   - **A budget:** a share of the device's bandwidth, larger when the system
+     is idle, so that repairing never costs the foreground its latency.
+3. **Never run full.** A reserve of free segments the user cannot fill (5–10%
+   of the volume, to be measured), and the volume says it is full before it
+   is. Aging accelerates sharply near full, where no contiguous space is
+   left: ZFS's cliff above about 80%.
+4. **Keep snapshots and history from pinning it,** through the birth-time
+   rule above: recent data, where fragmentation is, stays movable; old
+   shared data stays put until its snapshot goes; history is thinned and
+   kept in a log whose blocks have one owner each.
+
+**And measure it, live:** the filesystem keeps the numbers that say how
+aged it is (extents per file, a histogram of segment use, tree nodes read
+per lookup, the cleaner's backlog), shows them to the user, and starts the
+cleaner and the defragmentation from them. Rule 5's benchmark then checks,
+before each release, that the four layers hold it within the threshold.
+
 ## 5. Fast
 
 In a microkernel the enemy is **one IPC per `read()`**. Cached data must not
