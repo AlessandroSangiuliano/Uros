@@ -3024,6 +3024,14 @@ static volatile unsigned	arm54_made;
 static volatile unsigned	arm54_late;
 static volatile unsigned	arm54_asked;
 
+/*
+ * #940: each helper's MIG reply port, as it was before its last call.  The
+ * trap answers both calls while the child is a task; once it is not, the
+ * library sends the call as a message and sleeps on this port for the answer.
+ */
+static volatile mach_port_t	arm54_creator_reply;
+static volatile mach_port_t	arm54_poller_reply;
+
 /* Make and unmake threads in the child until told to stop or it is gone. */
 static void *
 arm54_creator(void *arg)
@@ -3033,7 +3041,10 @@ arm54_creator(void *arg)
 	(void) arg;
 	while (!arm54_stop) {
 		mach_port_t	t = MACH_PORT_NULL;
-		kern_return_t	kr = thread_create(arm54_child, &t);
+		kern_return_t	kr;
+
+		arm54_creator_reply = mig_get_reply_port();
+		kr = thread_create(arm54_child, &t);
 
 		/*
 		 * KERN_FAILURE comes from one place only: thread_create_in()
@@ -3061,11 +3072,54 @@ arm54_poller(void *arg)
 		task_thread_times_info_data_t	times;
 		mach_msg_type_number_t		n = TASK_THREAD_TIMES_INFO_COUNT;
 
+		arm54_poller_reply = mig_get_reply_port();
 		if (task_info(arm54_child, TASK_THREAD_TIMES_INFO,
 			      (task_info_t) &times, &n) == KERN_SUCCESS)
 			arm54_asked++;
 	}
 	return NULL;
+}
+
+/*
+ * #940: a join with a bound.  A helper's last call after the terminate goes
+ * to the child's dead name as a message, and its answer comes back at once,
+ * a refusal; a request that went to a port with nothing behind it leaves
+ * the helper asleep on its reply port for good, and this thread in its join.
+ * So the join waits PATIENCE / 10 seconds at most, and one that does not
+ * return says which helper and what it asked, then lets it out by destroying
+ * its reply port, which ends the receive with MACH_RCV_PORT_DIED.  Answers
+ * whether the helper came back by itself.
+ */
+static int
+arm54_join(pthread_t t, int round, const char *who, const char *asked,
+	   volatile mach_port_t *reply)
+{
+	struct timespec	deadline;
+	mach_port_t	r;
+
+	if (getclock(TIMEOFDAY, &deadline) != 0) {
+		printf("act_test: [54] no clock to bound the join of the %s "
+		       "— WRONG\n", who);
+		return 0;
+	}
+	deadline.tv_sec += PATIENCE / 10;
+	if (pthread_timedjoin_np(t, NULL, &deadline) == 0)
+		return 1;
+	r = *reply;
+	printf("act_test: [54] round %d: the %s had not come back from "
+	       "%s on the terminated child %d s later: its request went "
+	       "where nothing answers — WRONG (#940)\n", round, who, asked,
+	       PATIENCE / 10);
+	if (r != MACH_PORT_NULL)
+		(void) mach_port_destroy(mach_task_self(), r);
+	if (getclock(TIMEOFDAY, &deadline) == 0) {
+		deadline.tv_sec += PATIENCE / 10;
+		if (pthread_timedjoin_np(t, NULL, &deadline) != 0)
+			printf("act_test: [54] round %d: and the %s stayed "
+			       "where it was with its reply port 0x%x "
+			       "destroyed\n", round, who, (unsigned) r);
+	}
+	return 0;
 }
 
 static int
@@ -3078,6 +3132,7 @@ arm_fifty_four_create_on_a_dying_task(void)
 		pthread_t		creator, poller;
 		mach_port_type_t	type;
 		kern_return_t		kr;
+		int			back;
 
 		arm54_child = MACH_PORT_NULL;
 		arm54_stop = 0;
@@ -3106,8 +3161,14 @@ arm_fifty_four_create_on_a_dying_task(void)
 		 */
 		kr = task_terminate(arm54_child);
 		arm54_stop = 1;
-		(void) pthread_join(creator, NULL);
-		(void) pthread_join(poller, NULL);
+		back = arm54_join(creator, round, "creator", "thread_create()",
+				  &arm54_creator_reply);
+		back = arm54_join(poller, round, "poller", "task_info()",
+				  &arm54_poller_reply) && back;
+		if (!back) {
+			(void) mach_port_deallocate(me, arm54_child);
+			return 0;
+		}
 
 		if (kr == KERN_SUCCESS)
 			kr = mach_port_type(me, arm54_child, &type);
