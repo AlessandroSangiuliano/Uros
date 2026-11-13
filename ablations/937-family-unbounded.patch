@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #937
+Takes out: the bound on one family's derived ports (0c4d44d7) -- a family derives until the quota refuses it
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[46\] WRONG — refused with 2418 after [0-9]+ derived port\(s\), not CAP_ERR_LINEAGE_FULL after 16
+
+diff --git a/uros/src/servers/cap_server/cap_manifest_table.c b/uros/src/servers/cap_server/cap_manifest_table.c
+index 979de353..7a676e78 100644
+--- a/uros/src/servers/cap_server/cap_manifest_table.c
++++ b/uros/src/servers/cap_server/cap_manifest_table.c
+@@ -145,7 +145,7 @@ may_derive(mach_port_t parent, mach_port_t self, uint64_t *family)
+         if (g_table[i].family == p->family)
+             mine++;
+     }
+-    if (mine >= CAP_MANIFEST_FAMILY_MAX)
++    if (mine >= CAP_MANIFEST_FAMILY_MAX && 0)
+         return CAP_ERR_LINEAGE_FULL;
+     if (all >= CAP_MANIFEST_DERIVED_QUOTA)
+         return CAP_ERR_DERIVED_QUOTA;
