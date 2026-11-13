@@ -435,6 +435,32 @@ from the first day.
   - **The way out:** old versions go to a **history log** in which each old
     block has exactly one owner, so that moving it updates one entry. The
     retention is bounded and the thinning firm.
+  - **Where the history lives: its own segments, not a hidden partition.**
+    The idea of keeping history apart from live data (13/11) is right; the
+    question is how.
+    - **A partition of its own** would cost a copy on every kept overwrite.
+      Under copy-on-write an overwritten block's old version is already on
+      disk, where it was: keeping it costs nothing when the overwrite
+      happens. Moving it to another partition means reading and writing it
+      again, doubling the writes of an overwrite-heavy file such as a
+      database. A partition's size is also fixed, too large while the
+      history is small and too small when it is not.
+    - **History segments within the volume** keep the separation without
+      the copy. An old version stays where it is until the cleaner takes
+      its segment. The cleaner copies the live blocks out anyway, and it
+      copies a block the history keeps to a history segment instead: a
+      temperature class of its own, the coldest. Live segments then never
+      carry history, the live data keeps the birth-time rule of rule 1,
+      and the history segments have their own quota, with the oldest
+      versions thinned first, and their own cleaner.
+    - **A device of its own** stays an option: history on a second, larger
+      or slower device, as a tier. There the copy is the price of the tier,
+      paid in the background.
+    - **Either way, nobody but the filesystem server reaches it.** History
+      is not a file in the namespace, and the block layer gives no one else
+      the volume, as it gives only `bootlog` the UROSLOG partition (#915).
+      So a ransomware with write access to `/home` cannot erase the versions
+      that undo it: feature 1 stays possible.
 
   Long transactions do the same on a small scale: they pin old versions until
   they end.
