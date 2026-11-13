@@ -1,0 +1,83 @@
+Kind: widen
+Issue: #940
+Holds open: ipc_right_check() for 200 us after it has dropped the reference of the name it turns dead and before it clears the entry, which still names the port, and says the window is open in w940_open.  Before the release it waits up to 500 us for the requests still in flight to give their references back, so that this release is the port's last, and allocates a port and gives it back, so that one lies ahead of this port on the zone's list; and the port zone runs without its per-CPU magazines (#330), so that a freed port goes on that list, where the zone's 64-bit free pointer makes it read as active on x86-64 -- in a magazine it keeps the bits it died with, as a diagnostic boot found it in 5 rounds of 6, where the 31 boots of run 43434979398 had it on the list.  task_info()'s message, 2098, which act_test [54]'s messengers send with no trap first, waits in mach_msg's hot path up to 100 us for a window to be open before it resolves its names, holding no reference.  With the fix the port's memory is still the dead port when the resolve locks it, its grace period not over; the fixed tree must still pass
+Run: --entry 14 600 -smp 4
+diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
+index 5128c52a..5204032f 100644
+--- a/uros/src/mach_kernel/ipc/ipc_right.c
++++ b/uros/src/mach_kernel/ipc/ipc_right.c
+@@ -408,6 +408,8 @@ ipc_right_inuse(
+  *
+  */
+ 
++volatile int	w940_open;	/* 940-widen-dead-name */
++
+ boolean_t
+ ipc_right_check(
+ 	ipc_space_t	space,
+@@ -439,7 +441,29 @@ ipc_right_check(
+ 		assert(IE_BITS_UREFS(bits) == 1);
+ 	}
+ 
++	{	/* 940-widen-dead-name */
++		extern void	delay(int);
++		ipc_port_t	w;
++		int		i;
++
++		/* the requests still in flight give their references back
++		 * first, so that this release is the port's last */
++		for (i = 0; i < 500 && port->ip_references > 1; i++)
++			delay(1);
++		/* a port ahead of this one in the zone's free list: this one,
++		 * freed, then reads as active, as the free pointer makes it */
++		w = ipc_port_alloc_special(ipc_space_kernel);
++		if (w != IP_NULL)
++			ipc_port_dealloc_special(w, ipc_space_kernel);
++	}
+ 	ipc_port_release(port);
++	{	/* 940-widen-dead-name: the window, open and said to be */
++		extern void delay(int);
++
++		w940_open = 1;
++		delay(200);
++		w940_open = 0;
++	}
+ 
+ 	/* convert entry to dead name */
+ 
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index a39c73cf..fb80fa45 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1588,6 +1588,16 @@ urmach_msg_overwrite_trap_call(
+ 			index = MACH_PORT_INDEX(reply_name);
+ 			gen = MACH_PORT_GEN(reply_name);
+ 
++			if (hdr->msgh_id == 2098) {	/* 940-widen-dead-name */
++				extern void delay(int);
++				extern volatile int w940_open;
++				int w;
++
++				/* task_info()'s message waits for a window */
++				for (w = 0; w < 100 && !w940_open; w++)
++					delay(1);
++			}
++
+ 			/*
+ 			 * #331 step 2 part 3b: try resolving both names WITHOUT
+ 			 * the space lock.  On success both ports are locked and
+diff --git a/uros/src/mach_kernel/kern/zalloc.c b/uros/src/mach_kernel/kern/zalloc.c
+index c44ac078..b8c884e7 100644
+--- a/uros/src/mach_kernel/kern/zalloc.c
++++ b/uros/src/mach_kernel/kern/zalloc.c
+@@ -710,8 +710,8 @@ zone_enable_hot_magazines(void)
+ 
+ 	if (vm_map_entry_zone != ZONE_NULL)
+ 		zone_enable_magazines(vm_map_entry_zone);
+-	if (ipc_object_zones[0] != ZONE_NULL)		/* IOT_PORT */
+-		zone_enable_magazines(ipc_object_zones[0]);
++	/* 940-widen-dead-name: the port zone without magazines, so that a
++	 * freed port goes on the zone's list, where it reads as active */
+ 	if (ipc_object_zones[1] != ZONE_NULL)		/* IOT_PORT_SET */
+ 		zone_enable_magazines(ipc_object_zones[1]);
+ 	if (ipc_space_zone != ZONE_NULL)

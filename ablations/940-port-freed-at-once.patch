@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #940
+Over: 940-widen-dead-name.patch
+Takes out: 73914c1c -- a port's memory goes back to its zone at once again, with no grace period, so over 940-widen-dead-name a messenger of act_test [54] whose resolve meets the window locks the port ipc_right_check() has just freed, finds it active by the zone's free pointer, takes a reference in the zone's free list and queues its request there, and the bounded join says the messenger never came back, or the next port the zone hands out stops the kernel on the modified free pointer
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[54\] round [0-9]+: the (creator|poller|messenger) had not come back from
+Expect: A freed zone element has been modified
+diff --git a/uros/src/mach_kernel/ipc/ipc_object.c b/uros/src/mach_kernel/ipc/ipc_object.c
+index 12e30e80..a13b6a5c 100644
+--- a/uros/src/mach_kernel/ipc/ipc_object.c
++++ b/uros/src/mach_kernel/ipc/ipc_object.c
+@@ -991,7 +991,7 @@ io_free(
+ #if	MACH_ASSERT && IPC_PORT_TRACK
+ 		ipc_port_track_dealloc(port);
+ #endif	/* MACH_ASSERT && IPC_PORT_TRACK */
+-		urmach_call_rcu(&port->ip_rcu, ipc_port_free_after_grace);
++		ipc_port_free_after_grace(&port->ip_rcu);
+ 		return;
+ 	}
+ 	zfree(ipc_object_zones[otype], (vm_offset_t) object);
