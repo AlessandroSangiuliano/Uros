@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #937
+Takes out: a derivation that keeps nothing taking no slot (816d81f7) -- cap_derive_task makes an empty port, and a slot for it, as before
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[46\] WRONG — a derivation that keeps nothing answered 0, not CAP_ERR_NOTHING_TO_DERIVE
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index aeaab312..906e23fc 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -896,7 +896,7 @@ cap_derive_task(mach_port_t            server,
+      * took one, and any caller could take as many as it asked for.  The
+      * program runs with no per-task port, as one whose caller has none.
+      */
+-    if (((const cap_manifest_header_t *)derived)->required_count == 0 &&
++    if (0 && ((const cap_manifest_header_t *)derived)->required_count == 0 &&
+         ((const cap_manifest_header_t *)derived)->delegatable_count == 0) {
+         printf("cap: derive_task on 0x%x keeps nothing of %u entries — no "
+                "port and no slot (#937)\n", (unsigned)g_request_local_port,
