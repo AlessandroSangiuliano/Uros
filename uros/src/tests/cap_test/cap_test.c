@@ -709,6 +709,148 @@ a_no_senders_forgery_ends_nothing(void)
 }
 
 /*
+ * Test [46]: derived ports are bounded (#937).
+ *
+ * cap_server's table has 64 slots, and a derivation took one for every call:
+ * a task with a per-task port could hold them all, and every task bootstrap
+ * started after that ran without its manifest.  A derivation that keeps
+ * nothing must now be refused with CAP_ERR_NOTHING_TO_DERIVE, taking no slot;
+ * derived ports are held to a quota of the table, which leaves bootstrap the
+ * rest; and those of one family -- a task bootstrap provisioned and all that
+ * is derived from it, down any chain -- to a smaller bound.
+ *
+ * The arm waits for this task's family to hold no derived port -- the arms
+ * before gave theirs back, and cap_server counts a port out on a notification
+ * that may come late -- then derives an empty port, and then ports that keep
+ * block devices READ for a child task, holding them, until it is refused.
+ * The bound it must meet is read from cap_slots: the family's, with
+ * CAP_ERR_LINEAGE_FULL, when the family has no more room than the quota, and
+ * the quota's, with CAP_ERR_DERIVED_QUOTA, otherwise.  This task is one
+ * family, so it meets the quota only under a widen that lifts the family's
+ * bound.  A slot must be left free either way, and once every port is given
+ * back the family must come back to none, within two seconds.
+ */
+static int
+family_drained(struct slots *s, unsigned *waits)
+{
+    for (*waits = 0; ; (*waits)++) {
+        if (slots_now(mach_cap_port, s) != KERN_SUCCESS)
+            return 0;
+        if (s->family == 0 || *waits == 200)
+            return s->family == 0;
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+    }
+}
+
+static int
+derived_ports_are_bounded(void)
+{
+    static uint64_t blob[16], empty[16];
+    static const cap_manifest_entry_t rd[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
+    static mach_port_t held[64];
+    uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_bound",
+                                      rd, 1, NULL, 0);
+    uint32_t      elen = manifest_make(empty, sizeof(empty), "cap_test_empty",
+                                       NULL, 0, NULL, 0);
+    mach_port_t   child = MACH_PORT_NULL, eport = MACH_PORT_NULL;
+    struct slots  s0 = { 0 }, s1 = { 0 }, at = { 0 }, s2 = { 0 };
+    kern_return_t kr_empty, kr = KERN_SUCCESS, want;
+    unsigned      n, i, w0 = 0, w2 = 0;
+    int           room_family, room_quota, want_n;
+    int           ok_start, ok_empty, ok_bound, ok_free, ok_back, ok;
+
+    if (len == 0 || elen == 0 ||
+        task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                    &child) != KERN_SUCCESS) {
+        printf("cap_test: [46] WRONG — no child task to derive for (#937)\n");
+        return 0;
+    }
+    ok_start = family_drained(&s0, &w0);
+
+    /* A derivation that keeps nothing; the census before its port goes. */
+    kr_empty = cap_derive_child(mach_cap_port, child, empty, elen, &eport);
+    if (slots_now(mach_cap_port, &s1) != KERN_SUCCESS) {
+        s1 = s0;
+        s1.family = (natural_t)-1;
+    }
+    if (MACH_PORT_VALID(eport))
+        (void)mach_port_deallocate(mach_task_self(), eport);
+    ok_empty = kr_empty == CAP_ERR_NOTHING_TO_DERIVE &&
+               eport == MACH_PORT_NULL && s1.family == s0.family;
+
+    /* The bound to meet first, and after how many more ports. */
+    room_family = (int)s1.family_max - (int)s1.family;
+    room_quota  = (int)s1.quota - (int)s1.derived;
+    if (room_family <= room_quota) {
+        want   = CAP_ERR_LINEAGE_FULL;
+        want_n = room_family;
+    } else {
+        want   = CAP_ERR_DERIVED_QUOTA;
+        want_n = room_quota;
+    }
+    for (n = 0; n < 64; n++) {
+        held[n] = MACH_PORT_NULL;
+        kr = cap_derive_child(mach_cap_port, child, blob, len, &held[n]);
+        if (kr != KERN_SUCCESS)
+            break;
+    }
+    if (slots_now(mach_cap_port, &at) != KERN_SUCCESS)
+        at.in_use = at.size = 0;
+    ok_bound = kr == want && (int)n == want_n;
+    ok_free  = at.in_use < at.size;
+
+    for (i = 0; i < n; i++)
+        (void)mach_port_deallocate(mach_task_self(), held[i]);
+    (void)task_terminate(child);
+    (void)mach_port_deallocate(mach_task_self(), child);
+    ok_back = family_drained(&s2, &w2);
+
+    ok = ok_start && ok_empty && ok_bound && ok_free && ok_back;
+    /* One line per check, each within the console's 256 bytes (#802). */
+    if (ok) {
+        printf("cap_test: [46] a derivation that keeps nothing was refused "
+               "with CAP_ERR_NOTHING_TO_DERIVE, and the family stayed at %u "
+               "(#937)\n", (unsigned)s1.family);
+        printf("cap_test: [46] %u derived port(s) held, then refused with "
+               "%s: family %u of %u, derived %u of a quota of %u, %u of %u "
+               "slots taken (#937)\n", n,
+               want == CAP_ERR_LINEAGE_FULL ? "CAP_ERR_LINEAGE_FULL"
+                                            : "CAP_ERR_DERIVED_QUOTA",
+               (unsigned)at.family, (unsigned)at.family_max,
+               (unsigned)at.derived, (unsigned)at.quota,
+               (unsigned)at.in_use, (unsigned)at.size);
+        printf("cap_test: [46] all given back, the family at %u after %u "
+               "wait(s) of 10 ms (#937)\n", (unsigned)s2.family, w2);
+    }
+    if (!ok_start)
+        printf("cap_test: [46] WRONG — this task's family held %u derived "
+               "port(s) before the arm, after %u wait(s) of 10 ms (#937)\n",
+               (unsigned)s0.family, w0);
+    if (!ok_empty)
+        printf("cap_test: [46] WRONG — a derivation that keeps nothing "
+               "answered %d, not CAP_ERR_NOTHING_TO_DERIVE, and the family "
+               "went from %u to %u (#937)\n", (int)kr_empty,
+               (unsigned)s0.family, (unsigned)s1.family);
+    if (!ok_bound)
+        printf("cap_test: [46] WRONG — refused with %d after %u derived "
+               "port(s), not %s after %d (#937)\n", (int)kr, n,
+               want == CAP_ERR_LINEAGE_FULL ? "CAP_ERR_LINEAGE_FULL"
+                                            : "CAP_ERR_DERIVED_QUOTA",
+               want_n);
+    if (!ok_free)
+        printf("cap_test: [46] WRONG — at the refusal %u of %u slots were "
+               "taken: bootstrap had none left (#937)\n",
+               (unsigned)at.in_use, (unsigned)at.size);
+    if (!ok_back)
+        printf("cap_test: [46] WRONG — the family held %u derived port(s) "
+               "after all were given back and %u wait(s) of 10 ms (#937)\n",
+               (unsigned)s2.family, w2);
+    return ok;
+}
+
+/*
  * Test [41]: no task gives bootstrap a provisioning port (#743).
  *
  * cap_provision_task answers on one port, and bootstrap provisions through
@@ -4929,6 +5071,9 @@ main(int argc, char **argv)
     if (!only_cap_server_gives_the_provisioning_port())
         pass = 0;
     if (!a_no_senders_forgery_ends_nothing())
+        pass = 0;
+    /* #937: and derived ports are bounded. */
+    if (!derived_ports_are_bounded())
         pass = 0;
 
     /*
