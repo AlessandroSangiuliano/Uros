@@ -2951,6 +2951,9 @@ urmach_msg_overwrite_trap_call(
 	    {
 		register ipc_port_t	reply_port;
 		mach_port_seqno_t	local_seqno;
+#if	WAKER_TRACK
+		mach_msg_id_t		request_id = kmsg->ikm_header.msgh_id;
+#endif	/* WAKER_TRACK */
 
 		/*
 		 * Perform the kernel function.
@@ -2962,6 +2965,16 @@ urmach_msg_overwrite_trap_call(
 			 * No reply.  Take the
 			 * slow receive path.
 			 */
+#if	WAKER_TRACK
+			/*
+			 * 🔴 EACH WAY TO THE SLOW RECEIVE SAYS ITSELF (#940): this
+			 * one, the two below and slow_send, every way there is.
+			 * A record for the walk, under the switch of the other
+			 * records of IPC waits.
+			 */
+			self->ith_slow_why = "the kernel server made no reply";
+			self->ith_slow_id = request_id;
+#endif	/* WAKER_TRACK */
 			HOT(c_mmot_cold_051++);
 			goto slow_get_rcv_port;
 		}
@@ -2999,6 +3012,11 @@ urmach_msg_overwrite_trap_call(
 		    (reply_port->ip_pset != IPS_NULL))
 		{
 			ip_unlock(reply_port);
+#if	WAKER_TRACK
+			self->ith_slow_why = "its reply queued, the reply port not "
+					     "as the receive expects";
+			self->ith_slow_id = hdr->msgh_id;
+#endif	/* WAKER_TRACK */
 			ipc_mqueue_send_always(kmsg);
 			HOT(c_mmot_cold_052++);
 			goto slow_get_rcv_port;
@@ -3020,6 +3038,11 @@ urmach_msg_overwrite_trap_call(
 		{
 			imq_unlock(rcv_mqueue);
 			ip_unlock(reply_port);
+#if	WAKER_TRACK
+			self->ith_slow_why = "its reply queued, the reply port "
+					     "holding messages or receivers";
+			self->ith_slow_id = hdr->msgh_id;
+#endif	/* WAKER_TRACK */
 			ipc_mqueue_send_always(kmsg);
 			HOT(c_mmot_cold_053++);
 			goto slow_get_rcv_port;
@@ -3082,6 +3105,14 @@ urmach_msg_overwrite_trap_call(
 				self->handoff_hint = TRUE;
 		}
 #endif	/* NCPUS > 1 */
+#if	WAKER_TRACK
+		/*
+		 * Before the send, which can destroy the request at a port
+		 * already dead: ith_sent_dead says whether it did.
+		 */
+		self->ith_slow_why = "sent by ipc_mqueue_send()";
+		self->ith_slow_id = hdr->msgh_id;
+#endif	/* WAKER_TRACK */
 		mr = ipc_mqueue_send(kmsg, MACH_MSG_OPTION_NONE,
 				     MACH_MSG_TIMEOUT_NONE);
 #if	NCPUS > 1

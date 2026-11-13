@@ -380,6 +380,15 @@ ipc_mqueue_send(
 			ip_release(port);
 			ip_check_unlock(port);
 			ikm_set_dest(kmsg, IP_NULL);	/* #442 */
+#if	WAKER_TRACK
+			/*
+			 * #940: for the walk, whose sender then waits for the
+			 * send-once notification of its reply right, if any.
+			 */
+			current_thread()->ith_sent_dead++;
+			current_thread()->ith_sent_dead_id =
+				kmsg->ikm_header.msgh_id;
+#endif	/* WAKER_TRACK */
 			ipc_kmsg_destroy(kmsg);
 			return MACH_MSG_SUCCESS;
 		}

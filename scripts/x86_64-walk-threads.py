@@ -191,6 +191,20 @@ def receive_port(th):
                 print("      port set %#x active=%d %s%s" % (obj, bits >> 31, lists, odd))
         else:
             print("      receive on object %#x of type %d, queue %#x: %s" % (obj, otype, mq, lists))
+        # 🔴 HOW IT GOT THERE (#940): the jump of the hot path that took it
+        # to its slow receive, and the msgh_id of the message it was about;
+        # how many of its messages were destroyed at a dead port; and the
+        # port of its last send-once notification, which a request destroyed
+        # there owes this port.  act_test [54]'s helper waited for good on a
+        # reply port with nothing on it, and nothing said why.
+        if hot:
+            why, son = th["ith_slow_why"], int(th["ith_sonce_port"])
+            print("      came by: %s, msgh_id %d; sent to a dead port %u time(s), the last "
+                  "msgh_id %d; its last send-once notification went to %s" % (
+                      why.string() if int(why) else "nothing recorded",
+                      int(th["ith_slow_id"]), int(th["ith_sent_dead"]) & 0xffffffff,
+                      int(th["ith_sent_dead_id"]),
+                      ("this port" if son == obj else "%#x" % son) if son else "no port"))
     except Exception as x:
         print("      receive queue %#x unreadable: %s" % (mq, x))
 
@@ -358,6 +372,23 @@ while q != head and nt < 64:
                           int(A["stop_asked_by"]), int(A["stop_asked_tick"])))
             except gdb.error as x:
                 print("      special handler record unreadable: %s" % x)
+            # Only ipc_kmsg_destroy() puts messages on ith_messages, the ones
+            # a clean destroys in its turn, and takes them off before it
+            # returns (#940).  A thread that holds one elsewhere has every
+            # later destroy only queue its message, cleaned by no one: a
+            # request destroyed at a dead port then owes its sender a
+            # send-once notification that is never made.
+            try:
+                KM = gdb.lookup_type("struct ipc_kmsg").pointer()
+                held = ring(int(th["ith_messages"]["ikmq_base"]),
+                            lambda k: int(gdb.Value(k).cast(KM)["ikm_next"]))
+                if held:
+                    print("      ith_messages NOT EMPTY (ipc_kmsg_destroy() holds its own there "
+                          "only while it runs): %s" % " ".join(
+                              "%#x:%d" % (k, int(gdb.Value(k).cast(KM)["ikm_header"]["msgh_id"]))
+                              for k in held))
+            except gdb.error as x:
+                print("      ith_messages unreadable: %s" % x)
             receive_port(th)
             # A thread asleep on a mutex: who holds it, from own_thr, as
             # quiet_census does.  That census cannot speak while another
