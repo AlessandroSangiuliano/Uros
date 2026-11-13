@@ -568,14 +568,23 @@ a_child_gets_what_its_parent_may_hand_on(void)
  * at a time -- more than the table holds, whatever else holds slots now --
  * must all be made.  cap_server learns that a port is given back from a
  * notification, which may wait behind the next request, so a derivation
- * refused for want of a slot is asked again, for up to two seconds.
+ * refused for want of a slot is asked again, for up to two seconds -- and
+ * since #937 one refused by the bounds on derived slots, which the ports
+ * given back and not yet counted out would fill as well.
+ *
+ * Each port keeps block devices READ, which this task may hand on: a
+ * derivation that keeps nothing takes no slot since #937, and the eighty
+ * this arm derived before were empty.
  */
 static int
 a_port_given_back_gives_its_slot_back(void)
 {
     static uint64_t blob[16];
+    static const cap_manifest_entry_t rd[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
     uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_slot",
-                                      NULL, 0, NULL, 0);
+                                      rd, 1, NULL, 0);
     mach_port_t   child = MACH_PORT_NULL;
     unsigned      i, waits = 0, most = 0;
     kern_return_t kr = KERN_SUCCESS;
@@ -592,7 +601,9 @@ a_port_given_back_gives_its_slot_back(void)
 
         for (waits = 0; ; waits++) {
             kr = cap_derive_child(mach_cap_port, child, blob, len, &port);
-            if (kr != CAP_ERR_NO_MANIFEST_SLOT || waits == 200)
+            if ((kr != CAP_ERR_NO_MANIFEST_SLOT &&
+                 kr != CAP_ERR_DERIVED_QUOTA && kr != CAP_ERR_LINEAGE_FULL) ||
+                waits == 200)
                 break;
             (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
         }
