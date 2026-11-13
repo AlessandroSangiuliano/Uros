@@ -6,16 +6,14 @@ Run: --entry 14 300 -smp 1
 Expect: act_test: \[56\] round [0-9]+: at one processor the victim's depression ran out [0-9]+ time\(s\) in a row before it ran again
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
-index eae85a01..302b77b6 100644
+index c0af2417..7d17ff8b 100644
 --- a/uros/src/tests/act_test/act_test.c
 +++ b/uros/src/tests/act_test/act_test.c
-@@ -3614,11 +3614,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
+@@ -3639,9 +3639,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
  		 * the processor taken by others, and the round went on with the
  		 * victim at its own priority (see a56_victim()).
  		 */
--		if (a56_depressed == KERN_ABORTED &&
--		    a56_switch_ms >= A56_DEPRESS_MS &&
--		    a56_ran_out == A56_DEPRESS_TRIES)
+-		if (a56_ran_out == A56_DEPRESS_TRIES && a56_depression_ran_out())
 -			held++;
 -		else if (a56_depressed != KERN_SUCCESS) {
 +		if (a56_depressed != KERN_SUCCESS) {

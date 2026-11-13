@@ -6,16 +6,16 @@ Run: --entry 14 300 -smp 1
 Expect: act_test: \[56\] round [0-9]+: at one processor the victim's depression ran out [0-9]+ time
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
-index 072806a3..93c81b7e 100644
+index c0af2417..565db033 100644
 --- a/uros/src/tests/act_test/act_test.c
 +++ b/uros/src/tests/act_test/act_test.c
-@@ -3490,8 +3490,7 @@ a56_victim(void *arg)
- 			    a56_switch_ms < A56_DEPRESS_MS)
+@@ -3540,8 +3540,7 @@ a56_victim(void *arg)
+ 			if (!a56_depression_ran_out())
  				break;
  			a56_ran_out++;
 -			if (a56_ran_out == A56_DEPRESS_TRIES)
 -				break;
 +			break;
  		}
- 		/*
- 		 * And read back: that is how the depression that was not there
+ 	}
+ 	a56_spinning = 1;

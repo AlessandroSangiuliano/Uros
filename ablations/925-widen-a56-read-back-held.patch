@@ -1,0 +1,23 @@
+Kind: widen
+Issue: #925
+Holds open: the time between thread_switch()'s answer and act_test [56]'s victim reading its depression back, 300 ms by the clock in the first round, past the depression's 100 ms -- what entry 55's -t did at one processor in the merge test of a869dac2 (OMEGA, 13/11), the processor held after a KERN_SUCCESS that left the victim depressed.  The fixed tree finds the depression gone after its whole time and asks it again
+Run: --entry 14 300 -smp 1
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 4b04322f..3f09bfad 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3503,6 +3503,14 @@ a56_victim(void *arg)
+ 			a56_depressed = thread_switch(MACH_PORT_NULL,
+ 						      SWITCH_OPTION_IDLE,
+ 						      A56_DEPRESS_MS);
++			{	/* 925-widen-a56-read-back-held */
++				static int	held_once;
++
++				/* past the depression's time before the reading,
++				 * as -t held it, in the first round */
++				if (held_once++ == 0)
++					(void) a56_gap(300000);
++			}
+ 			/*
+ 			 * And read back: that is how the depression that was
+ 			 * not there was found.  A call that answered
