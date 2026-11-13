@@ -936,14 +936,21 @@ cap_derive_task(mach_port_t            server,
 /*
  * cap_slots (#743).  The table's census, on any port: a count of tasks says
  * nothing about any one of them, and it is the only way a test can see a slot
- * come back.
+ * come back.  With the bounds on derived slots (#937), and the family count
+ * of the port it was asked on.
  */
 kern_return_t
-cap_slots(mach_port_t server, natural_t *in_use, natural_t *size)
+cap_slots(mach_port_t server, natural_t *in_use, natural_t *size,
+          natural_t *derived, natural_t *quota, natural_t *family,
+          natural_t *family_max)
 {
     (void)server;
-    *in_use = (natural_t)cap_manifest_table_in_use();
-    *size   = (natural_t)cap_manifest_table_size();
+    *in_use     = (natural_t)cap_manifest_table_in_use();
+    *size       = (natural_t)cap_manifest_table_size();
+    *derived    = (natural_t)cap_manifest_table_derived();
+    *quota      = (natural_t)cap_manifest_table_derived_quota();
+    *family     = (natural_t)cap_manifest_table_family(g_request_local_port);
+    *family_max = (natural_t)cap_manifest_table_family_max();
     return KERN_SUCCESS;
 }
 

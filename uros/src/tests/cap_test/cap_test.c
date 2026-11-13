@@ -423,6 +423,22 @@ acquire_on(mach_port_t port, uint32_t type, uint64_t id, uint64_t ops)
 }
 
 /*
+ * cap_slots' census, asked on `port' (#743, #937): the table's slots, and the
+ * bounds on derived ones -- `family' is the count of the family `port'
+ * belongs to.
+ */
+struct slots {
+    natural_t in_use, size, derived, quota, family, family_max;
+};
+
+static kern_return_t
+slots_now(mach_port_t port, struct slots *s)
+{
+    return mig_cap_slots(port, &s->in_use, &s->size, &s->derived, &s->quota,
+                         &s->family, &s->family_max);
+}
+
+/*
  * Test [38]: only bootstrap provisions (#743).
  *
  * cap_provision_task answered whichever port it was asked on, so a task could
@@ -779,6 +795,7 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
     mach_port_t   task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
     mach_port_t   port = MACH_PORT_NULL;
     natural_t     before = 0, after = 0, size = 0;
+    struct slots  s = { 0 };
     unsigned      waits, waited;
     int           rc = -1, ok;
     kern_return_t kr, rd = -1, wr = -1, dma = -1;
@@ -794,8 +811,8 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
         }
         (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
     }
-    if (plen == 0 ||
-        mig_cap_slots(mach_cap_port, &before, &size) != KERN_SUCCESS ||
+    /* The census is read before the caller's port is derived. */
+    if (plen == 0 || slots_now(mach_cap_port, &s) != KERN_SUCCESS ||
         cap_derive_child(mach_cap_port, mach_task_self(), pblob, plen,
                          &parent) != KERN_SUCCESS) {
         printf("cap_test: [42] WRONG — no slot count, or no caller's port "
@@ -803,6 +820,8 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
         (void)mach_port_deallocate(mach_task_self(), exec_port);
         return 0;
     }
+    before = s.in_use;
+    size   = s.size;
 
     /* #926: the program's task is made here and lent to exec_server. */
     kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
@@ -836,8 +855,10 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
     (void)mach_port_deallocate(mach_task_self(), thread);
 
     for (waits = 0; ; waits++) {
-        if (mig_cap_slots(mach_cap_port, &after, &size) != KERN_SUCCESS)
+        if (slots_now(mach_cap_port, &s) != KERN_SUCCESS)
             after = before + 1;
+        else
+            after = s.in_use;
         if (after <= before || waits == 200)
             break;
         (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
