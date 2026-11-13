@@ -40,7 +40,9 @@
  * rights, special ports.  A reduced port reaches none of that.
  *
  * The set with no bits is the task's identity: a port that names the task
- * and dies with it, and that no routine accepts yet (#938).  A right is
+ * and dies with it.  urmach_dma_region_owner() takes it, to say whether a
+ * DMA region is the task's, and it is the only task port cap_server keeps
+ * (#938).  A right is
  * added here when a routine comes to name it -- reading a task's memory for
  * a debugger, say -- and not before: a bit nothing checks would read as a
  * right and be none.
@@ -63,6 +65,9 @@
 /* What a process is registered with proc_server by (#927). */
 #define	URMACH_TASK_RIGHTS_PROCESS	(URMACH_TASK_RIGHT_INFO | \
 					 URMACH_TASK_RIGHT_LIFECYCLE)
+
+/* No right: which task, and nothing else (#938). */
+#define	URMACH_TASK_RIGHTS_IDENTITY	0x00000000
 
 /*
  * What urmach_task_port_rights() answers for the full task port: every
