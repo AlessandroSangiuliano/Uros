@@ -41,6 +41,7 @@
 #include <mach/bootstrap.h>
 #include <mach/mach_port.h>
 #include <mach/message.h>
+#include <mach/notify.h>	/* MACH_NOTIFY_NO_SENDERS (#743) */
 #include <mach/cap_types.h>
 #include <mach/mach_traps.h>	/* urmach_cap_revoke (#432) */
 #include <mach_init.h>
@@ -73,6 +74,14 @@ static mach_port_t root_ledger_paged;
 static mach_port_t cap_port;
 
 /*
+ * The provisioning port (#743): cap_provision_task answers on this port and
+ * on no other.  Its one send right is bootstrap's, given at start-up on this
+ * server's own bootstrap port (bootstrap_cap_provisioner()); the port every
+ * task inherits and the per-task ports are refused.
+ */
+static mach_port_t provision_port;
+
+/*
  * Port set that covers cap_port + every per-task cap_port allocated
  * by cap_provision_task.  mach_msg_server receives from the set;
  * the demux uses in->msgh_local_port to identify the caller.
@@ -93,10 +102,26 @@ static mach_port_t g_request_local_port;
  * hand off to the MIG-generated cap_server_server.  Anything that
  * doesn't match subsystem 3500 gets a MIG_BAD_ID reply.
  */
+static void cap_task_port_gone(mach_port_t port);
+
 static boolean_t
 cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
     boolean_t handled;
+
+    /*
+     * A per-task port with no senders (#743).  Only the kernel can send
+     * this: it comes through the send-once right this server made for the
+     * request, and a task that holds a per-task port has a send right, not
+     * a send-once one, so a message it forges with this id arrives with
+     * other bits and goes to MIG, which refuses it.  No reply: the one
+     * mach_msg_server() starts with is none.
+     */
+    if (in->msgh_id == MACH_NOTIFY_NO_SENDERS &&
+        in->msgh_bits == MACH_MSGH_BITS(0, MACH_MSG_TYPE_PORT_SEND_ONCE)) {
+        cap_task_port_gone(in->msgh_local_port);
+        return TRUE;
+    }
 
     g_request_local_port = in->msgh_local_port;
     handled = cap_server_server(in, out);
@@ -652,16 +677,108 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
 }
 
 /*
- * cap_provision_task (#216 v2.1).  Allocate a fresh receive port,
- * add it to cap_port_set so subsequent requests on it land in our
- * mach_msg loop, install the validated manifest blob in the
- * per-task table keyed by the receive name, and hand a send right
- * back to the caller.  The caller (bootstrap today) is expected to
- * either keep the send right and forward it to the new child task,
- * or have it inserted into the child's IPC space directly.
+ * cap_task_port_make -- a fresh per-task port for `task_port', with `blob' as
+ * its manifest: a receive right in cap_port_set, so that requests on it land
+ * in our loop, with the manifest in the per-task table under its name.
  *
- * Trust: any caller can invoke this in v2.1; gating to bootstrap-
- * only via a setup-port pattern is a follow-up.
+ * 🔑 IT ASKS TO BE TOLD WHEN THE PORT HAS NO SENDERS, and that is how this
+ * server learns the task is gone (#743).  The task's TASK_CAP_PORT and its
+ * copies are the only send rights: cap_server keeps none (the reply makes the
+ * caller's from the receive right), and the provisioner gives its own back.
+ * Before, the table's 64 slots were taken one per task for the life of the
+ * system, and so were the task ports kept in them.
+ *
+ * ⚠️ sync 1, because the port has no sender yet: with 0 the notification
+ * would come at once.  The reply's make-send is the first.
+ *
+ * On an error the request that brought `task_port' is destroyed by
+ * mach_msg_server(), which releases it: so is nothing here.
+ */
+static kern_return_t
+cap_task_port_make(mach_port_t task_port, const void *blob, uint32_t len,
+                   mach_port_t *out_port)
+{
+    mach_port_t new_port = MACH_PORT_NULL;
+    mach_port_t previous = MACH_PORT_NULL;
+    kern_return_t kr;
+    int vrc;
+
+    kr = mach_port_allocate(mach_task_self(),
+                            MACH_PORT_RIGHT_RECEIVE, &new_port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: per-task port — port_allocate kr=%d\n", kr);
+        return CAP_ERR_NO_MEMORY;
+    }
+
+    kr = mach_port_move_member(mach_task_self(), new_port, cap_port_set);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: per-task port — move_member kr=%d\n", kr);
+        (void)mach_port_destroy(mach_task_self(), new_port);
+        return CAP_ERR_INTERNAL;
+    }
+
+    kr = mach_port_request_notification(mach_task_self(), new_port,
+                                        MACH_NOTIFY_NO_SENDERS, 1, new_port,
+                                        MACH_MSG_TYPE_MAKE_SEND_ONCE,
+                                        &previous);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: per-task port — no-senders request kr=%d\n", kr);
+        (void)mach_port_destroy(mach_task_self(), new_port);
+        return CAP_ERR_INTERNAL;
+    }
+
+    vrc = cap_manifest_table_install(new_port, task_port, blob, len);
+    if (vrc != CAP_ERR_NONE) {
+        (void)mach_port_destroy(mach_task_self(), new_port);
+        return vrc;
+    }
+
+    *out_port = new_port;
+    return KERN_SUCCESS;
+}
+
+/*
+ * cap_task_port_gone -- the kernel says `port' has no senders: the task it was
+ * made for is gone, and so is every copy it handed out (#743).  The slot, the
+ * task port it kept and the receive right are given back.
+ */
+static void
+cap_task_port_gone(mach_port_t port)
+{
+    mach_port_t task;
+
+    if (port == cap_port || cap_manifest_table_get(port) == NULL) {
+        printf("cap: no senders on 0x%x, which is no task's port\n",
+               (unsigned)port);
+        return;
+    }
+
+    task = cap_manifest_table_remove(port);
+    (void)mach_port_destroy(mach_task_self(), port);
+    if (MACH_PORT_VALID(task))
+        (void)mach_port_deallocate(mach_task_self(), task);
+    printf("cap: cap_port=0x%x has no senders — its slot and its task's "
+           "port are given back (#743)\n", (unsigned)port);
+}
+
+/*
+ * cap_provision_task (#216 v2.1).  Validate the manifest and make a per-task
+ * port for `task_port' with it.  The caller -- bootstrap, and nobody else --
+ * stamps the port as the child's TASK_CAP_PORT and gives its own copy back.
+ *
+ * 🔴 IT ANSWERED ANYONE (#743).  `server' was discarded, the port every task
+ * inherits took the request as well as a per-task port did, and the manifest
+ * was whatever the caller sent: a task could provision itself with a manifest
+ * of its own writing, take the per-task port it got back, and acquire through
+ * it whatever that manifest said.  The manifests bound only the tasks that
+ * did not try.
+ *
+ * 🔑 Now the port the request arrived on decides, and only the provisioning
+ * port is answered.  Its one send right is bootstrap's: it is made here and
+ * handed over on this server's own bootstrap port, which bootstrap knows to be
+ * the cap_server it started, before bootstrap provisions anything.  A task
+ * exec'd later gets its port by derivation from its caller's, which can only
+ * narrow what the caller holds (cap_derive_task).
  */
 kern_return_t
 cap_provision_task(mach_port_t            server,
@@ -671,12 +788,19 @@ cap_provision_task(mach_port_t            server,
                    mach_port_t           *out_task_cap_port)
 {
     mach_port_t new_port = MACH_PORT_NULL;
-    mach_port_t send_right = MACH_PORT_NULL;
     kern_return_t kr;
     int vrc;
 
     (void)server;
     *out_task_cap_port = MACH_PORT_NULL;
+
+    if (provision_port == MACH_PORT_NULL ||
+        g_request_local_port != provision_port) {
+        printf("cap: DENY provision_task on port 0x%x — only bootstrap's "
+               "provisioning port provisions (#743)\n",
+               (unsigned)g_request_local_port);
+        return CAP_ERR_NOT_PROVISIONER;
+    }
 
     vrc = cap_manifest_validate(manifest_buf, (uint32_t)manifest_len, NULL);
     if (vrc != CAP_ERR_NONE) {
@@ -685,44 +809,113 @@ cap_provision_task(mach_port_t            server,
         return vrc;
     }
 
-    kr = mach_port_allocate(mach_task_self(),
-                            MACH_PORT_RIGHT_RECEIVE, &new_port);
-    if (kr != KERN_SUCCESS) {
-        printf("cap: provision_task — port_allocate kr=%d\n", kr);
-        return CAP_ERR_NO_MEMORY;
-    }
-
-    /* Hand the receive port to the port set so subsequent requests on
-     * it land in our mach_msg loop.  On failure rip the port back down
-     * so we don't leak. */
-    kr = mach_port_move_member(mach_task_self(), new_port, cap_port_set);
-    if (kr != KERN_SUCCESS) {
-        printf("cap: provision_task — move_member kr=%d\n", kr);
-        (void)mach_port_destroy(mach_task_self(), new_port);
-        return CAP_ERR_INTERNAL;
-    }
-
-    vrc = cap_manifest_table_install(new_port, task_port, manifest_buf,
-                                     (uint32_t)manifest_len);
-    if (vrc != CAP_ERR_NONE) {
-        (void)mach_port_destroy(mach_task_self(), new_port);
-        return vrc;
-    }
-
-    /* Caller wants a send right; we keep the receive side. */
-    kr = mach_port_insert_right(mach_task_self(), new_port, new_port,
-                                MACH_MSG_TYPE_MAKE_SEND);
-    if (kr != KERN_SUCCESS) {
-        printf("cap: provision_task — insert_right kr=%d\n", kr);
-        (void)mach_port_destroy(mach_task_self(), new_port);
-        return CAP_ERR_INTERNAL;
-    }
-    send_right = new_port;
+    kr = cap_task_port_make(task_port, manifest_buf, (uint32_t)manifest_len,
+                            &new_port);
+    if (kr != KERN_SUCCESS)
+        return kr;
 
     printf("cap: provisioned task — cap_port=0x%x manifest=%u bytes\n",
            (unsigned)new_port, (unsigned)manifest_len);
 
-    *out_task_cap_port = send_right;
+    /*
+     * The reply MAKES the caller's send right from our receive right
+     * (mach_port_make_send_t, #743).  This server used to make one for
+     * itself and send a copy, and the one it kept meant no per-task port
+     * could ever have no senders: the slot of a task long dead stayed
+     * taken.
+     */
+    *out_task_cap_port = new_port;
+    return KERN_SUCCESS;
+}
+
+/*
+ * cap_derive_task (#743).  A per-task port for a child of the task whose
+ * per-task port the request arrived on: what the child's manifest asks for,
+ * cut to what the parent's may hand on (cap_manifest_derive()).
+ *
+ * 🔑 THE POLICY COMES FROM THE PARENT.  exec_server used to provision every
+ * program from the manifest in the program's own file, so whoever wrote a
+ * binary that something exec'd wrote its policy too.  A derivation can only
+ * narrow what the parent holds, and a parent with no manifest -- a request on
+ * the port every task inherits, or on the provisioning port -- has nothing
+ * to hand on.
+ *
+ * The child's blob is copied before it is read: it arrives in the request
+ * buffer, and its 64-bit fields are read where malloc() puts them.
+ */
+kern_return_t
+cap_derive_task(mach_port_t            server,
+                mach_port_t            task_port,
+                cap_manifest_blob_t   manifest_buf,
+                mach_msg_type_number_t manifest_len,
+                mach_port_t           *out_task_cap_port)
+{
+    const cap_manifest_header_t *parent;
+    const cap_manifest_header_t *asked;
+    void *copy = NULL;
+    void *derived = NULL;
+    uint32_t derived_len = 0;
+    mach_port_t new_port = MACH_PORT_NULL;
+    kern_return_t kr;
+    int vrc;
+
+    (void)server;
+    *out_task_cap_port = MACH_PORT_NULL;
+
+    parent = cap_manifest_table_get(g_request_local_port);
+    if (parent == NULL) {
+        printf("cap: DENY derive_task on port 0x%x — no task's port, so "
+               "nothing to hand on (#743)\n", (unsigned)g_request_local_port);
+        return CAP_ERR_NOT_DELEGABLE;
+    }
+
+    if (manifest_len == 0 || manifest_len > CAP_MANIFEST_MAX_BYTES)
+        return CAP_ERR_MANIFEST_INVALID;
+    copy = malloc(manifest_len);
+    if (copy == NULL)
+        return CAP_ERR_NO_MEMORY;
+    memcpy(copy, manifest_buf, manifest_len);
+
+    vrc = cap_manifest_validate(copy, (uint32_t)manifest_len, &asked);
+    if (vrc == CAP_ERR_NONE)
+        vrc = cap_manifest_derive(parent, asked, &derived, &derived_len);
+    if (vrc != CAP_ERR_NONE) {
+        printf("cap: derive_task — manifest refused (rc=%d, len=%u)\n",
+               vrc, (unsigned)manifest_len);
+        free(copy);
+        return vrc;
+    }
+
+    kr = cap_task_port_make(task_port, derived, derived_len, &new_port);
+    if (kr == KERN_SUCCESS)
+        printf("cap: derived task — cap_port=0x%x from 0x%x, %u of %u "
+               "entries kept (#743)\n", (unsigned)new_port,
+               (unsigned)g_request_local_port,
+               (unsigned)(((const cap_manifest_header_t *)derived)
+                              ->required_count +
+                          ((const cap_manifest_header_t *)derived)
+                              ->delegatable_count),
+               (unsigned)(asked->required_count + asked->delegatable_count));
+    free(derived);
+    free(copy);
+    if (kr != KERN_SUCCESS)
+        return kr;
+
+    *out_task_cap_port = new_port;
+    return KERN_SUCCESS;
+}
+
+/*
+ * cap_slots (#743).  The table's census, on any port: a count of tasks says
+ * nothing about any one of them, and it is the only way a test can see a slot
+ * come back.
+ */
+kern_return_t
+cap_slots(mach_port_t server, natural_t *in_use, natural_t *size)
+{
+    (void)server;
+    *in_use = (natural_t)cap_manifest_table_in_use();
+    *size   = (natural_t)cap_manifest_table_size();
     return KERN_SUCCESS;
 }
 
@@ -843,6 +1036,33 @@ main(int argc, char **argv)
 
     printf("cap: serving CAP_SERVER_SLOT's port 0x%x, which the name server "
            "publishes as \"cap_server\" (#744)\n", (unsigned)cap_port);
+
+    /*
+     * The provisioning port (#743), and bootstrap's one send right to it,
+     * given on this server's own bootstrap port so that bootstrap knows the
+     * cap_server it started gave it.  bootstrap provisions nothing, itself
+     * included, until it has it; a request it sends before the loop below
+     * starts waits in the port's queue.
+     *
+     * ⚠️ Without it nothing can be provisioned, and bootstrap would wait for
+     * it as long as this task lives: so this task ends, and bootstrap, told
+     * of the death, runs the rest without manifests and says so.
+     */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &provision_port);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_move_member(mach_task_self(), provision_port,
+                                   cap_port_set);
+    if (kr == KERN_SUCCESS)
+        kr = bootstrap_cap_provisioner(bootstrap_port, provision_port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: the provisioning port did not reach bootstrap (%d) — "
+               "nothing could be provisioned, so cap_server ends (#743)\n",
+               kr);
+        return 1;
+    }
+    printf("cap: provisioning port 0x%x given to bootstrap, the only task "
+           "that provisions (#743)\n", (unsigned)provision_port);
 
     /* #209: cap_server boots before gpu_server in bootstrap.conf
      * (gpu_server cap_subscribe_revoke's against us at startup), so

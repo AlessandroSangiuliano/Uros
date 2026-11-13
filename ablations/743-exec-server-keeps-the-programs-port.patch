@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #743
+Takes out: exec_server giving back the port it derived for a program (c0b1a6b5, 2d9ca190) -- it keeps a copy of every one
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[42\] WRONG — /hello_exec exec'd with a caller's port: block devices READ 0 \(want 0\), WRITE 2413 and DMA buffers 2413 \(want CAP_ERR_NOT_IN_MANIFEST 2413\); slots [0-9]+ before the exec and [0-9]+ after both ports were given back and 200 wait\(s\) of 10 ms
+
+diff --git a/uros/src/servers/exec_server/exec_load.c b/uros/src/servers/exec_server/exec_load.c
+index aee95556..3a699788 100644
+--- a/uros/src/servers/exec_server/exec_load.c
++++ b/uros/src/servers/exec_server/exec_load.c
+@@ -461,11 +461,6 @@ derive_cap_port(mach_port_t new_task, const elf_image_t *img,
+            path ? path : "(?)", (unsigned)cap_port, blen,
+            (blob == &default_manifest_blob) ? ", default" : "");
+ 
+-    /*
+-     * The task holds the port now; this copy would keep it from ever having
+-     * no senders, and cap_server from giving its slot back (#743).
+-     */
+-    (void)mach_port_deallocate(mach_task_self(), cap_port);
+     return 1;
+ }
+ 

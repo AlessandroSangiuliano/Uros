@@ -136,13 +136,12 @@ extern int boot_open_file(const char *path, struct file *fp);
 extern mach_port_t bootstrap_name_server_port(void);
 
 /*
- * #744: cap_server's slot (service.c) -- the port bootstrap made for it,
- * whether cap_server has taken its receive right, and what waits on it
- * refused from now on, when cap_server died first or is not in
- * bootstrap.conf.
+ * #744: cap_server's slot (service.c) -- the port bootstrap made for it, and
+ * what waits on it refused from now on, when cap_server died first or is not
+ * in bootstrap.conf.  Whether cap_server is up is its provisioning port now
+ * (#743, bootstrap.c).
  */
 extern mach_port_t bootstrap_cap_server_port(void);
-extern boolean_t service_cap_server_taken(void);
 extern void service_cap_server_refuse(void);
 /* #744: bootstrap.c -- the server a bootstrap port is, by name, or NULL */
 extern const char *bootstrap_server_name(mach_port_t bootstrap_port);

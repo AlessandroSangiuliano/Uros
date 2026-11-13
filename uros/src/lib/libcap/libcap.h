@@ -132,11 +132,34 @@ kern_return_t cap_use_local(const struct uros_cap *token,
  * Returns KERN_SUCCESS on a successful install; otherwise one of
  * CAP_ERR_* (manifest invalid / no slot / no memory) or the
  * underlying mach_msg failure.
+ *
+ * `provisioner' is cap_server's provisioning port (#743), the only port
+ * cap_provision_task answers on; bootstrap holds its one send right.  It
+ * is an argument and not looked up, because no lookup can find it: on
+ * the port every task inherits, or on a per-task port, the answer is
+ * CAP_ERR_NOT_PROVISIONER.  The returned port is the caller's to give
+ * back once the task holds it.
  */
-kern_return_t cap_provision(mach_port_t task_port,
+kern_return_t cap_provision(mach_port_t provisioner,
+                            mach_port_t task_port,
                             const void *manifest_blob,
                             unsigned int manifest_len,
                             mach_port_t *out_task_cap_port);
+
+/*
+ * cap_derive_child() — the cap_derive_task RPC (#743).  A per-task port for the
+ * child `task_port', asked on its parent's per-task port `parent_cap_port':
+ * the child gets what `manifest_blob' asks for, cut to what the parent's
+ * manifest may hand on.  exec_server asks it with the port its caller passed
+ * to exec_load.  The returned port is the caller's to give back once the
+ * child holds it.  CAP_ERR_NOT_DELEGABLE when `parent_cap_port' is no task's
+ * per-task port.
+ */
+kern_return_t cap_derive_child(mach_port_t parent_cap_port,
+                               mach_port_t task_port,
+                               const void *manifest_blob,
+                               unsigned int manifest_len,
+                               mach_port_t *out_task_cap_port);
 
 #ifdef __cplusplus
 }

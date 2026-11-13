@@ -26,25 +26,16 @@
 #include <stdio.h>
 #include <string.h>
 
-/* MIG user stubs from exec.defs / proc.defs (subsystems 3100 / 3200). */
-extern kern_return_t exec_load(
-    mach_port_t exec_port, mach_port_t client_task, char *path,
-    pointer_t argv_blob, mach_msg_type_number_t argv_blobCnt,
-    pointer_t envp_blob, mach_msg_type_number_t envp_blobCnt,
-    mach_port_t *new_task, mach_port_t *new_thread, int *result_code);
-
-extern kern_return_t proc_register(
-    mach_port_t proc_port, proc_pid_t parent_pid,
-    mach_port_t task_port, char *cmdline,
-    proc_pid_t *new_pid, int *result);
-
-extern kern_return_t proc_subscribe_exit(
-    mach_port_t proc_port, proc_pid_t pid,
-    mach_port_t notify_port, int *result);
-
-extern kern_return_t proc_list(
-    mach_port_t proc_port, pointer_t *entries,
-    mach_msg_type_number_t *entriesCnt, unsigned *count, int *result);
+/*
+ * The MIG user stubs' own headers, generated from exec.defs and proc.defs
+ * into this directory's build, so a call that disagrees with a routine does
+ * not compile.  The prototypes written here by hand went on declaring
+ * exec_load() without the parent_caps it gained in #743, and this file called
+ * it one argument short: the path went where the port was wanted.
+ */
+#include "exec_types.h"
+#include "exec.h"
+#include "proc.h"
 
 void
 bench_proc_smoke(void)
@@ -76,7 +67,8 @@ bench_proc_smoke(void)
     }
 
     /* 1. Spawn hello_exec via exec_server. */
-    kr = exec_load(exec_port, mach_task_self(), (char *)"/hello_exec",
+    kr = exec_load(exec_port, mach_task_self(), mach_cap_port,
+                   (char *)"/hello_exec",
                    (pointer_t)argv, sizeof(argv),
                    (pointer_t)envp, sizeof(envp),
                    &new_task, &new_thread, &rc);

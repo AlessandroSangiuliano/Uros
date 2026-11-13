@@ -61,6 +61,7 @@ kern_return_t
 exec_S_load(
     mach_port_t                 server_port,
     mach_port_t                      client_task,
+    mach_port_t                 parent_caps,
     exec_path_t                 path,
     pointer_t                   argv_blob,
     mach_msg_type_number_t      argv_blobCnt,
@@ -77,11 +78,20 @@ exec_S_load(
     *new_task   = MACH_PORT_NULL;
     *new_thread = MACH_PORT_NULL;
 
-    rc = exec_do_load(client_task, path,
+    rc = exec_do_load(client_task, parent_caps, path,
                       (const void *)argv_blob, argv_blobCnt,
                       (const void *)envp_blob, envp_blobCnt,
                       new_task, new_thread);
     *result_code = rc;
+
+    /*
+     * #743: the caller's per-task port is ours to give back, whatever the
+     * result: this routine answers KERN_SUCCESS, so the request is not
+     * destroyed for us.  Kept, it would be a sender the caller's port never
+     * loses, and its slot in cap_server would outlive the caller.
+     */
+    if (MACH_PORT_VALID(parent_caps))
+        (void)mach_port_deallocate(mach_task_self(), parent_caps);
 
     /* MIG OOL: deallocate the OOL buffers it handed us. */
     if (argv_blob)

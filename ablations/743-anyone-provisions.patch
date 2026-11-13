@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #743
+Takes out: the gate on cap_provision_task (d7928dfb) -- it answers whichever port it is asked on, so a task provisions itself with a manifest of its own writing
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[38\] WRONG — provisioning itself with a manifest of its own, on the port every task inherits: 0, on its own per-task port: 0,
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index b19628dd..58b1d041 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -794,14 +794,6 @@ cap_provision_task(mach_port_t            server,
+     (void)server;
+     *out_task_cap_port = MACH_PORT_NULL;
+ 
+-    if (provision_port == MACH_PORT_NULL ||
+-        g_request_local_port != provision_port) {
+-        printf("cap: DENY provision_task on port 0x%x — only bootstrap's "
+-               "provisioning port provisions (#743)\n",
+-               (unsigned)g_request_local_port);
+-        return CAP_ERR_NOT_PROVISIONER;
+-    }
+-
+     vrc = cap_manifest_validate(manifest_buf, (uint32_t)manifest_len, NULL);
+     if (vrc != CAP_ERR_NONE) {
+         printf("cap: provision_task — manifest invalid (rc=%d, len=%u)\n",

@@ -156,6 +156,13 @@ provision_cap_port_for_child(task_port_t child_task,
  */
 static struct server	*cap_server_sp;
 
+/*
+ * #743: the one send right to cap_server's provisioning port, the only port
+ * cap_provision_task answers on.  cap_server gives it on its own bootstrap
+ * port (do_bootstrap_cap_provisioner()), once; MACH_PORT_NULL until then.
+ */
+static mach_port_t	cap_provisioner = MACH_PORT_NULL;
+
 char	*boot_device = (char *)BOOT_DEVICE_NAME;
 
 boolean_t bootstrap_demux(mach_msg_header_t *, mach_msg_header_t *);
@@ -612,9 +619,14 @@ boot_open_file(const char *path, struct file *fp)
 }
 
 /*
- * cap_server_checked_in -- wait until cap_server has taken its slot's receive
- * right from bootstrap, or is gone (#412, #744).  Returns 1 once it has; 0 when
- * cap_server was never started, or died first.
+ * cap_server_checked_in -- wait until cap_server has given bootstrap its
+ * provisioning port, or is gone (#412, #744, #743).  Returns 1 once it has; 0
+ * when cap_server was never started, or died first.
+ *
+ * 🔑 THE FACT IS THE PROVISIONING PORT NOW (#743).  It was the slot taken, and
+ * cap_server gives the port right after it takes the slot; the port is what a
+ * provisioning needs, since cap_provision_task answers on it and on nothing
+ * else.
  *
  * 🔴 THE WAIT WAS A COUNT OF YIELDS, AND A COUNT OF YIELDS IS A DEADLINE.
  * #432 retried cap_provision two hundred times with a depressed yield between
@@ -652,10 +664,10 @@ cap_server_checked_in(void)
 		return 0;
 
 	pthread_mutex_lock(&start_mutex);
-	while (!service_cap_server_taken() &&
+	while (cap_provisioner == MACH_PORT_NULL &&
 	       !(cap_server_sp->flags & SERVER_DIED_F))
 		pthread_cond_wait(&start_condition, &start_mutex);
-	up = service_cap_server_taken() &&
+	up = cap_provisioner != MACH_PORT_NULL &&
 	     !(cap_server_sp->flags & SERVER_DIED_F);
 	pthread_mutex_unlock(&start_mutex);
 
@@ -760,7 +772,8 @@ provision_cap_port_for_child(task_port_t child_task,
 	 * it ends is cap_server_checked_in()'s business.
 	 */
 	if (cap_server_checked_in())
-		kr = cap_provision(child_task, blob, (unsigned int)sz, &cap_port);
+		kr = cap_provision(cap_provisioner, child_task, blob,
+				   (unsigned int)sz, &cap_port);
 	else
 		kr = CAP_ERR_INTERNAL;
 
@@ -803,6 +816,33 @@ provision_cap_port_for_child(task_port_t child_task,
 	       program_name, symtab_name, (unsigned)cap_port,
 	       (unsigned)sz);
 	BOOTSTRAP_IO_UNLOCK();
+
+	/*
+	 * 🔴 AND OURS GOES BACK (#743).  The task holds the port now, in its
+	 * TASK_CAP_PORT, and this copy was the second reason no per-task port
+	 * could ever have no senders: bootstrap kept one for every task it
+	 * provisioned, itself included, and cap_server could never learn that a
+	 * task was gone.
+	 */
+	(void)mach_port_deallocate(mach_task_self(), cap_port);
+
+	/*
+	 * And checked, because nothing else can see it: a right kept here is a
+	 * sender no other task can count, and cap_server only ever learns of
+	 * the last one going.
+	 */
+	{
+		mach_port_type_t	type;
+
+		if (mach_port_type(mach_task_self(), cap_port, &type)
+		    == KERN_SUCCESS && (type & MACH_PORT_TYPE_SEND)) {
+			BOOTSTRAP_IO_LOCK();
+			printf("%s: %s: still holds a send right to its "
+			       "TASK_CAP_PORT after giving it back — WRONG "
+			       "(#743)\n", program_name, symtab_name);
+			BOOTSTRAP_IO_UNLOCK();
+		}
+	}
 	return 1;
 }
 
@@ -2110,6 +2150,47 @@ do_bootstrap_ports(mach_port_t bootstrap,
 	*root_ledger_wiredp = MACH_PORT_NULL;
 	*root_ledger_pagedp = MACH_PORT_NULL;
 	*security_portp = MACH_PORT_NULL;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #743: cap_server's provisioning port.  Taken from the cap_server this file
+ * started, asking on its own bootstrap port -- which the request arriving
+ * there proves, since the receive right is ours (#620): from any other task it
+ * would make that task the judge of who provisions, and is refused with
+ * KERN_NO_ACCESS.  And taken once: provision_cap_port_for_child() reads
+ * cap_provisioner without start_mutex once cap_server_checked_in() has seen
+ * it, which holds only for a port that is never written again, so a second
+ * offer is refused with KERN_NAME_EXISTS.
+ *
+ * Two rules, two answers.  An offer made after cap_server has given its port
+ * breaks both, and only the answer says which one refused it: cap_test [41]
+ * wants KERN_NO_ACCESS, so it sees the first rule go even with the second in
+ * place.  A refused right goes back with the request.
+ */
+kern_return_t
+do_bootstrap_cap_provisioner(mach_port_t bootstrap, mach_port_t provisioner)
+{
+	struct server	*sp = server_by_bootstrap_port(bootstrap);
+
+	if (sp == NULL || sp != cap_server_sp) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: bootstrap_cap_provisioner: refused to %s (#743)\n",
+		       program_name,
+		       sp == NULL ? "a task asking on the shared service port" :
+		       sp->symtab_name);
+		BOOTSTRAP_IO_UNLOCK();
+		return KERN_NO_ACCESS;
+	}
+	if (cap_provisioner != MACH_PORT_NULL) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: bootstrap_cap_provisioner: refused to cap_server, "
+		       "which gave one already (#743)\n", program_name);
+		BOOTSTRAP_IO_UNLOCK();
+		return KERN_NAME_EXISTS;
+	}
+	cap_provisioner = provisioner;
+	bootstrap_wake();		/* cap_server_checked_in() */
 	return KERN_SUCCESS;
 }
 
