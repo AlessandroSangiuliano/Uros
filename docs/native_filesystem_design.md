@@ -8,7 +8,7 @@
 
 **Status:** design reference from a discussion (13 November 2026). Nothing
 here is implemented or scheduled. The work starts after v0.3.0, which ends
-when the x86-64 port is complete. Section 9 lists the questions still open.
+when the x86-64 port is complete. Section 12 lists the questions still open.
 When a piece is decided or built, say so here.
 
 Uros needs a filesystem of its own: modern, fast, secure and robust. This
@@ -123,7 +123,7 @@ while BetrFS stayed close to its fresh speed.
    transaction groups, and hot files are defragmented when they are idle,
    not on every write. A voluntary per-file `nocow` that still keeps
    checksums: a torn write is then detected, though not prevented.
-5. **Aging is measured from the first day** (section 8): after N GB of use
+5. **Aging is measured from the first day** (section 11): after N GB of use
    the volume's speed must stay within a threshold of its fresh speed. The
    threshold is set before the first measurement, not after.
 
@@ -182,7 +182,198 @@ go through the server.
 - **Capabilities.** Rights travel with the file handle, as in the rest of the
   system; the Unix personality maps POSIX permissions onto them.
 
-## 7. Lineage, and what may be taken
+## 7. On-disk layout: a proposal
+
+A first proposal, to be argued with and measured, not a decision.
+
+**Units.**
+
+- Blocks of 4 KiB.
+- Segments of 8 MiB by default, a power of two chosen when the volume is
+  made, aligned to the device's erase blocks or zones.
+- An extent never crosses a segment, so the cleaner moves extents whole.
+
+**Objects and keys.** Every file, directory and symlink is an object with a
+64-bit id. All metadata lives in the one write-optimized tree of rule 3,
+keyed by (object id, item type, offset). The item types:
+
+- **object header:** type, sizes, times, flags, the object's key slot, its
+  feature bits;
+- **directory entry**, keyed by a 64-bit hash of the name, with a counter for
+  collisions;
+- **directory order item**, which gives `readdir()` cookies that stay stable
+  while the directory changes;
+- **extent record**;
+- **inline data:** files up to about 2–4 KiB live in the tree, with no
+  extent;
+- **extended attribute**;
+- **snapshot record:** a root pointer, a transaction group, a dead list.
+
+**The extent record.**
+
+| field | what it holds |
+| --- | --- |
+| logical offset, length | the file range, capped (say at 1 MiB) so that moving or rewriting one stays cheap |
+| physical address | (segment, offset in blocks) |
+| birth | the transaction group that wrote it |
+| compression | the algorithm and the compressed length |
+| checksums | an algorithm id, and one checksum per checksum unit |
+| writer | who wrote it, for section 8; zero until used |
+| key, nonce | for encryption, section 8; zero until used |
+| flags | `nocow` and the like |
+
+**Checksum units.** A checksum per extent would make a 4 KiB read fetch the
+whole extent to verify it. A checksum per 4 KiB costs 8 bytes in 4 KiB with
+xxHash64 (0.2%), and 32 with BLAKE3 (0.8%). The proposal:
+
+- extents are cut into checksum units of up to 64 KiB, compressed one by one,
+  so that a small read reads and decompresses one unit;
+- a file written at random gets smaller units, down to 4 KiB.
+
+**Tree nodes.** Large nodes, 64 to 256 KiB, in which updates are appended as
+in bcachefs, or buffered as in a Bε-tree. A node pointer carries the address,
+the child's checksum, its birth and its level.
+
+**Commit.**
+
+- Transaction groups close every few seconds, or after so many MiB.
+- A ring of superblocks at fixed places holds the root pointer, the group's
+  number and a checksum; mounting takes the newest valid one.
+- An intent log in segments of its own makes `fsync` fast: it records
+  operations, and mounting replays the ones after the last group.
+
+**Space.**
+
+- A segment usage table, in a tree of its own: for each segment its live
+  bytes, and its youngest and oldest birth.
+- Open segments are kept by stream, so that data of one temperature shares a
+  segment, as in F2FS: metadata; new data; data the cleaner moves, which is
+  cold by definition. There is one set per processor, against contention.
+- A pool of free segments, and rule 2's reserve.
+
+**The cleaner.**
+
+- It picks segments by LFS's cost-benefit, (1 − u) · age / (1 + u), with u
+  the fraction still live.
+- It moves only blocks born after the most recent snapshot, or owned by the
+  history log of section 9, found through the segment summaries.
+- It runs when free segments fall below a threshold or the measure of
+  fragmentation asks, and it yields to foreground I/O.
+
+**Snapshots** are a root pointer, a transaction group and a dead list.
+Deleting one merges its dead list into the next, as in ZFS, and says exactly
+what it freed.
+
+**Zoned devices** (ZNS SSDs, SMR disks) come almost free: a segment is a
+zone, and segments are written by appending only.
+
+**The superblock** holds a format version and three sets of feature flags,
+as ext4 does: compatible, read-only compatible, incompatible. A feature
+added later says by its flag what an older server may do with the volume.
+
+## 8. Features for the user
+
+Ideas from the discussion. All of them come from three things that do not
+exist together elsewhere:
+
+- copy-on-write with birth times, so every transaction group is a version;
+- capabilities, so every write reaches the server with the identity of its
+  writer, and an identity nobody can forge;
+- the per-process namespace.
+
+1. **Undo what one program did.** "Undo what this installer, script or
+   ransomware changed since ten this morning", leaving everyone else's
+   changes alone, and showing a conflict where someone else touched the same
+   file afterwards. Research systems did this (Taser, Retro); no filesystem
+   one can install does. Here the attribution is free: the server knows which
+   capability wrote each extent.
+2. **A continuous history, and the past as a mount.** Every transaction group
+   kept for some hours, then thinned to one an hour, then one a day, and
+   browsable as `~/doc.txt@10:42`. NILFS2 keeps a continuous history; what is
+   ours is giving a process the past as its root: "run this program in the
+   world as it was yesterday", to reproduce a bug or recover a file without
+   touching the present.
+3. **Who changed this file.** Each file's history says which program changed
+   it, and when.
+4. **Writes as proposals.** An application the user has not consented to
+   writes to a copy-on-write branch of the real filesystem. The user sees the
+   differences, and accepts or rejects them, like a pull request on their own
+   files. It is the promotion of the namespace design's overlay (its section
+   6), made persistent and cheap instead of living in RAM.
+5. **Folders encrypted for a capability.** The tax folder is decrypted only
+   for the application that holds its capability; anyone else sees encrypted
+   bytes, even with the right user. iOS ties its protection classes to the
+   device's lock state, not to applications.
+6. **Sealed folders.** A root hash one can print or publish, and later the
+   check "this folder is as it was that day", from any copy of it. fs-verity
+   does this for single read-only files; here it covers live folders.
+7. **Transactions over several files.** A package manager updates `/usr` all
+   or nothing; an office program saves a document made of several files
+   atomically. Microsoft's Transactional NTFS tried, on a filesystem that
+   updates in place, and was deprecated for its complexity. Under
+   copy-on-write a transaction is a private branch, committed in one group.
+8. **Space explained.** "Deleting this snapshot frees exactly 3.2 GB",
+   computed from the dead lists. btrfs cannot say it cheaply.
+
+And one good idea nobody kept: **BeOS's live queries**, a directory that is a
+saved search and updates itself. Here it would be a server in the namespace.
+
+## 9. What the features cost, and how they are added
+
+**The method.**
+
+1. The filesystem is built and measured without the features: the baseline.
+2. Each feature is then added as an A/B on the same build, switched on and
+   off at run time, against a threshold set before the measurement.
+
+**The format hooks are reserved from the first version:** the writer field in
+the extent record, the feature flags, the key slot of each object, the
+checksum algorithm id in each pointer. Without them a feature added later
+would mean a new format, and its A/B would measure the migration instead of
+the feature. Empty, they are in the baseline, so their own cost is measured
+from the first day.
+
+**The expected costs:**
+
+- **Nothing on the fast path:**
+  - **Writes as proposals and transactions over several files** cost only
+    whoever uses them: one more level of indirection on the files a branch
+    touched, and a commit that is a pointer switch in one group.
+  - **Space explained** is computed when asked, from the dead lists.
+  - **Sealed folders** cost nothing if the cryptographic hash is computed
+    when the folder is sealed. Everyday checksums stay fast (xxHash64,
+    CRC32C, over 10 GB/s per core); BLAKE3 on every block would cost CPU on
+    every write.
+- **Small and constant:**
+  - **Writer attribution** (features 1 and 3): a few bytes per extent, beside
+    its birth and checksum. The undo itself is rare and may be slow.
+  - **Encryption for a capability:** CPU on disk I/O only, since the page
+    cache holds plaintext and only capability holders can map the object.
+    AES-GCM with AES-NI or VAES runs at several GB/s per core: a few percent
+    on NVMe, and opt-in per folder.
+  - **Live queries:** only for indexed attributes. Full-text indexing belongs
+    to a separate, asynchronous server.
+- **The real risk: the continuous history.** It does not touch the fast path,
+  but it touches space and the cleaner, which is the aging rule 5 guards
+  against:
+  - **Every kept version is live data**, so the cleaner copies more and
+    write amplification grows.
+  - **It switches off the birth-time trick.** If every transaction group is
+    in effect a snapshot, no block is born after the last snapshot except
+    those of the last seconds, and the cleaner cannot move recent data
+    without back-references.
+  - **The way out:** old versions go to a **history log** in which each old
+    block has exactly one owner, so that moving it updates one entry. The
+    retention is bounded and the thinning firm.
+
+  Long transactions do the same on a small scale: they pin old versions until
+  they end.
+
+The thresholds are to be set before the first measurement, for example under
+2% on the fast path for everything but encryption, and the aging benchmark
+within rule 5's threshold for the history.
+
+## 10. Lineage, and what may be taken
 
 | rule | where it comes from |
 | --- | --- |
@@ -201,11 +392,12 @@ Licences decide what may be taken. ZFS is CDDL, and btrfs and bcachefs are
 GPL: they are studied, never copied. The LFS and BetrFS papers, and
 HAMMER2's design (BSD), may be used with citation.
 
-## 8. How it would be built
+## 11. How it would be built
 
 1. **This design, and the reading** in the references.
 2. **A core library over an abstract block device that also runs on
-   Linux**, where it can be tested quickly:
+   Linux**, without the features of section 8 but with their hooks in the
+   format, where it can be tested quickly:
    - a crash simulator that cuts the write stream at every point and checks
      the tree;
    - injected bit flips, torn writes and writes that land elsewhere;
@@ -217,8 +409,10 @@ HAMMER2's design (BSD), may be used with citation.
    guarantee has a test that is shown to fail without it.
 3. **The Uros server on top of the library:** the block layer below, pager to
    the VM, libvfs above. Then the boot volume.
+4. **The baseline measured**, on the same machine, then each feature of
+   section 8 added as an A/B against its threshold (section 9).
 
-## 9. Open questions
+## 12. Open questions
 
 - **Workloads and media.** A desktop or development machine on NVMe first?
   Several devices (mirrors, RAID) or one with backups?
@@ -227,6 +421,10 @@ HAMMER2's design (BSD), may be used with citation.
 - **What version 1 holds.** Snapshots and encryption from the start, or first
   copy-on-write and checksums only?
 - **The aging threshold** of rule 5, to be set before the first measurement.
+- **The features' thresholds** of section 9, likewise.
+- **The layout's numbers:** the segment size, the cap on an extent, the
+  checksum unit and its algorithm, the node size — each to be measured, not
+  guessed.
 - **The name.** Servers here have Greek names; *Mnemosyne*, memory, was
   proposed.
 
@@ -255,5 +453,16 @@ HAMMER2's design (BSD), may be used with citation.
 - M. Dillon, HAMMER2 design document, DragonFly BSD
   (`sys/vfs/hammer2/DESIGN`).
 - Apple, "Apple File System Reference".
+- R. Konishi et al., "The Linux implementation of a log-structured file
+  system" (NILFS), ACM SIGOPS Operating Systems Review 40(3), 2006.
+- A. Goel, K. Po, K. Farhadi, Z. Li, E. de Lara, "The Taser Intrusion
+  Recovery System", SOSP 2005.
+- T. Kim, X. Wang, N. Zeldovich, M. F. Kaashoek, "Intrusion Recovery Using
+  Selective Re-execution" (Retro), OSDI 2010.
+- D. Giampaolo, "Practical File System Design with the Be File System",
+  Morgan Kaufmann, 1999 — BFS's indexed attributes and live queries.
+- Microsoft, "Alternatives to using Transactional NTFS".
+- The Linux kernel's documentation, "fs-verity: read-only file-based
+  authenticity protection".
 - In this repository: `filesystem_namespace_design.md`,
   `capability_system.md`; issues #623, #724, #728, #773, #906.
