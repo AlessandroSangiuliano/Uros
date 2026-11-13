@@ -300,8 +300,8 @@ section is not.
 | `cap_revoke(cap_id)` | a holder / an authority | revoke it and its whole subtree |
 | `cap_verify(token, op, id)` | anyone | slow path; the trap is the fast one |
 | `cap_subscribe_revoke(port)` | a task whose manifest grants `RESOURCE_REVOKE_NOTICES`, on its per-task port (#744) | receive `cap_revoke_notify`, sent without blocking |
-| `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy, return the principal port |
-| `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`; refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
+| `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy for the task its identity port names, return the principal port; refuse a port that carries more than identity (#938) |
+| `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`, for the child its identity port names (#938); refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
 | `cap_slots() → in_use, size, derived, quota, family, family_max` | anyone | how many manifest slots are taken, how many by derived ports, and their bounds: how a test sees a slot come back (#743) and a bound met (#937) |
 
 ### Traps — `syscall_sw.h`
@@ -369,12 +369,19 @@ task may hold buffer capabilities *at all* — declared with `any`, the only
 honest thing it can say — and the kernel says whether *this* buffer is that
 task's to give away, which it knows because it made the allocation.
 
-⚠️ The bridge between the two halves is the **task port** that
-`cap_provision_task` and `cap_derive_task` carry. cap_server knows a requester as a port; the kernel
-knows an owner as a task; the port is what turns one into the other. For a
-derivation it is the parent's word: cap_server does not check that the task is
-the parent's child. It does not need to, because a parent can only name a task
-it holds a send right to, and that right is control of the task already.
+⚠️ The bridge between the two halves is the task's **identity port** that
+`cap_provision_task` and `cap_derive_task` carry (#938). cap_server knows a
+requester as a port; the kernel knows an owner as a task; the port is what
+turns one into the other, and the identity port, the reduced port with no
+right (§7), is all of the task the question needs: `urmach_dma_region_owner()`
+takes it. Until #938 the RPCs carried the full task port, and cap_server kept
+the memory and port rights of every task with a manifest for this comparison
+alone; it now refuses a port that carries more, with
+`CAP_ERR_TASK_NOT_IDENTITY`, and libcap makes the identity port from the task
+port its caller holds. For a derivation it is the parent's word: cap_server
+does not check that the task is the parent's child. It does not need to,
+because only the holder of a task's full port can make the task's identity
+port, and that right is control of the task already.
 
 ### 6.2 Checking
 
@@ -473,6 +480,7 @@ needs:
 |---|---|
 | `URMACH_TASK_RIGHT_INFO` | `task_info()` |
 | `URMACH_TASK_RIGHT_LIFECYCLE` | `task_terminate()`, `task_suspend()`, `task_resume()` |
+| none, `URMACH_TASK_RIGHTS_IDENTITY`: any port on the task | `urmach_dma_region_owner()` (#938) |
 | the full port only | everything else: memory, threads, port rights, special ports |
 
 The traps of `task_terminate()`, `task_suspend()` and `task_info()`, which
@@ -500,9 +508,20 @@ the host, so that a plain port gets an answer, where asking the port itself
 would send a request nobody reads.
 
 proc_server is handed each process's reduced port with the info and lifecycle
-rights, and refuses a full one with `PROC_ERR_FULL_TASK`. A right is named
-when a routine comes to check it: reading a task's memory, for a debugger, is
-not named yet, and cap_server's identity-only port is #938.
+rights, and refuses a full one with `PROC_ERR_FULL_TASK`. cap_server is
+handed each task's identity port, the set with no bits
+(`URMACH_TASK_RIGHTS_IDENTITY`), which it keeps with the task's slot to ask
+`urmach_dma_region_owner()` which task a DMA region belongs to, and refuses
+any other with `CAP_ERR_TASK_NOT_IDENTITY` (#938). A right is named when a
+routine comes to check it: reading a task's memory, for a debugger, is not
+named yet.
+
+Three servers held task ports they did not need, as found while enumerating
+for #911. exec_server held the port of every task that spawned a program, and
+of every program and first thread it started, until #926: the caller now
+makes the task and lends it, and exec_server gives it back. proc_server held
+every process's task port until #927, and cap_server every task's with a
+manifest until #938.
 
 ---
 
@@ -672,15 +691,6 @@ Stated so nobody reads this document as a description of a finished system.
   `DIRECTORY`, `PRINTER`, `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values
   with no enforcement behind them — the browser example above is therefore
   *architecture*, not a transcript.
-- **cap_server still holds full task ports**, of every task with a manifest,
-  for the DMA owner check, which needs only to tell which task a region
-  belongs to (#938). Two other servers held task ports they did not need, as
-  found while enumerating for #911:
-  - exec_server held the port of every task that spawned a program, and of
-    every program and first thread it started, until #926. The caller now
-    makes the task and lends it, and exec_server gives it back.
-  - proc_server held every process's task port until #927. It now holds the
-    process's reduced port (§7).
 - **A manifest decides every capability.** A task that ships none is refused
   all of them (`cap_manifest_allows()`, #511). In the x86-64 build fourteen
   programs ship one: ten in the bundle, for the tasks bootstrap starts
@@ -730,6 +740,7 @@ this is where to look, and what to break to confirm it still works.
 | proc_server holds a process's reduced port, and it reaches no more | `cap_test [45]` | `ablations/927-proc-server-takes-full-ports`, `927-reduced-port-reaches-memory`, `927-rights-not-checked`, `927-mint-from-a-reduced-port` |
 | a reduced port takes the traps itself, not through MIG | `cap_test [45]` | `ablations/927-traps-refuse-a-reduced-port` |
 | a derivation that keeps nothing takes no slot, and derived ports meet a family's bound and a quota | `cap_test [46]` | `ablations/937-empty-derivation-takes-a-slot`, `937-family-unbounded`, `937-quota-unbounded` (over the widen `937-widen-family-to-the-quota`) |
+| cap_server keeps a task's identity port and no task port, and the kernel's DMA owner check takes the identity port | `cap_test [47]`, `[12]` | `ablations/938-cap-server-takes-full-ports`, `938-cap-server-keeps-task-ports`, `938-dma-owner-wants-the-task-port` |
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers
