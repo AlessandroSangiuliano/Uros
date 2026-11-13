@@ -235,6 +235,129 @@ Which of the two serves a `read()` that hits the cache — the mapped memory
 object, or a read-ahead window filled over FLIPC — is decided by measuring
 both, not by preference.
 
+### Client, server and the kernel's VM (13/11)
+
+What Uros does today is classic Mach: `read()` and `write()` are RPCs to the
+ext2 server, which keeps a page cache of its own in user space, and `mmap`
+goes through libfspager (#276), with the server as pager and the kernel
+caching the mapped pages. That is two caches of one file, to be kept
+coherent: where Mach was slow.
+
+**One cache, the kernel's.** The filesystem server is the pager of every
+file, always, not only of mapped ones. File pages live in the kernel's memory
+objects. The server caches only its metadata, the tree's nodes.
+
+**The kernel never touches the disk.** It holds pages in memory and nothing
+else.
+
+- **A missing page** is a message to the pager, the server. The server reads
+  the disk through the block layer, BDS and the device's driver task, and
+  hands the kernel the pages.
+- **A dirty page** goes back to the server, which writes it through the same
+  layer at its commit.
+- **The DMA can land in the very pages the object then holds.** The server
+  hands buffer pages to the driver, under the IOMMU, checks the checksums,
+  and moves the pages to the kernel as out-of-line memory, without a copy.
+  Writes go the other way, from the copy-on-write snapshots the kernel hands
+  the server.
+
+Anonymous memory is the kernel's own business, compressed and then swapped
+through BDS, as decided on 2 November 2026; it does not touch this path.
+
+**The file's capability is a memory entry.** #911 put memory entries in the
+kernel: `urmach_make_memory_entry()` makes a port (`IKOT_MEMORY_ENTRY`) that
+names memory with a maximum protection for each segment, and `vm_map()` of
+that port maps it. At `open()` the server answers with a memory entry
+naming the file's object, its maximum protection the mode of the open. The
+kernel enforces it in the traps below and in `mmap`. One extension is
+needed: today an entry names a range of its maker's address space, and here
+it must name an object paged by the server.
+
+**The paths, in an example** (the new calls' names are proposals):
+
+- **`open("doc.txt", O_RDWR)`:**
+  1. libvfs resolves the path in the process's namespace.
+  2. It makes a Mach RPC `fs_open` to the server, with direct thread switch.
+  3. The server looks the name up in its tree, checks the rights, and
+     creates the file's object, as its pager, if it does not exist yet.
+  4. It answers with three things: the memory entry, the size, and a space
+     credit of 1 MiB.
+- **`read(fd, buf, 16 KiB)` at 64 KiB, the first time:**
+  1. libvfs calls the trap `file_read(entry, 64 KiB, buf, 16 KiB)`.
+  2. The kernel resolves the entry: the object, read allowed. The 4 pages
+     are not resident.
+  3. It sends **one** data request to the server for a 64 KiB cluster, the
+     read-ahead, and the thread waits.
+  4. The server finds the extents in its tree and sends one 64 KiB
+     descriptor to BDS over the FLIPC ring.
+  5. It checks the unit's checksum before supplying the pages: a mismatch is
+     `EIO`, or the redundant copy.
+  6. It moves the pages to the kernel, which inserts them, wakes the thread
+     and copies 16 KiB.
+- **The same `read()` again:** a trap, the pages are there, a copy of 16 KiB.
+  About 1–2 µs, no IPC, and the server never hears of it.
+- **`write(fd, buf, 4 KiB)` at 8 KiB:**
+  1. libvfs takes 4 KiB off the credit, locally, and calls the trap
+     `file_write(entry, 8 KiB, buf, 4 KiB)`.
+  2. The kernel checks that writing is allowed and takes the page:
+     - a resident page is written in place;
+     - a missing whole page is a zeroed one, with no disk read;
+     - a missing partial page is first asked of the server.
+  3. It marks the page dirty and updates the object's size and times.
+
+  Again 1–2 µs without the server. When the credit runs out, an RPC
+  `fs_reserve` asks for more, or gives `ENOSPC` there and then, at the
+  `write()`, never lost at a commit. Quotas work the same way.
+- **The commit**, every few seconds or when dirty pages pass a limit:
+  1. The server collects its objects' dirty pages from the kernel, which
+     write-protects them and hands copy-on-write copies, with sizes and
+     times. The program can go on writing to the originals, and the checksum
+     stays true to what reaches the disk.
+  2. The server allocates new places in a "hot" open segment.
+  3. It writes, in batches over FLIPC: the data, then the new extent records
+     and the tree's nodes copied up to the root, a flush, and the
+     superblock.
+  4. The kernel marks the pages clean, and keeps them cached.
+- **`fsync(fd)`:** an RPC. The server collects that object's dirty pages
+  only, writes them with an intent-log record and a flush, and answers
+  "durable". The next commit takes them into the tree.
+- **`mmap`:** `vm_map()` of the same memory entry. The process maps the very
+  pages `file_read` and `file_write` use, so it is coherent with a `write()`
+  by construction, and pages dirtied by stores go to the same commit.
+
+| operation | typical cost | who works |
+| --- | --- | --- |
+| `read` or `write` of cached pages | about 1–2 µs | the kernel alone |
+| `read` of missing pages | a trap, one round to the server, the disk | kernel, server, BDS |
+| `write` | about 1–2 µs, and an RPC per MiB of credit | the kernel |
+| commit | in batches, in the background | server, BDS |
+| `fsync` | an RPC, the log write, a flush | the server |
+
+**Where Mach was slow, and what changes:**
+
+| classic Mach | here |
+| --- | --- |
+| every `read()` an IPC to the server | cached data never goes through the server |
+| two caches, the server's and the kernel's | one, the kernel's |
+| a page a message | clusters, over FLIPC |
+| cleaning a page at a time | at the commit, in large batches |
+| an RPC with two context switches | direct thread switch for the RPCs left, `open`, `fsync` |
+
+**The hard part: memory pressure.** To free memory the kernel needs the
+server to clean dirty pages. If the server must allocate memory to do it,
+the system deadlocks: the classic trouble with external pagers, and why
+anonymous memory stays in the kernel. For files:
+
+- a **limit on dirty pages**, which slows writers before memory runs out;
+- **memory wired for the server**, so it can clean without allocating;
+- **a kernel that never waits for the server** for its own progress.
+
+**To measure:**
+
+- the mapped window against the trap, for cached reads;
+- pages supplied over FLIPC against Mach messages;
+- the cost of the commit.
+
 ## 6. Secure
 
 - **The disk is untrusted input.** On a USB stick a filesystem's parsing bugs
