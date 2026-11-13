@@ -51,9 +51,19 @@ int cap_manifest_validate(const void *blob, uint32_t blob_len,
  * #432 is that cross-reference -- issuing a capability for a DMA buffer means
  * asking the KERNEL whether the requesting task owns it, and the requester is
  * known here only as a port.
+ *
+ * `parent_cap_port' says what the slot is (#937).  MACH_PORT_NULL is a task
+ * bootstrap provisions, which starts a family of its own.  A parent's per-task
+ * port is a derivation, which joins the parent's family and is bounded twice:
+ * the derived slots of the whole table by a quota, so that bootstrap always
+ * has the rest for the tasks it starts, and those of one family by a smaller
+ * bound, so that one family cannot take the quota from the others.  Past
+ * them it answers CAP_ERR_DERIVED_QUOTA or CAP_ERR_LINEAGE_FULL, and a parent
+ * that is no slot's port CAP_ERR_NOT_DELEGABLE.
  */
 int cap_manifest_table_install(mach_port_t task_cap_port,
                                mach_port_t task_port,
+                               mach_port_t parent_cap_port,
                                const void *blob, uint32_t blob_len);
 
 /*
@@ -79,6 +89,16 @@ mach_port_t cap_manifest_table_remove(mach_port_t task_cap_port);
 /* How many slots hold a per-task port now, and how many there are (#743). */
 unsigned cap_manifest_table_in_use(void);
 unsigned cap_manifest_table_size(void);
+
+/*
+ * The bounds on derived slots (#937): how many hold a derived port now, and
+ * the quota; how many of them belong to the family of `task_cap_port' -- 0
+ * for a port that is no slot's -- and how many one family may hold.
+ */
+unsigned cap_manifest_table_derived(void);
+unsigned cap_manifest_table_derived_quota(void);
+unsigned cap_manifest_table_family(mach_port_t task_cap_port);
+unsigned cap_manifest_table_family_max(void);
 
 /*
  * What a child that asks for `asked' may have, from a parent whose manifest
