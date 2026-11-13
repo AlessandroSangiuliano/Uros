@@ -179,6 +179,7 @@
 #include <kern/thread_pool.h>
 #include <ipc/ipc_entry.h>
 #include <kern/rpc_common.h>
+#include <kern/rcu.h>		/* #940: struct urmach_rcu_head */
 
 /*
  *  A receive right (port) can be in four states:
@@ -240,6 +241,15 @@ struct ipc_port {
 	 * precisely for numbers the interfaces exchange.
 	 */
 	natural_t	ip_protected_payload;	/* receiver payload (0=none) */
+
+	/*
+	 * #940: what holds the port's memory back from its zone for an RCU
+	 * grace period after its last reference goes (io_free()).  mach_msg's
+	 * resolve reads a port from an entry with nothing locked, inside a
+	 * read section, and until the grace period has passed that memory is
+	 * the dead port it was, never a port handed out again.
+	 */
+	struct urmach_rcu_head	ip_rcu;
 
 
 
