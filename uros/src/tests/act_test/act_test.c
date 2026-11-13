@@ -3393,6 +3393,20 @@ a56_ms_between(const struct timespec *a, const struct timespec *b)
 }
 
 /*
+ * #925: the victim's last depression ran out -- ended by its timer, which
+ * thread_switch() answers KERN_ABORTED for, or found gone when read back
+ * after a KERN_SUCCESS -- after its whole time, so it is asked again.  One
+ * place for the victim's loop and the round's verdict, which must agree.
+ */
+static int
+a56_depression_ran_out(void)
+{
+	return (a56_depressed == KERN_ABORTED ||
+		(a56_depressed == KERN_SUCCESS && a56_was_depressed == 0)) &&
+	       a56_switch_ms >= A56_DEPRESS_MS;
+}
+
+/*
  * Wait at least `us' microseconds by the clock -- a count of turns is no time
  * under TCG -- and answer how many it read, or -1 if it could not read it.
  */
@@ -3472,6 +3486,16 @@ a56_victim(void *arg)
 		 * still holds.  A depressed thread kept off a processor nothing
 		 * else wanted would be counted there too, which is why the line
 		 * says how many rounds were held.
+		 *
+		 * A depression found gone when read back ran out the same way:
+		 * thread_switch() answered KERN_SUCCESS with this thread still
+		 * depressed, and the processor was held past the depression's
+		 * time before the reading -- entry 55, -t again, at one processor
+		 * in the merge test of a869dac2 (OMEGA, 13/11).  So the reading
+		 * is inside the loop and the clock is read after it: found gone
+		 * after the whole depression is asked again, and before it is
+		 * WRONG, as for KERN_ABORTED.  a56_depression_ran_out() says
+		 * which, here and in the round's verdict.
 		 */
 		for (;;) {
 			int	clocked = getclock(TIMEOFDAY, &s[0]) == 0;
@@ -3479,26 +3503,27 @@ a56_victim(void *arg)
 			a56_depressed = thread_switch(MACH_PORT_NULL,
 						      SWITCH_OPTION_IDLE,
 						      A56_DEPRESS_MS);
+			/*
+			 * And read back: that is how the depression that was
+			 * not there was found.  A call that answered
+			 * KERN_SUCCESS said nothing of the priority the thread
+			 * then ran at.
+			 */
+			n = POLICY_TIMESHARE_INFO_COUNT;
+			if (thread_info(a56_self, THREAD_SCHED_TIMESHARE_INFO,
+					(thread_info_t) &ts, &n) != KERN_SUCCESS)
+				a56_was_depressed = -1;
+			else
+				a56_was_depressed = ts.depressed ? 1 : 0;
 			a56_switch_ms = clocked &&
 					getclock(TIMEOFDAY, &s[1]) == 0 ?
 					a56_ms_between(&s[0], &s[1]) : -1;
-			if (a56_depressed != KERN_ABORTED ||
-			    a56_switch_ms < A56_DEPRESS_MS)
+			if (!a56_depression_ran_out())
 				break;
 			a56_ran_out++;
 			if (a56_ran_out == A56_DEPRESS_TRIES)
 				break;
 		}
-		/*
-		 * And read back: that is how the depression that was not there
-		 * was found.  A call that answered KERN_SUCCESS said nothing of
-		 * the priority the thread then ran at.
-		 */
-		if (thread_info(a56_self, THREAD_SCHED_TIMESHARE_INFO,
-				(thread_info_t) &ts, &n) != KERN_SUCCESS)
-			a56_was_depressed = -1;
-		else
-			a56_was_depressed = ts.depressed ? 1 : 0;
 	}
 	a56_spinning = 1;
 	while (!a56_go)
@@ -3593,9 +3618,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		 * the processor taken by others, and the round went on with the
 		 * victim at its own priority (see a56_victim()).
 		 */
-		if (a56_depressed == KERN_ABORTED &&
-		    a56_switch_ms >= A56_DEPRESS_MS &&
-		    a56_ran_out == A56_DEPRESS_TRIES)
+		if (a56_ran_out == A56_DEPRESS_TRIES && a56_depression_ran_out())
 			held++;
 		else if (a56_depressed != KERN_SUCCESS) {
 			if (a56_depressed != KERN_ABORTED)
@@ -3631,13 +3654,26 @@ arm_fifty_six_abort_reaches_user_mode(void)
 				       a56_ran_out, a56_switch_ms);
 			return 0;
 		} else if (a56_alone && a56_was_depressed != 1) {
-			printf("act_test: [56] round %d: at one processor the "
-			       "victim %s in its loop, thread_switch() having "
-			       "answered %d: the end of the main thread's nap is "
-			       "to preempt it by its priority — WRONG (#925)\n",
-			       round, a56_was_depressed < 0 ?
-			       "could not read its priority" :
-			       "read itself not depressed", a56_depressed);
+			if (a56_was_depressed < 0)
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim could not read its priority in "
+				       "its loop, thread_switch() having answered "
+				       "%d — WRONG (#925)\n", round, a56_depressed);
+			else if (a56_switch_ms < 0)
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim read itself not depressed in its "
+				       "loop, and the clock could not be read to say "
+				       "whether its depression had run out — WRONG "
+				       "(#925)\n", round);
+			else
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim read itself not depressed in its "
+				       "loop %ld ms after it asked, before its %d ms "
+				       "depression could run out, thread_switch() "
+				       "having answered %d: the end of the main "
+				       "thread's nap is to preempt it by its priority "
+				       "— WRONG (#925)\n", round, a56_switch_ms,
+				       A56_DEPRESS_MS, a56_depressed);
 			return 0;
 		} else if (a56_alone)
 			depressed++;
