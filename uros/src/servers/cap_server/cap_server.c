@@ -44,6 +44,8 @@
 #include <mach/notify.h>	/* MACH_NOTIFY_NO_SENDERS (#743) */
 #include <mach/cap_types.h>
 #include <mach/mach_traps.h>	/* urmach_cap_revoke (#432) */
+#include <mach/mach_host.h>	/* urmach_task_port_rights (#938) */
+#include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
 #include <mach_init.h>
 #include <sa_mach.h>
 #include <stdio.h>
@@ -741,6 +743,30 @@ cap_task_port_make(mach_port_t task_port, mach_port_t parent,
 }
 
 /*
+ * #938: is `task_port' a task's identity port, and nothing more?  This server
+ * keeps the port it is handed with the slot, for as long as the per-task port
+ * lives, and needs it only to tell which task a DMA region belongs to
+ * (urmach_dma_region_owner(), which takes any port on the task).  It kept the
+ * full task port of every task with a manifest: the task's memory, its
+ * threads and its port rights.  A full port is refused, and so is a reduced
+ * port with rights, and a port that is no task's; libcap hands over the
+ * identity port.  The kernel is asked through the host, as proc_server asks
+ * it (#927): a request sent to a port that is no task's would wait for a
+ * reply that never comes.
+ */
+static int
+is_an_identity_port(mach_port_t task_port)
+{
+    mach_port_t   host = mach_host_self();
+    natural_t     rights = URMACH_TASK_RIGHTS_FULL;
+    kern_return_t kr;
+
+    kr = urmach_task_port_rights(host, task_port, &rights);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    return kr == KERN_SUCCESS && rights == URMACH_TASK_RIGHTS_IDENTITY;
+}
+
+/*
  * cap_task_port_gone -- the kernel says `port' has no senders: the task it was
  * made for is gone, and so is every copy it handed out (#743).  The slot, the
  * task port it kept and the receive right are given back.
@@ -803,6 +829,12 @@ cap_provision_task(mach_port_t            server,
                "provisioning port provisions (#743)\n",
                (unsigned)g_request_local_port);
         return CAP_ERR_NOT_PROVISIONER;
+    }
+
+    if (!is_an_identity_port(task_port)) {
+        printf("cap: DENY provision_task — the task's port carries more than "
+               "its identity (#938)\n");
+        return CAP_ERR_TASK_NOT_IDENTITY;
     }
 
     vrc = cap_manifest_validate(manifest_buf, (uint32_t)manifest_len, NULL);
@@ -870,6 +902,13 @@ cap_derive_task(mach_port_t            server,
         printf("cap: DENY derive_task on port 0x%x — no task's port, so "
                "nothing to hand on (#743)\n", (unsigned)g_request_local_port);
         return CAP_ERR_NOT_DELEGABLE;
+    }
+
+    if (!is_an_identity_port(task_port)) {
+        printf("cap: DENY derive_task on 0x%x — the child's port carries "
+               "more than its identity (#938)\n",
+               (unsigned)g_request_local_port);
+        return CAP_ERR_TASK_NOT_IDENTITY;
     }
 
     if (manifest_len == 0 || manifest_len > CAP_MANIFEST_MAX_BYTES)
