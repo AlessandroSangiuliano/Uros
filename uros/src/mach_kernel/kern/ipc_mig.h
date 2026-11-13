@@ -62,4 +62,13 @@ extern mach_msg_return_t mach_msg_overwrite(
 	mach_msg_header_t	*rcv_msg,
         mach_msg_size_t		rcv_msg_size);
 
+/*
+ * The task a name in the current space names, if its port carries `need'
+ * (URMACH_TASK_RIGHT_*, <mach/task_rights.h>): a task reference, or
+ * TASK_NULL (#927, #938).
+ */
+extern task_t port_name_to_task_right(
+	mach_port_t		name,
+	natural_t		need);
+
 #endif	/* _IPC_MIG_H_ */
