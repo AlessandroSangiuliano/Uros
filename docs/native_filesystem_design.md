@@ -165,6 +165,28 @@ go through the server.
   processor, small files inside the metadata, a B+tree keyed by (object,
   type, offset), per-extent compression (LZ4 or zstd).
 
+**FLIPC v2 carries the data, in batches.** Uros already has the transport for
+this: FLIPC v2's shared-memory channels, which move a 4 KiB descriptor in
+about 86 ns with no kernel crossing. #232 measured how to use them for reads
+(libvfs to the ext2 server, KVM):
+
+| | 4 KiB | 16 KiB | 64 KiB |
+| --- | --- | --- | --- |
+| a synchronous RPC per `read()` over FLIPC, against a Mach RPC | 0.19× | 0.50× | 1.28× |
+| read-ahead over the same channel (a 192 KiB window per descriptor), against a Mach RPC | up to about 50× | 2.8× | 2.7× |
+
+- **One small request, one answer, loses.** The request–reply ping-pong
+  between two threads costs two context switches, about 53 µs, against about
+  1.4 µs for a Mach RPC with direct thread switch and the port cache.
+- **FLIPC wins where work is batched:** read-ahead, write-behind, the
+  submission rings above.
+- **So:** a single small request stays a Mach RPC, or a page already mapped.
+  Bulk data moves over FLIPC.
+
+Which of the two serves a `read()` that hits the cache — the mapped memory
+object, or a read-ahead window filled over FLIPC — is decided by measuring
+both, not by preference.
+
 ## 6. Secure
 
 - **The disk is untrusted input.** On a USB stick a filesystem's parsing bugs
@@ -368,6 +390,28 @@ from the first day.
 
   Long transactions do the same on a small scale: they pin old versions until
   they end.
+
+**What a threshold is.** A number decided before the measurement, which
+says whether the result is accepted. Decided afterwards, it moves to wherever
+the result fell ("82%? close enough"); decided before, the number decides.
+The C-versus-Rust measurement was set up the same way. An example for rule
+5, with numbers made up for the illustration:
+
+| metric | fresh volume | aged volume | aged / fresh | threshold: at least 80% |
+| --- | --- | --- | --- | --- |
+| sequential read of a 1 GB file | 1.80 GB/s | 1.50 GB/s | 83% | passes |
+| random 4 KiB writes | 120,000 IOPS | 110,000 IOPS | 92% | passes |
+| `git status` on a tree of 50,000 files | 0.30 s | 0.45 s | 67% | fails |
+
+The aging between the two columns is the benchmark of section 11: a hundred
+`git pull`s of a large repository, 20 GB of random rewrites of a database,
+and a round of snapshots made and deleted. Here the release stops until it is
+understood why an aged directory costs half as much again. For a feature the
+same shape: "writer attribution may cost at most 2% on the fast path" means,
+on a baseline of 120,000 random 4 KiB writes a second, at least 117,600 with
+the feature on. The measurements are taken as the rest of the project's are:
+one machine, A and B alternated, several runs, medians, the clock in the log,
+nothing else running.
 
 The thresholds are to be set before the first measurement, for example under
 2% on the fast path for everything but encryption, and the aging benchmark
