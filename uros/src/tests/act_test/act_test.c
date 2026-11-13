@@ -3503,6 +3503,14 @@ a56_victim(void *arg)
 		(void) getclock(TIMEOFDAY, &t[i + 1]);
 		a56_ms[i] = a56_ms_between(&t[i], &t[i + 1]);
 	}
+	/*
+	 * Not back to the pool depressed: thread_abort() does not end a
+	 * depression, and this one would follow the thread into whatever
+	 * pthread_create() reuses it next, at the lowest priority, until its
+	 * timer.  KERN_NOT_DEPRESSED, if the timer came first, is as good.
+	 */
+	if (a56_alone)
+		(void) thread_depress_abort(a56_self);
 	return NULL;
 }
 
