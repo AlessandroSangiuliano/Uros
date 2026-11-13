@@ -284,6 +284,9 @@ _Static_assert(__builtin_offsetof(struct uros_cap, hmac) == 160,
 #define CAP_ERR_MANIFEST_INVALID  2414   /* malformed .cmf blob */
 #define CAP_ERR_NO_MANIFEST_SLOT  2415   /* cap_server manifest table full */
 #define CAP_ERR_NOT_PROVISIONER   2416   /* #743: provisioning asked off the provisioning port */
+#define CAP_ERR_NOTHING_TO_DERIVE 2417   /* #937: a derivation that keeps nothing takes no slot */
+#define CAP_ERR_DERIVED_QUOTA     2418   /* #937: derived per-task ports hold their share of the table */
+#define CAP_ERR_LINEAGE_FULL      2419   /* #937: the caller's family holds as many derived ports as it may */
 
 /*
  * Manifest binary format (v2.1 / #216) lives in its own header so
