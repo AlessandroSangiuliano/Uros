@@ -24,12 +24,16 @@ sits under a mount point: the on-disk format and the server that keeps it.
 
 A filesystem here is not a kernel module, and that changes the design.
 
-- **A user-space server per volume.** It sits above the block layer
-  (`block_device_server` today, the volume server of #773 later) and below
+- **A user-space server per volume.** It sits above the block layer and below
   the namespace, where a process's root is an inherited capability. A crash
   of the server takes down that volume, not the kernel. Each volume can have
   its own server task, so a USB stick nobody trusts is parsed in a task of
   its own.
+- **The block layer is the one of #773, not `block_device_server`,** which
+  #773 dismantles. Each device gets a driver task of its own, hosted by
+  `chora` and watched by the HAL, and a volume server sits above them for RAID
+  and multipath. The filesystem server speaks to a device's queue as to a
+  capability (#623), and nothing here depends on the block server of today.
 - **The kernel's VM is the page cache.** The pagers of files stay: on 2
   November 2026 the default pager went from x86-64, and anonymous memory to
   the kernel, but files keep their external pagers. The filesystem server is
@@ -251,8 +255,8 @@ objects. The server caches only its metadata, the tree's nodes.
 else.
 
 - **A missing page** is a message to the pager, the server. The server reads
-  the disk through the block layer, BDS and the device's driver task, and
-  hands the kernel the pages.
+  the disk through the block layer, the volume server and the device's
+  driver task (#773), and hands the kernel the pages.
 - **A dirty page** goes back to the server, which writes it through the same
   layer at its commit.
 - **The DMA can land in the very pages the object then holds.** The server
@@ -262,7 +266,7 @@ else.
   the server.
 
 Anonymous memory is the kernel's own business, compressed and then swapped
-through BDS, as decided on 2 November 2026; it does not touch this path.
+through the block layer, as decided on 2 November 2026; it does not touch this path.
 
 **The file's capability is a memory entry.** #911 put memory entries in the
 kernel: `urmach_make_memory_entry()` makes a port (`IKOT_MEMORY_ENTRY`) that
@@ -289,7 +293,7 @@ it must name an object paged by the server.
   3. It sends **one** data request to the server for a 64 KiB cluster, the
      read-ahead, and the thread waits.
   4. The server finds the extents in its tree and sends one 64 KiB
-     descriptor to BDS over the FLIPC ring.
+     descriptor to the device's queue over the FLIPC ring.
   5. It checks the unit's checksum before supplying the pages: a mismatch is
      `EIO`, or the redundant copy.
   6. It moves the pages to the kernel, which inserts them, wakes the thread
@@ -328,9 +332,9 @@ it must name an object paged by the server.
 | operation | typical cost | who works |
 | --- | --- | --- |
 | `read` or `write` of cached pages | about 1–2 µs | the kernel alone |
-| `read` of missing pages | a trap, one round to the server, the disk | kernel, server, BDS |
+| `read` of missing pages | a trap, one round to the server, the disk | kernel, server, driver |
 | `write` | about 1–2 µs, and an RPC per MiB of credit | the kernel |
-| commit | in batches, in the background | server, BDS |
+| commit | in batches, in the background | server, driver |
 | `fsync` | an RPC, the log write, a flush | the server |
 
 **Where Mach was slow, and what changes:**
@@ -581,7 +585,8 @@ from the first day.
       paid in the background.
     - **Either way, nobody but the filesystem server reaches it.** History
       is not a file in the namespace, and the block layer gives no one else
-      the volume, as it gives only `bootlog` the UROSLOG partition (#915).
+      the volume: the block server gives only `bootlog` the UROSLOG partition
+      today (#915), and the volume server of #773 must keep that property.
       So a ransomware with write access to `/home` cannot erase the versions
       that undo it: feature 1 stays possible.
 
