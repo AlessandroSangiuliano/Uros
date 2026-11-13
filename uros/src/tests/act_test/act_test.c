@@ -3052,18 +3052,97 @@ arm54_creator(void *arg)
 	return NULL;
 }
 
+/*
+ * #940, local and never committed: what each poll was answered, for the
+ * stub (the trap, then the message when the trap says the name is no task)
+ * and for the message alone.  ok, KERN_INVALID_ARGUMENT (a disabled port),
+ * MACH_SEND_INVALID_DEST (the name dead), a reply that was not task_info's
+ * (a send-once notification: the request destroyed after its copyin), other.
+ */
+#define	ARM54_KINDS		5
+#define	ARM54_AFTER_MAX		200000	/* polls after the stop, never for ever */
+static volatile unsigned	arm54_stub_kind[ARM54_KINDS];
+static volatile unsigned	arm54_msg_kind[ARM54_KINDS];
+
+static int
+arm54_kind(kern_return_t kr)
+{
+	if (kr == KERN_SUCCESS)
+		return 0;
+	if (kr == KERN_INVALID_ARGUMENT)
+		return 1;
+	if (kr == MACH_SEND_INVALID_DEST)
+		return 2;
+	if (kr == MIG_REPLY_MISMATCH)
+		return 3;
+	return 4;
+}
+
 /* Read the child's thread times, which walks its activation list. */
 static void *
 arm54_poller(void *arg)
 {
+	unsigned	after = 0;
+
 	(void) arg;
-	while (!arm54_stop) {
+	for (;;) {
 		task_thread_times_info_data_t	times;
 		mach_msg_type_number_t		n = TASK_THREAD_TIMES_INFO_COUNT;
+		kern_return_t			kr;
 
-		if (task_info(arm54_child, TASK_THREAD_TIMES_INFO,
-			      (task_info_t) &times, &n) == KERN_SUCCESS)
+		kr = task_info(arm54_child, TASK_THREAD_TIMES_INFO,
+			       (task_info_t) &times, &n);
+		arm54_stub_kind[arm54_kind(kr)]++;
+		if (kr == KERN_SUCCESS)
 			arm54_asked++;
+		/* on through the termination, until the name is dead */
+		if (kr == MACH_SEND_INVALID_DEST)
+			break;
+		if (arm54_stop && ++after > ARM54_AFTER_MAX)
+			break;
+	}
+	return NULL;
+}
+
+/* The same question, by its message only, as the stub sends it. */
+static void *
+arm54_message_poller(void *arg)
+{
+	mach_port_t	reply = mig_get_reply_port();
+	unsigned	after = 0;
+
+	(void) arg;
+	for (;;) {
+		union arm14_msg		m;
+		mach_msg_return_t	mr;
+		kern_return_t		kr;
+
+		m.in.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						      MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		m.in.head.msgh_size = sizeof(m.in);
+		m.in.head.msgh_remote_port = arm54_child;
+		m.in.head.msgh_local_port = reply;
+		m.in.head.msgh_id = ARM14_TASK_INFO_ID;
+		m.in.ndr = NDR_record;
+		m.in.flavor = TASK_THREAD_TIMES_INFO;
+		m.in.count = TASK_THREAD_TIMES_INFO_COUNT;
+		mr = mach_msg_overwrite_trap(&m.in.head,
+					     MACH_SEND_MSG | MACH_RCV_MSG,
+					     sizeof(m.in), sizeof(m), reply,
+					     MACH_MSG_TIMEOUT_NONE,
+					     MACH_PORT_NULL,
+					     (mach_msg_header_t *) 0, 0);
+		if (mr != MACH_MSG_SUCCESS)
+			kr = mr;
+		else if (m.out.head.msgh_id != ARM14_TASK_INFO_ID + 100)
+			kr = MIG_REPLY_MISMATCH;
+		else
+			kr = m.out.ret;
+		arm54_msg_kind[arm54_kind(kr)]++;
+		if (kr == MACH_SEND_INVALID_DEST)
+			break;
+		if (arm54_stop && ++after > ARM54_AFTER_MAX)
+			break;
 	}
 	return NULL;
 }
@@ -3075,7 +3154,7 @@ arm_fifty_four_create_on_a_dying_task(void)
 	int		round;
 
 	for (round = 0; round < ARM54_ROUNDS; round++) {
-		pthread_t		creator, poller;
+		pthread_t		creator, poller, mpoller;
 		mach_port_type_t	type;
 		kern_return_t		kr;
 
@@ -3088,7 +3167,9 @@ arm_fifty_four_create_on_a_dying_task(void)
 			return 0;
 		}
 		if (pthread_create(&creator, NULL, arm54_creator, NULL) != 0 ||
-		    pthread_create(&poller, NULL, arm54_poller, NULL) != 0) {
+		    pthread_create(&poller, NULL, arm54_poller, NULL) != 0 ||
+		    pthread_create(&mpoller, NULL, arm54_message_poller,
+				   NULL) != 0) {
 			printf("act_test: [54] round %d: pthread_create failed "
 			       "— WRONG\n", round);
 			arm54_stop = 1;
@@ -3108,6 +3189,7 @@ arm_fifty_four_create_on_a_dying_task(void)
 		arm54_stop = 1;
 		(void) pthread_join(creator, NULL);
 		(void) pthread_join(poller, NULL);
+		(void) pthread_join(mpoller, NULL);
 
 		if (kr == KERN_SUCCESS)
 			kr = mach_port_type(me, arm54_child, &type);
@@ -3131,6 +3213,13 @@ arm_fifty_four_create_on_a_dying_task(void)
 	       "the thread was attached) and another read its thread times "
 	       "(%u read), and the kernel came through (#935)\n",
 	       ARM54_ROUNDS, arm54_made, arm54_late, arm54_asked);
+	printf("act_test: [54] polls so far (#940, local): stub ok %u inval %u "
+	       "dead %u mismatch %u other %u; message ok %u inval %u dead %u "
+	       "mismatch %u other %u\n",
+	       arm54_stub_kind[0], arm54_stub_kind[1], arm54_stub_kind[2],
+	       arm54_stub_kind[3], arm54_stub_kind[4],
+	       arm54_msg_kind[0], arm54_msg_kind[1], arm54_msg_kind[2],
+	       arm54_msg_kind[3], arm54_msg_kind[4]);
 	return 1;
 }
 
@@ -9675,6 +9764,21 @@ main(int argc, char **argv)
 	if (kr != KERN_SUCCESS) {
 		printf("act_test: no port to wait on (%d) — WRONG\n", kr);
 		return 1;
+	}
+
+	/*
+	 * #940, local and never committed: [56] once, so that the pool holds
+	 * threads an abort has been through, then [54] fifty times, with its
+	 * pollers on through each termination.
+	 */
+	{
+		int	i, ok;
+
+		ok = arm_fifty_six_abort_reaches_user_mode();
+		for (i = 0; i < 50; i++)
+			ok += arm_fifty_four_create_on_a_dying_task();
+		printf("act_test: %d of %d arms passed\n", ok, 51);
+		return ok == 51 ? 0 : 1;
 	}
 
 	arm_one_passed = arm_one_terminate_in_exception();
