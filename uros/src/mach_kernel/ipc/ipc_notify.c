@@ -99,6 +99,7 @@
 #include <mach/notify.h>
 #include <kern/assert.h>
 #include <kern/misc_protos.h>
+#include <kern/thread.h>		/* #940: current_thread(), WAKER_TRACK */
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_mqueue.h>
 #include <ipc/ipc_notify.h>
@@ -461,6 +462,10 @@ ipc_notify_send_once(
 	ipc_kmsg_t kmsg;
 	mach_send_once_notification_t *n;
 
+#if	WAKER_TRACK
+	/* #940: for the walk, which reads it beside a reply that never came */
+	current_thread()->ith_sonce_port = port;
+#endif	/* WAKER_TRACK */
 
 #if	MACH_RT
 	if (IP_RT(port))
