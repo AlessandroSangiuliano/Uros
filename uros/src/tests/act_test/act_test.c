@@ -3015,7 +3015,7 @@ arm_fourteen_terminate_inside_traps(void)
  * The kernel has to come through every round.  The widens hold each window
  * open; the ablations put each defect back.
  *
- * #940: and a third sending task_info()'s message to the child with no trap
+ * #940: and two more sending task_info()'s message to the child with no trap
  * first, on through the terminate, so that a request is in mach_msg's hot
  * path while another thread's refusal turns the child's name dead.  Every
  * helper is joined with a bound: a request queued where nothing answers is
@@ -3037,9 +3037,12 @@ static volatile unsigned	arm54_asked;
  */
 static volatile mach_port_t	arm54_creator_reply;
 static volatile mach_port_t	arm54_poller_reply;
-static volatile mach_port_t	arm54_messenger_reply;
 
-/* How many messages the messenger sends after the stop, at most, before it
+/* #940: two messengers, and the reply port each receives on. */
+#define	ARM54_MESSENGERS	2
+static volatile mach_port_t	arm54_messenger_reply[ARM54_MESSENGERS];
+
+/* How many messages a messenger sends after the stop, at most, before it
  * gives up on the name ever answering dead. */
 #define	ARM54_AFTER_MAX	1000
 
@@ -3094,9 +3097,11 @@ arm54_poller(void *arg)
 /*
  * #940: task_info()'s message to the child, as [14]'s third thread sends it
  * and as the library sends it once the trap refuses -- but with no trap
- * first, which reads the name under the space's lock.  So this thread is in
- * mach_msg's hot path all the time, while a helper's call is what turns the
- * child's name dead.  On through the terminate, until the name answers dead.
+ * first, which reads the name under the space's lock.  So a messenger is in
+ * mach_msg's hot path all the time.  There are two: the first to send after
+ * the death is the one whose refusal turns the child's name dead, and the
+ * other is in the hot path meanwhile.  On through the terminate, until the
+ * name answers dead.
  */
 static void *
 arm54_messenger(void *arg)
@@ -3105,8 +3110,7 @@ arm54_messenger(void *arg)
 	mach_port_t	reply = mach_reply_port();
 	unsigned	after = 0;
 
-	(void) arg;
-	arm54_messenger_reply = reply;
+	arm54_messenger_reply[(int) (long) arg] = reply;
 	for (;;) {
 		union arm14_msg		m;
 		mach_msg_return_t	mr = arm_fourteen_ask(arm54_child, reply,
@@ -3172,10 +3176,11 @@ arm_fifty_four_create_on_a_dying_task(void)
 	int		round;
 
 	for (round = 0; round < ARM54_ROUNDS; round++) {
-		pthread_t		creator, poller, messenger;
+		pthread_t		creator, poller;
+		pthread_t		messenger[ARM54_MESSENGERS];
 		mach_port_type_t	type;
 		kern_return_t		kr;
-		int			back;
+		int			back, i;
 
 		arm54_child = MACH_PORT_NULL;
 		arm54_stop = 0;
@@ -3187,8 +3192,10 @@ arm_fifty_four_create_on_a_dying_task(void)
 		}
 		if (pthread_create(&creator, NULL, arm54_creator, NULL) != 0 ||
 		    pthread_create(&poller, NULL, arm54_poller, NULL) != 0 ||
-		    pthread_create(&messenger, NULL, arm54_messenger,
-				   NULL) != 0) {
+		    pthread_create(&messenger[0], NULL, arm54_messenger,
+				   (void *) 0L) != 0 ||
+		    pthread_create(&messenger[1], NULL, arm54_messenger,
+				   (void *) 1L) != 0) {
 			printf("act_test: [54] round %d: pthread_create failed "
 			       "— WRONG\n", round);
 			arm54_stop = 1;
@@ -3210,9 +3217,10 @@ arm_fifty_four_create_on_a_dying_task(void)
 				  &arm54_creator_reply);
 		back = arm54_join(poller, round, "poller", "task_info()",
 				  &arm54_poller_reply) && back;
-		back = arm54_join(messenger, round, "messenger",
-				  "task_info()'s message",
-				  &arm54_messenger_reply) && back;
+		for (i = 0; i < ARM54_MESSENGERS; i++)
+			back = arm54_join(messenger[i], round, "messenger",
+					  "task_info()'s message",
+					  &arm54_messenger_reply[i]) && back;
 		if (!back) {
 			(void) mach_port_deallocate(me, arm54_child);
 			return 0;
