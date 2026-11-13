@@ -16,7 +16,8 @@ set(UROS_MIG_USERLAND_INCLUDES
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci
     -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
-    -I${CMAKE_SOURCE_DIR}/src/servers/exec_server)
+    -I${CMAKE_SOURCE_DIR}/src/servers/exec_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/proc_server)
 
 set(_CT_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
 set(CT_MIG_GENERATED)
@@ -44,6 +45,13 @@ set(CT_EXEC_GENERATED)
 add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs
                         ${_CT_OUT} CT_EXEC)
 list(APPEND CT_MIG_GENERATED ${CT_EXEC_GENERATED})
+
+# proc.defs, user half (#927): [45] registers a child with proc_server by its
+# reduced port, and by its full task port, which must be refused.
+set(CT_PROC_GENERATED)
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/proc_server/proc.defs
+                        ${_CT_OUT} CT_PROC)
+list(APPEND CT_MIG_GENERATED ${CT_PROC_GENERATED})
 
 add_executable(cap_test_server
   cap_test.c ${CT_MIG_GENERATED}
@@ -77,6 +85,8 @@ target_include_directories(cap_test_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
   # #743: exec_types.h, which the exec.h MIG generates for [42] imports.
   ${CMAKE_SOURCE_DIR}/src/servers/exec_server
+  # #927: proc_types.h, which proc.h imports, for [45].
+  ${CMAKE_SOURCE_DIR}/src/servers/proc_server
   # #743: cap_server.h, the MIG stubs libcap links in, for the arms that ask
   # a port of their own choosing.  Last, so that it shadows nothing.
   ${CMAKE_BINARY_DIR}/generated

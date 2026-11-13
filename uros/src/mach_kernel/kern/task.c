@@ -441,6 +441,7 @@ task_init(void)
 			TASK_CHUNK * sizeof(struct task),
 			"tasks");
 
+	ipc_task_rights_init();		/* #927: before the first task */
 	eml_init();
 
 	/*

@@ -63,6 +63,9 @@
 
 #include "proc_types.h"
 #include "proc.h"
+#include "internal.h"                    /* #927: __uros_process_port */
+#include <mach/task_rights.h>            /* #927 */
+#include <mach/mach_host.h>               /* #927: urmach_task_rights_port */
 
 #include "uros/libposix.h"
 
@@ -259,10 +262,14 @@ __uros_signals_init(void)
          * buffer accordingly so gcc's stringop-overflow analyser
          * doesn't complain. */
         char cmd_name[128] = "musl-task";
+        mach_port_t me = MACH_PORT_NULL;
         rc = PROC_ERR_INVAL;
-        (void)proc_register(__uros_proc_port, PROC_PID_NONE,
-                            mach_task_self(), cmd_name,
-                            &__uros_my_pid, &rc);
+        /* #927: by this task's reduced port, never its task port. */
+        if (__uros_process_port(mach_task_self(), &me) == KERN_SUCCESS) {
+            (void)proc_register(__uros_proc_port, PROC_PID_NONE,
+                                me, cmd_name, &__uros_my_pid, &rc);
+            (void)mach_port_deallocate(mach_task_self(), me);
+        }
         if (rc != PROC_OK)
             return;
 
@@ -476,4 +483,11 @@ __uros_kill(proc_pid_t pid, int signo)
     case PROC_ERR_NO_SIGPORT:   return 0;   /* target hasn't registered */
     default:                    return -EPERM;
     }
+}
+
+/* #927: see internal.h. */
+kern_return_t
+__uros_process_port(mach_port_t task, mach_port_t *port)
+{
+    return urmach_task_rights_port(task, URMACH_TASK_RIGHTS_PROCESS, port);
 }

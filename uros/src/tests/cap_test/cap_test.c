@@ -59,6 +59,9 @@
 #include "cap_server.h"		/* #743: the stubs, asked on ports of the arms' choosing */
 #include "exec.h"		/* #743: [42]'s exec_load */
 #include "exec_types.h"		/* #743: EXEC_OK */
+#include "proc.h"		/* #927: [45]'s proc_register */
+#include "proc_types.h"		/* #927: PROC_OK, PROC_ERR_FULL_TASK */
+#include <mach/task_rights.h>	/* #927 */
 #include <servers/netname_defs.h>	/* #744: [33]'s refusals */
 #include "service.h"			/* #744: [34]'s service_checkin */
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
@@ -537,13 +540,15 @@ a_child_gets_what_its_parent_may_hand_on(void)
     ok = kr == KERN_SUCCESS && rd == KERN_SUCCESS &&
          wr == CAP_ERR_NOT_IN_MANIFEST && dma == CAP_ERR_NOT_IN_MANIFEST &&
          shared == CAP_ERR_NOT_DELEGABLE;
-    if (ok)
+    if (ok) {
+        /* Two lines, each within the console's 256 bytes (#802). */
         printf("cap_test: [39] a child that asked for block devices "
                "READ|WRITE and DMA buffers got block devices READ, all this "
                "task may hand on: WRITE and DMA buffers refused with "
-               "CAP_ERR_NOT_IN_MANIFEST, and the port every task inherits "
-               "refused to derive with CAP_ERR_NOT_DELEGABLE (#743)\n");
-    else
+               "CAP_ERR_NOT_IN_MANIFEST (#743)\n");
+        printf("cap_test: [39] the port every task inherits refused to "
+               "derive with CAP_ERR_NOT_DELEGABLE (#743)\n");
+    } else
         printf("cap_test: [39] WRONG — derived on this task's port: %d; "
                "then block devices READ: %d (want 0), WRITE: %d and DMA "
                "buffers: %d (want CAP_ERR_NOT_IN_MANIFEST %d); derived on "
@@ -829,23 +834,31 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
 
     ok = rd == KERN_SUCCESS && wr == CAP_ERR_NOT_IN_MANIFEST &&
          dma == CAP_ERR_NOT_IN_MANIFEST && after <= before;
-    if (ok)
+    /*
+     * Each line within the console's 256 bytes (#802), and a failure says
+     * which half failed: the line that said both was 260 bytes, and its
+     * Expect ended three bytes short of the cut.
+     */
+    if (ok) {
         printf("cap_test: [42] /hello_exec, which asks for block devices "
                "READ|WRITE and DMA buffers, exec'd with a caller's port that "
                "may hand on block devices READ: its port granted READ and "
-               "refused WRITE and DMA buffers with CAP_ERR_NOT_IN_MANIFEST, "
-               "and once both ports were given back the slots were back to "
-               "%u of %u after %u wait(s) of 10 ms; exec_server's name came "
-               "after %u ms (#743)\n", (unsigned)after, (unsigned)size, waits,
-               waited);
-    else
+               "refused WRITE and DMA buffers (#743)\n");
+        printf("cap_test: [42] once both ports were given back the slots "
+               "were back to %u of %u after %u wait(s) of 10 ms; "
+               "exec_server's name came after %u ms (#743)\n",
+               (unsigned)after, (unsigned)size, waits, waited);
+    }
+    if (rd != KERN_SUCCESS || wr != CAP_ERR_NOT_IN_MANIFEST ||
+        dma != CAP_ERR_NOT_IN_MANIFEST)
         printf("cap_test: [42] WRONG — /hello_exec exec'd with a caller's "
                "port: block devices READ %d (want 0), WRITE %d and DMA "
-               "buffers %d (want CAP_ERR_NOT_IN_MANIFEST %d); slots %u "
-               "before the exec and %u after both ports were given back and "
-               "%u wait(s) of 10 ms (#743)\n", (int)rd, (int)wr, (int)dma,
-               CAP_ERR_NOT_IN_MANIFEST, (unsigned)before, (unsigned)after,
-               waits);
+               "buffers %d (want CAP_ERR_NOT_IN_MANIFEST %d) (#743)\n",
+               (int)rd, (int)wr, (int)dma, CAP_ERR_NOT_IN_MANIFEST);
+    if (after > before)
+        printf("cap_test: [42] WRONG — the slots were %u before the exec "
+               "and %u after both ports were given back and %u wait(s) of "
+               "10 ms (#743)\n", (unsigned)before, (unsigned)after, waits);
     return ok;
 }
 
@@ -1038,6 +1051,226 @@ exec_server_holds_nothing_of_a_spawn(mach_port_t host_priv)
            "task: %d, to its first thread: %d (want 0, 0, 0); %d dead "
            "name(s) in its space (#926)\n", spawner, prog, first, dead);
     return 0;
+}
+
+/*
+ * Test [45]: proc_server holds a registered process's reduced port, and that
+ * port reaches nothing but what proc_server needs (#927).
+ *
+ * A process is registered by its reduced port (<mach/task_rights.h>,
+ * URMACH_TASK_RIGHTS_PROCESS).  With it proc_server can end the process,
+ * stop it and let it go on, read its counters and see it die, and nothing
+ * else.  The arm makes a child with a page that holds a word, registers it
+ * by that port, and asks:
+ *
+ *   - proc_server's send rights, copied out as [44] does exec_server's: none
+ *     to the child's task port, one to its reduced port -- and still none to
+ *     the task port after a registration by it has been tried;
+ *   - the kernel, what the reduced port carries: the process set;
+ *   - the word, through the task port (there) and the reduced one (refused);
+ *   - the child's counters through the reduced port (granted);
+ *   - the traps of task_info() and task_suspend(), asked directly with the
+ *     reduced port (granted): when a trap refuses, libmach goes through
+ *     MIG, which answers the same, so only the trap can say it refused;
+ *   - a stop through an identity port, a reduced port with no rights
+ *     (refused), and a process port made from an info-only port (refused:
+ *     a right is taken away, never added);
+ *   - a reduced port with a right no routine names (KERN_INVALID_VALUE);
+ *   - a registration by the full task port (PROC_ERR_FULL_TASK).
+ *
+ * The child is then ended through the reduced port, which may.
+ */
+static int
+proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
+{
+    mach_port_t   me = mach_task_self();
+    mach_port_t   host = MACH_PORT_NULL, proc = MACH_PORT_NULL;
+    mach_port_t   proc_task = MACH_PORT_NULL, child = MACH_PORT_NULL;
+    mach_port_t   pp = MACH_PORT_NULL, idp = MACH_PORT_NULL;
+    mach_port_t   amp = MACH_PORT_NULL, odd = MACH_PORT_NULL;
+    mach_port_t   infop = MACH_PORT_NULL;
+    vm_address_t  page = 0;
+    vm_offset_t   data = 0;
+    mach_msg_type_number_t cnt = 0, icnt = TASK_BASIC_INFO_COUNT;
+    struct task_basic_info info;
+    natural_t     word = 0x927927, read_back = 0, rights = 0;
+    proc_pid_t    pid = 0, fpid = 0;
+    int           rc = -1, frc = -1;
+    int           full_held = -1, reduced_held = -1, full_after = -1;
+    unsigned      waited;
+    int           ok;
+    kern_return_t kr, kr_rights = -1, kr_full_read = -1, kr_read = -1;
+    kern_return_t kr_info = -1, kr_idstop = -1, kr_amp = -1, kr_odd = -1;
+    kern_return_t kr_end = -1, kr_trap_info = -1, kr_trap_stop = -1;
+    mach_msg_type_number_t tcnt = TASK_BASIC_INFO_COUNT;
+
+    for (waited = 0; ; waited += 100) {
+        if (netname_look_up(name_server_port, "", (char *)"proc_server",
+                            &proc) == KERN_SUCCESS)
+            break;
+        if (waited >= 30000) {
+            printf("cap_test: [45] proc_server's name did not come in 30 s "
+                   "— NOT ASKED (#927)\n");
+            return 1;
+        }
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+    }
+
+    kr = task_create(me, NULL, 0, FALSE, &child);
+    if (kr == KERN_SUCCESS)
+        kr = vm_allocate(child, &page, vm_page_size, TRUE);
+    if (kr == KERN_SUCCESS)
+        kr = vm_write(child, page, (vm_offset_t)&word, sizeof(word));
+    if (kr == KERN_SUCCESS)
+        kr = urmach_task_rights_port(child, URMACH_TASK_RIGHTS_PROCESS, &pp);
+    if (kr == KERN_SUCCESS)
+        kr = proc_register(proc, PROC_PID_NONE, pp, (char *)"cap_test_45",
+                           &pid, &rc);
+    if (kr != KERN_SUCCESS || rc != PROC_OK || pid == 0) {
+        printf("cap_test: [45] WRONG — a child registered by its reduced "
+               "port: kr %d, result %d, pid %u (#927)\n", (int)kr, rc,
+               (unsigned)pid);
+        if (MACH_PORT_VALID(pp))
+            (void)mach_port_deallocate(me, pp);
+        if (MACH_PORT_VALID(child)) {
+            (void)task_terminate(child);
+            (void)mach_port_deallocate(me, child);
+        }
+        (void)mach_port_deallocate(me, proc);
+        return 0;
+    }
+
+    if (the_task_receiving_on(host_priv, proc, &proc_task) == KERN_SUCCESS) {
+        full_held    = rights_to(proc_task, child, MACH_PORT_TYPE_SEND);
+        reduced_held = rights_to(proc_task, pp, MACH_PORT_TYPE_SEND);
+    }
+
+    host = mach_host_self();
+    kr_rights = urmach_task_port_rights(host, pp, &rights);
+
+    kr_full_read = vm_read(child, page, sizeof(word), &data, &cnt);
+    if (kr_full_read == KERN_SUCCESS) {
+        if (cnt >= sizeof(word))
+            read_back = *(natural_t *)data;
+        (void)vm_deallocate(me, data, cnt);
+    }
+    kr_read = vm_read(pp, page, sizeof(word), &data, &cnt);
+    if (kr_read == KERN_SUCCESS)
+        (void)vm_deallocate(me, data, cnt);
+    kr_info = task_info(pp, TASK_BASIC_INFO, (task_info_t)&info, &icnt);
+    kr_trap_info = syscall_task_info(pp, TASK_BASIC_INFO, (task_info_t)&info,
+                                     &tcnt);
+    kr_trap_stop = syscall_task_suspend(pp);
+    if (kr_trap_stop == KERN_SUCCESS)
+        (void)task_resume(pp);
+
+    if (urmach_task_rights_port(child, 0, &idp) == KERN_SUCCESS) {
+        kr_idstop = task_suspend(idp);
+        if (kr_idstop == KERN_SUCCESS)
+            (void)task_resume(child);
+    }
+    if (urmach_task_rights_port(child, URMACH_TASK_RIGHT_INFO, &infop)
+            == KERN_SUCCESS)
+        kr_amp = urmach_task_rights_port(infop, URMACH_TASK_RIGHTS_PROCESS,
+                                         &amp);
+    kr_odd = urmach_task_rights_port(child, 0x80000000U, &odd);
+
+    (void)proc_register(proc, PROC_PID_NONE, child, (char *)"cap_test_45f",
+                        &fpid, &frc);
+    if (MACH_PORT_VALID(proc_task))
+        full_after = rights_to(proc_task, child, MACH_PORT_TYPE_SEND);
+
+    kr_end = task_terminate(pp);
+
+    ok = full_held == 0 && reduced_held == 1 && full_after == 0 &&
+         kr_rights == KERN_SUCCESS && rights == URMACH_TASK_RIGHTS_PROCESS &&
+         kr_full_read == KERN_SUCCESS && read_back == word &&
+         kr_read != KERN_SUCCESS && kr_info == KERN_SUCCESS &&
+         kr_trap_info == KERN_SUCCESS && kr_trap_stop == KERN_SUCCESS &&
+         kr_idstop != KERN_SUCCESS && kr_amp != KERN_SUCCESS &&
+         kr_odd == KERN_INVALID_VALUE && frc == PROC_ERR_FULL_TASK &&
+         kr_end == KERN_SUCCESS;
+    if (ok) {
+        printf("cap_test: [45] proc_server held the registered child's "
+               "reduced port and not its task port; the port carried 0x%x, "
+               "read the child's counters, ended it, and was refused its "
+               "memory (%d) (#927)\n", (unsigned)rights, (int)kr_read);
+        printf("cap_test: [45] an identity port could not stop the child, an "
+               "info-only port could not make a process port, a right no "
+               "routine names was refused, and a registration by the task "
+               "port with PROC_ERR_FULL_TASK (#927)\n");
+        printf("cap_test: [45] the traps of task_info and task_suspend took "
+               "the reduced port themselves (#927)\n");
+    }
+    /*
+     * One line per check that failed, each short and its own: a long line is
+     * cut by another thread's output (#757), and ablate.sh reads the raw log
+     * line by line, so an Expect across the cut is never matched.  It was:
+     * 927-reduced-port-reaches-memory under KVM, the defect said WRONG and the
+     * run read NOT CAUGHT.
+     */
+    if (full_held != 0)
+        printf("cap_test: [45] WRONG — proc_server held the child's task "
+               "port: %d name(s) (#927)\n", full_held);
+    if (reduced_held != 1)
+        printf("cap_test: [45] WRONG — proc_server held the child's reduced "
+               "port under %d name(s), not 1 (#927)\n", reduced_held);
+    if (full_after != 0)
+        printf("cap_test: [45] WRONG — proc_server kept a task port it was "
+               "handed: %d name(s) (#927)\n", full_after);
+    if (kr_rights != KERN_SUCCESS || rights != URMACH_TASK_RIGHTS_PROCESS)
+        printf("cap_test: [45] WRONG — the reduced port carries 0x%x (%d), "
+               "not 0x%x (#927)\n", (unsigned)rights, (int)kr_rights,
+               URMACH_TASK_RIGHTS_PROCESS);
+    if (kr_full_read != KERN_SUCCESS || read_back != word)
+        printf("cap_test: [45] WRONG — the child's word through its task "
+               "port: %d, 0x%x (#927)\n", (int)kr_full_read,
+               (unsigned)read_back);
+    if (kr_read == KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — the reduced port read the child's "
+               "memory (#927)\n");
+    if (kr_info != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_info through the reduced port: "
+               "%d (#927)\n", (int)kr_info);
+    if (kr_trap_info != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_info's trap refused the reduced "
+               "port: %d (#927)\n", (int)kr_trap_info);
+    if (kr_trap_stop != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_suspend's trap refused the "
+               "reduced port: %d (#927)\n", (int)kr_trap_stop);
+    if (kr_idstop == KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — an identity port stopped the child "
+               "(#927)\n");
+    if (kr_amp == KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — an info-only port made a process port "
+               "(#927)\n");
+    if (kr_odd != KERN_INVALID_VALUE)
+        printf("cap_test: [45] WRONG — a right no routine names: %d, not "
+               "KERN_INVALID_VALUE (#927)\n", (int)kr_odd);
+    if (frc != PROC_ERR_FULL_TASK)
+        printf("cap_test: [45] WRONG — a registration by the task port "
+               "answered %d, not PROC_ERR_FULL_TASK (#927)\n", frc);
+    if (kr_end != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — the reduced port did not end the "
+               "child: %d (#927)\n", (int)kr_end);
+
+    if (MACH_PORT_VALID(amp))
+        (void)mach_port_deallocate(me, amp);
+    if (MACH_PORT_VALID(odd))
+        (void)mach_port_deallocate(me, odd);
+    if (MACH_PORT_VALID(idp))
+        (void)mach_port_deallocate(me, idp);
+    if (MACH_PORT_VALID(infop))
+        (void)mach_port_deallocate(me, infop);
+    if (kr_end != KERN_SUCCESS)
+        (void)task_terminate(child);
+    (void)mach_port_deallocate(me, pp);
+    (void)mach_port_deallocate(me, child);
+    if (MACH_PORT_VALID(proc_task))
+        (void)mach_port_deallocate(me, proc_task);
+    (void)mach_port_deallocate(me, host);
+    (void)mach_port_deallocate(me, proc);
+    return ok;
 }
 
 /*
@@ -5176,6 +5409,8 @@ main(int argc, char **argv)
         pass = 0;
     if (!exec_server_holds_nothing_of_a_spawn(host_port))
         pass = 0;		/* #926 */
+    if (!proc_server_holds_only_a_reduced_port(host_port))
+        pass = 0;		/* #927 */
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");

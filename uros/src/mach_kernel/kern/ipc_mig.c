@@ -163,6 +163,7 @@
 #include <kern/ipc_mig.h>
 #include <kern/ipc_tt.h>
 #include <kern/task.h>
+#include <mach/task_rights.h>	/* #927 */
 #include <kern/ipc_kobject.h>
 #include <kern/misc_protos.h>
 #include <vm/vm_map.h>
@@ -799,6 +800,61 @@ abort: {
     }
 }
 
+/*
+ * #927: port_name_to_task_right() where its fast lookup gives up -- a name
+ * the table cannot answer, or a dying space -- through ipc_object_copyin(),
+ * as port_name_to_task() goes on.
+ */
+static task_t
+port_name_to_task_right_slow(
+	mach_port_t	name,
+	natural_t	need)
+{
+	ipc_port_t	port;
+	task_t		task;
+
+	if (ipc_object_copyin(current_space(), name, MACH_MSG_TYPE_COPY_SEND,
+			      (ipc_object_t *) &port) != KERN_SUCCESS)
+		return TASK_NULL;
+	task = convert_port_to_task_right(port, need);
+	if (IP_VALID(port))
+		ipc_port_release_send(port);
+	return task;
+}
+
+/*
+ * #927: a task by a name in the current space, if the port it names carries
+ * `need': the full task port, or a reduced port made with the right
+ * (ref_task_right_port_locked(), the one check).  For the traps whose
+ * routine names a right, so that a reduced port takes the trap as the full
+ * port does rather than being refused and sent through MIG.
+ *
+ * port_name_to_task()'s lookup, with a return where it has a goto, and the
+ * only lookup a trap makes: a trap that asked port_name_to_task() first
+ * looked a reduced port up twice, the fast lookup that refused it and then
+ * the slow path, and on omen task_info() by a reduced port cost 0.80 us
+ * against 0.68 by the task port.  A task reference, or TASK_NULL.
+ */
+static task_t
+port_name_to_task_right(
+	mach_port_t	name,
+	natural_t	need)
+{
+	ipc_port_t	port;
+	task_t		task = TASK_NULL;
+	boolean_t	r = FALSE;
+
+	while (!r) {
+		fast_send_right_lookup(name, port,
+			return port_name_to_task_right_slow(name, need));
+		/* port is locked */
+
+		r = ref_task_right_port_locked(port, need, &task);
+		/* port unlocked */
+	}
+	return task;
+}
+
 vm_map_t
 port_name_to_map(
 	mach_port_t	name)
@@ -1180,7 +1236,8 @@ syscall_task_info(
 	natural_t		buff[ TASK_INFO_SMALL ];
 	mach_msg_type_number_t	our_cnt = TASK_INFO_SMALL;
 
-	t = port_name_to_task(task);
+	/* #927: the task port, or a reduced port with the right */
+	t = port_name_to_task_right(task, URMACH_TASK_RIGHT_INFO);
 	if (t == TASK_NULL) {
 		return(MACH_SEND_INTERRUPTED);
 	}
@@ -1491,7 +1548,8 @@ syscall_task_terminate(
 	task_t		t;
 	kern_return_t	result;
 
-	t = port_name_to_task(task);
+	/* #927: the task port, or a reduced port with the right */
+	t = port_name_to_task_right(task, URMACH_TASK_RIGHT_LIFECYCLE);
 	if (t == TASK_NULL)
 		return MACH_SEND_INTERRUPTED;
 
@@ -1508,7 +1566,8 @@ syscall_task_suspend(
 	task_t		t;
 	kern_return_t	result;
 
-	t = port_name_to_task(task);
+	/* #927: the task port, or a reduced port with the right */
+	t = port_name_to_task_right(task, URMACH_TASK_RIGHT_LIFECYCLE);
 	if (t == TASK_NULL)
 		return MACH_SEND_INTERRUPTED;
 

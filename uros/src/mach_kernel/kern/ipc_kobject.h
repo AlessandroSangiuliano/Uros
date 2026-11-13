@@ -152,9 +152,10 @@ typedef natural_t ipc_kobject_type_t;
 #define IKOT_CLOCK		25
 #define IKOT_CLOCK_CTRL		26
 #define IKOT_MEMORY_ENTRY	27	/* #911: vm/vm_memory_entry.c */
+#define IKOT_TASK_RIGHTS	28	/* #927: a task's reduced port, kern/ipc_tt.c */
 					/* << new entries here	*/
-#define	IKOT_UNKNOWN		28	/* magic catchall	*/
-#define	IKOT_MAX_TYPE		29	/* # of IKOT_ types	*/
+#define	IKOT_UNKNOWN		29	/* magic catchall	*/
+#define	IKOT_MAX_TYPE		30	/* # of IKOT_ types	*/
  /* Please keep ipc/ipc_object.c:ikot_print_array up to date	*/
 
 #define is_ipc_kobject(ikot)	(ikot != IKOT_NONE)

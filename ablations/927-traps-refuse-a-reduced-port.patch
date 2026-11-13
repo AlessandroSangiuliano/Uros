@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #927
+Takes out: the traps' taking a reduced port (8af6a812, 57b2b487) -- task_info's, task_suspend's and task_terminate's traps answer MACH_SEND_INTERRUPTED for one, and libmach goes through MIG, which answers the same, slower
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[45\] WRONG — task_info's trap refused the reduced port
+
+diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
+index b57b71f2..92be72b8 100644
+--- a/uros/src/mach_kernel/kern/ipc_mig.c
++++ b/uros/src/mach_kernel/kern/ipc_mig.c
+@@ -849,7 +849,7 @@ port_name_to_task_right(
+ 			return port_name_to_task_right_slow(name, need));
+ 		/* port is locked */
+ 
+-		r = ref_task_right_port_locked(port, need, &task);
++		r = ref_task_port_locked(port, &task);
+ 		/* port unlocked */
+ 	}
+ 	return task;

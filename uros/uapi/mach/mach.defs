@@ -259,7 +259,7 @@ skip;	/* nmk15_task_create */
  *	and all of its address space to be deallocated.
  */
 routine task_terminate(
-		target_task	: task_t);
+		target_task	: task_lifecycle_t);	/* #927 */
 
 /*
  *	Get user-level handler entry points for all
@@ -605,7 +605,7 @@ skip;	/* old thread_set_priority */
  *	count for that task is non-zero.
  */
 routine	task_suspend(
-		target_task	: task_t);
+		target_task	: task_lifecycle_t);	/* #927 */
 
 /*
  *	Decrement the suspend count for the target task,
@@ -614,7 +614,7 @@ routine	task_suspend(
  *	that also have non-zero suspend counts may execute.
  */
 routine	task_resume(
-		target_task	: task_t);
+		target_task	: task_lifecycle_t);	/* #927 */
 
 /*
  *	Returns the current value of the selected special port
@@ -895,7 +895,7 @@ skip;	/* was vm_map_rep; old port_set_select */
  */
 /* was skip; old port_set_backup */
 routine task_info(
-                target_task     : task_t;
+                target_task     : task_inspect_t;	/* #927 */
                 flavor          : task_flavor_t;
         out     task_info_out   : task_info_t, CountInOut);
 

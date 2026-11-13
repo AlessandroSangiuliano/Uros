@@ -23,6 +23,8 @@
 #include <servers/netname_defs.h>
 #include <libvfs.h>
 #include <proc_types.h>
+#include <mach/task_rights.h>   /* #927 */
+#include <mach/mach_host.h>      /* #927: urmach_task_rights_port */
 #include <stdio.h>
 #include <string.h>
 
@@ -43,6 +45,7 @@ bench_proc_smoke(void)
     mach_port_t exec_port = MACH_PORT_NULL;
     mach_port_t proc_port = MACH_PORT_NULL;
     mach_port_t new_task = MACH_PORT_NULL, new_thread = MACH_PORT_NULL;
+    mach_port_t new_proc_port = MACH_PORT_NULL;   /* #927 */
     mach_port_t notify_recv = MACH_PORT_NULL;
     mach_port_t notify_send = MACH_PORT_NULL;
     proc_pid_t pid = 0;
@@ -89,8 +92,14 @@ bench_proc_smoke(void)
      *    DEAD_NAME notify so it can mark the pid zombie when we
      *    task_terminate later. */
     rc = 0;
-    kr = proc_register(proc_port, /*parent*/ 0, new_task,
+    /* #927: by the program's reduced port; proc_server refuses the task's. */
+    if (urmach_task_rights_port(new_task, URMACH_TASK_RIGHTS_PROCESS,
+                                &new_proc_port) != KERN_SUCCESS)
+        new_proc_port = MACH_PORT_NULL;
+    kr = proc_register(proc_port, /*parent*/ 0, new_proc_port,
                        (char *)"hello_exec", &pid, &rc);
+    if (MACH_PORT_VALID(new_proc_port))
+        (void)mach_port_deallocate(mach_task_self(), new_proc_port);
     if (kr != KERN_SUCCESS || rc != 0 || pid == 0) {
         printf("  proc: proc_register failed kr=%d rc=%d pid=%u "
                "— FAIL\n", kr, rc, pid);
