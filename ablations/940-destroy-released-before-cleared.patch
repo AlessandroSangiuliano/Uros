@@ -1,0 +1,39 @@
+Kind: ablation
+Issue: #940
+Over: 940-widen-dead-name.patch
+Takes out: faddf20e -- ipc_right_destroy()'s dead branch drops the dead port's last reference before it clears and deallocates the entry again, so over 940-widen-dead-name, in the rounds of act_test [54] that destroy the terminated child's name, the port's memory goes back to its zone while the entry still names it as a send right, and a messenger whose resolve meets the window locks it, which the probe sees when the zone hands the port out; or finds it active by the zone's free pointer and queues its request there, and the bounded join says the messenger never came back, or the zone stops on the modified free pointer
+Run: --entry 14 600 -smp 4
+Expect: 940-probe-given-back: a port's lock was taken after its memory went back to its zone
+Expect: act_test: \[54\] round [0-9]+: the (creator|poller|messenger) had not come back from
+Expect: A freed zone element has been modified
+diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
+index 726ba918..0642138d 100644
+--- a/uros/src/mach_kernel/ipc/ipc_right.c
++++ b/uros/src/mach_kernel/ipc/ipc_right.c
+@@ -725,15 +725,6 @@ ipc_right_destroy(
+ 
+ 		if (!ip_active(port)) {
+ 			assert((type & MACH_PORT_TYPE_RECEIVE) == 0);
+-
+-			/*
+-			 * #940: the entry goes before its reference, which
+-			 * may be the port's last, as in ipc_right_check().
+-			 */
+-			entry->ie_request = 0;
+-			entry->ie_object = IO_NULL;
+-			ipc_entry_dealloc(space, name, entry);
+-
+ 			{	/* 940-widen-dead-name */
+ 				int	w940_last =
+ 					w940_before_release(port, FALSE);
+@@ -742,6 +733,10 @@ ipc_right_destroy(
+ 				ip_check_unlock(port);
+ 				w940_after_release(port, w940_last);
+ 			}
++
++			entry->ie_request = 0;
++			entry->ie_object = IO_NULL;
++			ipc_entry_dealloc(space, name, entry);
+ 			is_write_unlock(space);
+ 
+ 			break;
