@@ -139,6 +139,10 @@ kern_return_t cap_use_local(const struct uros_cap *token,
  * the port every task inherits, or on a per-task port, the answer is
  * CAP_ERR_NOT_PROVISIONER.  The returned port is the caller's to give
  * back once the task holds it.
+ *
+ * `task_port' is the task's full port, which the caller keeps: cap_server
+ * is handed the task's identity port, made from it here, and refuses a
+ * port that carries more (#938).
  */
 kern_return_t cap_provision(mach_port_t provisioner,
                             mach_port_t task_port,
@@ -153,7 +157,8 @@ kern_return_t cap_provision(mach_port_t provisioner,
  * manifest may hand on.  exec_server asks it with the port its caller passed
  * to exec_load.  The returned port is the caller's to give back once the
  * child holds it.  CAP_ERR_NOT_DELEGABLE when `parent_cap_port' is no task's
- * per-task port.
+ * per-task port.  As with cap_provision(), cap_server is handed the child's
+ * identity port, never `task_port' itself (#938).
  */
 kern_return_t cap_derive_child(mach_port_t parent_cap_port,
                                mach_port_t task_port,

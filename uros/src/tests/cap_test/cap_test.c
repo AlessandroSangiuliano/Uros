@@ -447,6 +447,11 @@ slots_now(mach_port_t port, struct slots *s)
  * port it got back.  Asked on the port every task inherits and on this task's
  * own per-task port, it must be refused both times with
  * CAP_ERR_NOT_PROVISIONER.  A port that came anyway is given back.
+ *
+ * It asks through libcap, which hands cap_server this task's identity port
+ * (#938).  With the task port, cap_server would refuse it before the rule
+ * this arm is about -- CAP_ERR_TASK_NOT_IDENTITY -- and a task can make its
+ * own identity port: the rule would be taken out with nothing to say so.
  */
 static int
 only_bootstrap_provisions(void)
@@ -469,14 +474,12 @@ only_bootstrap_provisions(void)
         return 0;
     }
 
-    on_shared = mig_cap_provision_task(urmach_cap_server_port,
-                                       mach_task_self(), (const char *)blob,
-                                       len, &got);
+    on_shared = cap_provision(urmach_cap_server_port, mach_task_self(),
+                              blob, len, &got);
     if (on_shared == KERN_SUCCESS && MACH_PORT_VALID(got))
         (void)mach_port_deallocate(mach_task_self(), got);
     got = MACH_PORT_NULL;
-    on_own = mig_cap_provision_task(mach_cap_port, mach_task_self(),
-                                    (const char *)blob, len, &got);
+    on_own = cap_provision(mach_cap_port, mach_task_self(), blob, len, &got);
     if (on_own == KERN_SUCCESS && MACH_PORT_VALID(got))
         (void)mach_port_deallocate(mach_task_self(), got);
 
@@ -1444,6 +1447,130 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
         (void)mach_port_deallocate(me, proc_task);
     (void)mach_port_deallocate(me, host);
     (void)mach_port_deallocate(me, proc);
+    return ok;
+}
+
+/*
+ * Test [47]: cap_server keeps a task's identity, and not the task (#938).
+ *
+ * cap_server kept the full port of every task it made a per-task port for --
+ * the task's memory, its threads and its port rights -- to ask the kernel,
+ * when a DMA buffer capability is asked for, whether the buffer is the
+ * task's.  It now keeps the task's identity port, the reduced port with no
+ * right (<mach/task_rights.h>), which libcap makes and hands over, and it
+ * refuses any other.  The arm asks:
+ *
+ *   - cap_server's send rights, copied out as [44] does exec_server's: none
+ *     to this task's full port, one to its identity port, the one bootstrap's
+ *     libcap made when it provisioned this task;
+ *   - a derivation handed a child's full task port, bypassing libcap:
+ *     refused with CAP_ERR_TASK_NOT_IDENTITY;
+ *   - the kernel's owner check, which is what cap_server asks it with: a DMA
+ *     region this task allocates is this task's by its identity port, and
+ *     not the child's by the child's.  [12] asks it through cap_server.
+ */
+static int
+cap_server_keeps_identities(mach_port_t host_priv, mach_port_t device_port)
+{
+    static uint64_t blob[16];
+    static const cap_manifest_entry_t rd[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
+    uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_identity",
+                                      rd, 1, NULL, 0);
+    mach_port_t   me = mach_task_self();
+    mach_port_t   cs_task = MACH_PORT_NULL, child = MACH_PORT_NULL;
+    mach_port_t   my_id = MACH_PORT_NULL, child_id = MACH_PORT_NULL;
+    mach_port_t   got = MACH_PORT_NULL;
+    vm_address_t  kva = 0, uva = 0;
+    vm_address_t *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    uint64_t      region = 0;
+    int           full_held = -1, id_held = -1, ok, dma_asked;
+    kern_return_t kr_full = -1, kr_mine = -1, kr_child = -1, kr_alloc;
+
+    if (len == 0 ||
+        task_create(me, (ledger_port_array_t)0, 0, FALSE, &child)
+            != KERN_SUCCESS ||
+        urmach_task_rights_port(me, URMACH_TASK_RIGHTS_IDENTITY, &my_id)
+            != KERN_SUCCESS ||
+        urmach_task_rights_port(child, URMACH_TASK_RIGHTS_IDENTITY,
+                                &child_id) != KERN_SUCCESS) {
+        printf("cap_test: [47] WRONG — no child, or no identity port for "
+               "this task or the child (#938)\n");
+        if (MACH_PORT_VALID(my_id))
+            (void)mach_port_deallocate(me, my_id);
+        if (MACH_PORT_VALID(child)) {
+            (void)task_terminate(child);
+            (void)mach_port_deallocate(me, child);
+        }
+        return 0;
+    }
+
+    if (the_task_receiving_on(host_priv, urmach_cap_server_port, &cs_task)
+            == KERN_SUCCESS) {
+        full_held = rights_to(cs_task, me, MACH_PORT_TYPE_SEND);
+        id_held   = rights_to(cs_task, my_id, MACH_PORT_TYPE_SEND);
+    }
+
+    kr_full = mig_cap_derive_task(mach_cap_port, child, (const char *)blob,
+                                  len, &got);
+    if (kr_full == KERN_SUCCESS && MACH_PORT_VALID(got))
+        (void)mach_port_deallocate(me, got);
+
+    kr_alloc = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1, me,
+                                   &kva, &uva, &pa_list, &pa_cnt, &region);
+    dma_asked = kr_alloc == KERN_SUCCESS && pa_cnt == 1;
+    if (dma_asked) {
+        kr_mine  = urmach_dma_region_owner(region, my_id);
+        kr_child = urmach_dma_region_owner(region, child_id);
+    }
+    if (kr_alloc == KERN_SUCCESS)
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    if (pa_list != NULL)
+        (void)vm_deallocate(me, (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+
+    ok = full_held == 0 && id_held == 1 &&
+         kr_full == CAP_ERR_TASK_NOT_IDENTITY &&
+         (!dma_asked || (kr_mine == KERN_SUCCESS && kr_child == KERN_NO_ACCESS));
+    /* One line per check, each within the console's 256 bytes (#802). */
+    if (ok) {
+        printf("cap_test: [47] cap_server held this task's identity port and "
+               "not its task port, and refused a child's task port with "
+               "CAP_ERR_TASK_NOT_IDENTITY (#938)\n");
+        if (dma_asked)
+            printf("cap_test: [47] a DMA region this task allocated was its "
+                   "own by its identity port, and not the child's by the "
+                   "child's (%d) (#938)\n", (int)kr_child);
+        else
+            printf("cap_test: [47] the owner check NOT ASKED: no "
+                   "scatter-gather page (kr=%d) (#938)\n", (int)kr_alloc);
+    }
+    if (full_held != 0)
+        printf("cap_test: [47] WRONG — cap_server held this task's task "
+               "port: %d name(s) (#938)\n", full_held);
+    if (id_held != 1)
+        printf("cap_test: [47] WRONG — cap_server held this task's identity "
+               "port under %d name(s), not 1 (#938)\n", id_held);
+    if (kr_full != CAP_ERR_TASK_NOT_IDENTITY)
+        printf("cap_test: [47] WRONG — a derivation handed a child's task "
+               "port answered %d, not CAP_ERR_TASK_NOT_IDENTITY (#938)\n",
+               (int)kr_full);
+    if (dma_asked && kr_mine != KERN_SUCCESS)
+        printf("cap_test: [47] WRONG — this task's own DMA region was not its "
+               "own by its identity port: %d (#938)\n", (int)kr_mine);
+    if (dma_asked && kr_child != KERN_NO_ACCESS)
+        printf("cap_test: [47] WRONG — this task's DMA region answered %d for "
+               "the child's identity port, not KERN_NO_ACCESS (#938)\n",
+               (int)kr_child);
+
+    (void)mach_port_deallocate(me, child_id);
+    (void)mach_port_deallocate(me, my_id);
+    (void)task_terminate(child);
+    (void)mach_port_deallocate(me, child);
+    if (MACH_PORT_VALID(cs_task))
+        (void)mach_port_deallocate(me, cs_task);
     return ok;
 }
 
@@ -5588,6 +5715,8 @@ main(int argc, char **argv)
         pass = 0;		/* #926 */
     if (!proc_server_holds_only_a_reduced_port(host_port))
         pass = 0;		/* #927 */
+    if (!cap_server_keeps_identities(host_port, device_port))
+        pass = 0;		/* #938 */
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");

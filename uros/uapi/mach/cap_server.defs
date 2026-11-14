@@ -156,10 +156,15 @@ routine cap_subscribe_revoke(
  *	matching receive port, so the port name doubles as the
  *	principal in the policy check.
  *
- *	task_port is informational for now (audit / future
- *	cross-reference); the actual identity binding is via the
- *	returned cap_port.  manifest is the .cmf binary, validated
- *	against <mach/cap_manifest.h> before installation.
+ *	task_port is the task's IDENTITY port (#938), the reduced port
+ *	with no right (<mach/task_rights.h>), which libcap makes from the
+ *	task port its caller holds.  cap_server keeps it with the slot,
+ *	to ask the kernel which task a DMA region belongs to (#432), and
+ *	refuses a port that carries more with CAP_ERR_TASK_NOT_IDENTITY:
+ *	it kept the full task port, the task's memory and port rights.
+ *	The identity binding of requests is via the returned cap_port.
+ *	manifest is the .cmf binary, validated against
+ *	<mach/cap_manifest.h> before installation.
  *
  *	Who may ask (#743): only a request on cap_server's provisioning
  *	port is answered, and bootstrap holds that port's one send right
@@ -191,7 +196,8 @@ routine cap_provision_task(
  *
  *	This is how exec_server gives a program its policy: from the
  *	task that exec'd it, and not from the program's own file, which
- *	whoever wrote the binary wrote.
+ *	whoever wrote the binary wrote.  The child is named by its
+ *	identity port, as for cap_provision_task (#938).
  *
  *	Asked on the port every task inherits, on the provisioning port,
  *	or on any port that is no task's, the answer is

@@ -32,6 +32,8 @@
 #include <mach_init.h>
 #include <mach/cap_types.h>
 #include <mach/mach_traps.h>	/* the cap traps, declared once (#426) */
+#include <mach/mach_host.h>	/* urmach_task_rights_port (#938) */
+#include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
 
 #include "libcap.h"
 
@@ -259,6 +261,22 @@ extern kern_return_t mig_cap_provision_task(mach_port_t cap_server,
                                             mach_msg_type_number_t manifestCnt,
                                             mach_port_t *task_cap_port);
 
+/*
+ * #938: cap_server is handed a task's IDENTITY port, never the task port.  It
+ * keeps the port for as long as the task's per-task port lives, and needs it
+ * only to tell which task a DMA region belongs to; a task port is the task's
+ * memory and port rights as well, and cap_server refuses one.  The identity
+ * port is made here from the task port the caller holds, and given back once
+ * cap_server has its own copy.
+ */
+static kern_return_t
+identity_port(mach_port_t task_port, mach_port_t *out)
+{
+    *out = MACH_PORT_NULL;
+    return urmach_task_rights_port(task_port, URMACH_TASK_RIGHTS_IDENTITY,
+                                   out);
+}
+
 kern_return_t
 cap_provision(mach_port_t provisioner,
               mach_port_t task_port,
@@ -266,15 +284,23 @@ cap_provision(mach_port_t provisioner,
               unsigned int manifest_len,
               mach_port_t *out_task_cap_port)
 {
+    mach_port_t   id;
+    kern_return_t kr;
+
     if (!MACH_PORT_VALID(provisioner)) return CAP_ERR_NOT_PROVISIONER;
     if (!manifest_blob || manifest_len == 0 || !out_task_cap_port)
         return CAP_ERR_INVALID_TOKEN;
 
     *out_task_cap_port = MACH_PORT_NULL;
-    return mig_cap_provision_task(provisioner, task_port,
-                                  (char *)manifest_blob,
-                                  (mach_msg_type_number_t)manifest_len,
-                                  out_task_cap_port);
+    kr = identity_port(task_port, &id);
+    if (kr != KERN_SUCCESS)
+        return kr;
+    kr = mig_cap_provision_task(provisioner, id,
+                                (char *)manifest_blob,
+                                (mach_msg_type_number_t)manifest_len,
+                                out_task_cap_port);
+    (void)mach_port_deallocate(mach_task_self(), id);
+    return kr;
 }
 
 /* #743: the second signature kept by hand, for the reason given above. */
@@ -291,13 +317,21 @@ cap_derive_child(mach_port_t parent_cap_port,
                  unsigned int manifest_len,
                  mach_port_t *out_task_cap_port)
 {
+    mach_port_t   id;
+    kern_return_t kr;
+
     if (!MACH_PORT_VALID(parent_cap_port)) return CAP_ERR_NOT_DELEGABLE;
     if (!manifest_blob || manifest_len == 0 || !out_task_cap_port)
         return CAP_ERR_INVALID_TOKEN;
 
     *out_task_cap_port = MACH_PORT_NULL;
-    return mig_cap_derive_task(parent_cap_port, task_port,
-                               (const char *)manifest_blob,
-                               (mach_msg_type_number_t)manifest_len,
-                               out_task_cap_port);
+    kr = identity_port(task_port, &id);		/* #938 */
+    if (kr != KERN_SUCCESS)
+        return kr;
+    kr = mig_cap_derive_task(parent_cap_port, id,
+                             (const char *)manifest_blob,
+                             (mach_msg_type_number_t)manifest_len,
+                             out_task_cap_port);
+    (void)mach_port_deallocate(mach_task_self(), id);
+    return kr;
 }

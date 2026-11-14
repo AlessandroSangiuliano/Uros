@@ -834,8 +834,12 @@ port_name_to_task_right_slow(
  * looked a reduced port up twice, the fast lookup that refused it and then
  * the slow path, and on omen task_info() by a reduced port cost 0.80 us
  * against 0.68 by the task port.  A task reference, or TASK_NULL.
+ *
+ * With URMACH_TASK_RIGHTS_IDENTITY any port on the task answers, the identity
+ * port included: urmach_dma_region_owner() asks which task, and no more
+ * (#938).  Declared in kern/ipc_mig.h.
  */
-static task_t
+task_t
 port_name_to_task_right(
 	mach_port_t	name,
 	natural_t	need)

@@ -50,7 +50,8 @@ int cap_manifest_validate(const void *blob, uint32_t blob_len,
  * carries it as "informational for now (audit / future cross-reference)".
  * #432 is that cross-reference -- issuing a capability for a DMA buffer means
  * asking the KERNEL whether the requesting task owns it, and the requester is
- * known here only as a port.
+ * known here only as a port.  Since #938 it is the task's identity port, and
+ * cap_server refuses any other: which task, and nothing of the task.
  *
  * `parent_cap_port' says what the slot is (#937).  MACH_PORT_NULL is a task
  * bootstrap provisions, which starts a family of its own.  A parent's per-task
