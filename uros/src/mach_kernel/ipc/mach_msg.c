@@ -1253,6 +1253,20 @@ urmach_msg_lockfree_resolve_in_section(
 
 	urmach_rcu_barrier();
 
+	/*
+	 * #940: a dead space names nothing.  ipc_space_destroy() clears
+	 * is_active and then ipc_right_clean() drops each entry's reference
+	 * with the entry still naming its port, so a port read from a dead
+	 * space's table may have gone back to its zone.  Asked inside the
+	 * section, before any port is touched: a grace period can end while
+	 * this section runs only if this processor reported quiescent for it
+	 * before the section began, so it began before the section -- and
+	 * after the release it waits on, which came after is_active was
+	 * cleared.  A section that can outlive it reads is_active cleared.
+	 */
+	if (!space->is_active)
+		return FALSE;
+
 	re = ipc_entry_lookup_lockfree(space, reply_name);
 	if (re == IE_NULL || !(re->ie_bits & MACH_PORT_TYPE_RECEIVE))
 		return FALSE;
