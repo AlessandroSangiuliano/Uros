@@ -632,6 +632,8 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
   # #917: mach_error() in a program of musl, static and dynamic.
   add_subdirectory(tests/mach_error_test)
   add_subdirectory(tests/musl_test)
+  # #945: what a forked child holds of its parent's per-task port.
+  add_subdirectory(tests/fork_cap_test)
   add_subdirectory(cmds/ush)
 endif()
 
