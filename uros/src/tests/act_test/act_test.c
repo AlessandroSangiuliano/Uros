@@ -3019,7 +3019,9 @@ arm_fourteen_terminate_inside_traps(void)
  * first, on through the terminate, so that a request is in mach_msg's hot
  * path while another thread's refusal turns the child's name dead.  Every
  * helper is joined with a bound: a request queued where nothing answers is
- * said as WRONG rather than stopping the boot.
+ * said as WRONG rather than stopping the boot.  Every other round destroys
+ * the child's name right after the terminate instead, so that a send right
+ * whose port has died leaves the space by mach_port_destroy() too.
  */
 #define	ARM54_ROUNDS	20
 #define	ARM54_RUN_MS	5
@@ -3178,9 +3180,10 @@ arm_fifty_four_create_on_a_dying_task(void)
 	for (round = 0; round < ARM54_ROUNDS; round++) {
 		pthread_t		creator, poller;
 		pthread_t		messenger[ARM54_MESSENGERS];
-		mach_port_type_t	type;
-		kern_return_t		kr;
+		mach_port_type_t	type = 0;
+		kern_return_t		kr, tkr;
 		int			back, i;
+		int			destroy = (round & 1) != 0;
 
 		arm54_child = MACH_PORT_NULL;
 		arm54_stop = 0;
@@ -3212,6 +3215,17 @@ arm_fifty_four_create_on_a_dying_task(void)
 		 * so one is as likely as not to be inside thread_create_in().
 		 */
 		kr = task_terminate(arm54_child);
+
+		/*
+		 * #940: and every other round destroys the child's name right
+		 * after, while the messengers send to it.  A send right whose
+		 * port has died goes through ipc_right_destroy()'s own dead
+		 * branch then, where in the other rounds the first refusal
+		 * turns it into a dead name in ipc_right_check(): both drop the
+		 * port's last reference, and both must clear the entry first.
+		 */
+		if (kr == KERN_SUCCESS && destroy)
+			kr = mach_port_destroy(me, arm54_child);
 		arm54_stop = 1;
 		back = arm54_join(creator, round, "creator", "thread_create()",
 				  &arm54_creator_reply);
@@ -3224,6 +3238,25 @@ arm_fifty_four_create_on_a_dying_task(void)
 		if (!back) {
 			(void) mach_port_deallocate(me, arm54_child);
 			return 0;
+		}
+
+		if (destroy) {
+			tkr = KERN_INVALID_NAME;
+			if (kr == KERN_SUCCESS)
+				tkr = mach_port_type(me, arm54_child, &type);
+			if (kr != KERN_SUCCESS) {
+				printf("act_test: [54] round %d: terminating the "
+				       "child, or destroying its name after, "
+				       "answered %d — WRONG\n", round, kr);
+				return 0;
+			}
+			if (tkr != KERN_INVALID_NAME) {
+				printf("act_test: [54] round %d: the terminated "
+				       "child's name, destroyed, still answers %d "
+				       "(type 0x%x) — WRONG\n", round, tkr, type);
+				return 0;
+			}
+			continue;
 		}
 
 		if (kr == KERN_SUCCESS)
@@ -3246,7 +3279,8 @@ arm_fifty_four_create_on_a_dying_task(void)
 	printf("act_test: [54] %d tasks terminated while a thread made and "
 	       "unmade threads in each (%u made, %u met the task gone after "
 	       "the thread was attached) and another read its thread times "
-	       "(%u read), and the kernel came through (#935)\n",
+	       "(%u read), every other child's name destroyed right after, "
+	       "and the kernel came through (#935, #940)\n",
 	       ARM54_ROUNDS, arm54_made, arm54_late, arm54_asked);
 	return 1;
 }
