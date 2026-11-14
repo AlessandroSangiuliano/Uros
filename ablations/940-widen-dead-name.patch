@@ -1,7 +1,7 @@
 Kind: widen
 Issue: #940
 Over: 940-probe-given-back.patch
-Holds open: the release of a dead port's last reference, in ipc_right_check() and in ipc_right_destroy()'s dead branch, until the port's memory is back in its zone, then 200 us more with w940_open said; then the zone hands the port out again, for 940-probe-given-back to ask whether its lock was taken meanwhile.  Before the release it waits up to 500 us for the requests still in flight to give their references back, the port unlocked meanwhile in ipc_right_destroy(), so that this release is the port's last; in ipc_right_check() it also allocates a port and gives it back, so that one lies ahead of this port on the zone's list; and the port zone runs without its per-CPU magazines (#330), so that a port given back goes on that list, where the zone's 64-bit free pointer makes it read as active on x86-64, and is the next one handed out.  task_info()'s message, 2098, which act_test [54]'s messengers send with no trap first, and thread_create()'s, 2061, which its creator sends once the trap refuses, wait in mach_msg's hot path for a window to be held, then until it opens, before they resolve their names, holding no reference: up to 100 us, and up to 5 ms when the destination has died, so that no request turns the dead name in before an odd round's destroy holds its window.  940-destroy-released-before-cleared was caught 3 times in 4 on victus with 100 us for every request, the creator's 2061 then sent at once, and 3 times in 4 again on the union with 2061 held back too, the boot it missed under TCG at 2.1 GHz on battery: the round's destroy came later than the requests' wait.  With the fix the entry is cleared before the release, and a resolve in the window finds a dead name or no name; the fixed tree must pass
+Holds open: the release of a dead port's last reference, in ipc_right_check() and in ipc_right_destroy()'s dead branch, until the port's memory is back in its zone, then 200 us more with w940_open said; then the zone hands the port out again, for 940-probe-given-back to ask whether its lock was taken meanwhile.  Before the release it waits up to 500 us for the requests still in flight to give their references back, the port unlocked meanwhile in ipc_right_destroy(), so that this release is the port's last; in ipc_right_check() it also allocates a port and gives it back, so that one lies ahead of this port on the zone's list; and the port zone runs without its per-CPU magazines (#330), so that a port given back goes on that list, where the zone's 64-bit free pointer makes it read as active on x86-64, and is the next one handed out.  task_info()'s message, 2098, which act_test [54]'s messengers send with no trap first, and thread_create()'s, 2061, which its creator sends once the trap refuses, wait in mach_msg's hot path for a window to be held, then until it opens, before they resolve their names, holding no reference: up to 100 us, and then, if the destination has died by then, up to 5 ms more, so that no request turns the dead name in before an odd round's destroy holds its window.  940-destroy-released-before-cleared was caught 3 times in 4 on victus with 100 us for every request and the creator's 2061 sent at once; 3 times in 4 on the union with 2061 held back too; and 3 times in 4 again with 5 ms for a destination already dead before the wait, the boot it missed each time under TCG at 2.1 GHz on battery: a messenger's request is as likely as not in its 100 us when the child dies, and it then saw the port alive and converted the name.  With the fix the entry is cleared before the release, and a resolve in the window finds a dead name or no name; the fixed tree must pass
 Run: --entry 14 600 -smp 4
 diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
 index 64086bd8..3874b96d 100644
@@ -122,10 +122,37 @@ index 64086bd8..3874b96d 100644
  
  			break;
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index 581bd595..7a130c5e 100644
+index 581bd595..fc417cb6 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -1608,6 +1608,40 @@ urmach_msg_overwrite_trap_call(
+@@ -1213,6 +1213,26 @@ urmach_msg_rights_hold(
+  *		it cleared the entry, and preempted in between, its processor
+  *		counted as quiescent while the entry still named the port.
+  */
++
++/* 940-widen-dead-name: whether `name' is a send right to a port that has
++ * died, read under the space's read lock */
++static boolean_t
++w940_dest_died(
++	ipc_space_t	space,
++	mach_port_t	name)
++{
++	ipc_entry_t	e;
++	boolean_t	died = FALSE;
++
++	is_read_lock(space);
++	e = space->is_active ? ipc_entry_lookup(space, name) : IE_NULL;
++	if (e != IE_NULL && (e->ie_bits & MACH_PORT_TYPE_SEND) &&
++	    !ip_active((ipc_port_t) e->ie_object))
++		died = TRUE;
++	is_read_unlock(space);
++	return died;
++}
++
+ static boolean_t	urmach_msg_lockfree_resolve_in_section(
+ 				ipc_space_t, mach_port_t, mach_port_t,
+ 				ipc_port_t *, ipc_port_t *);
+@@ -1608,6 +1628,36 @@ urmach_msg_overwrite_trap_call(
  			index = MACH_PORT_INDEX(reply_name);
  			gen = MACH_PORT_GEN(reply_name);
  
@@ -133,31 +160,27 @@ index 581bd595..7a130c5e 100644
 +			    hdr->msgh_id == 2061) {
 +				extern void delay(int);
 +				extern volatile int w940_open, w940_armed;
-+				ipc_entry_t w940_e;
-+				int w, w940_wait = 100;
++				int w;
 +
 +				/* task_info()'s message, and thread_create()'s,
 +				 * which act_test [54]'s creator sends once its
 +				 * trap refuses, wait for a window: up to 100 us
 +				 * for one to be held, then until it opens,
 +				 * holding no reference.  To a destination that
-+				 * has died, up to 5 ms: no request then turns
-+				 * the dead name in before the odd rounds'
-+				 * destroy holds its window, on a slow machine
-+				 * too, and in the even rounds the first to give
-+				 * up converts while the others still wait */
-+				is_read_lock(space);
-+				w940_e = space->is_active ?
-+				    ipc_entry_lookup(space,
-+						     hdr->msgh_remote_port) :
-+				    IE_NULL;
-+				if (w940_e != IE_NULL &&
-+				    (w940_e->ie_bits & MACH_PORT_TYPE_SEND) &&
-+				    !ip_active((ipc_port_t) w940_e->ie_object))
-+					w940_wait = 5000;
-+				is_read_unlock(space);
-+				for (w = 0; w < w940_wait && !w940_armed; w++)
++				 * has died, up to 5 ms more, asked again after
++				 * the 100 us too, since a messenger's request is
++				 * as likely as not waiting when the child dies:
++				 * no request then turns the dead name in before
++				 * the odd rounds' destroy holds its window, on
++				 * a slow machine too, and in the even rounds the
++				 * first to give up converts while the others
++				 * still wait */
++				for (w = 0; w < 100 && !w940_armed; w++)
 +					delay(1);
++				if (!w940_armed &&
++				    w940_dest_died(space, hdr->msgh_remote_port))
++					for (w = 0; w < 5000 && !w940_armed; w++)
++						delay(1);
 +				for (w = 0; w < 300000 && w940_armed &&
 +					    !w940_open; w++)
 +					delay(1);
