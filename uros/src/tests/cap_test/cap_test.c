@@ -447,6 +447,11 @@ slots_now(mach_port_t port, struct slots *s)
  * port it got back.  Asked on the port every task inherits and on this task's
  * own per-task port, it must be refused both times with
  * CAP_ERR_NOT_PROVISIONER.  A port that came anyway is given back.
+ *
+ * It asks through libcap, which hands cap_server this task's identity port
+ * (#938).  With the task port, cap_server would refuse it before the rule
+ * this arm is about -- CAP_ERR_TASK_NOT_IDENTITY -- and a task can make its
+ * own identity port: the rule would be taken out with nothing to say so.
  */
 static int
 only_bootstrap_provisions(void)
@@ -469,14 +474,12 @@ only_bootstrap_provisions(void)
         return 0;
     }
 
-    on_shared = mig_cap_provision_task(urmach_cap_server_port,
-                                       mach_task_self(), (const char *)blob,
-                                       len, &got);
+    on_shared = cap_provision(urmach_cap_server_port, mach_task_self(),
+                              blob, len, &got);
     if (on_shared == KERN_SUCCESS && MACH_PORT_VALID(got))
         (void)mach_port_deallocate(mach_task_self(), got);
     got = MACH_PORT_NULL;
-    on_own = mig_cap_provision_task(mach_cap_port, mach_task_self(),
-                                    (const char *)blob, len, &got);
+    on_own = cap_provision(mach_cap_port, mach_task_self(), blob, len, &got);
     if (on_own == KERN_SUCCESS && MACH_PORT_VALID(got))
         (void)mach_port_deallocate(mach_task_self(), got);
 
