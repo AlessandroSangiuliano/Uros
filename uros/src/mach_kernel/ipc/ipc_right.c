@@ -439,8 +439,6 @@ ipc_right_check(
 		assert(IE_BITS_UREFS(bits) == 1);
 	}
 
-	ipc_port_release(port);
-
 	/* convert entry to dead name */
 
 	bits = (bits &~ IE_BITS_TYPE_MASK) | MACH_PORT_TYPE_DEAD_NAME;
@@ -454,6 +452,20 @@ ipc_right_check(
 
 	entry->ie_bits = bits;
 	entry->ie_object = IO_NULL;
+
+	/*
+	 * #940: the entry's reference goes last, once the entry no longer
+	 * names the port.  It may be the port's last, and then io_free()
+	 * hands the port to urmach_call_rcu(), which counts its grace period
+	 * from the call and so wants the port found by no new reader --
+	 * and mach_msg's resolve reads this entry with nothing locked.  It
+	 * went first, once: this thread holds only the space's lock, which
+	 * sleeps, so a return from an interrupt can preempt it in between,
+	 * and its processor then counts as quiescent.  The grace period
+	 * ended, the port went back to its zone, and the entry still named
+	 * it as a send right.
+	 */
+	ipc_port_release(port);
 	return TRUE;
 }
 
@@ -637,12 +649,17 @@ ipc_right_destroy(
 
 		if (!ip_active(port)) {
 			assert((type & MACH_PORT_TYPE_RECEIVE) == 0);
-			ip_release(port);
-			ip_check_unlock(port);
 
+			/*
+			 * #940: the entry goes before its reference, which
+			 * may be the port's last, as in ipc_right_check().
+			 */
 			entry->ie_request = 0;
 			entry->ie_object = IO_NULL;
 			ipc_entry_dealloc(space, name, entry);
+
+			ip_release(port);
+			ip_check_unlock(port);
 			is_write_unlock(space);
 
 			break;

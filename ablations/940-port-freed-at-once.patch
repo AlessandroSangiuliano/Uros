@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #940
+Over: 940-widen-resolve-before-clear.patch
+Takes out: 73914c1c -- a port's memory goes back to its zone at once again, with no grace period, so over 940-widen-resolve-before-clear the resolve that read the entry before ipc_right_check() turned it into a dead name locks a port whose memory is already in the zone, and 940-probe-given-back stops the kernel when the zone hands the port out
+Run: --entry 14 600 -smp 4
+Expect: 940-probe-given-back: a port's lock was taken after its memory went back to its zone
+diff --git a/uros/src/mach_kernel/ipc/ipc_object.c b/uros/src/mach_kernel/ipc/ipc_object.c
+index 160004d8..8b2a6bff 100644
+--- a/uros/src/mach_kernel/ipc/ipc_object.c
++++ b/uros/src/mach_kernel/ipc/ipc_object.c
+@@ -1030,7 +1030,7 @@ io_free(
+ #if	MACH_ASSERT && IPC_PORT_TRACK
+ 		ipc_port_track_dealloc(port);
+ #endif	/* MACH_ASSERT && IPC_PORT_TRACK */
+-		urmach_call_rcu(&port->ip_rcu, ipc_port_free_after_grace);
++		ipc_port_free_after_grace(&port->ip_rcu);
+ 		return;
+ 	}
+ 	zfree(ipc_object_zones[otype], (vm_offset_t) object);

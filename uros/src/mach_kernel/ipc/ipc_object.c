@@ -950,28 +950,60 @@ ipc_object_rename(
 	return kr;
 }
 
-#if	MACH_ASSERT
 /*
- *	Check whether the object is a port; if so, and if it
- *	has a dipc_port extension, then deallocate the dipc_port
- *	before deallocating the port.
+ * #940: a port's memory, back to its zone once no read section can still
+ * hold the port.
+ */
+static void
+ipc_port_free_after_grace(
+	struct urmach_rcu_head	*h)
+{
+	ipc_port_t	port = (ipc_port_t) ((char *) h -
+				__builtin_offsetof(struct ipc_port, ip_rcu));
+
+	zfree(ipc_object_zones[IOT_PORT], (vm_offset_t) port);
+}
+
+/*
+ *	Routine:	io_free
+ *	Purpose:
+ *		Give an object's memory back, its last reference gone.
+ *
+ *		#940: a port's after an RCU grace period.  mach_msg's resolve
+ *		reads a port from an entry with nothing locked, inside a read
+ *		section, then locks it and asks the entry again.  A port dies
+ *		before its last reference goes, since a live port's receive
+ *		right holds one, so the memory it finds is a dead port and the
+ *		resolve gives up -- as long as the memory is not handed out
+ *		again meanwhile, which is what the grace period keeps from
+ *		happening.  Freed at once, it was: the zone wrote its free
+ *		pointer over io_bits, which made the port read as active, and a
+ *		request was queued on freed memory (act_test [54]).
+ *
+ *		The grace period counts from here, so here the port must be
+ *		named by no entry a resolve can still read.  An entry's
+ *		reference is the port's last only on a dead port, a live one's
+ *		receive right holding another, and ipc_right_check() and
+ *		ipc_right_destroy(), which drop it, clear the entry first; a
+ *		dead space's entries, which ipc_right_clean() leaves naming
+ *		their ports, are not read.
  */
 void
 io_free(
 	unsigned int	otype,
 	ipc_object_t	object)
 {
-	ipc_port_t	port;
-
 	if (otype == IOT_PORT) {
-		port = (ipc_port_t) object;
+		ipc_port_t	port = (ipc_port_t) object;
+
 #if	MACH_ASSERT && IPC_PORT_TRACK
 		ipc_port_track_dealloc(port);
-#endif	/* MACH_ASSERT */
+#endif	/* MACH_ASSERT && IPC_PORT_TRACK */
+		urmach_call_rcu(&port->ip_rcu, ipc_port_free_after_grace);
+		return;
 	}
 	zfree(ipc_object_zones[otype], (vm_offset_t) object);
 }
-#endif	/* MACH_ASSERT */
 
 #if	MACH_RT
 /*

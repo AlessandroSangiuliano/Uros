@@ -1,0 +1,161 @@
+Kind: widen
+Issue: #940
+Over: 940-probe-given-back.patch
+Holds open: a resolve of task_info()'s message, 2098, between its reading of the entry and its locking of the port, while ipc_right_check() turns the entry into a dead name and drops the dead port's last reference: the conversion, once the requests still in flight have given their references back (up to 500 us), waits up to 2 ms for a resolve to have read the entry, and the resolve, in its read section, waits up to 1 ms for the reference to go; then the resolve goes on, and the conversion has the zone hand out up to 8 ports, stopping at this one, for 940-probe-given-back to ask whether its lock was taken while its memory was in the zone.  Each 2098 waits in mach_msg's hot path up to 100 us for a conversion to want a reader, and the first to come is it.  The port zone runs without its per-CPU magazines (#330), so that a port given back is the next one handed out.  With the fix the resolve's section keeps the port's memory from going back until the section ends: it finds the dead port, gives up, and the zone does not have the port yet; the fixed tree must pass
+Run: --entry 14 600 -smp 4
+diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
+index 64086bd8..84e334f5 100644
+--- a/uros/src/mach_kernel/ipc/ipc_right.c
++++ b/uros/src/mach_kernel/ipc/ipc_right.c
+@@ -408,6 +408,19 @@ ipc_right_inuse(
+  *
+  */
+ 
++/*
++ * 940-widen-resolve-before-clear: a resolve of task_info()'s message reads
++ * the entry before it is turned into a dead name and waits, in its read
++ * section, for the port's last reference to go; then it locks the port,
++ * and the zone hands the port out again, for 940-probe-given-back to ask
++ * whether its lock was taken while its memory was in the zone.
++ */
++volatile int		w940b_armed;	/* a conversion wants a reader */
++thread_t volatile	w940b_reader;	/* the resolve that came */
++volatile int		w940b_looked;	/* it has read the entry */
++volatile int		w940b_released;	/* the reference has gone */
++volatile int		w940b_done;	/* the resolve is over */
++
+ boolean_t
+ ipc_right_check(
+ 	ipc_space_t	space,
+@@ -439,6 +452,24 @@ ipc_right_check(
+ 		assert(IE_BITS_UREFS(bits) == 1);
+ 	}
+ 
++	{	/* 940-widen-resolve-before-clear: a resolve reads the entry */
++		extern void	delay(int);
++		int		i;
++
++		w940b_armed = 0;
++		for (i = 0; i < 500 && port->ip_references > 1; i++)
++			delay(1);
++		if (port->ip_references == 1) {
++			w940b_looked = w940b_released = w940b_done = 0;
++			w940b_reader = THREAD_NULL;
++			w940b_armed = 1;
++			for (i = 0; i < 2000 && !w940b_looked; i++)
++				delay(1);
++			if (!w940b_looked)
++				w940b_armed = 0;
++		}
++	}
++
+ 	/* convert entry to dead name */
+ 
+ 	bits = (bits &~ IE_BITS_TYPE_MASK) | MACH_PORT_TYPE_DEAD_NAME;
+@@ -466,6 +497,28 @@ ipc_right_check(
+ 	 * it as a send right.
+ 	 */
+ 	ipc_port_release(port);
++	{	/* 940-widen-resolve-before-clear: the resolve goes on, and the
++		 * zone hands the port out again if it has it */
++		extern void	delay(int);
++		ipc_port_t	w[8];
++		int		i, n;
++
++		if (w940b_armed) {
++			w940b_released = 1;
++			for (i = 0; i < 2000 && !w940b_done; i++)
++				delay(1);
++			w940b_armed = 0;
++			for (n = 0; n < 8; ) {
++				w[n] = ipc_port_alloc_special(ipc_space_kernel);
++				if (w[n++] == port)
++					break;
++			}
++			for (i = 0; i < n; i++)
++				if (w[i] != IP_NULL)
++					ipc_port_dealloc_special(w[i],
++								 ipc_space_kernel);
++		}
++	}
+ 	return TRUE;
+ }
+ 
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 42e788d9..38021efb 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1232,6 +1232,13 @@ urmach_msg_lockfree_resolve(
+ 							  reply_portp,
+ 							  dest_portp);
+ 	urmach_rcu_read_unlock();
++	{	/* 940-widen-resolve-before-clear: this resolve is over */
++		extern thread_t volatile	w940b_reader;
++		extern volatile int		w940b_done;
++
++		if (w940b_reader == current_thread())
++			w940b_done = 1;
++	}
+ 	return resolved;
+ }
+ 
+@@ -1285,6 +1292,20 @@ urmach_msg_lockfree_resolve_in_section(
+ 	if (rp == IP_NULL || dp == IP_NULL)
+ 		return FALSE;
+ 
++	{	/* 940-widen-resolve-before-clear: the entry read, the section
++		 * waits for the release before it touches the port */
++		extern void			delay(int);
++		extern thread_t volatile	w940b_reader;
++		extern volatile int		w940b_looked, w940b_released;
++		int				w;
++
++		if (w940b_reader == current_thread()) {
++			w940b_looked = 1;
++			for (w = 0; w < 1000 && !w940b_released; w++)
++				delay(1);
++		}
++	}
++
+ 	for (tries = 1; !ip_lock_try(dp); tries++)
+ 		if (tries == URMACH_RESOLVE_LOCK_TRIES)
+ 			return FALSE;
+@@ -1607,6 +1628,23 @@ urmach_msg_overwrite_trap_call(
+ 			index = MACH_PORT_INDEX(reply_name);
+ 			gen = MACH_PORT_GEN(reply_name);
+ 
++			if (hdr->msgh_id == 2098) {	/* 940-widen-resolve-before-clear */
++				extern void			delay(int);
++				extern thread_t volatile	w940b_reader;
++				extern volatile int		w940b_armed;
++				int				w;
++
++				/* task_info()'s message waits up to 100 us
++				 * for a conversion to want a reader, and the
++				 * first to come is it */
++				for (w = 0; w < 100 && !w940b_armed; w++)
++					delay(1);
++				if (w940b_armed)
++					(void) __sync_bool_compare_and_swap(
++						&w940b_reader, THREAD_NULL,
++						current_thread());
++			}
++
+ 			/*
+ 			 * #331 step 2 part 3b: try resolving both names WITHOUT
+ 			 * the space lock.  On success both ports are locked and
+diff --git a/uros/src/mach_kernel/kern/zalloc.c b/uros/src/mach_kernel/kern/zalloc.c
+index c44ac078..01588070 100644
+--- a/uros/src/mach_kernel/kern/zalloc.c
++++ b/uros/src/mach_kernel/kern/zalloc.c
+@@ -710,8 +710,8 @@ zone_enable_hot_magazines(void)
+ 
+ 	if (vm_map_entry_zone != ZONE_NULL)
+ 		zone_enable_magazines(vm_map_entry_zone);
+-	if (ipc_object_zones[0] != ZONE_NULL)		/* IOT_PORT */
+-		zone_enable_magazines(ipc_object_zones[0]);
++	/* 940-widen-resolve-before-clear: the port zone without magazines,
++	 * so that a port given back is the next the zone hands out */
+ 	if (ipc_object_zones[1] != ZONE_NULL)		/* IOT_PORT_SET */
+ 		zone_enable_magazines(ipc_object_zones[1]);
+ 	if (ipc_space_zone != ZONE_NULL)

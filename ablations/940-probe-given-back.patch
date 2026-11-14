@@ -1,0 +1,77 @@
+Kind: widen
+Issue: #940
+Holds open: no window: a probe for the widens and ablations of #940.  A port's memory, as ipc_port_free_after_grace() gives it back to its zone, carries 0xf4eef4eef4eef4ee in its lock's own_pc, which a lock taken overwrites, and in ip_rcu.func, which says it went back through there; io_alloc() asks every port the zone hands out, before it is cleared, whether its lock was taken meanwhile, and stops the kernel naming where from.  w940_watch and w940_watch_back tell a widen that its port's memory is back in the zone.  The fixed tree must pass with it: nothing may lock a port whose memory is in the zone
+Run: --entry 14 600 -smp 4
+diff --git a/uros/src/mach_kernel/ipc/ipc_object.c b/uros/src/mach_kernel/ipc/ipc_object.c
+index da301256..160004d8 100644
+--- a/uros/src/mach_kernel/ipc/ipc_object.c
++++ b/uros/src/mach_kernel/ipc/ipc_object.c
+@@ -954,6 +954,34 @@ ipc_object_rename(
+  * #940: a port's memory, back to its zone once no read section can still
+  * hold the port.
+  */
++/* 940-probe-given-back: what the memory of a port given back carries, in
++ * its lock's own_pc, which a lock taken overwrites, and in ip_rcu.func,
++ * which says it went back through here */
++#define	W940_GIVEN_BACK	((vm_offset_t) 0xf4eef4eef4eef4eeUL)
++
++volatile ipc_port_t	w940_watch;	/* a widen's port */
++volatile int		w940_watch_back; /* and whether it went back */
++
++vm_offset_t
++w940_probe_handed_out(
++	unsigned int	otype,
++	vm_offset_t	elem)
++{
++	ipc_port_t	port = (ipc_port_t) elem;
++	mutex_t		*m;
++
++	if (otype != IOT_PORT || port == IP_NULL)
++		return elem;
++	m = &((rpc_common_t) port)->rcd_io_lock_data;
++	if ((vm_offset_t) port->ip_rcu.func == W940_GIVEN_BACK &&
++	    m->own_pc != W940_GIVEN_BACK)
++		panic("940-probe-given-back: a port's lock was taken after its "
++		      "memory went back to its zone: port %p, taken from %p",
++		      (void *) port, (void *) m->own_pc);
++	port->ip_rcu.func = 0;
++	return elem;
++}
++
+ static void
+ ipc_port_free_after_grace(
+ 	struct urmach_rcu_head	*h)
+@@ -961,7 +989,12 @@ ipc_port_free_after_grace(
+ 	ipc_port_t	port = (ipc_port_t) ((char *) h -
+ 				__builtin_offsetof(struct ipc_port, ip_rcu));
+ 
++	/* 940-probe-given-back */
++	((rpc_common_t) port)->rcd_io_lock_data.own_pc = W940_GIVEN_BACK;
++	port->ip_rcu.func = (void (*)(struct urmach_rcu_head *)) W940_GIVEN_BACK;
+ 	zfree(ipc_object_zones[IOT_PORT], (vm_offset_t) port);
++	if (port == w940_watch)		/* 940-probe-given-back */
++		w940_watch_back = 1;
+ }
+ 
+ /*
+diff --git a/uros/src/mach_kernel/ipc/ipc_object.h b/uros/src/mach_kernel/ipc/ipc_object.h
+index acd2b9b8..ddc53d74 100644
+--- a/uros/src/mach_kernel/ipc/ipc_object.h
++++ b/uros/src/mach_kernel/ipc/ipc_object.h
+@@ -177,8 +177,15 @@ name_sentinel_to_io(mach_port_t name)
+ 
+ extern zone_t ipc_object_zones[IOT_NUMBER];
+ 
++/* 940-probe-given-back: a port handed out is asked first whether its
++ * lock was taken while its memory was in the zone */
++extern vm_offset_t	w940_probe_handed_out(
++				unsigned int	otype,
++				vm_offset_t	elem);
++
+ #define	io_alloc(otype)		\
+-		((ipc_object_t) zalloc(ipc_object_zones[(otype)]))
++		((ipc_object_t) w940_probe_handed_out((otype), \
++					zalloc(ipc_object_zones[(otype)])))
+ 
+ /*
+  *	#940: a function on every kernel, not a zfree() where MACH_ASSERT is
