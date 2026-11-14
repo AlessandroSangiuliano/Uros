@@ -3737,6 +3737,203 @@ arm_fifty_six_abort_reaches_user_mode(void)
 }
 
 /*
+ * ── Arm fifty-seven: a task terminated while its thread asks a port of its
+ *    own through mach_msg()'s hot path (#940) ──
+ *
+ * The hot path resolves a request's two names with nothing locked, in an RCU
+ * read section, and a thread of a task being terminated can still be inside
+ * mach_msg() after its space has died (#688).  ipc_space_destroy() clears
+ * is_active, then ipc_right_clean() drops each entry's reference and leaves
+ * the entry naming its port: a port whose receive right was in that space
+ * dies, and its memory goes back to its zone a grace period later, while the
+ * dead space's table still names it.  So the resolve asks whether the space
+ * is alive before it touches a port.
+ *
+ * Each round makes a child with this task's memory and a port in its space,
+ * the receive right and a send right under one name, and starts two threads
+ * in it: one receives on the port and answers, the other asks it, an RPC
+ * that takes the hot path.  After ARM57_RUN_MS the child is terminated from
+ * here.  The kernel must come through every round, and the child's port must
+ * be a dead name after each one.  As in [14], the threads use traps only,
+ * and from here nothing shows whether the asking thread was in the window
+ * when its space died: 940-widen-dead-space puts it to sleep before its
+ * resolve, where task_terminate() stops it and lets it go, and holds it
+ * until the port is back in its zone; 940-dead-space-read takes the check
+ * out, and 940-probe-given-back sees the port's lock taken in the zone.
+ */
+#define	ARM57_ROUNDS	20
+#define	ARM57_RUN_MS	5
+#define	ARM57_STACK	(16 * 1024)
+#define	ARM57_ID	5757	/* the question's msgh_id: 940-widen-dead-space
+				   knows it */
+
+union arm57_msg {
+	mach_msg_header_t	head;
+	char			room[128];
+};
+
+/* The child's server: receives the question on `name' and answers it. */
+static void
+arm_fifty_seven_server(mach_port_t name)
+{
+	union arm57_msg	m;
+
+	for (;;) {
+		if (mach_msg_overwrite_trap(&m.head, MACH_RCV_MSG, 0, sizeof(m),
+					    name, MACH_MSG_TIMEOUT_NONE,
+					    MACH_PORT_NULL,
+					    (mach_msg_header_t *) 0, 0)
+		    != MACH_MSG_SUCCESS)
+			continue;
+		m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE,
+						  0);
+		m.head.msgh_size = sizeof(m.head);
+		m.head.msgh_local_port = MACH_PORT_NULL;
+		m.head.msgh_id = ARM57_ID + 100;
+		(void) mach_msg_overwrite_trap(&m.head, MACH_SEND_MSG,
+					       sizeof(m.head), 0,
+					       MACH_PORT_NULL,
+					       MACH_MSG_TIMEOUT_NONE,
+					       MACH_PORT_NULL,
+					       (mach_msg_header_t *) 0, 0);
+	}
+}
+
+/* The child's asker: the RPC to `name', for ever, as a MIG stub sends it. */
+static void
+arm_fifty_seven_asker(mach_port_t name)
+{
+	mach_port_t	reply = mach_reply_port();
+	union arm57_msg	m;
+
+	for (;;) {
+		m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						  MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		m.head.msgh_size = sizeof(m.head);
+		m.head.msgh_remote_port = name;
+		m.head.msgh_local_port = reply;
+		m.head.msgh_id = ARM57_ID;
+		(void) mach_msg_overwrite_trap(&m.head,
+					       MACH_SEND_MSG | MACH_RCV_MSG,
+					       sizeof(m.head), sizeof(m), reply,
+					       MACH_MSG_TIMEOUT_NONE,
+					       MACH_PORT_NULL,
+					       (mach_msg_header_t *) 0, 0);
+	}
+}
+
+/* A thread of the child, started at `fn' with `name' as its argument. */
+static kern_return_t
+arm_fifty_seven_start(mach_port_t child, void (*fn)(mach_port_t),
+		      mach_port_t name)
+{
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	vm_address_t			stack = 0;
+	mach_port_t			th = MACH_PORT_NULL;
+	kern_return_t			kr;
+
+	kr = vm_allocate(child, &stack, ARM57_STACK, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = thread_create(child, &th);
+	if (kr == KERN_SUCCESS)
+		kr = thread_get_state(th, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, &count);
+	if (kr == KERN_SUCCESS) {
+		/* As a call leaves it, with its argument in rdi. */
+		state.rip = (uint64_t) (uintptr_t) fn;
+		state.rsp = (uint64_t) (stack + ARM57_STACK - 8);
+		state.rdi = (uint64_t) name;
+		kr = thread_set_state(th, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, count);
+	}
+	if (kr == KERN_SUCCESS)
+		kr = thread_resume(th);
+	if (th != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), th);
+	return kr;
+}
+
+static int
+arm_fifty_seven_dead_space(void)
+{
+	mach_port_t	me = mach_task_self();
+	int		round;
+
+	for (round = 0; round < ARM57_ROUNDS; round++) {
+		mach_port_t		child = MACH_PORT_NULL;
+		mach_port_t		name = MACH_PORT_NULL;
+		mach_port_t		send = MACH_PORT_NULL;
+		mach_msg_type_name_t	sendtype;
+		mach_port_type_t	type;
+		kern_return_t		kr;
+
+		/*
+		 * The port's receive right made in the child's space, a send
+		 * right made from it, and that send right given back under the
+		 * same name: one entry with both, so that the child's death
+		 * takes the port's last reference with it.
+		 */
+		kr = task_create(me, NULL, 0, TRUE, &child);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_allocate(child, MACH_PORT_RIGHT_RECEIVE,
+						&name);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_extract_right(child, name,
+						     MACH_MSG_TYPE_MAKE_SEND,
+						     &send, &sendtype);
+		if (kr == KERN_SUCCESS) {
+			/* moved with the request, whatever the answer */
+			kr = mach_port_insert_right(child, name, send,
+						    MACH_MSG_TYPE_MOVE_SEND);
+			send = MACH_PORT_NULL;
+		}
+		if (kr == KERN_SUCCESS)
+			kr = arm_fifty_seven_start(child,
+						   arm_fifty_seven_server,
+						   name);
+		if (kr == KERN_SUCCESS)
+			kr = arm_fifty_seven_start(child, arm_fifty_seven_asker,
+						   name);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [57] round %d: a child with a port of "
+			       "its own and two threads could not be started "
+			       "(%d) — WRONG\n", round, kr);
+			if (child != MACH_PORT_NULL) {
+				(void) task_terminate(child);
+				(void) mach_port_deallocate(me, child);
+			}
+			return 0;
+		}
+
+		nap(ARM57_RUN_MS);
+
+		kr = task_terminate(child);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_type(me, child, &type);
+		(void) mach_port_deallocate(me, child);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [57] round %d: terminating the child, or "
+			       "asking about its port after, answered %d — "
+			       "WRONG\n", round, kr);
+			return 0;
+		}
+		if (!(type & MACH_PORT_TYPE_DEAD_NAME)) {
+			printf("act_test: [57] round %d: the terminated child's "
+			       "port is not a dead name (type 0x%x) — WRONG\n",
+			       round, type);
+			return 0;
+		}
+	}
+
+	printf("act_test: [57] %d children terminated, each with a thread "
+	       "asking a port of its own through mach_msg()'s hot path, and "
+	       "the kernel came through: every child's port was a dead name "
+	       "after (#940)\n", ARM57_ROUNDS);
+	return 1;
+}
+
+/*
  * Arm twenty: thread_activation_create() makes nothing (#783).
  *
  * It made an empty activation -- no thread behind it -- in a port's thread
@@ -9968,6 +10165,8 @@ main(int argc, char **argv)
 	passed += arm_fifty_two_fs_base_goes_with_the_thread();
 	arms++;		/* arm fifty-three, #414 */
 	passed += arm_fifty_three_threads_fault_together();
+	arms++;		/* arm fifty-seven, #940 */
+	passed += arm_fifty_seven_dead_space();
 	arms++;		/* arm fifty-six, #925 */
 	passed += arm_fifty_six_abort_reaches_user_mode();
 	arms++;		/* arm fifty-five, #935: before [54], which [16] follows */
