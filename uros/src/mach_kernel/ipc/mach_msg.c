@@ -1188,9 +1188,10 @@ urmach_msg_rights_hold(
  *		that gives is only a guess: right after it is read the entry may
  *		be cleared and the port's last reference dropped.  So the resolve
  *		is an RCU read section, and a port's memory goes back to its zone
- *		only after a grace period (io_free(), #940).  An entry is cleared
- *		before its reference goes (ipc_right_check(), ipc_right_destroy()),
- *		and a dead space is asked about first, since ipc_right_clean()
+ *		only after a grace period (io_free(), #940).  An entry's reference
+ *		that can be the port's last, a dead port's, goes only once the
+ *		entry is cleared (ipc_right_check(), ipc_right_destroy()), and a
+ *		dead space is asked about first, since ipc_right_clean()
  *		leaves its entries naming their ports: so the grace period of a
  *		port read here began after the read, and until the section ends
  *		the port is the port it was, live or dead, never one handed out

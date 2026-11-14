@@ -981,10 +981,12 @@ ipc_port_free_after_grace(
  *		request was queued on freed memory (act_test [54]).
  *
  *		The grace period counts from here, so here the port must be
- *		named by no entry a resolve can still read: whoever drops an
- *		entry's reference clears the entry first (ipc_right_check(),
- *		ipc_right_destroy()), and a dead space's entries, which
- *		ipc_right_clean() leaves, are not read.
+ *		named by no entry a resolve can still read.  An entry's
+ *		reference is the port's last only on a dead port, a live one's
+ *		receive right holding another, and ipc_right_check() and
+ *		ipc_right_destroy(), which drop it, clear the entry first; a
+ *		dead space's entries, which ipc_right_clean() leaves naming
+ *		their ports, are not read.
  */
 void
 io_free(
