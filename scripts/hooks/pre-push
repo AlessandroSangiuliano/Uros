@@ -1,0 +1,28 @@
+#!/bin/bash
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# pre-push: the epic's queue (#949, scripts/epic-queue.sh).  A push of epic/v0.3.0-x86-64 goes through only if
+# the queue is free or held by whoever pushes, named by EPIC_QUEUE_WHO=host:union-branch in the environment.
+# A base that moves under another union's merge test throws that test away (14/11, #940).  Other branches go
+# through without a question.  Installed by scripts/install-hooks.sh.
+TOP=$(git rev-parse --show-toplevel 2>/dev/null)
+Q=$TOP/scripts/epic-queue.sh
+WHO=${EPIC_QUEUE_WHO:-}
+while read -r lref lsha rref rsha; do
+	[ "$rref" = refs/heads/epic/v0.3.0-x86-64 ] || continue
+	if [ ! -x "$Q" ]; then
+		echo "pre-push: $Q is missing: the epic's queue (#949) is not checked" >&2
+		continue
+	fi
+	"$Q" show "$WHO" >&2
+	rc=$?
+	case $rc in
+	0|2)	;;
+	1)	echo "pre-push: another union holds the epic's queue: no push of the epic." >&2
+		echo "          If it is yours: EPIC_QUEUE_WHO=<host:union-branch> git push ..." >&2
+		exit 1 ;;
+	*)	echo "pre-push: the epic's queue cannot be read (rc=$rc): the push goes through, check #949 by hand" >&2 ;;
+	esac
+done
+exit 0
