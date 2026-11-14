@@ -1126,9 +1126,8 @@ boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
  *		live port's send right is dropped with the port locked, so with
  *		this port locked and active an entry seen here means the right
  *		is still counted in it.  A dead port's right is dropped without
- *		the lock and before its entry is cleared (ipc_right_check()), but
- *		the caller has given up on a dead port already, and its read
- *		section keeps the memory the dead port until then (#940).
+ *		the lock, but only once its entry is cleared (ipc_right_check(),
+ *		#940), and the caller has given up on a dead port already.
  *
  *		`gen' is a generation read before the mapping was: it is a
  *		filter, and one that is no longer current is a miss.  is_seq
@@ -1186,13 +1185,16 @@ urmach_msg_rights_hold(
  *	Why it is safe without the lock:
  *		ipc_entry_lookup_lockfree reads the entry from type-stable storage
  *		under the per-space seqlock (no fault, table-consistent).  What
- *		that gives is only a guess, and the port it names may already
- *		have lost the entry's right: ipc_right_check() drops a dead
- *		port's right before it clears the entry.  So the resolve is an
- *		RCU read section, and a port's memory goes back to its zone only
- *		after a grace period (io_free(), #940): until the section ends the
- *		port read here is the port it was, live or dead, never one handed
- *		out again.  A port dies before its last reference goes, so
+ *		that gives is only a guess: right after it is read the entry may
+ *		be cleared and the port's last reference dropped.  So the resolve
+ *		is an RCU read section, and a port's memory goes back to its zone
+ *		only after a grace period (io_free(), #940).  An entry is cleared
+ *		before its reference goes (ipc_right_check(), ipc_right_destroy()),
+ *		and a dead space is asked about first, since ipc_right_clean()
+ *		leaves its entries naming their ports: so the grace period of a
+ *		port read here began after the read, and until the section ends
+ *		the port is the port it was, live or dead, never one handed out
+ *		again.  A port dies before its last reference goes, so
  *		ip_active() tells a live one, and with both ports locked
  *		urmach_msg_rights_hold() asks whether the mapping is still true.
  *		So it never misdelivers: it confirms name->port at a valid
@@ -1205,7 +1207,10 @@ urmach_msg_rights_hold(
  *		The zone wrote its free pointer over io_bits, which on x86-64 made
  *		a freed port read as active, so a port ipc_right_check() had just
  *		freed passed the check and act_test [54]'s request was queued on
- *		freed memory, its reply never to come.
+ *		freed memory, its reply never to come.  The grace period alone
+ *		did not close it: ipc_right_check() dropped the reference before
+ *		it cleared the entry, and preempted in between, its processor
+ *		counted as quiescent while the entry still named the port.
  */
 static boolean_t	urmach_msg_lockfree_resolve_in_section(
 				ipc_space_t, mach_port_t, mach_port_t,

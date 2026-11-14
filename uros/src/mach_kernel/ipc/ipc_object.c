@@ -979,6 +979,12 @@ ipc_port_free_after_grace(
  *		happening.  Freed at once, it was: the zone wrote its free
  *		pointer over io_bits, which made the port read as active, and a
  *		request was queued on freed memory (act_test [54]).
+ *
+ *		The grace period counts from here, so here the port must be
+ *		named by no entry a resolve can still read: whoever drops an
+ *		entry's reference clears the entry first (ipc_right_check(),
+ *		ipc_right_destroy()), and a dead space's entries, which
+ *		ipc_right_clean() leaves, are not read.
  */
 void
 io_free(
