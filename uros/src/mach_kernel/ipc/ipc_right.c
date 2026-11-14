@@ -649,12 +649,17 @@ ipc_right_destroy(
 
 		if (!ip_active(port)) {
 			assert((type & MACH_PORT_TYPE_RECEIVE) == 0);
-			ip_release(port);
-			ip_check_unlock(port);
 
+			/*
+			 * #940: the entry goes before its reference, which
+			 * may be the port's last, as in ipc_right_check().
+			 */
 			entry->ie_request = 0;
 			entry->ie_object = IO_NULL;
 			ipc_entry_dealloc(space, name, entry);
+
+			ip_release(port);
+			ip_check_unlock(port);
 			is_write_unlock(space);
 
 			break;
