@@ -1,0 +1,57 @@
+Kind: widen
+Issue: #925
+Holds open: the processor, at one processor, by the clock: 3 s in the first round, so that its depression runs out more than ten times in a row and the round is held, and 300 ms in each of the others -- act_test [56]'s victim makes a thread that spins that long just before it asks for its depression, so that thread_switch() finds it ready and blocks, and the victim, at the lowest priority, runs again only once its 100 ms depression has run out, about twice a round, where the merge test of 116a782d met it in 2 boots of 44 at -smp 1 under TCG.  On a good tree each is asked again, the first round goes on undepressed, and [56] passes and counts both on its line
+Run: --entry 14 300 -smp 1
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 029310a3..eae85a01 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3413,12 +3413,29 @@ a56_gap(long us)
+ 	return d;
+ }
+ 
++/*
++ * The widen: the processor held by the clock, 3 s in the first round -- more
++ * than ten depressions, so that the round is held -- and 300 ms in each of
++ * the others, about three depressions.
++ */
++static int	a56_hogs;
++
++static void *
++a56_hog(void *arg)
++{
++	(void) arg;
++	(void) a56_gap(a56_hogs++ == 0 ? 3000000 : 300000);
++	return NULL;
++}
++
+ /* Spin in user mode until told, then wait twice on a word nobody wakes. */
+ static void *
+ a56_victim(void *arg)
+ {
+ 	struct timespec	t[3];
+ 	int		i;
++	pthread_t	hog;
++	int		hogging = 0;
+ 
+ 	(void) arg;
+ 	a56_self = mach_thread_self();
+@@ -3448,6 +3465,8 @@ a56_victim(void *arg)
+ 		mach_msg_type_number_t		n = POLICY_TIMESHARE_INFO_COUNT;
+ 		struct timespec			s[2];
+ 
++		/* The widen: ready before the depression, and longer than it. */
++		hogging = pthread_create(&hog, NULL, a56_hog, NULL) == 0;
+ 		/*
+ 		 * 🔴 A DEPRESSION THAT RAN OUT WHILE THIS THREAD WAITED TO RUN
+ 		 * IS ASKED AGAIN; ONE THAT ENDED BEFORE ITS TIME IS WRONG (#925).
+@@ -3512,6 +3531,8 @@ a56_victim(void *arg)
+ 		(void) getclock(TIMEOFDAY, &t[i + 1]);
+ 		a56_ms[i] = a56_ms_between(&t[i], &t[i + 1]);
+ 	}
++	if (hogging)
++		(void) pthread_join(hog, NULL);
+ 	/*
+ 	 * Not back to the pool depressed: thread_abort() does not end a
+ 	 * depression, and this one would follow the thread into whatever

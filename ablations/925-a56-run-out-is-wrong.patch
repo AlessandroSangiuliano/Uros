@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #925
+Over: 925-widen-a56-processor-held.patch
+Takes out: the asking again for a depression that ran out while act_test [56]'s victim waited to run (00c14596) -- the first that runs out ends the victim's tries and is WRONG, as every KERN_ABORTED was since 4630995c: what entries 53 and 55 met at -smp 1 under TCG in the merge test of 116a782d (OMEGA, 13/11), in every round under the widen
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[56\] round [0-9]+: at one processor the victim's depression ran out [0-9]+ time
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index c0af2417..565db033 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3540,8 +3540,7 @@ a56_victim(void *arg)
+ 			if (!a56_depression_ran_out())
+ 				break;
+ 			a56_ran_out++;
+-			if (a56_ran_out == A56_DEPRESS_TRIES)
+-				break;
++			break;
+ 		}
+ 	}
+ 	a56_spinning = 1;
