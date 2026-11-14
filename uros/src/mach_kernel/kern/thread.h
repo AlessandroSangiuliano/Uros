@@ -455,6 +455,21 @@ typedef struct thread_shuttle {
 	 */
 	unsigned int	ith_park_seq;
 	unsigned int	ith_dq_seq;
+	/*
+	 * #940: which jump took mach_msg's hot path to its slow receive, and
+	 * the msgh_id of the message it was about -- the request, or the reply
+	 * it queued; how many of this thread's messages ipc_mqueue_send()
+	 * destroyed at a port already dead, and the last one's msgh_id; and
+	 * the port of the last send-once notification this thread made.
+	 * act_test [54]'s helper waited for good on a reply port with nothing
+	 * on it, and the walk could not tell a reply the kernel never made from
+	 * a request destroyed whose notification never came.
+	 */
+	const char	*ith_slow_why;
+	mach_msg_id_t	ith_slow_id;
+	unsigned int	ith_sent_dead;
+	mach_msg_id_t	ith_sent_dead_id;
+	struct ipc_port	*ith_sonce_port;
 #endif	/* WAKER_TRACK */
 	mach_msg_return_t ith_state;
 	mach_msg_size_t ith_msize;		/* max size for recvd msg */
