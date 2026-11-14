@@ -8,7 +8,7 @@
 # through without a question.  Installed by scripts/install-hooks.sh.
 TOP=$(git rev-parse --show-toplevel 2>/dev/null)
 Q=$TOP/scripts/epic-queue.sh
-WHO=${EPIC_QUEUE_WHO:-${CODA_EPIC_CHI:-}}
+WHO=${EPIC_QUEUE_WHO:-}
 while read -r lref lsha rref rsha; do
 	[ "$rref" = refs/heads/epic/v0.3.0-x86-64 ] || continue
 	if [ ! -x "$Q" ]; then
