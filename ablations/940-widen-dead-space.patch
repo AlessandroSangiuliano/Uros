@@ -1,0 +1,103 @@
+Kind: widen
+Issue: #940
+Over: 940-probe-given-back.patch
+Holds open: act_test [57]'s question, msgh_id 5757, in mach_msg()'s hot path before its resolve: it notes the port its destination names, sleeps a tick there with mutex_pause(), as 688-widen-copyin-late does for [14], so that task_terminate() finds the thread stopped in it, lets it go and destroys the space before the tick is over; if the space is dead then, it waits until the port's memory is back in its zone, up to 300 ms, and after the resolve the zone hands out up to 8 ports, stopping at that one, for 940-probe-given-back to ask whether its lock was taken while its memory was in the zone.  The port zone runs without its per-CPU magazines (#330), so that a port given back is the next one handed out.  With the fix the resolve refuses the dead space before it touches a port; the fixed tree must pass
+Run: --entry 14 600 -smp 4
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 581bd595..b7670608 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1217,6 +1217,10 @@ static boolean_t	urmach_msg_lockfree_resolve_in_section(
+ 				ipc_space_t, mach_port_t, mach_port_t,
+ 				ipc_port_t *, ipc_port_t *);
+ 
++/* 940-widen-dead-space: the thread whose resolve reads a dead space whose
++ * port is back in its zone */
++thread_t volatile	w940d_thread;
++
+ static boolean_t
+ urmach_msg_lockfree_resolve(
+ 	ipc_space_t	space,
+@@ -1233,6 +1237,25 @@ urmach_msg_lockfree_resolve(
+ 							  reply_portp,
+ 							  dest_portp);
+ 	urmach_rcu_read_unlock();
++	{	/* 940-widen-dead-space: the zone hands the port out again, for
++		 * 940-probe-given-back to ask whether this resolve locked it */
++		extern volatile ipc_port_t	w940_watch;
++		ipc_port_t			w[8];
++		int				i, n;
++
++		if (w940d_thread == current_thread()) {
++			w940d_thread = THREAD_NULL;
++			for (n = 0; n < 8; ) {
++				w[n] = ipc_port_alloc_special(ipc_space_kernel);
++				if (w[n++] == w940_watch)
++					break;
++			}
++			for (i = 0; i < n; i++)
++				if (w[i] != IP_NULL)
++					ipc_port_dealloc_special(w[i],
++								 ipc_space_kernel);
++		}
++	}
+ 	return resolved;
+ }
+ 
+@@ -1608,6 +1631,41 @@ urmach_msg_overwrite_trap_call(
+ 			index = MACH_PORT_INDEX(reply_name);
+ 			gen = MACH_PORT_GEN(reply_name);
+ 
++			if (hdr->msgh_id == 5757) {	/* 940-widen-dead-space */
++				extern void			delay(int);
++				extern volatile ipc_port_t	w940_watch;
++				extern volatile int		w940_watch_back;
++				ipc_entry_t			w940_e;
++				int				w;
++
++				/* act_test [57]'s question: its destination,
++				 * as the space names it now, watched until
++				 * its memory is back in its zone */
++				is_read_lock(space);
++				w940_e = space->is_active ?
++				    ipc_entry_lookup(space,
++						     hdr->msgh_remote_port) :
++				    IE_NULL;
++				if (w940_e != IE_NULL &&
++				    (w940_e->ie_bits & MACH_PORT_TYPE_SEND)) {
++					w940_watch_back = 0;
++					w940_watch = (ipc_port_t)
++						w940_e->ie_object;
++				}
++				is_read_unlock(space);
++				/* a tick asleep, as in 688-widen-copyin-late:
++				 * task_terminate() finds the thread stopped
++				 * here, lets it go and destroys the space
++				 * before the tick is over */
++				mutex_pause();
++				if (!space->is_active) {
++					for (w = 0; w < 300000 &&
++						    !w940_watch_back; w++)
++						delay(1);
++					w940d_thread = current_thread();
++				}
++			}
++
+ 			/*
+ 			 * #331 step 2 part 3b: try resolving both names WITHOUT
+ 			 * the space lock.  On success both ports are locked and
+diff --git a/uros/src/mach_kernel/kern/zalloc.c b/uros/src/mach_kernel/kern/zalloc.c
+index c44ac078..0e88ecff 100644
+--- a/uros/src/mach_kernel/kern/zalloc.c
++++ b/uros/src/mach_kernel/kern/zalloc.c
+@@ -710,8 +710,8 @@ zone_enable_hot_magazines(void)
+ 
+ 	if (vm_map_entry_zone != ZONE_NULL)
+ 		zone_enable_magazines(vm_map_entry_zone);
+-	if (ipc_object_zones[0] != ZONE_NULL)		/* IOT_PORT */
+-		zone_enable_magazines(ipc_object_zones[0]);
++	/* 940-widen-dead-space: the port zone without magazines, so that a
++	 * port given back is the next the zone hands out */
+ 	if (ipc_object_zones[1] != ZONE_NULL)		/* IOT_PORT_SET */
+ 		zone_enable_magazines(ipc_object_zones[1]);
+ 	if (ipc_space_zone != ZONE_NULL)
