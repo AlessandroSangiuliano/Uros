@@ -1,0 +1,52 @@
+Kind: ablation
+Issue: #940
+Over: 940-widen-dead-name.patch
+Takes out: 7408bdae -- ipc_right_check() drops the dead port's last reference before it turns the entry into a dead name again, so over 940-widen-dead-name the port's memory goes back to its zone while the entry still names it as a send right, and a messenger of act_test [54] whose resolve meets the window locks it, which the probe sees when the zone hands the port out; or finds it active by the zone's free pointer and queues its request there, and the bounded join says the messenger never came back, or the zone stops on the modified free pointer
+Run: --entry 14 600 -smp 4
+Expect: 940-probe-given-back: a port's lock was taken after its memory went back to its zone
+Expect: act_test: \[54\] round [0-9]+: the (creator|poller|messenger) had not come back from
+Expect: A freed zone element has been modified
+diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
+index 726ba918..9795d443 100644
+--- a/uros/src/mach_kernel/ipc/ipc_right.c
++++ b/uros/src/mach_kernel/ipc/ipc_right.c
+@@ -510,6 +510,13 @@ ipc_right_check(
+ 		assert(IE_BITS_UREFS(bits) == 1);
+ 	}
+ 
++	{	/* 940-widen-dead-name */
++		int	w940_last = w940_before_release(port, TRUE);
++
++		ipc_port_release(port);
++		w940_after_release(port, w940_last);
++	}
++
+ 	/* convert entry to dead name */
+ 
+ 	bits = (bits &~ IE_BITS_TYPE_MASK) | MACH_PORT_TYPE_DEAD_NAME;
+@@ -523,25 +530,6 @@ ipc_right_check(
+ 
+ 	entry->ie_bits = bits;
+ 	entry->ie_object = IO_NULL;
+-
+-	/*
+-	 * #940: the entry's reference goes last, once the entry no longer
+-	 * names the port.  It may be the port's last, and then io_free()
+-	 * hands the port to urmach_call_rcu(), which counts its grace period
+-	 * from the call and so wants the port found by no new reader --
+-	 * and mach_msg's resolve reads this entry with nothing locked.  It
+-	 * went first, once: this thread holds only the space's lock, which
+-	 * sleeps, so a return from an interrupt can preempt it in between,
+-	 * and its processor then counts as quiescent.  The grace period
+-	 * ended, the port went back to its zone, and the entry still named
+-	 * it as a send right.
+-	 */
+-	{	/* 940-widen-dead-name */
+-		int	w940_last = w940_before_release(port, TRUE);
+-
+-		ipc_port_release(port);
+-		w940_after_release(port, w940_last);
+-	}
+ 	return TRUE;
+ }
+ 
