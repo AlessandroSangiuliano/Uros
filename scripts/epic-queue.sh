@@ -11,8 +11,8 @@
 # taken neither starts a merge test nor pushes the epic: they wait, or ask the holder to fold their branches into
 # its next union, one union and one merge test.
 #
-# The state lives in the body of issue #949 on GitHub, between the lines <!-- coda-epic --> and
-# <!-- /coda-epic -->, so that every session reads and writes the same one and anyone can see it there.
+# The state lives in the body of issue #949 on GitHub, between the lines <!-- epic-queue --> and
+# <!-- /epic-queue -->, so that every session reads and writes the same one and anyone can see it there.
 #
 # Usage:
 #   epic-queue.sh show [WHO]                       the state; exit 0 free, 1 held by another, 2 held by WHO,
@@ -27,8 +27,8 @@
 set -u
 QUEUE=949
 REPO=AlessandroSangiuliano/Uros
-OPEN='<!-- coda-epic -->'
-CLOSE='<!-- /coda-epic -->'
+OPEN='<!-- epic-queue -->'
+CLOSE='<!-- /epic-queue -->'
 
 # The body in BODY, the block in BLOCK.  Carriage returns go: a body edited on the web may carry them.
 read_queue() {
