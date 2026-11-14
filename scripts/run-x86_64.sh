@@ -634,6 +634,9 @@ must_report 'hello_exec: hello from exec_server' 'hello_exec: AUXV AT_PAGESZ (ta
 must_report 'musl_test: started' 'musl_test: [0-9]* of [0-9]* arms passed' \
 	'A static C program with musl under it, asking for threads, memory, signals and files through the system calls of this target (#414).  It started and did not reach its last line, which is a stop inside the personality or a thread that never came back.'
 
+must_report 'fork_cap_test: started' 'fork_cap_test: [0-9]* of [0-9]* arms passed' \
+	'It is granted a capability on its own per-task port, forks, and its child asks for the same and must be refused by cap_server (#945).  Its wait for the child is bounded, so silence is a request of its own that never came back, or a fork that never did.'
+
 must_report 'msg_server_test: started' 'msg_server_test: [0-9]* of [0-9]* arms passed' \
 	'It runs the mach_msg_server of libmach in a thread and asks it, after a one-way message, whether it still holds a right it kept (#583).  A loop that lost the right answers WRONG; silence means the loop never answered at all.'
 
@@ -1670,6 +1673,7 @@ expected_reports() {
 		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
 		'musl_test: started'    'musl_test: [0-9]* of [0-9]* arms passed' \
+		'fork_cap_test: started' 'fork_cap_test: [0-9]* of [0-9]* arms passed' \
 		'=== sig_test ('        '=== sig_test: [0-9]* PASS, [0-9]* FAIL ===' \
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
