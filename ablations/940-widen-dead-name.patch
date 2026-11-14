@@ -1,13 +1,13 @@
 Kind: widen
 Issue: #940
 Over: 940-probe-given-back.patch
-Holds open: the release of a dead port's last reference, in ipc_right_check() and in ipc_right_destroy()'s dead branch, until the port's memory is back in its zone, then 200 us more with w940_open said; then the zone hands the port out again, for 940-probe-given-back to ask whether its lock was taken meanwhile.  Before the release, where the port is not locked, it waits up to 500 us for the requests still in flight to give their references back, so that this release is the port's last, and allocates a port and gives it back, so that one lies ahead of this port on the zone's list; and the port zone runs without its per-CPU magazines (#330), so that a port given back goes on that list, where the zone's 64-bit free pointer makes it read as active on x86-64, and is the next one handed out.  task_info()'s message, 2098, which act_test [54]'s messengers send with no trap first, waits in mach_msg's hot path up to 100 us for a window to be held, then until it opens, before it resolves its names, holding no reference.  With the fix the entry is cleared before the release, and a resolve in the window finds a dead name or no name; the fixed tree must pass
+Holds open: the release of a dead port's last reference, in ipc_right_check() and in ipc_right_destroy()'s dead branch, until the port's memory is back in its zone, then 200 us more with w940_open said; then the zone hands the port out again, for 940-probe-given-back to ask whether its lock was taken meanwhile.  Before the release it waits up to 500 us for the requests still in flight to give their references back, the port unlocked meanwhile in ipc_right_destroy(), so that this release is the port's last; in ipc_right_check() it also allocates a port and gives it back, so that one lies ahead of this port on the zone's list; and the port zone runs without its per-CPU magazines (#330), so that a port given back goes on that list, where the zone's 64-bit free pointer makes it read as active on x86-64, and is the next one handed out.  task_info()'s message, 2098, which act_test [54]'s messengers send with no trap first, and thread_create()'s, 2061, which its creator sends once the trap refuses, wait in mach_msg's hot path up to 100 us for a window to be held, then until it opens, before they resolve their names, holding no reference: the creator's message, sent at once, turned the dead name in before the odd rounds' destroy, and a run of 940-destroy-released-before-cleared over the widen without it was caught 3 times in 4.  With the fix the entry is cleared before the release, and a resolve in the window finds a dead name or no name; the fixed tree must pass
 Run: --entry 14 600 -smp 4
 diff --git a/uros/src/mach_kernel/ipc/ipc_right.c b/uros/src/mach_kernel/ipc/ipc_right.c
-index 64086bd8..726ba918 100644
+index 64086bd8..3874b96d 100644
 --- a/uros/src/mach_kernel/ipc/ipc_right.c
 +++ b/uros/src/mach_kernel/ipc/ipc_right.c
-@@ -408,6 +408,77 @@ ipc_right_inuse(
+@@ -408,6 +408,82 @@ ipc_right_inuse(
   *
   */
  
@@ -21,10 +21,11 @@ index 64086bd8..726ba918 100644
 +volatile int	w940_armed;	/* a window is held */
 +volatile int	w940_open;	/* and it is open */
 +
-+/* Before the release: whether it is the port's last.  With the port not
-+ * locked, the requests still in flight give their references back first,
-+ * and a port goes ahead of this one in the zone's free list, so that this
-+ * one, given back, reads as active by the zone's free pointer. */
++/* Before the release: whether it is the port's last.  The requests still in
++ * flight give their references back first, the port unlocked meanwhile
++ * where the caller holds it; and, where it does not, a port goes ahead of
++ * this one in the zone's free list, so that this one, given back, reads as
++ * active by the zone's free pointer. */
 +static int
 +w940_before_release(
 +	ipc_port_t	port,
@@ -36,8 +37,12 @@ index 64086bd8..726ba918 100644
 +	ipc_port_t			w;
 +	int				i;
 +
-+	for (i = 0; unlocked && i < 500 && port->ip_references > 1; i++)
++	if (!unlocked)
++		ip_unlock(port);
++	for (i = 0; i < 500 && port->ip_references > 1; i++)
 +		delay(1);
++	if (!unlocked)
++		ip_lock(port);
 +	if (port->ip_references != 1)
 +		return 0;
 +	if (unlocked) {
@@ -85,7 +90,7 @@ index 64086bd8..726ba918 100644
  boolean_t
  ipc_right_check(
  	ipc_space_t	space,
-@@ -465,7 +536,12 @@ ipc_right_check(
+@@ -465,7 +541,12 @@ ipc_right_check(
  	 * ended, the port went back to its zone, and the entry still named
  	 * it as a send right.
  	 */
@@ -99,7 +104,7 @@ index 64086bd8..726ba918 100644
  	return TRUE;
  }
  
-@@ -658,8 +734,14 @@ ipc_right_destroy(
+@@ -658,8 +739,14 @@ ipc_right_destroy(
  			entry->ie_object = IO_NULL;
  			ipc_entry_dealloc(space, name, entry);
  
@@ -117,21 +122,26 @@ index 64086bd8..726ba918 100644
  
  			break;
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index 42e788d9..e9bef357 100644
+index 581bd595..f78fb00d 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -1607,6 +1607,21 @@ urmach_msg_overwrite_trap_call(
+@@ -1608,6 +1608,26 @@ urmach_msg_overwrite_trap_call(
  			index = MACH_PORT_INDEX(reply_name);
  			gen = MACH_PORT_GEN(reply_name);
  
-+			if (hdr->msgh_id == 2098) {	/* 940-widen-dead-name */
++			if (hdr->msgh_id == 2098 ||	/* 940-widen-dead-name */
++			    hdr->msgh_id == 2061) {
 +				extern void delay(int);
 +				extern volatile int w940_open, w940_armed;
 +				int w;
 +
-+				/* task_info()'s message waits for a window: up
-+				 * to 100 us for one to be held, then until it
-+				 * opens, holding no reference */
++				/* task_info()'s message, and thread_create()'s,
++				 * which act_test [54]'s creator sends once its
++				 * trap refuses, wait for a window: up to 100 us
++				 * for one to be held, then until it opens,
++				 * holding no reference.  Delayed, the creator's
++				 * no longer turns the dead name in before the
++				 * odd rounds' destroy */
 +				for (w = 0; w < 100 && !w940_armed; w++)
 +					delay(1);
 +				for (w = 0; w < 300000 && w940_armed &&
