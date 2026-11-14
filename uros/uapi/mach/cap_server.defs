@@ -214,8 +214,18 @@ routine cap_derive_task(
  *	keeps is a sender no other task can count, and only cap_server
  *	learns, by a no-senders notification, that a port has none left.
  *	Appended: MIG numbers routines by position.
+ *
+ *	And the bounds on derived slots (#937): how many hold a derived
+ *	port, the quota they may not pass, how many of them belong to the
+ *	family of the port it is asked on -- 0 for a port that is no
+ *	task's -- and how many one family may hold.  A test reads the
+ *	bound it should meet from the server it meets it in.
  */
 routine cap_slots(
 		cap_server	: mach_port_t;
 	out	in_use		: natural_t;
-	out	size		: natural_t);
+	out	size		: natural_t;
+	out	derived		: natural_t;
+	out	quota		: natural_t;
+	out	family		: natural_t;
+	out	family_max	: natural_t);

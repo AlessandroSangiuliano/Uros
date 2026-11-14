@@ -254,7 +254,10 @@ The program's file says what it **asks** for; what it **gets** is its caller's
 to give. An entry survives for the types, the instances and the operations the
 caller's `delegatable[]` names, and its own `delegatable[]` is cut the same
 way, so a chain of execs never widens. A caller with no per-task port has
-nothing to hand on, and its program runs with none. Until #743 exec_server
+nothing to hand on, and its program runs with none; so does one whose cut
+leaves nothing, which `cap_derive_task` refuses with
+`CAP_ERR_NOTHING_TO_DERIVE` rather than make a port that grants nothing and
+holds a slot (#937). Until #743 exec_server
 provisioned the file's manifest as it stood: whoever wrote a binary that
 something exec'd wrote its policy.
 
@@ -298,8 +301,8 @@ section is not.
 | `cap_verify(token, op, id)` | anyone | slow path; the trap is the fast one |
 | `cap_subscribe_revoke(port)` | a task whose manifest grants `RESOURCE_REVOKE_NOTICES`, on its per-task port (#744) | receive `cap_revoke_notify`, sent without blocking |
 | `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy, return the principal port |
-| `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]` |
-| `cap_slots() → in_use, size` | anyone | how many manifest slots are taken: how a test sees one come back (#743) |
+| `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`; refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
+| `cap_slots() → in_use, size, derived, quota, family, family_max` | anyone | how many manifest slots are taken, how many by derived ports, and their bounds: how a test sees a slot come back (#743) and a bound met (#937) |
 
 ### Traps — `syscall_sw.h`
 
@@ -640,15 +643,25 @@ Stated so nobody reads this document as a description of a finished system.
   from the design docs do not exist.
 - **cap_server is single-shard and single-threaded.** No 64 shards, no revoke /
   snapshot / policy threads.
-- **The manifest table holds 64 per-task ports at once, and nothing bounds
-  how many one task takes.** Slots come back when a per-task port has no
-  senders (#743), so the limit is on the ports alive, not on how many tasks
-  have ever run. But every `cap_derive_task` takes one, an empty derivation
-  included, and a task with a per-task port can derive and hold until the
-  table is full: from then on bootstrap starts its tasks without their
-  manifests. In #743's ablations that leave the slots taken, ext_server,
-  mount_test and proc_server ran without theirs in every boot, and the block
-  server too in every TCG boot, and the boot stopped. The bound is #937.
+- **The manifest table holds 64 per-task ports at once, and its bounds are
+  fixed numbers.** Slots come back when a per-task port has no senders
+  (#743), so the limit is on the ports alive, not on how many tasks have ever
+  run. Derived ports are bounded so that no task and no family of tasks can
+  fill the table (#937):
+  - a derivation that keeps nothing takes no slot (`CAP_ERR_NOTHING_TO_DERIVE`);
+  - derived ports hold at most 32 slots (`CAP_ERR_DERIVED_QUOTA`), so the other
+    32 are bootstrap's for the tasks it starts: 11 on x86-64, 18 on i386;
+  - one family -- a task bootstrap provisioned and every task derived from it,
+    down any chain of execs -- holds at most 16 (`CAP_ERR_LINEAGE_FULL`). A
+    family is a number given at provisioning and never given again.
+
+  Before #937 a task with a per-task port could derive and hold until the
+  table was full, and bootstrap then started its tasks without their
+  manifests: in #743's ablations that left the slots taken, ext_server,
+  mount_test and proc_server ran without theirs in every boot. What is not
+  built: a table that grows, and a quota sized by what bootstrap starts rather
+  than half the table. Only bootstrap, with more than 32 tasks of its own,
+  could fill it now.
 - **Only `cap_test`'s manifest delegates anything.** It hands on block devices
   READ, to show a derivation cut; every other task's programs get nothing,
   whatever their files ask for.
@@ -716,6 +729,7 @@ this is where to look, and what to break to confirm it still works.
 | exec_server holds nothing of a spawn once it has answered | `cap_test [44]` | `ablations/926-exec-server-keeps-the-task`, `926-first-thread-copied` |
 | proc_server holds a process's reduced port, and it reaches no more | `cap_test [45]` | `ablations/927-proc-server-takes-full-ports`, `927-reduced-port-reaches-memory`, `927-rights-not-checked`, `927-mint-from-a-reduced-port` |
 | a reduced port takes the traps itself, not through MIG | `cap_test [45]` | `ablations/927-traps-refuse-a-reduced-port` |
+| a derivation that keeps nothing takes no slot, and derived ports meet a family's bound and a quota | `cap_test [46]` | `ablations/937-empty-derivation-takes-a-slot`, `937-family-unbounded`, `937-quota-unbounded` (over the widen `937-widen-family-to-the-quota`) |
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers

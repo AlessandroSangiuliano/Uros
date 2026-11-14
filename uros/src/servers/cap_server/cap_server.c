@@ -693,10 +693,13 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
  *
  * On an error the request that brought `task_port' is destroyed by
  * mach_msg_server(), which releases it: so is nothing here.
+ *
+ * `parent' is the per-task port a derivation was asked on, or MACH_PORT_NULL
+ * for a task bootstrap provisions: the table bounds derived slots (#937).
  */
 static kern_return_t
-cap_task_port_make(mach_port_t task_port, const void *blob, uint32_t len,
-                   mach_port_t *out_port)
+cap_task_port_make(mach_port_t task_port, mach_port_t parent,
+                   const void *blob, uint32_t len, mach_port_t *out_port)
 {
     mach_port_t new_port = MACH_PORT_NULL;
     mach_port_t previous = MACH_PORT_NULL;
@@ -727,7 +730,7 @@ cap_task_port_make(mach_port_t task_port, const void *blob, uint32_t len,
         return CAP_ERR_INTERNAL;
     }
 
-    vrc = cap_manifest_table_install(new_port, task_port, blob, len);
+    vrc = cap_manifest_table_install(new_port, task_port, parent, blob, len);
     if (vrc != CAP_ERR_NONE) {
         (void)mach_port_destroy(mach_task_self(), new_port);
         return vrc;
@@ -809,8 +812,8 @@ cap_provision_task(mach_port_t            server,
         return vrc;
     }
 
-    kr = cap_task_port_make(task_port, manifest_buf, (uint32_t)manifest_len,
-                            &new_port);
+    kr = cap_task_port_make(task_port, MACH_PORT_NULL, manifest_buf,
+                            (uint32_t)manifest_len, &new_port);
     if (kr != KERN_SUCCESS)
         return kr;
 
@@ -886,7 +889,25 @@ cap_derive_task(mach_port_t            server,
         return vrc;
     }
 
-    kr = cap_task_port_make(task_port, derived, derived_len, &new_port);
+    /*
+     * 🔑 A DERIVATION THAT KEEPS NOTHING TAKES NO SLOT (#937).  Its port would
+     * grant nothing, as no port does (#511), and it held a slot for as long as
+     * its task lived: every program a caller with nothing to hand on exec'd
+     * took one, and any caller could take as many as it asked for.  The
+     * program runs with no per-task port, as one whose caller has none.
+     */
+    if (((const cap_manifest_header_t *)derived)->required_count == 0 &&
+        ((const cap_manifest_header_t *)derived)->delegatable_count == 0) {
+        printf("cap: derive_task on 0x%x keeps nothing of %u entries — no "
+               "port and no slot (#937)\n", (unsigned)g_request_local_port,
+               (unsigned)(asked->required_count + asked->delegatable_count));
+        free(derived);
+        free(copy);
+        return CAP_ERR_NOTHING_TO_DERIVE;
+    }
+
+    kr = cap_task_port_make(task_port, g_request_local_port, derived,
+                            derived_len, &new_port);
     if (kr == KERN_SUCCESS)
         printf("cap: derived task — cap_port=0x%x from 0x%x, %u of %u "
                "entries kept (#743)\n", (unsigned)new_port,
@@ -896,6 +917,13 @@ cap_derive_task(mach_port_t            server,
                           ((const cap_manifest_header_t *)derived)
                               ->delegatable_count),
                (unsigned)(asked->required_count + asked->delegatable_count));
+    else if (kr == CAP_ERR_DERIVED_QUOTA || kr == CAP_ERR_LINEAGE_FULL)
+        printf("cap: DENY derive_task on 0x%x — %u derived of a quota of %u, "
+               "%u in its family of at most %u (#937)\n",
+               (unsigned)g_request_local_port, cap_manifest_table_derived(),
+               cap_manifest_table_derived_quota(),
+               cap_manifest_table_family(g_request_local_port),
+               cap_manifest_table_family_max());
     free(derived);
     free(copy);
     if (kr != KERN_SUCCESS)
@@ -908,14 +936,21 @@ cap_derive_task(mach_port_t            server,
 /*
  * cap_slots (#743).  The table's census, on any port: a count of tasks says
  * nothing about any one of them, and it is the only way a test can see a slot
- * come back.
+ * come back.  With the bounds on derived slots (#937), and the family count
+ * of the port it was asked on.
  */
 kern_return_t
-cap_slots(mach_port_t server, natural_t *in_use, natural_t *size)
+cap_slots(mach_port_t server, natural_t *in_use, natural_t *size,
+          natural_t *derived, natural_t *quota, natural_t *family,
+          natural_t *family_max)
 {
     (void)server;
-    *in_use = (natural_t)cap_manifest_table_in_use();
-    *size   = (natural_t)cap_manifest_table_size();
+    *in_use     = (natural_t)cap_manifest_table_in_use();
+    *size       = (natural_t)cap_manifest_table_size();
+    *derived    = (natural_t)cap_manifest_table_derived();
+    *quota      = (natural_t)cap_manifest_table_derived_quota();
+    *family     = (natural_t)cap_manifest_table_family(g_request_local_port);
+    *family_max = (natural_t)cap_manifest_table_family_max();
     return KERN_SUCCESS;
 }
 

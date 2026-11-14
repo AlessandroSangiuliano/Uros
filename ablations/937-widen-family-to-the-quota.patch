@@ -1,0 +1,18 @@
+Kind: widen
+Issue: #937
+Holds open: lifts one family's bound on derived ports from 16 to 64, above the quota, so that cap_test, which is one family, can reach the quota -- which 937-quota-unbounded takes out.  Harmless in the fixed tree: [46] reads the bounds from cap_slots and meets the quota, with CAP_ERR_DERIVED_QUOTA, in place of the family's bound
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/servers/cap_server/cap_manifest_table.c b/uros/src/servers/cap_server/cap_manifest_table.c
+index 979de353..2863fa57 100644
+--- a/uros/src/servers/cap_server/cap_manifest_table.c
++++ b/uros/src/servers/cap_server/cap_manifest_table.c
+@@ -28,7 +28,7 @@
+  * without.
+  */
+ #define CAP_MANIFEST_DERIVED_QUOTA  32
+-#define CAP_MANIFEST_FAMILY_MAX     16
++#define CAP_MANIFEST_FAMILY_MAX     64
+ 
+ struct cap_manifest_slot {
+     int            in_use;

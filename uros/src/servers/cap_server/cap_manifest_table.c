@@ -18,15 +18,35 @@
 
 #define CAP_MANIFEST_TABLE_SIZE  64
 
+/*
+ * What derivations may hold (#937).  A derivation took a slot for every call,
+ * and nothing bounded how many one caller held: a task with a per-task port
+ * could take all 64, and every task bootstrap started after that ran without
+ * its manifest.  Derived ports may hold half the table, so the other half is
+ * bootstrap's whatever they do -- it provisions 11 tasks on x86-64 and 18 on
+ * i386 -- and one family half of that, so that it cannot leave the others
+ * without.
+ */
+#define CAP_MANIFEST_DERIVED_QUOTA  32
+#define CAP_MANIFEST_FAMILY_MAX     16
+
 struct cap_manifest_slot {
     int            in_use;
     mach_port_t    port;       /* per-task cap_port receive name */
     mach_port_t    task;       /* the task it was provisioned for (#432) */
     void          *blob;       /* owned copy, freed on uninstall */
     uint32_t       len;
+    int            derived;    /* made by cap_derive_task (#937) */
+    uint64_t       family;     /* the provisioned task's lineage (#937) */
 };
 
 static struct cap_manifest_slot g_table[CAP_MANIFEST_TABLE_SIZE];
+
+/*
+ * A family's number, given at provisioning and never given again (#937): a
+ * family outlives the task at its top, whose port name a new task may take.
+ */
+static uint64_t g_next_family = 1;
 
 void
 cap_manifest_table_init(void)
@@ -100,14 +120,57 @@ cap_manifest_validate(const void *blob, uint32_t blob_len,
 /*  Install / lookup                                                    */
 /* ------------------------------------------------------------------ */
 
+/*
+ * May a child of `parent' take a derived slot (#937)?  Answers the parent's
+ * family in *family when it may.  `self' is the port being installed: a
+ * re-install on its name gives its own slot up, so that slot is not counted.
+ */
+static int
+may_derive(mach_port_t parent, mach_port_t self, uint64_t *family)
+{
+    const struct cap_manifest_slot *p = NULL;
+    unsigned all = 0, mine = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == parent)
+            p = &g_table[i];
+    if (p == NULL)
+        return CAP_ERR_NOT_DELEGABLE;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++) {
+        if (!g_table[i].in_use || !g_table[i].derived ||
+            g_table[i].port == self)
+            continue;
+        all++;
+        if (g_table[i].family == p->family)
+            mine++;
+    }
+    if (mine >= CAP_MANIFEST_FAMILY_MAX)
+        return CAP_ERR_LINEAGE_FULL;
+    if (all >= CAP_MANIFEST_DERIVED_QUOTA)
+        return CAP_ERR_DERIVED_QUOTA;
+    *family = p->family;
+    return CAP_ERR_NONE;
+}
+
 int
 cap_manifest_table_install(mach_port_t task_cap_port,
                            mach_port_t task_port,
+                           mach_port_t parent_cap_port,
                            const void *blob, uint32_t blob_len)
 {
     int slot = -1;
     int i;
     void *copy;
+    uint64_t family = 0;
+    int derived = MACH_PORT_VALID(parent_cap_port);
+
+    if (derived) {
+        int rc = may_derive(parent_cap_port, task_cap_port, &family);
+
+        if (rc != CAP_ERR_NONE)
+            return rc;
+    }
 
     for (i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++) {
         if (!g_table[i].in_use) {
@@ -130,11 +193,15 @@ cap_manifest_table_install(mach_port_t task_cap_port,
         return CAP_ERR_NO_MEMORY;
     memcpy(copy, blob, blob_len);
 
-    g_table[slot].in_use = 1;
-    g_table[slot].port   = task_cap_port;
-    g_table[slot].task   = task_port;
-    g_table[slot].blob   = copy;
-    g_table[slot].len    = blob_len;
+    if (!derived)
+        family = g_next_family++;
+    g_table[slot].in_use  = 1;
+    g_table[slot].port    = task_cap_port;
+    g_table[slot].task    = task_port;
+    g_table[slot].blob    = copy;
+    g_table[slot].len     = blob_len;
+    g_table[slot].derived = derived;
+    g_table[slot].family  = family;
     return CAP_ERR_NONE;
 }
 
@@ -163,6 +230,47 @@ unsigned
 cap_manifest_table_size(void)
 {
     return CAP_MANIFEST_TABLE_SIZE;
+}
+
+unsigned
+cap_manifest_table_derived(void)
+{
+    unsigned n = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].derived)
+            n++;
+    return n;
+}
+
+unsigned
+cap_manifest_table_derived_quota(void)
+{
+    return CAP_MANIFEST_DERIVED_QUOTA;
+}
+
+unsigned
+cap_manifest_table_family(mach_port_t task_cap_port)
+{
+    const struct cap_manifest_slot *s = NULL;
+    unsigned n = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == task_cap_port)
+            s = &g_table[i];
+    if (s == NULL)
+        return 0;
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].derived &&
+            g_table[i].family == s->family)
+            n++;
+    return n;
+}
+
+unsigned
+cap_manifest_table_family_max(void)
+{
+    return CAP_MANIFEST_FAMILY_MAX;
 }
 
 mach_port_t
