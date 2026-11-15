@@ -43,6 +43,29 @@ add_custom_command(
 )
 set_source_files_properties(${PROC_USER_C} ${PROC_USER_H} PROPERTIES GENERATED TRUE)
 
+# #931: the server half of exc.defs, for exceptions.c -- the demultiplexer and
+# the three catch_ routines it calls, which exceptions.c writes.  It used to
+# come from libmach_core, which keeps user halves only now: a server half calls
+# routines its server writes, and in a program of musl the server of its
+# exceptions is this library.
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    )
+set(PU_EXC_GENERATED)
+add_mig_userland_server(${UROS_UAPI_DIR}/mach/exc.defs
+                        ${CMAKE_CURRENT_BINARY_DIR}/mig PU_EXC)
+# Measured, as for the stubs below: under this library's -Wall -Wextra the
+# server half emits exactly two classes, three times each, both from migcom's
+# template and neither a defect -- the routine table keeps each catch_ routine
+# as a kern_return_t (*)(void) it never calls through (the demultiplexer calls
+# the _X stub, which calls the routine with its own type), and leaves each
+# descriptor's last field, max_reply_msg, to its zero.  libmach compiled the
+# same file without -Wextra and never saw them.
+set_source_files_properties(${PU_EXC_GENERATED} PROPERTIES
+  COMPILE_OPTIONS "-Wno-cast-function-type;-Wno-missing-field-initializers"
+)
+
 # Phase 5 (#254): exec_server client stubs.  Same pattern as proc.defs
 # above — generated locally, linked into libposix-uros, so any musl-
 # linked server gets execve() routing through us.
@@ -148,6 +171,7 @@ set(LIBPOSIX_UROS_SRCS
   ${PROC_USER_C}
   ${EXEC_USER_C}
   ${CHAR_USER_C}
+  ${PU_EXC_GENERATED}
   ${UROS_TARGET_ARCH}/posix_tls.c
   ${UROS_TARGET_ARCH}/fork_capture.S
   ${UROS_TARGET_ARCH}/clone_trampoline.S

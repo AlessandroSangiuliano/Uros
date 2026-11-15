@@ -93,13 +93,15 @@ function(uros_add_libmach_core LIB_SOURCES)
   # path.
   list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/generated/asm/(memset|memcpy|ffs|gcc|fork|bzero)\\.s\\.S$")
 
-  # #917: the server halves of three interfaces.  A server half calls
-  # routines its server writes -- do_bootstrap_*, do_mach_notify_*,
-  # ds_device_* -- and every program that demultiplexes one of these links
-  # libmach in full, so here they were 25 names nothing defines, among which
-  # three real omissions went unseen.  A server of musl generates its own half
-  # from the .defs, as #931 asks of every server, in libmach as well.
-  list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/(bootstrap|notify|device)_server\\.c$")
+  # #917, #931: no server half MIG generated.  A server half calls routines
+  # its server writes -- do_bootstrap_*, do_mach_notify_*, ds_device_* were 25
+  # names nothing defined here, among which #917's three real omissions went
+  # unseen -- so the program that answers an interface generates that half in
+  # its own build (add_mig_userland_server); libposix-uros does it for the
+  # exceptions of every program of musl.  On x86-64 libmach no longer has any
+  # to filter; i386's libmach is made by its own path, which keeps them.
+  # (mach_msg_server.c is libmach's own receive loop, not a MIG half.)
+  list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/generated/[^/]*_server\\.c$")
 
   add_library(libmach_core STATIC ${LIBMACH_CORE_SOURCES})
   add_dependencies(libmach_core mig_device_header mig_mach_public_headers)
@@ -169,6 +171,29 @@ function(uros_add_libmach_core LIB_SOURCES)
     $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
   target_include_directories(libmach_export_objs PRIVATE
     $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
+
+  # #931: no server half MIG generated in either archive, checked each time
+  # one is made.  The check first reads a canary made to fail it, so that a
+  # check gone blind stops the build as well.
+  uros_add_mig_server_half_check(libmach_core)
+  uros_add_mig_server_half_check(libmach_core-pic)
+endfunction()
+
+# #931: fail the build if a MIG server half is a member of LIB's archive.
+function(uros_add_mig_server_half_check LIB)
+  if(NOT TARGET mig_server_half_check_canary)
+    add_library(mig_server_half_check_canary OBJECT
+      ${CMAKE_CURRENT_SOURCE_DIR}/check/mig_server_half_check_canary.c)
+    target_compile_options(mig_server_half_check_canary PRIVATE ${UROS_ARCH_FLAGS})
+  endif()
+  add_dependencies(${LIB} mig_server_half_check_canary)
+  add_custom_command(TARGET ${LIB} POST_BUILD
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check/mig_server_half_check.sh --must-refuse
+            ${CMAKE_NM} $<TARGET_OBJECTS:mig_server_half_check_canary>
+    COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/check/mig_server_half_check.sh
+            ${CMAKE_NM} $<TARGET_FILE:${LIB}>
+    VERBATIM
+  )
 endfunction()
 
 # ===========================================================================
@@ -275,9 +300,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # naming the wrong number rather than sending it.
     ${_U}/mach_debug/mach_debug.defs
   )
+  # #931: the user halves only.  A server half calls routines its server
+  # writes, so the program that answers an interface generates that half in
+  # its own build (add_mig_userland_server): seven of these eleven halves were
+  # interfaces only the kernel serves, linked against their own user stubs,
+  # and the other four were taken by programs that could make their own.
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)
-    add_mig_userland(${d} ${_MIG_OUT} LIBMACH_MIG)
+    add_mig_userland_client(${d} ${_MIG_OUT} LIBMACH_MIG)
   endforeach()
 
   # #169: published under the names consumers actually include.
@@ -285,13 +315,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   file(MAKE_DIRECTORY "${_PUB}")
   # ⚠️ i386 publishes eighteen of these and this published nine, which is not a
   # judgement about what the target needs -- it is the list that happened to be
-  # written when only libmach itself consumed them.  bootstrap wants two more:
-  # the SERVER half of bootstrap.defs, which it demultiplexes, and mach_klog.
+  # written when only libmach itself consumed them.  bootstrap wanted mach_klog.
+  # #931: and no server header -- a server generates its half, header included,
+  # in its own build.
   set(_PUB_MAP  mach_interface.h mach_interface.h  mach_port.h mach_port.h
                 mach_host.h mach_host.h  clock.h clock.h
                 bootstrap.h bootstrap.h  exc.h exc_user.h
-                exc_server.h exc_server.h  notify_server.h notify_server.h
-                bootstrap_server.h bootstrap_server.h
                 mach_klog.h mach_klog.h
                 sync.h sync.h)
   # device/device.h goes under its own directory, which is how it is spelled.
@@ -432,6 +461,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include)
+
+  # #931: user halves only, checked each time the archive is made.  Here and
+  # not in the half below: i386's libmach is generated by its own path and
+  # keeps its server halves.
+  uros_add_mig_server_half_check(libmach)
 
   # The musl half (#414), from the list the target above is built from, and
   # with no bzero object: that one exists for a libmach with no assembly, and

@@ -79,7 +79,7 @@
 #include <mach.h>
 #include <mach/message.h>
 #include <mach/notify.h>
-#include <mach/notify_server.h>
+#include "notifyServer.h"	/* this program's own server half (#931) */
 #include <mach/mig_errors.h>
 #include "serviceServer.h"
 
