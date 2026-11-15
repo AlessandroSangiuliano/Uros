@@ -106,12 +106,17 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 # The entries, one per line: number, verdict, extra run-x86_64.sh options, and
 # the processor count when it is not the run's.  @char among the options boots
 # the char build instead of the build the run was given (#765; side_build
-# below).
+# below), and @ush the ush build, typed at by scripts/ush-x86_64.py instead of
+# booted by run-x86_64.sh (#952).
 #   harness   the harness's own verdict: "passed: reached the end, nothing unexplained"
 #   char      the harness's verdict, of the char build: COM1 handed over to
 #             char_server, its klog forwarder started, and char_test's count of
 #             arms -- what "harness" would pass a build without char_server
 #             on, since nothing asks for them there (#765)
+#   ush       ush-x86_64.py's count, of the ush build: every command it types
+#             at the prompt printed its lines and gave the prompt back -- a
+#             program's stdout on the controlling terminal, fork and execve
+#             from a shell, a forked child's write on its terminal (#952)
 #   stop13    the name server stops at service_checkin, which grub.cfg says is
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in.  Since #744 it checks in on its
@@ -175,6 +180,7 @@ ENTRIES="
 14 harness - 1
 14 harness --socket1-cpu 1,sockets=2,cores=64,maxcpus=128
 14 char @char
+14 ush @ush
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
@@ -494,6 +500,14 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aq "char_server: forwarding the kernel's klog to the tty it now owns" "$f" &&
 		out=$(grep -aoE 'char_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		[ -n "$out" ] && NOTE=$out ;;
+	# #952: the ush build, typed at by ush-x86_64.py.  Its count is the
+	# verdict, every command of its list answered and at least one: a
+	# session that stopped at a command says fewer, and one that never got
+	# to the prompt says none.
+	ush) out=$(grep -aoE '^ush-x86_64: [0-9]+ of [0-9]+ commands answered' "$h" | tail -n 1) &&
+		[ -n "$out" ] && out=${out#ush-x86_64: } &&
+		[ "${out%% *}" -gt 0 ] && [ "${out%% *}" = "$(echo "$out" | cut -d' ' -f3)" ] &&
+		NOTE=$out ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/mig) bad request message ID' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ||
 		alone_ok "$n" "$h" "$f" 'ioapic_race: NOT ASKED — alone' ;;
@@ -689,11 +703,17 @@ fi
 # with its log, and not as a boot that did not run.  A count of warnings means
 # something only of a build from nothing, which the first run here is.
 #
-# #952: made by side_build(), a build beside the given one with its options
-# but for the ones it names, so that another can be made beside it the same way.
+# #952: the ush build is the char build and one more option, UROS_BUNDLE_USH:
+# its bundle boots to ush on the serial line, and an entry marked @ush is not
+# booted by run-x86_64.sh but typed at by scripts/ush-x86_64.py -- the one run
+# that goes through a controlling terminal, which no other entry here had.
+# Both are made by side_build(), so that what one is configured with the other
+# is too, but for the options it names.
 MAIN_BUILD=${UROS_BUILD_DIR:-$HERE/uros/build-x86_64}
 CHAR_BUILD=$MAIN_BUILD-char
 CHAR_REFUSED=""
+USH_BUILD=$MAIN_BUILD-ush
+USH_REFUSED=""
 SIDE_REFUSED=""
 side_build() {	# directory word what-it-turns-on -Doption...
 	local dir=$1 word=$2 what=$3 cache=$MAIN_BUILD/CMakeCache.txt
@@ -754,6 +774,12 @@ if marked char; then
 	CHAR_REFUSED=$SIDE_REFUSED
 	[ -z "$CHAR_REFUSED" ] || echo "merge-test: $CHAR_REFUSED -- the entries marked @char are WRONG, not run" >&2
 fi
+if marked ush; then
+	side_build "$USH_BUILD" ush "char_server and the ush bundle" \
+		-DOSFMK_BUILD_CHAR_SERVER=ON -DUROS_BUNDLE_USH=ON
+	USH_REFUSED=$SIDE_REFUSED
+	[ -z "$USH_REFUSED" ] || echo "merge-test: $USH_REFUSED -- the entries marked @ush are WRONG, not run" >&2
+fi
 echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}${STUB:+, gdb stub on every run}"
 echo "$SKIPPED" | sed '/^$/d; s/^/merge-test: not run -- /'
 [ ${#SAME[@]} -eq 0 ] || printf 'merge-test: booted once -- %s (#776)\n' "${SAME[@]}"
@@ -771,11 +797,18 @@ for boot in "${PLAN[@]}"; do
 		side=char
 		refused=$CHAR_REFUSED
 		opt=$(echo " $opt " | sed 's/ @char / /; s/^ *//; s/ *$//')
+	elif [[ " $opt " == *" @ush "* ]]; then
+		build=$USH_BUILD
+		side=ush
+		refused=$USH_REFUSED
+		opt=$(echo " $opt " | sed 's/ @ush / /; s/^ *//; s/ *$//')
 	fi
 	for a in $ACCS; do
 		budget=1200
 		k=""
-		[ $a = kvm ] && { budget=600; k="--kvm"; }
+		# ush-x86_64.py's wait for each line a command prints (#952).
+		wait=300
+		[ $a = kvm ] && { budget=600; k="--kvm"; wait=120; }
 		tag=$(boot_name "$e" "$a" "$n" "$shown")
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
@@ -792,8 +825,19 @@ for boot in "${PLAN[@]}"; do
 			continue
 		fi
 		rc=0
+		runner=run-x86_64.sh
+		[ "$side" = ush ] && runner=ush-x86_64.py
+		# #952: an @ush entry is typed at, not judged by the harness:
+		# ush-x86_64.py boots the ush build, waits for the prompt and the
+		# root disk, and types its commands.  Its exit statuses are the
+		# harness's -- 0, 1, and 2 for a run it could not make -- and the
+		# line it carried is the full log.
 		( cd "$HERE" || exit 2
 		  [ -z "$build" ] || export UROS_BUILD_DIR=$build
+		  if [ "$side" = ush ]; then
+			exec ./scripts/ush-x86_64.py --build "$build" $k --entry "$e" --smp "$n" \
+				--budget "$budget" --wait "$wait" --log "$f"
+		  fi
 		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?
 		# A run not made is WRONG, and says which: not started (2), qemu
 		# never ran or said nothing (3), stopped by a signal (above 128) --
@@ -802,10 +846,10 @@ for boot in "${PLAN[@]}"; do
 		# words "did not run, " and names its harness log, the only one.
 		notrun=""
 		case $rc in
-		2)	notrun="run-x86_64.sh did not start: $(grep -av '^ *$' "$h" | tail -n 1 | sed 's/^ *//; s/^run-x86_64.sh: //')" ;;
+		2)	notrun="$runner did not start: $(grep -av '^ *$' "$h" | tail -n 1 | sed 's/^ *//; s/^run-x86_64.sh: //; s/^ush-x86_64: //')" ;;
 		3)	notrun="qemu never ran, or said nothing" ;;
 		129|1[3-9][0-9]|2[0-5][0-9])
-			notrun="run-x86_64.sh was stopped by SIG$(kill -l $((rc - 128)) 2>/dev/null || echo $((rc - 128)))" ;;
+			notrun="$runner was stopped by SIG$(kill -l $((rc - 128)) 2>/dev/null || echo $((rc - 128)))" ;;
 		*)	[ -e "$f" ] || notrun="no full log was written" ;;
 		esac
 		if [ -n "$notrun" ]; then
