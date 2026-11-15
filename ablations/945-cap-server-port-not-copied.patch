@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #945
+Takes out: fork()'s copy of cap_server's well-known port into the child (37b76fbc) -- the child's fallback names its parent's
+Run: --entry 14 600 -smp 4
+Expect: fork_cap_test: \[2\] WRONG -- the child did not end in 10 s: its request was never answered
+
+diff --git a/uros/src/lib/libposix-uros/posix_fork.c b/uros/src/lib/libposix-uros/posix_fork.c
+--- a/uros/src/lib/libposix-uros/posix_fork.c
++++ b/uros/src/lib/libposix-uros/posix_fork.c
+@@ -249,7 +249,6 @@
+      * asks when there is no per-task port, and the child never has one:
+      * without it the child's requests went to whatever its name named.
+      */
+-    inherit_send_right(mach_task_self(), child_task, urmach_cap_server_port);
+     inherit_send_right(mach_task_self(), child_task, environment_port);
+     inherit_send_right(mach_task_self(), child_task, service_port);
+     inherit_send_right(mach_task_self(), child_task, __uros_proc_port);
