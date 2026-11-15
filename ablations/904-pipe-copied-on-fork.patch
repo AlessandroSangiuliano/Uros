@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #904
+Takes out: the region's shared inheritance -- vm_allocate()'s copy-on-write is left, so a forked child writes and reads a copy of the pipe of its own: musl_test's [34] must find its writer and its reader both still blocked after 60 s
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[34\] WRONG -- .*2 of 2 still there after 60 s
+
+diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
+index 6dc7bf93..49f7c1a0 100644
+--- a/uros/src/lib/libposix-uros/posix_pipe.c
++++ b/uros/src/lib/libposix-uros/posix_pipe.c
+@@ -479,9 +479,8 @@ __uros_pipe_new(struct uros_pipe **out)
+ 	 */
+ 	ch->mapped_size = PIPE_CHANNEL_SIZE;
+ 	/* What fork() shares instead of copying (task_create's inherit). */
+-	if (vm_inherit(mach_task_self(), (vm_address_t)ch->hdr,
+-		       PIPE_CHANNEL_SIZE, VM_INHERIT_SHARE) != KERN_SUCCESS ||
+-	    ch->hdr->data_size < PIPE_SHARED + PIPE_RING) {
++	/* 904-pipe-copied-on-fork: the region inherited as vm_allocate left it */
++	if (ch->hdr->data_size < PIPE_SHARED + PIPE_RING) {
+ 		(void)flipc2_channel_detach(ch);
+ 		return -ENOMEM;
+ 	}

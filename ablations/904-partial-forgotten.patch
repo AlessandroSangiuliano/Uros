@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #904
+Takes out: what a read took of the head descriptor -- the next read starts it again from its first byte: musl_test's [32] must read 4 bytes of a 10-byte write and then all 10
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[32\] WRONG -- 10 bytes read as 4 and 10
+
+diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
+index fc47e263..b5e102f1 100644
+--- a/uros/src/lib/libposix-uros/posix_pipe.c
++++ b/uros/src/lib/libposix-uros/posix_pipe.c
+@@ -451,7 +451,7 @@ __uros_pipe_read(struct uros_pipe *p, const struct uros_pipe_iov *iov,
+ 			flipc2_consume_release(ch);
+ 			room_made(sh);
+ 		} else {
+-			sh->partial = part;
++			sh->partial = 0;	/* 904-partial-forgotten */
+ 		}
+ 		if (got == total)
+ 			break;

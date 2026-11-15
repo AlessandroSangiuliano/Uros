@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #897
+Takes out: dup3()'s O_CLOEXEC -- the new name is made without close-on-exec, so it crosses an exec it was asked not to cross: musl_test's [31] must see 22 in the exec'd child
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[31\] WRONG -- .*and 22 crossed
+Note: 4 of 4 caught and 4 of 4 passed at 0881d372 on OMEGA, TCG and KVM: in every ablated boot 22 answered 32 in the exec'd child, where the fixed tree's answered -1 with errno 9
+
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+index 83a25e92..db916a44 100644
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -1025,7 +1025,7 @@ long __uros_dup3(int oldfd, int newfd, int flags)
+         return -EINVAL;
+     if (oldfd == newfd)
+         return -EINVAL;
+-    return dup_onto(oldfd, newfd, flags & LX_O_CLOEXEC);
++    return dup_onto(oldfd, newfd, 0);	/* 897-dup3-no-cloexec: O_CLOEXEC dropped */
+ }
+ 
+ /*

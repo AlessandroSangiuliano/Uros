@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #904
+Over: 904-widen-late-notice.patch
+Takes out: pipe_leave -- a task that closes its last description of an end lets the token go without saying so, and pipe_server learns it from the no-senders notification, after close() has returned: [42]'s read with O_NONBLOCK right after the write end's close() answers EAGAIN where it must answer end of file
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[42\] WRONG -- in one process, 5 bytes and the write end closed: reads of 2, 3 and -1
+
+diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
+index fc47e263..5d08e2f3 100644
+--- a/uros/src/lib/libposix-uros/posix_pipe.c
++++ b/uros/src/lib/libposix-uros/posix_pipe.c
+@@ -576,7 +576,7 @@ __uros_pipe_token_put(unsigned int token)
+ {
+ 	if (token == MACH_PORT_NULL)
+ 		return;
+-	(void)pipe_leave((mach_port_t)token);
++	/* 904-leave-unsaid: the no-senders notification says it, later */
+ 	(void)mach_port_deallocate(mach_task_self(), (mach_port_t)token);
+ }
+ 

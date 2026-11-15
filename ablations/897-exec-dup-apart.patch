@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #897
+Takes out: the new image's reading of same_as -- each record is opened again, a dup() among them too, as every image did before: two names of one description come out of the exec with an offset each, and musl_test's [31] must see a read on 20 leave 21 where it was
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[31\] WRONG -- .*a read on 20 left 21 where it was
+Note: 4 of 4 caught and 4 of 4 passed at 0881d372 on OMEGA, TCG and KVM: in every ablated boot the exec'd child's read of 16 bytes on 20 answered 16 and left 21 at 16, where the fixed tree's moved it to 32
+
+diff --git a/uros/src/lib/libposix-uros/posix_exec_fds.c b/uros/src/lib/libposix-uros/posix_exec_fds.c
+index a3eb8113..dded81bb 100644
+--- a/uros/src/lib/libposix-uros/posix_exec_fds.c
++++ b/uros/src/lib/libposix-uros/posix_exec_fds.c
+@@ -183,15 +183,7 @@ __uros_absorb_inherited_fds(void)
+     for (i = 0; i < h->count && i < UROS_FD_HANDOFF_MAX; i++) {
+         const struct uros_fd_handoff_rec *r = &h->recs[i];
+ 
+-        /* #897: a second name of an earlier record's description.  Only an
+-         * earlier one: same_as is 1 + its index, so it is below i + 1. */
+-        if (r->same_as != 0 && r->same_as <= i) {
+-            (void)__uros_pfd_install_alias(r->posix_fd,
+-                                           h->recs[r->same_as - 1].posix_fd);
+-            continue;
+-        }
+-        if (r->same_as != 0)
+-            continue;               /* names a record at or after itself */
++        /* 897-exec-dup-apart: every record opened again, same_as or not */
+         /* #904: a pipe end, mapped from pipe_server, its token kept. */
+         if (r->type == UROS_FD_HANDOFF_FIFO) {
+             int end = (r->flags & UROS_FD_HANDOFF_PIPE_WRITE) ?

@@ -1,0 +1,28 @@
+Kind: widen
+Issue: #904
+Holds open: the time between a token's last send right going and pipe_server reading its no-senders notification -- 300 ms of thread_switch(SWITCH_OPTION_WAIT) before it acts on it, so that a read right after a close() that did not say so finds the pipe as it was
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/servers/pipe_server/pipe_server.c b/uros/src/servers/pipe_server/pipe_server.c
+index 0d5cdecd..0d3a39e3 100644
+--- a/uros/src/servers/pipe_server/pipe_server.c
++++ b/uros/src/servers/pipe_server/pipe_server.c
+@@ -53,6 +53,8 @@
+ 
+ #include "pipe_server.h"	/* MIG: pipe.defs */
+ #include "notify_server.h"	/* MIG: notify.defs */
++#include <mach/thread_switch.h>	/* 904-widen-late-notice */
++#include <mach/mach_syscalls.h>	/* 904-widen-late-notice */
+ 
+ _Static_assert(PIPE_HEADER_BYTES == FLIPC2_HEADER_SIZE &&
+ 	       PIPE_DESC_BYTES == FLIPC2_DESC_SIZE,
+@@ -368,6 +370,8 @@ do_mach_notify_no_senders(mach_port_t port, mach_port_mscount_t mscount)
+ 
+ 	(void)mscount;
+ 	if (t != NULL) {
++		/* 904-widen-late-notice: a token's notification read 300 ms late */
++		(void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 300);
+ 		token_gone(t);
+ 		return KERN_SUCCESS;
+ 	}

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #904
+Takes out: the pipe records of the execve handoff -- no pipe end crosses an exec, so [45]'s exec'd writer writes to the console and its exec'd reader reads a stdin that is no pipe
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[45\] WRONG -- 
+
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+index 9e2418d5..607d1e1e 100644
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -1371,6 +1371,7 @@ int __uros_pfd_enum_pipes(int *posix_fds, struct uros_pipe **pipes, int *ends,
+         if (o == NULL || !OFD_IS_PIPE(o->kind) || pfds[i].cloexec ||
+             o->pipe->port == 0 || o->pipe->token[OFD_PIPE_END(o->kind)] == 0)
+             continue;
++        continue;   /* 904-pipes-stay-behind */
+         posix_fds[n] = i;
+         pipes[n]     = o->pipe;
+         ends[n]      = OFD_PIPE_END(o->kind);

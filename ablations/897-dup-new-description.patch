@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #897
+Takes out: the description dup() shares -- dup(), dup2() and dup3() give the new name a description of its own with the same libvfs fd, as a table of one description per descriptor would: closing the first name closes the file under the second, and musl_test's [30] must find the dup unable to seek once the first name is closed
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[30\] WRONG -- .*with [0-9]+ closed, [0-9]+ was at -1
+Note: 4 of 4 caught and 4 of 4 passed at 0881d372 on OMEGA, TCG and KVM: with the first name closed, the dup's lseek() answered -1 in every ablated boot, where the fixed tree's answered 16; the same boots' [31] found the exec'd child's 20 and 21 at -1 as well, as dup2()'s names had descriptions of their own and the first close closed the file under them
+
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+index bf883ed8..1c97e5c7 100644
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -879,7 +879,9 @@ static long dup_onto(int oldfd, int newfd, int cloexec)
+     }
+     if (pfds[newfd].ofd != NULL)
+         freed = pfd_unbind_locked(newfd, &gone);
+-    pfd_bind_locked(newfd, o, cloexec);
++    /* 897-dup-new-description: a description of its own for the new name */
++    struct posix_ofd *copy = ofd_alloc_locked(o->kind, o->vfd, o->tty_dev_id);
++    pfd_bind_locked(newfd, copy != NULL ? copy : o, cloexec);
+     pthread_mutex_unlock(&pfd_lock);
+     if (freed)
+         ofd_release(&gone);
+@@ -901,7 +903,9 @@ long __uros_dup(int oldfd)
+         pthread_mutex_unlock(&pfd_lock);
+         return -EMFILE;
+     }
+-    pfd_bind_locked(fd, o, 0);
++    /* 897-dup-new-description: a description of its own for the new name */
++    struct posix_ofd *copy = ofd_alloc_locked(o->kind, o->vfd, o->tty_dev_id);
++    pfd_bind_locked(fd, copy != NULL ? copy : o, 0);
+     pthread_mutex_unlock(&pfd_lock);
+     return fd;
+ }

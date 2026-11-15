@@ -80,6 +80,10 @@ extern long __uros_write(int fd, const void *buf, size_t count);
 extern long __uros_readv(int fd, const void *iov, int iovcnt);
 extern long __uros_writev(int fd, const void *iov, int iovcnt);
 extern long __uros_close(int fd);
+extern long __uros_dup(int oldfd);				/* #897 */
+extern long __uros_dup2(int oldfd, int newfd);			/* #897 */
+extern long __uros_dup3(int oldfd, int newfd, int flags);	/* #897 */
+extern long __uros_pipe2(int *fds, int flags);			/* #904 */
 #ifdef SYS__llseek
 extern long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
                           void *result, unsigned int whence);
@@ -212,6 +216,43 @@ static long h_close(long fd, long a2, long a3,
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
     return __uros_close((int)fd);
+}
+
+/* #897: a second descriptor for what one names, in posix_fd.c. */
+static long h_dup(long oldfd, long a2, long a3,
+                  long a4, long a5, long a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_dup((int)oldfd);
+}
+
+static long h_dup2(long oldfd, long newfd, long a3,
+                   long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_dup2((int)oldfd, (int)newfd);
+}
+
+static long h_dup3(long oldfd, long newfd, long flags,
+                   long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return __uros_dup3((int)oldfd, (int)newfd, (int)flags);
+}
+
+/* #904: a pipe, in posix_pipe.c through posix_fd.c. */
+static long h_pipe(long fds, long a2, long a3,
+                   long a4, long a5, long a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_pipe2((int *)fds, 0);
+}
+
+static long h_pipe2(long fds, long flags, long a3,
+                    long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_pipe2((int *)fds, (int)flags);
 }
 
 #ifdef SYS__llseek
@@ -869,6 +910,11 @@ static const struct entry table[] = {
     { SYS_write,            h_write           },
     { SYS_open,             h_open            },
     { SYS_close,            h_close           },
+    { SYS_dup,              h_dup             },	/* #897 */
+    { SYS_dup2,             h_dup2            },	/* #897 */
+    { SYS_dup3,             h_dup3            },	/* #897 */
+    { SYS_pipe,             h_pipe            },	/* #904 */
+    { SYS_pipe2,            h_pipe2           },	/* #904 */
 #ifdef SYS_waitpid
     { SYS_waitpid,          h_waitpid         },
 #endif

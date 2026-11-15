@@ -1,0 +1,74 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * pipe.defs -- MIG interface for pipe_server, the witness of a pipe's ends
+ * (#904).  Subsystem 3700.
+ *
+ * The bytes of a pipe never pass through here: they go through memory its
+ * holders share (libposix-uros/posix_pipe.c).  pipe_server learns, by the
+ * death of tokens, that the last holder of an end has let it go or died, and
+ * says so in the pipe's shared page: end of file, EPIPE.
+ *
+ * pipe_register goes to the service port, which the name server knows as
+ * "pipe_server".  pipe_token and pipe_entry go to the pipe's own port, the
+ * answer of pipe_register: holding it is what lets a task ask for the pipe.
+ *
+ * Routines are appended at the end only: MIG numbers them by position.
+ */
+
+subsystem
+#if	KERNEL_SERVER
+	  KernelServer
+#endif	/* KERNEL_SERVER */
+		       pipe 3700;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+serverprefix		pipe_S_;
+serverstripprefix	pipe_;
+
+/*
+ * A pipe this task made, by the memory entry of its channel
+ * (flipc2_channel_make_entry(): one read-write segment, a flat channel's).
+ * size is the size the channel was made with.  The answer is a send right
+ * to the pipe's port, which names the pipe from now on.
+ */
+routine pipe_register(
+		server		: mach_port_t;
+		entry		: mach_port_move_send_t;
+		size		: natural_t;
+	out	pipe		: mach_port_make_send_t);
+
+/*
+ * This task's hold on one end of the pipe (PIPE_END_READ or PIPE_END_WRITE),
+ * for the process pid: a send right whose death -- the end let go, or the task
+ * gone -- pipe_server learns from its no-senders notification.  One per task,
+ * pipe and end.  A forked child is given its own, for its own pid.
+ */
+routine pipe_token(
+		pipe		: mach_port_t;
+		end		: int;
+		pid		: int;
+	out	token		: mach_port_make_send_t);
+
+/*
+ * The channel's memory entry, for a task that holds the pipe without having
+ * it mapped: the image an execve() made.
+ */
+routine pipe_entry(
+		pipe		: mach_port_t;
+	out	entry		: mach_port_copy_send_t);
+
+/*
+ * The holder of this token leaves its end, now: sent to the token itself by
+ * a task that closes its last description of the end.  The no-senders
+ * notification would say the same, but later than close() returns, and a
+ * read with O_NONBLOCK right after the last writer's close() must answer end
+ * of file, not EAGAIN.  The token is gone when this returns.
+ */
+routine pipe_leave(
+		token		: mach_port_t);

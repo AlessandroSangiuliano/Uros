@@ -243,6 +243,26 @@ __uros_spawn(const char *path,
                         (void)mach_port_insert_right(new_task, name,
                                                      right, acq);
                 }
+                /*
+                 * #904: a pipe end's token, under the name its record keeps
+                 * in handle: the pipe's port went above, once a pipe, and
+                 * its two ends' tokens differ.  A copy: this task's goes
+                 * when it dies, and the new image's keeps the end held,
+                 * for the same process.
+                 */
+                for (i = 0; i < nfd; i++) {
+                    mach_port_t name = (mach_port_t)blob.recs[i].handle;
+                    mach_port_t right = MACH_PORT_NULL;
+                    mach_msg_type_name_t acq = 0;
+                    if (blob.recs[i].type != UROS_FD_HANDOFF_FIFO ||
+                        blob.recs[i].same_as != 0 || name == MACH_PORT_NULL)
+                        continue;
+                    if (mach_port_extract_right(mach_task_self(), name,
+                            MACH_MSG_TYPE_COPY_SEND, &right, &acq)
+                        == KERN_SUCCESS)
+                        (void)mach_port_insert_right(new_task, name,
+                                                     right, acq);
+                }
                 (void)vm_write(new_task, (vm_address_t)EXEC_FD_HANDOFF_VA,
                                (vm_offset_t)&blob, sizeof blob);
             }

@@ -34,9 +34,13 @@
 #include <mach/thread_switch.h>	/* SWITCH_OPTION_WAIT (#583) */
 #include <mach/mach_syscalls.h>	/* syscall_thread_switch (#583) */
 
+#include "posix_pipe.h"         /* pipes (#904) */
+#include "pipe_types.h"         /* PIPE_END_READ, PIPE_END_WRITE (#904) */
+
 /* From signals.c: proc_server send right + caller's pid. */
 extern mach_port_t  __uros_proc_port;
 extern unsigned int __uros_my_pid;
+extern int          __uros_kill(unsigned int pid, int signo);  /* SIGPIPE (#904) */
 
 /* char_server send right — resolved lazily via netname on first /dev/tty
  * open.  Shared with the tty fd I/O path below. */
@@ -69,9 +73,17 @@ static mach_port_t char_port_resolve(void)
 #define LX_O_EXCL       0200
 #define LX_O_TRUNC     01000
 #define LX_O_APPEND    02000
+#define LX_O_NONBLOCK  04000
 #define LX_O_DIRECTORY 0200000
 #define LX_O_NOFOLLOW  0400000
 #define LX_O_CLOEXEC  02000000
+
+/* struct iovec on Linux: { void *iov_base; size_t iov_len; }. */
+struct uros_iovec { unsigned long base; unsigned long len; };
+_Static_assert(sizeof(struct uros_iovec) == sizeof(struct uros_pipe_iov) &&
+               offsetof(struct uros_iovec, len) ==
+               offsetof(struct uros_pipe_iov, len),
+               "a writev()'s pieces go to posix_pipe.c as they are");
 
 /* statx / *at flags we recognise. */
 #define LX_AT_FDCWD            (-100)
@@ -94,16 +106,52 @@ static mach_port_t char_port_resolve(void)
 
 #define POSIX_OPEN_MAX  64
 
-struct posix_fd {
-    int       in_use;
-    int       is_console;   /* 0/1/2 — routed to mach_print, never vfs */
-    int       is_tty;       /* /dev/tty — routed to char_server (#275.4-bis) */
-    int       cloexec;      /* close on execve */
-    int       std_probed;   /* 0/1/2 — tried to bind to the session ctty (#286) */
-    vfs_fd_t  vfd;          /* underlying libvfs fd (-1 for console/tty) */
-    unsigned  tty_dev_id;   /* char_server dev_id for is_tty fds */
+/*
+ * 🔑 A DESCRIPTOR NAMES AN OPEN FILE DESCRIPTION, AND dup() GIVES THE SAME
+ * DESCRIPTION A SECOND NAME (#897).
+ *
+ * POSIX keeps the two apart.  The descriptor is a number with one flag of its
+ * own, close-on-exec.  The open file description is what open() made: here
+ * the libvfs fd and its offset, or the terminal it reaches.  dup(), dup2()
+ * and dup3() give one description a second number, so both numbers read and
+ * write at one offset, and the file closes when the last of them does.  This
+ * table kept one description per descriptor, so dup could not be written.
+ *
+ * At most one description per descriptor is ever alive, so the two tables
+ * are the same length and a free descriptor always finds a free description.
+ */
+enum ofd_kind {
+    OFD_FREE = 0,
+    OFD_CONSOLE,            /* mach_print; a read finds nothing */
+    OFD_TTY,                /* char_server's tty (#275.4-bis) */
+    OFD_VFS,                /* a libvfs fd */
+    OFD_PIPE_READ,          /* a pipe's read end (#904, posix_pipe.c) */
+    OFD_PIPE_WRITE,         /* and its write end */
 };
 
+#define OFD_IS_PIPE(k)  ((k) == OFD_PIPE_READ || (k) == OFD_PIPE_WRITE)
+/* The end a pipe description is, as pipe_server names it (pipe_types.h). */
+#define OFD_PIPE_END(k) ((k) == OFD_PIPE_WRITE ? PIPE_END_WRITE : PIPE_END_READ)
+
+struct posix_ofd {
+    int       refs;         /* descriptors of this task naming it; 0 = free */
+    int       kind;         /* enum ofd_kind */
+    int       std_probed;   /* console: tried to bind to the session ctty (#286) */
+    int       nonblock;     /* O_NONBLOCK, a flag of the description (#904) */
+    vfs_fd_t  vfd;          /* OFD_VFS; VFS_FD_INVALID otherwise */
+    unsigned  tty_dev_id;   /* OFD_TTY: char_server's dev_id */
+    struct uros_pipe *pipe; /* OFD_PIPE_*: holds one of the pipe's refs */
+    unsigned  token;        /* a freed description's copy only: the token of
+                               its end, to give back when it was the end's
+                               last (#904), or 0 */
+};
+
+struct posix_fd {
+    struct posix_ofd *ofd;  /* NULL: the number is free */
+    int       cloexec;      /* close on execve, the descriptor's own flag */
+};
+
+static struct posix_ofd ofds[POSIX_OPEN_MAX];
 static struct posix_fd  pfds[POSIX_OPEN_MAX];
 static pthread_mutex_t  pfd_lock = PTHREAD_MUTEX_INITIALIZER;
 static int              pfd_inited;
@@ -112,22 +160,129 @@ static void pfd_init_locked(void)
 {
     if (pfd_inited)
         return;
+    memset(ofds, 0, sizeof(ofds));
     memset(pfds, 0, sizeof(pfds));
     for (int i = 0; i < 3; i++) {
-        pfds[i].in_use     = 1;
-        pfds[i].is_console = 1;
-        pfds[i].vfd        = VFS_FD_INVALID;
+        ofds[i].refs = 1;
+        ofds[i].kind = OFD_CONSOLE;
+        ofds[i].vfd  = VFS_FD_INVALID;
+        pfds[i].ofd  = &ofds[i];
     }
     pfd_inited = 1;
 }
 
-/* Allocate the lowest free POSIX fd >= 3.  Caller holds pfd_lock. */
-static int pfd_alloc_locked(void)
+/* The lowest free descriptor >= from, or -1.  Caller holds pfd_lock. */
+static int pfd_alloc_locked(int from)
 {
-    for (int i = 3; i < POSIX_OPEN_MAX; i++)
-        if (!pfds[i].in_use)
+    for (int i = from; i < POSIX_OPEN_MAX; i++)
+        if (pfds[i].ofd == NULL)
             return i;
     return -1;
+}
+
+/* A free description, set up as `kind` with no descriptor naming it yet.
+ * Caller holds pfd_lock. */
+static struct posix_ofd *ofd_alloc_locked(int kind, vfs_fd_t vfd,
+                                          unsigned tty_dev_id)
+{
+    for (int i = 0; i < POSIX_OPEN_MAX; i++) {
+        struct posix_ofd *o = &ofds[i];
+        if (o->refs != 0)
+            continue;
+        o->kind       = kind;
+        o->std_probed = 0;
+        o->nonblock   = 0;
+        o->vfd        = vfd;
+        o->tty_dev_id = tty_dev_id;
+        o->pipe       = NULL;
+        o->token      = 0;
+        return o;
+    }
+    return NULL;
+}
+
+/* Make descriptor `fd`, which is free, name `o`.  Caller holds pfd_lock. */
+static void pfd_bind_locked(int fd, struct posix_ofd *o, int cloexec)
+{
+    o->refs++;
+    pfds[fd].ofd     = o;
+    pfds[fd].cloexec = cloexec ? 1 : 0;
+}
+
+/*
+ * Free descriptor `fd`, which is in use.  When it was the last name of its
+ * description, the description is freed too and copied to *gone, so that the
+ * caller can close its libvfs fd once pfd_lock is dropped (#262: no vfs_*
+ * call under this lock).  Returns 1 then, else 0.  Caller holds pfd_lock.
+ */
+static int pfd_unbind_locked(int fd, struct posix_ofd *gone)
+{
+    struct posix_ofd *o = pfds[fd].ofd;
+
+    pfds[fd].ofd     = NULL;
+    pfds[fd].cloexec = 0;
+    if (--o->refs > 0)
+        return 0;
+    *gone = *o;
+    /* #904: the end's token goes back when this was the task's last
+     * description of the end, so that pipe_server counts one holder of it
+     * fewer.  And a pipe end gives back its hold on the pipe; *gone keeps the
+     * pipe only when that was the last, for ofd_release() to let it go. */
+    if (OFD_IS_PIPE(o->kind))
+        gone->token = __uros_pipe_end_put(o->pipe, OFD_PIPE_END(o->kind));
+    if (OFD_IS_PIPE(o->kind) && --o->pipe->refs > 0)
+        gone->pipe = NULL;
+    o->kind       = OFD_FREE;
+    o->std_probed = 0;
+    o->nonblock   = 0;
+    o->vfd        = VFS_FD_INVALID;
+    o->tty_dev_id = 0;
+    o->pipe       = NULL;
+    return 1;
+}
+
+/* What a freed description leaves to do, with pfd_lock dropped. */
+static void ofd_release(const struct posix_ofd *gone)
+{
+    if (gone->kind == OFD_VFS)
+        vfs_close(gone->vfd);
+    if (OFD_IS_PIPE(gone->kind))
+        __uros_pipe_token_put(gone->token);     /* 0: not the end's last */
+    if (OFD_IS_PIPE(gone->kind) && gone->pipe != NULL)
+        __uros_pipe_free(gone->pipe);   /* this task's last hold on it */
+    /* A console has nothing to close, and a tty has no per-open state at
+     * char_server: it tracks subscriptions, not descriptors. */
+}
+
+/*
+ * A read or write in a pipe holds the pipe, so that a close() of the last
+ * descriptor by another thread meanwhile does not unmap it under the call:
+ * the pipe goes with the last of the two.  pipe_put() lets go of what
+ * resolve_fd() took.
+ */
+struct pipe_hold {
+    struct uros_pipe *pipe;
+    int               kind;     /* OFD_PIPE_READ or OFD_PIPE_WRITE */
+    int               nonblock;
+};
+
+static void pipe_put(struct uros_pipe *p)
+{
+    int last;
+
+    pthread_mutex_lock(&pfd_lock);
+    last = --p->refs == 0;
+    pthread_mutex_unlock(&pfd_lock);
+    if (last)
+        __uros_pipe_free(p);
+}
+
+/* The description descriptor `fd` names, or NULL.  Caller holds pfd_lock. */
+static struct posix_ofd *pfd_ofd_locked(int fd)
+{
+    if (fd < 0 || fd >= POSIX_OPEN_MAX)
+        return NULL;
+    return pfds[fd].ofd;
 }
 
 /* ------------------------------------------------------------------ */
@@ -237,19 +392,29 @@ static unsigned int ctty_dev_id(void)
  * (servers, early boot) keep the console fallback.  Probed once per fd:
  * a task that has no ctty when it first writes stays on the console
  * rather than re-issuing RPCs on every write.
+ *
+ * #897: the probe belongs to the console description, not to the number:
+ * once 0, 1 or 2 is bound, a dup() of it at another number reaches the tty
+ * too, as they are one description.  Only those three ask, as they always
+ * did: every read and write comes through here, and a higher number goes on
+ * without taking pfd_lock a second time.  A dup of the console written
+ * before any of the three stays on the console until one of them is.
  */
 static void maybe_upgrade_std_fd(int fd)
 {
+    struct posix_ofd *o;
+
     if (fd < 0 || fd > 2)
         return;
 
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    if (!pfds[fd].is_console || pfds[fd].std_probed) {
+    o = pfd_ofd_locked(fd);
+    if (o == NULL || o->kind != OFD_CONSOLE || o->std_probed) {
         pthread_mutex_unlock(&pfd_lock);
         return;
     }
-    pfds[fd].std_probed = 1;
+    o->std_probed = 1;
     pthread_mutex_unlock(&pfd_lock);
 
     unsigned int dev_id = ctty_dev_id();   /* RPCs — lock dropped */
@@ -257,10 +422,11 @@ static void maybe_upgrade_std_fd(int fd)
         return;                            /* no ctty: stay on console */
 
     pthread_mutex_lock(&pfd_lock);
-    if (pfds[fd].is_console) {              /* re-check under lock */
-        pfds[fd].is_console = 0;
-        pfds[fd].is_tty     = 1;
-        pfds[fd].tty_dev_id = dev_id;
+    /* Re-check under the lock: in between, `fd` may have been closed or
+     * pointed elsewhere by dup2(), and `o` freed and handed to an open(). */
+    if (pfds[fd].ofd == o && o->kind == OFD_CONSOLE) {
+        o->kind       = OFD_TTY;
+        o->tty_dev_id = dev_id;
     }
     pthread_mutex_unlock(&pfd_lock);
 }
@@ -273,17 +439,15 @@ static long open_dev_tty(int flags)
 
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    int fd = pfd_alloc_locked();
-    if (fd < 0) {
+    int fd = pfd_alloc_locked(3);
+    struct posix_ofd *o = fd < 0 ? NULL
+                                 : ofd_alloc_locked(OFD_TTY, VFS_FD_INVALID,
+                                                    dev_id);
+    if (o == NULL) {
         pthread_mutex_unlock(&pfd_lock);
         return -EMFILE;
     }
-    pfds[fd].in_use     = 1;
-    pfds[fd].is_console = 0;
-    pfds[fd].is_tty     = 1;
-    pfds[fd].cloexec    = (flags & LX_O_CLOEXEC) ? 1 : 0;
-    pfds[fd].vfd        = VFS_FD_INVALID;
-    pfds[fd].tty_dev_id = dev_id;
+    pfd_bind_locked(fd, o, flags & LX_O_CLOEXEC);
     pthread_mutex_unlock(&pfd_lock);
     return fd;
 }
@@ -338,18 +502,14 @@ long __uros_open(const char *path, int flags, int mode)
 
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    int fd = pfd_alloc_locked();
-    if (fd < 0) {
+    int fd = pfd_alloc_locked(3);
+    struct posix_ofd *o = fd < 0 ? NULL : ofd_alloc_locked(OFD_VFS, vfd, 0);
+    if (o == NULL) {
         pthread_mutex_unlock(&pfd_lock);
         vfs_close(vfd);
         return -EMFILE;
     }
-    pfds[fd].in_use     = 1;
-    pfds[fd].is_console = 0;
-    pfds[fd].is_tty     = 0;
-    pfds[fd].cloexec    = (flags & LX_O_CLOEXEC) ? 1 : 0;
-    pfds[fd].vfd        = vfd;
-    pfds[fd].tty_dev_id = 0;
+    pfd_bind_locked(fd, o, flags & LX_O_CLOEXEC);
     pthread_mutex_unlock(&pfd_lock);
     return fd;
 }
@@ -372,43 +532,86 @@ long __uros_openat(int dirfd, const char *path, int flags, int mode)
  * fds (0/1/2 before they are redirected to real files). */
 vfs_fd_t __uros_pfd_to_vfs(int fd)
 {
-    if (fd < 0 || fd >= POSIX_OPEN_MAX) return -1;
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); return -1; }
-    int console = pfds[fd].is_console;
-    vfs_fd_t vfd = pfds[fd].vfd;
+    struct posix_ofd *o = pfd_ofd_locked(fd);
+    if (o == NULL) { pthread_mutex_unlock(&pfd_lock); return -1; }
+    int console = o->kind == OFD_CONSOLE;
+    int pipe = OFD_IS_PIPE(o->kind);
+    vfs_fd_t vfd = o->vfd;
     pthread_mutex_unlock(&pfd_lock);
-    return console ? -2 : vfd;
+    return console ? -2 : pipe ? -3 : vfd;
 }
 
 /* Resolve a POSIX fd to its libvfs fd.  Returns -1 and sets *err for an
- * invalid fd; returns -2 (with *err=0) for a console fd. */
-static vfs_fd_t resolve_fd(int fd, int *err)
+ * invalid fd; returns -2 (with *err=0) for a console fd, and -3 for a pipe
+ * end (#904), with the pipe held in *hold when the caller passes one: it
+ * then lets go with pipe_put(). */
+static vfs_fd_t resolve_fd(int fd, int *err, struct pipe_hold *hold)
 {
     *err = 0;
-    if (fd < 0 || fd >= POSIX_OPEN_MAX) { *err = -EBADF; return -1; }
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); *err = -EBADF; return -1; }
-    int special = pfds[fd].is_console || pfds[fd].is_tty;
-    vfs_fd_t vfd = pfds[fd].vfd;
+    struct posix_ofd *o = pfd_ofd_locked(fd);
+    if (o == NULL) { pthread_mutex_unlock(&pfd_lock); *err = -EBADF; return -1; }
+    int special = o->kind == OFD_CONSOLE || o->kind == OFD_TTY;
+    vfs_fd_t vfd = o->vfd;
+    if (OFD_IS_PIPE(o->kind)) {
+        if (hold != NULL) {
+            o->pipe->refs++;
+            hold->pipe     = o->pipe;
+            hold->kind     = o->kind;
+            hold->nonblock = o->nonblock;
+        }
+        pthread_mutex_unlock(&pfd_lock);
+        return -3;
+    }
     pthread_mutex_unlock(&pfd_lock);
     if (special)
         return -2;     /* caller distinguishes console vs tty via tty_fd_snapshot */
     return vfd;
 }
 
+/*
+ * read(), readv(), write() and writev() on a pipe end (#904): the pieces go
+ * down whole, so that a writev() of up to PIPE_BUF bytes is one write, as
+ * musl's stdio makes every line it flushes.  The wrong end answers EBADF, as
+ * on Linux.
+ *
+ * A write on a pipe whose readers have all gone answers EPIPE and raises
+ * SIGPIPE, as POSIX asks: a program that has not caught or ignored it ends,
+ * which is how `yes | head -1' stops.  The signal goes the way kill() does,
+ * through proc_server, so it may come a little after the write returns.
+ */
+static long pipe_io(struct pipe_hold *h, const struct uros_iovec *iov,
+                    int iovcnt, int writing)
+{
+    long r;
+
+    if (h->kind != (writing ? OFD_PIPE_WRITE : OFD_PIPE_READ))
+        r = -EBADF;
+    else if (writing) {
+        r = __uros_pipe_write(h->pipe, (const struct uros_pipe_iov *)iov,
+                              iovcnt, h->nonblock);
+        if (r == -EPIPE && __uros_my_pid != 0)
+            (void)__uros_kill(__uros_my_pid, PROC_SIGPIPE);
+    } else
+        r = __uros_pipe_read(h->pipe, (const struct uros_pipe_iov *)iov,
+                             iovcnt, h->nonblock);
+    pipe_put(h->pipe);
+    return r;
+}
+
 /* Snapshot a tty-kind fd's (char_port, dev_id) under the lock.
  * Returns 0 on success, -EBADF if fd is invalid, -ENOTTY if not a tty. */
 static int tty_fd_snapshot(int fd, mach_port_t *port, unsigned *dev_id)
 {
-    if (fd < 0 || fd >= POSIX_OPEN_MAX) return -EBADF;
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); return -EBADF; }
-    int tty = pfds[fd].is_tty;
-    unsigned id = pfds[fd].tty_dev_id;
+    struct posix_ofd *o = pfd_ofd_locked(fd);
+    if (o == NULL) { pthread_mutex_unlock(&pfd_lock); return -EBADF; }
+    int tty = o->kind == OFD_TTY;
+    unsigned id = o->tty_dev_id;
     pthread_mutex_unlock(&pfd_lock);
     if (!tty) return -ENOTTY;
     *port   = char_port_resolve();
@@ -531,11 +734,16 @@ static void tty_waiter_wait(mach_port_t port)
 long __uros_read(int fd, void *buf, size_t count)
 {
     int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
     maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, &hold);
     if (err) return err;
+    if (vfd == -3) {
+        struct uros_iovec one = { (unsigned long)buf, (unsigned long)count };
+        return pipe_io(&hold, &one, 1, 0);
+    }
     if (vfd == -2) {
-        /* fds 0/1/2 or /dev/tty: distinguish via is_tty. */
+        /* A console or a tty: tty_fd_snapshot() says which. */
         mach_port_t cport;
         unsigned    dev_id;
         if (tty_fd_snapshot(fd, &cport, &dev_id) == 0) {
@@ -584,8 +792,6 @@ long __uros_read(int fd, void *buf, size_t count)
     return n < 0 ? -EIO : (long)n;
 }
 
-/* struct iovec on Linux i386: { void *iov_base; size_t iov_len; }. */
-struct uros_iovec { unsigned long base; unsigned long len; };
 
 /* One char_tty_write of n bytes, at most the 4096 chr_buf_t carries: the
  * bytes it took, or the error. */
@@ -681,9 +887,14 @@ static long terminal_write(int fd, const struct uros_iovec *iov, int iovcnt)
 long __uros_write(int fd, const void *buf, size_t count)
 {
     int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
     maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, &hold);
     if (err) return err;
+    if (vfd == -3) {
+        struct uros_iovec one = { (unsigned long)buf, (unsigned long)count };
+        return pipe_io(&hold, &one, 1, 1);
+    }
     if (vfd == -2) {
         struct uros_iovec one = { (unsigned long)buf, (unsigned long)count };
         return terminal_write(fd, &one, 1);
@@ -696,6 +907,13 @@ long __uros_readv(int fd, const void *iov_ptr, int iovcnt)
 {
     const struct uros_iovec *iov = (const struct uros_iovec *)iov_ptr;
     if (iovcnt < 0) return -EINVAL;
+
+    /* A pipe takes the pieces in one read (#904). */
+    int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
+    if (resolve_fd(fd, &err, &hold) == -3 && err == 0)
+        return pipe_io(&hold, iov, iovcnt, 0);
+
     long total = 0;
     for (int i = 0; i < iovcnt; i++) {
         if (iov[i].len == 0) continue;
@@ -717,9 +935,12 @@ long __uros_writev(int fd, const void *iov_ptr, int iovcnt)
      * Nothing to write is 0 with no RPC, as it always was.
      */
     int err;
+    struct pipe_hold hold = { NULL, 0, 0 };
     maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, &hold);
     if (err) return err;
+    if (vfd == -3)                     /* a pipe: one write too (#904) */
+        return pipe_io(&hold, iov, iovcnt, 1);
     if (vfd == -2) {
         for (int i = 0; i < iovcnt; i++)
             if (iov[i].len)
@@ -740,26 +961,151 @@ long __uros_writev(int fd, const void *iov_ptr, int iovcnt)
 
 long __uros_close(int fd)
 {
-    if (fd < 0 || fd >= POSIX_OPEN_MAX)
-        return -EBADF;
+    struct posix_ofd gone;
+    int freed;
+
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); return -EBADF; }
-    int console = pfds[fd].is_console;
-    int tty     = pfds[fd].is_tty;
-    vfs_fd_t vfd = pfds[fd].vfd;
-    if (!console) {
-        pfds[fd].in_use     = 0;
-        pfds[fd].is_tty     = 0;
-        pfds[fd].vfd        = VFS_FD_INVALID;
-        pfds[fd].tty_dev_id = 0;
+    struct posix_ofd *o = pfd_ofd_locked(fd);
+    if (o == NULL) { pthread_mutex_unlock(&pfd_lock); return -EBADF; }
+    /*
+     * Closing a std stream that is still the console is a no-op: the
+     * console stays open, as it always has.  Any other descriptor closes,
+     * 0, 1 and 2 included once they name something else (#897): a dup()
+     * of the console, a /dev/tty, or what dup2() put there.
+     */
+    if (fd <= 2 && o->kind == OFD_CONSOLE) {
+        pthread_mutex_unlock(&pfd_lock);
+        return 0;
+    }
+    freed = pfd_unbind_locked(fd, &gone);
+    pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    return 0;
+}
+
+/*
+ * dup2() and dup3(): make `newfd` name what `oldfd` names, closing what
+ * `newfd` named first (#897).  Under the one lock, so no open() can take
+ * `newfd` in between, which is what Linux answers EBUSY for.
+ */
+static long dup_onto(int oldfd, int newfd, int cloexec)
+{
+    struct posix_ofd gone;
+    int freed = 0;
+
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    struct posix_ofd *o = pfd_ofd_locked(oldfd);
+    if (o == NULL || newfd < 0 || newfd >= POSIX_OPEN_MAX) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -EBADF;
+    }
+    if (newfd == oldfd) {               /* dup2() only: dup3() refused it */
+        pthread_mutex_unlock(&pfd_lock);
+        return newfd;
+    }
+    if (pfds[newfd].ofd != NULL)
+        freed = pfd_unbind_locked(newfd, &gone);
+    pfd_bind_locked(newfd, o, cloexec);
+    pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    return newfd;
+}
+
+/* dup(): the lowest free descriptor, naming what `oldfd` names. */
+long __uros_dup(int oldfd)
+{
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    struct posix_ofd *o = pfd_ofd_locked(oldfd);
+    if (o == NULL) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -EBADF;
+    }
+    int fd = pfd_alloc_locked(0);
+    if (fd < 0) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -EMFILE;
+    }
+    pfd_bind_locked(fd, o, 0);
+    pthread_mutex_unlock(&pfd_lock);
+    return fd;
+}
+
+long __uros_dup2(int oldfd, int newfd)
+{
+    return dup_onto(oldfd, newfd, 0);
+}
+
+long __uros_dup3(int oldfd, int newfd, int flags)
+{
+    if (flags & ~LX_O_CLOEXEC)
+        return -EINVAL;
+    if (oldfd == newfd)
+        return -EINVAL;
+    return dup_onto(oldfd, newfd, flags & LX_O_CLOEXEC);
+}
+
+/*
+ * pipe() and pipe2() (#904): a new pipe, its read end at the lowest free
+ * descriptor and its write end at the next.  O_CLOEXEC goes to both
+ * descriptors, and O_NONBLOCK to both descriptions.  Each end's description
+ * holds one of the pipe's refs (posix_pipe.h).
+ */
+long __uros_pipe2(int *fds, int flags)
+{
+    struct uros_pipe *p;
+    struct posix_ofd *r, *w = NULL, gone;
+    int fr, fw = -1, freed = 0, rc;
+    int cloexec = flags & LX_O_CLOEXEC;
+    int nonblock = (flags & LX_O_NONBLOCK) != 0;
+
+    if (fds == NULL)
+        return -EFAULT;
+    if (flags & ~(LX_O_CLOEXEC | LX_O_NONBLOCK))
+        return -EINVAL;
+    rc = __uros_pipe_new(&p);
+    if (rc != 0)
+        return rc;
+
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    fr = pfd_alloc_locked(0);
+    r = fr < 0 ? NULL : ofd_alloc_locked(OFD_PIPE_READ, VFS_FD_INVALID, 0);
+    if (r != NULL) {
+        r->pipe = p;
+        r->nonblock = nonblock;
+        p->refs++;
+        __uros_pipe_end_get(p, PIPE_END_READ);
+        pfd_bind_locked(fr, r, cloexec);
+        fw = pfd_alloc_locked(0);
+        w = fw < 0 ? NULL : ofd_alloc_locked(OFD_PIPE_WRITE, VFS_FD_INVALID,
+                                             0);
+        if (w != NULL) {
+            w->pipe = p;
+            w->nonblock = nonblock;
+            p->refs++;
+            __uros_pipe_end_get(p, PIPE_END_WRITE);
+            pfd_bind_locked(fw, w, cloexec);
+        } else {
+            freed = pfd_unbind_locked(fr, &gone);   /* takes the pipe along */
+        }
     }
     pthread_mutex_unlock(&pfd_lock);
-    /* Closing a std stream is a no-op (console stays open).  /dev/tty
-     * has no per-open server-side state to release — char_server tracks
-     * subscriptions, not fds — so just dropping the slot is enough. */
-    if (!console && !tty)
-        vfs_close(vfd);
+    if (r == NULL) {
+        __uros_pipe_free(p);
+        return -EMFILE;
+    }
+    if (w == NULL) {
+        if (freed)
+            ofd_release(&gone);
+        return -EMFILE;
+    }
+    fds[0] = fr;
+    fds[1] = fw;
     return 0;
 }
 
@@ -768,9 +1114,9 @@ long __uros_close(int fd)
 long __uros_lseek(int fd, long off, unsigned int whence)
 {
     int err;
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, NULL);
     if (err) return err;
-    if (vfd == -2)                    /* console is not seekable */
+    if (vfd == -2 || vfd == -3)       /* console and pipe: not seekable */
         return -ESPIPE;
     off_t r = vfs_lseek(vfd, (off_t)off, (int)whence);
     if (r == (off_t)-1)
@@ -783,9 +1129,9 @@ long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
                    void *result, unsigned int whence)
 {
     int err;
-    vfs_fd_t vfd = resolve_fd(fd, &err);
+    vfs_fd_t vfd = resolve_fd(fd, &err, NULL);
     if (err) return err;
-    if (vfd == -2)                    /* console is not seekable */
+    if (vfd == -2 || vfd == -3)       /* console and pipe: not seekable */
         return -ESPIPE;
     int64_t off = (int64_t)(((uint64_t)off_hi << 32) | (uint64_t)off_lo);
     off_t r = vfs_lseek(vfd, (off_t)off, (int)whence);
@@ -852,6 +1198,16 @@ static void fill_statx_console(struct lx_statx *sx)
     sx->stx_mode    = (uint16_t)(0620 | LX_S_IFCHR);
 }
 
+/* A pipe end presents as a FIFO, which is what S_ISFIFO() asks (#904). */
+static void fill_statx_fifo(struct lx_statx *sx)
+{
+    memset(sx, 0, sizeof(*sx));
+    sx->stx_mask    = LX_STATX_BASIC_STATS;
+    sx->stx_blksize = 4096;
+    sx->stx_nlink   = 1;
+    sx->stx_mode    = (uint16_t)(0600 | LX_S_IFIFO);
+}
+
 long __uros_statx(int dirfd, const char *path, int flags,
                   unsigned int mask, void *statxbuf)
 {
@@ -863,9 +1219,10 @@ long __uros_statx(int dirfd, const char *path, int flags,
     /* fstat(fd): musl calls statx(fd, "", AT_EMPTY_PATH, ...). */
     if ((flags & LX_AT_EMPTY_PATH) && path && path[0] == '\0') {
         int err;
-        vfs_fd_t vfd = resolve_fd(dirfd, &err);
+        vfs_fd_t vfd = resolve_fd(dirfd, &err, NULL);
         if (err) return err;
         if (vfd == -2) { fill_statx_console(sx); return 0; }
+        if (vfd == -3) { fill_statx_fifo(sx); return 0; }   /* #904 */
         vfs_stat_t vs;
         int rc = vfs_fstat(vfd, &vs);
         if (rc != 0)
@@ -960,11 +1317,10 @@ long __uros_fstatat(int dirfd, const char *path, void *kst, int flags)
 int __uros_pfd_is_terminal(int fd)
 {
     int r;
-    if (fd < 0 || fd >= POSIX_OPEN_MAX)
-        return 0;
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    r = pfds[fd].in_use && (pfds[fd].is_console || pfds[fd].is_tty);
+    struct posix_ofd *o = pfd_ofd_locked(fd);
+    r = o != NULL && (o->kind == OFD_CONSOLE || o->kind == OFD_TTY);
     pthread_mutex_unlock(&pfd_lock);
     return r;
 }
@@ -973,7 +1329,9 @@ int __uros_pfd_is_terminal(int fd)
  * Enumerate the POSIX fds that survive execve: in use, not a console
  * stream, and not O_CLOEXEC.  Writes parallel (posix_fd, vfs_fd) arrays
  * and returns the count (<= max).  posix_exec_fds.c turns each pair into
- * a handoff record by exporting the libvfs state behind vfd.
+ * a handoff record by exporting the libvfs state behind vfd.  Two
+ * descriptors of one description carry the same vfd, which is how
+ * posix_exec_fds.c tells a dup() from a second open() (#897).
  */
 int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
 {
@@ -981,14 +1339,80 @@ int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
     for (int i = 3; i < POSIX_OPEN_MAX && n < max; i++) {
-        if (!pfds[i].in_use || pfds[i].is_console || pfds[i].cloexec)
+        struct posix_ofd *o = pfds[i].ofd;
+        /* #904: a pipe's ends go by __uros_pfd_enum_pipes(), below. */
+        if (o == NULL || o->kind == OFD_CONSOLE || OFD_IS_PIPE(o->kind) ||
+            pfds[i].cloexec)
             continue;
         posix_fds[n] = i;
-        vfds[n]      = pfds[i].vfd;
+        vfds[n]      = o->vfd;
         n++;
     }
     pthread_mutex_unlock(&pfd_lock);
     return n;
+}
+
+/*
+ * #904: the pipe ends that survive execve, from fd 0 up: a pipe on a shell's
+ * stdin or stdout is what `a | b' is.  For each, its pipe, its end, whether
+ * O_NONBLOCK, and its description's index, which two descriptors of one
+ * description share.  Only ends pipe_server knows and this task holds a
+ * token for: a pipe with no port has no memory entry to be mapped from in
+ * the new image.  Returns the count (<= max).
+ */
+int __uros_pfd_enum_pipes(int *posix_fds, struct uros_pipe **pipes, int *ends,
+                          int *nonblock, int *desc, int max)
+{
+    int n = 0;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    for (int i = 0; i < POSIX_OPEN_MAX && n < max; i++) {
+        struct posix_ofd *o = pfds[i].ofd;
+        if (o == NULL || !OFD_IS_PIPE(o->kind) || pfds[i].cloexec ||
+            o->pipe->port == 0 || o->pipe->token[OFD_PIPE_END(o->kind)] == 0)
+            continue;
+        posix_fds[n] = i;
+        pipes[n]     = o->pipe;
+        ends[n]      = OFD_PIPE_END(o->kind);
+        nonblock[n]  = o->nonblock;
+        desc[n]      = (int)(o - ofds);
+        n++;
+    }
+    pthread_mutex_unlock(&pfd_lock);
+    return n;
+}
+
+/*
+ * #904: bind POSIX fd 'posix_fd' in the freshly-execed task to a new
+ * description of end 'end' of pipe 'p', which __uros_pipe_adopt() mapped.
+ * From fd 0 up: a pipe on stdin or stdout takes the console's place.
+ * Returns 0, or -1.
+ */
+int __uros_pfd_install_pipe(int posix_fd, struct uros_pipe *p, int end,
+                            int nonblock)
+{
+    struct posix_ofd gone, *o;
+    int freed = 0;
+
+    if (posix_fd < 0 || posix_fd >= POSIX_OPEN_MAX)
+        return -1;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    if (pfds[posix_fd].ofd != NULL)
+        freed = pfd_unbind_locked(posix_fd, &gone);
+    o = ofd_alloc_locked(end == PIPE_END_WRITE ? OFD_PIPE_WRITE : OFD_PIPE_READ,
+                         VFS_FD_INVALID, 0);
+    if (o != NULL) {
+        o->pipe = p;
+        o->nonblock = nonblock;
+        p->refs++;
+        __uros_pipe_end_get(p, end);
+        pfd_bind_locked(posix_fd, o, 0);
+    }
+    pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    return o != NULL ? 0 : -1;
 }
 
 /*
@@ -998,15 +1422,53 @@ int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
  */
 void __uros_pfd_install(int posix_fd, vfs_fd_t vfd)
 {
+    struct posix_ofd gone, *o;
+    int freed = 0;
+
     if (posix_fd < 3 || posix_fd >= POSIX_OPEN_MAX)
         return;
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
-    pfds[posix_fd].in_use     = 1;
-    pfds[posix_fd].is_console = 0;
-    pfds[posix_fd].cloexec    = 0;
-    pfds[posix_fd].vfd        = vfd;
+    if (pfds[posix_fd].ofd != NULL)
+        freed = pfd_unbind_locked(posix_fd, &gone);
+    o = ofd_alloc_locked(OFD_VFS, vfd, 0);
+    if (o != NULL)
+        pfd_bind_locked(posix_fd, o, 0);
     pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    if (o == NULL)
+        vfs_close(vfd);
+}
+
+/*
+ * Bind POSIX fd 'posix_fd' in the freshly-execed task to the description
+ * 'of_fd' already names: the two were one description before the exec, a
+ * dup() of each other (#897).  Returns 0, or -1 when 'of_fd' names nothing.
+ * From fd 0 up: a pipe's descriptors come from 0 (#904), and the files'
+ * from 3, so a file never names one of the first three here.
+ */
+int __uros_pfd_install_alias(int posix_fd, int of_fd)
+{
+    struct posix_ofd gone, *o;
+    int freed = 0;
+
+    if (posix_fd < 0 || posix_fd >= POSIX_OPEN_MAX || posix_fd == of_fd)
+        return -1;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    o = pfd_ofd_locked(of_fd);
+    if (o == NULL) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -1;
+    }
+    if (pfds[posix_fd].ofd != NULL)
+        freed = pfd_unbind_locked(posix_fd, &gone);
+    pfd_bind_locked(posix_fd, o, 0);
+    pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1043,6 +1505,8 @@ __uros_mmap_fd(long addr, unsigned long len, long prot,
         return -EINVAL;
 
     vfd = __uros_pfd_to_vfs(fd);
+    if (vfd == -3)
+        return -ENODEV;     /* a pipe end (#904): nothing to map, as on Linux */
     if (vfd < 0)
         return -EBADF;
 

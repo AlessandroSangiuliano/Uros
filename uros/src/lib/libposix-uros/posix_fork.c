@@ -53,6 +53,7 @@
 #include "proc.h"
 #include "proc_types.h"
 #include "internal.h"      /* __uros_port_t */
+#include "posix_pipe.h"    /* __uros_pipe_fork (#904) */
 
 #define UROS_FORK_MARKER  0xCAFEBABEu
 
@@ -298,6 +299,13 @@ __uros_fork(void)
         (void)vm_write(child_task, (vm_address_t)&__uros_my_pid,
                        (vm_offset_t)&pid_copy, sizeof pid_copy);
     }
+
+    /*
+     * 3b. #904: the pipes, whose names the child's memory holds: their ports,
+     *     and a token of the child's own for each end, asked for its pid --
+     *     before it runs, since its first close() gives one back.
+     */
+    __uros_pipe_fork(child_task, (unsigned int)new_pid);
 
     /*
      * 4. Hand the child our captured state, the return register bumped

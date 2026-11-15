@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #904
+Takes out: SIGPIPE -- a write on a pipe with no reader left answers EPIPE and raises nothing: [43]'s child that leaves SIGPIPE as it found it goes on past the write and exits with 3
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[43\] WRONG -- .*the other ended with NO SIGPIPE
+
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+index 9e2418d5..fbcfeb62 100644
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -593,8 +593,7 @@ static long pipe_io(struct pipe_hold *h, const struct uros_iovec *iov,
+     else if (writing) {
+         r = __uros_pipe_write(h->pipe, (const struct uros_pipe_iov *)iov,
+                               iovcnt, h->nonblock);
+-        if (r == -EPIPE && __uros_my_pid != 0)
+-            (void)__uros_kill(__uros_my_pid, PROC_SIGPIPE);
++        /* 904-sigpipe-unraised */
+     } else
+         r = __uros_pipe_read(h->pipe, (const struct uros_pipe_iov *)iov,
+                              iovcnt, h->nonblock);
