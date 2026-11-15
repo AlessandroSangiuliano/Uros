@@ -105,7 +105,8 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 
 # The entries, one per line: number, verdict, extra run-x86_64.sh options, and
 # the processor count when it is not the run's.  @char among the options boots
-# the char build instead of the build the run was given (#765; char_build below).
+# the char build instead of the build the run was given (#765; side_build
+# below).
 #   harness   the harness's own verdict: "passed: reached the end, nothing unexplained"
 #   char      the harness's verdict, of the char build: COM1 handed over to
 #             char_server, its klog forwarder started, and char_test's count of
@@ -687,13 +688,25 @@ fi
 # here too, before any boot, so that a build that fails or warns is said once,
 # with its log, and not as a boot that did not run.  A count of warnings means
 # something only of a build from nothing, which the first run here is.
+#
+# #952: made by side_build(), a build beside the given one with its options
+# but for the ones it names, so that another can be made beside it the same way.
 MAIN_BUILD=${UROS_BUILD_DIR:-$HERE/uros/build-x86_64}
 CHAR_BUILD=$MAIN_BUILD-char
 CHAR_REFUSED=""
-char_build() {
-	local cache=$MAIN_BUILD/CMakeCache.txt src gen bt l n rest t v w fresh=0 opts=()
+SIDE_REFUSED=""
+side_build() {	# directory word what-it-turns-on -Doption...
+	local dir=$1 word=$2 what=$3 cache=$MAIN_BUILD/CMakeCache.txt
+	local src gen bt l n rest t v w o fresh=0 opts=() own=() named=" "
+	shift 3
+	own=("$@")
+	for o in "${own[@]}"; do
+		o=${o#-D}
+		named="$named${o%%[:=]*} "
+	done
+	SIDE_REFUSED=""
 	if [ ! -r "$cache" ]; then
-		CHAR_REFUSED="$MAIN_BUILD has no CMakeCache.txt to take the char build's options from"
+		SIDE_REFUSED="$MAIN_BUILD has no CMakeCache.txt to take the $word build's options from"
 		return
 	fi
 	src=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$cache")
@@ -704,36 +717,41 @@ char_build() {
 		rest=${l#*:}
 		t=${rest%%=*}
 		v=${rest#*=}
-		[ "$n" = OSFMK_BUILD_CHAR_SERVER ] && continue
+		[[ "$named" == *" $n "* ]] && continue
 		opts+=("-D$n:$t=$v")
 	done < <(grep -E '^(OSFMK|UROS)_[A-Z0-9_]*:(BOOL|STRING|UNINITIALIZED)=' "$cache" | grep -v '_LAST:')
-	[ -f "$CHAR_BUILD/build.ninja" ] || fresh=1
-	if ! cmake -S "$src" -B "$CHAR_BUILD" -G "$gen" -DCMAKE_BUILD_TYPE="$bt" "${opts[@]}" \
-		-DOSFMK_BUILD_CHAR_SERVER=ON > "$OUT/char-build-configure.log" 2>&1; then
-		CHAR_REFUSED="the char build did not configure: $OUT/char-build-configure.log"
+	[ -f "$dir/build.ninja" ] || fresh=1
+	if ! cmake -S "$src" -B "$dir" -G "$gen" -DCMAKE_BUILD_TYPE="$bt" "${opts[@]}" \
+		"${own[@]}" > "$OUT/$word-build-configure.log" 2>&1; then
+		SIDE_REFUSED="the $word build did not configure: $OUT/$word-build-configure.log"
 		return
 	fi
-	if ! LC_ALL=C ninja -C "$CHAR_BUILD" mach_kernel boot_probe name_server_bin \
-		bootstrap_server bootstrap_bundle > "$OUT/char-build.log" 2>&1; then
-		CHAR_REFUSED="the char build failed: $OUT/char-build.log"
+	if ! LC_ALL=C ninja -C "$dir" mach_kernel boot_probe name_server_bin \
+		bootstrap_server bootstrap_bundle > "$OUT/$word-build.log" 2>&1; then
+		SIDE_REFUSED="the $word build failed: $OUT/$word-build.log"
 		return
 	fi
-	w=$(grep -c 'warning:' "$OUT/char-build.log")
+	w=$(grep -c 'warning:' "$OUT/$word-build.log")
 	if [ "$w" != 0 ]; then
-		CHAR_REFUSED="the char build has $w warning(s), and the build it is made from none: $OUT/char-build.log"
+		SIDE_REFUSED="the $word build has $w warning(s), and the build it is made from none: $OUT/$word-build.log"
 		return
 	fi
 	if [ $fresh = 1 ]; then
-		echo "merge-test: char build $CHAR_BUILD, from $src with ${#opts[@]} options of $MAIN_BUILD and char_server on: built from nothing, 0 warnings"
+		echo "merge-test: $word build $dir, from $src with ${#opts[@]} options of $MAIN_BUILD and $what on: built from nothing, 0 warnings"
 	else
-		echo "merge-test: char build $CHAR_BUILD, from $src with ${#opts[@]} options of $MAIN_BUILD and char_server on: rebuilt, so its 0 warnings cover only what it recompiled"
+		echo "merge-test: $word build $dir, from $src with ${#opts[@]} options of $MAIN_BUILD and $what on: rebuilt, so its 0 warnings cover only what it recompiled"
 	fi
 }
-if grep -E '^[0-9]+ ' <<< "$ENTRIES" | while read -r e v opt cpus; do
-	[ -z "$ONLY" ] || [[ "$ONLY" == *" $e "* ]] || continue
-	[[ " ${opt//_/ } " == *" @char "* ]] && echo yes
-done | grep -q yes; then
-	char_build
+# Whether an entry this run makes is marked @$1.
+marked() {
+	grep -E '^[0-9]+ ' <<< "$ENTRIES" | while read -r e v opt cpus; do
+		[ -z "$ONLY" ] || [[ "$ONLY" == *" $e "* ]] || continue
+		[[ " ${opt//_/ } " == *" @$1 "* ]] && echo yes
+	done | grep -q yes
+}
+if marked char; then
+	side_build "$CHAR_BUILD" char char_server -DOSFMK_BUILD_CHAR_SERVER=ON
+	CHAR_REFUSED=$SIDE_REFUSED
 	[ -z "$CHAR_REFUSED" ] || echo "merge-test: $CHAR_REFUSED -- the entries marked @char are WRONG, not run" >&2
 fi
 echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}${STUB:+, gdb stub on every run}"
@@ -746,8 +764,12 @@ for boot in "${PLAN[@]}"; do
 	# boot's log by the name it rebuilds from the verdict line's options.
 	shown=$opt
 	build=""
+	side=""
+	refused=""
 	if [[ " $opt " == *" @char "* ]]; then
 		build=$CHAR_BUILD
+		side=char
+		refused=$CHAR_REFUSED
 		opt=$(echo " $opt " | sed 's/ @char / /; s/^ *//; s/ *$//')
 	fi
 	for a in $ACCS; do
@@ -763,9 +785,9 @@ for boot in "${PLAN[@]}"; do
 		# stop13, ioapic, msirace, panic2, earlypanic, restart* -- passed on
 		# a boot that never happened.
 		rm -f "$h" "$f" "$f.walk.txt"
-		if [ -n "$build" ] && [ -n "$CHAR_REFUSED" ]; then
-			echo "merge-test: entry $e $a -smp $n ($shown) -- WRONG (did not run, the char build: ${CHAR_REFUSED//[()]/}): $h"
-			echo "$CHAR_REFUSED" > "$h"
+		if [ -n "$refused" ]; then
+			echo "merge-test: entry $e $a -smp $n ($shown) -- WRONG (did not run, the $side build: ${refused//[()]/}): $h"
+			echo "$refused" > "$h"
 			WRONG=$((WRONG + 1))
 			continue
 		fi
