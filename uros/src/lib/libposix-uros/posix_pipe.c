@@ -19,12 +19,17 @@
  * one store, so a writer that dies holding the lock has published all of a
  * descriptor or none of it: what is left to undo is the lock.
  *
- * 🔴 NOT HERE YET, AND WAITING FOR #911 (memory entries).  End of file and
- * EPIPE: pipe_server will set writers_gone and readers_gone when the last
- * holder of an end lets it go or dies, as only it can learn that.  The
- * release of a lock whose holder died, which is pipe_server's too.  And a
- * pipe's ends across execve().  Until then a read on a pipe whose writers
- * have all gone waits for ever, and a pipe's descriptors do not cross exec.
+ * What memory cannot tell is pipe_server's (pipe.defs): that the last holder
+ * of an end has let it go or died.  Each task holds a token for each end it
+ * holds, and gives it back with pipe_leave when its last description of the
+ * end goes; a task that dies loses its tokens, and pipe_server reads their
+ * no-senders.  The last token of an end gone, pipe_server sets writers_gone
+ * or readers_gone in the shared page and wakes the other side: end of file,
+ * EPIPE.  It also frees a lock word whose holder died inside a read or a
+ * write.  A forked child is given tokens of its own, and an exec'd image
+ * maps the pipe from pipe_server's memory entry (#911) and keeps the old
+ * image's tokens.  Where there is no pipe_server a pipe works as it did
+ * before it, and never says that an end has gone.
  *
  * Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * License: MIT
