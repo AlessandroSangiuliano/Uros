@@ -617,6 +617,13 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/sig_test)
 endif()
 
+# pipe_server, the witness of a pipe's ends (#904): it learns from its tokens
+# that the last holder of an end has gone.  libmach and libnetname, no C
+# library; the musl programs below ask it for every pipe they make.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/pipe_server)
+endif()
+
 # exec_server and the images it is asked for (#421).  hello_exec has no library
 # of any kind and exercises the stack layout and nothing else.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
