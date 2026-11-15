@@ -1771,9 +1771,10 @@ arm_pipe(void)
 }
 
 /*
- * Children that may block, watched: the pipe has no end of file yet (#911),
- * and a child waiting on a pipe that nothing will write is a boot with no
- * verdict.  Each is given `secs'; one still there then is killed.  Returns
+ * Children that may block, watched: a child waiting on a pipe that nothing
+ * will write or end -- a pipe_server missing, or the end of file broken -- is
+ * a boot with no verdict.  Each is given `secs'; one still there then is
+ * killed.  Returns
  * how many were killed, each one's status in status[], and in *others how
  * many children not in pid[] the wait collected.
  *
@@ -1936,6 +1937,318 @@ arm_pipe_writers(void)
 }
 
 /*
+ * ── [42] End of file (#904) ──────────────────────────────────────────────
+ *
+ * A read on a pipe whose writers have all gone answers what is left in it,
+ * then 0.  In one process, with O_NONBLOCK, so that a pipe with no end of
+ * file answers EAGAIN instead of holding the arm: five bytes written, the
+ * write end closed, and reads of 2, 3, and then 0 bytes.  close() tells
+ * pipe_server before it returns (pipe_leave), so the third read cannot find
+ * the pipe as it was.  And across fork: one child writes EOF_BYTES in three
+ * writes and exits, which lets its write end go; another reads until 0.  The
+ * parent holds no end, so the writer's going is the end of file.
+ */
+#define EOF_BYTES	300
+
+static int
+eof_reader(int fd)
+{
+	char	buf[128];
+	long	have = 0;
+	ssize_t	got;
+
+	while ((got = read(fd, buf, sizeof buf)) > 0)
+		have += got;
+	if (got < 0)
+		return 1;
+	return have == EOF_BYTES ? 0 : 2;
+}
+
+static int
+eof_writer(int fd)
+{
+	char	buf[EOF_BYTES / 3];
+	int	i;
+
+	memset(buf, 'e', sizeof buf);
+	for (i = 0; i < 3; i++)
+		if (write(fd, buf, sizeof buf) != (ssize_t)sizeof buf)
+			return 1;
+	return 0;
+}
+
+static void
+arm_pipe_eof(void)
+{
+	char	buf[8];
+	pid_t	pid[2];
+	int	fds[2], status[2], killed, others, i, rstat, wstat;
+	int	r1, r2, r3, e3;
+
+	if (pipe2(fds, O_NONBLOCK) != 0) {
+		verdict(42, 0, "pipe2 failed, errno %d", errno);
+		return;
+	}
+	(void)write(fds[1], "hello", 5);
+	(void)close(fds[1]);
+	r1 = (int)read(fds[0], buf, 2);
+	r2 = (int)read(fds[0], buf, 3);
+	errno = 0;
+	r3 = (int)read(fds[0], buf, sizeof buf);
+	e3 = errno;
+	(void)close(fds[0]);
+
+	if (pipe(fds) != 0) {
+		verdict(42, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	for (i = 0; i < 2; i++) {
+		pid[i] = fork();
+		if (pid[i] < 0) {
+			while (--i >= 0) {
+				(void)kill(pid[i], SIGKILL);
+				(void)waitpid(pid[i], NULL, 0);
+			}
+			(void)close(fds[0]);
+			(void)close(fds[1]);
+			not_asked(42, "fork refused: no process server on "
+				  "this boot");
+			return;
+		}
+		if (pid[i] == 0) {
+			if (i == 0) {
+				(void)close(fds[1]);
+				_exit(eof_reader(fds[0]));
+			}
+			(void)close(fds[0]);
+			_exit(eof_writer(fds[1]));
+		}
+	}
+	(void)close(fds[0]);
+	(void)close(fds[1]);
+	killed = watch_children(pid, 2, 30, status, &others);
+	rstat = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
+	wstat = WIFEXITED(status[1]) ? WEXITSTATUS(status[1]) : -1;
+	verdict(42, r1 == 2 && r2 == 3 && r3 == 0 && killed == 0 &&
+		others == 0 && rstat == 0 && wstat == 0,
+		"in one process, 5 bytes and the write end closed: reads of "
+		"%d, %d and %d (errno %d), %s; across fork the writer of %d "
+		"bytes ended %d and the reader to end of file %d (%s); %d of 2 "
+		"still there after 30 s, %d other children collected",
+		r1, r2, r3, e3, r3 == 0 ? "end of file" : "NO end of file",
+		EOF_BYTES, wstat, rstat,
+		rstat == 0 ? "all of them, then 0" : rstat == 2 ? "a WRONG count"
+		: rstat == 1 ? "a read FAILED" : "no answer", killed, others);
+}
+
+/*
+ * ── [43] EPIPE and SIGPIPE (#904) ────────────────────────────────────────
+ *
+ * A write on a pipe whose readers have all gone answers EPIPE and raises
+ * SIGPIPE.  The parent closes the read end before it forks, so the readers
+ * are gone before either child writes.  One child ignores SIGPIPE and must
+ * get -1 with EPIPE; the other leaves SIGPIPE as it is and must end by it.
+ * The signal goes through proc_server and may come after the write returns,
+ * so that child waits for it a while, and exits with 3 if it never comes.
+ * Both in children: a SIGPIPE ignored here could come after the arm put the
+ * old disposition back, and end musl_test.
+ */
+static void
+arm_pipe_epipe(void)
+{
+	pid_t	pid[2];
+	int	fds[2], status[2], killed, others, i, quiet, loud;
+
+	if (pipe(fds) != 0) {
+		verdict(43, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	(void)close(fds[0]);
+	for (i = 0; i < 2; i++) {
+		pid[i] = fork();
+		if (pid[i] < 0) {
+			while (--i >= 0) {
+				(void)kill(pid[i], SIGKILL);
+				(void)waitpid(pid[i], NULL, 0);
+			}
+			(void)close(fds[1]);
+			not_asked(43, "fork refused: no process server on "
+				  "this boot");
+			return;
+		}
+		if (pid[i] == 0) {
+			ssize_t	w;
+
+			(void)signal(SIGPIPE, i == 0 ? SIG_IGN : SIG_DFL);
+			errno = 0;
+			w = write(fds[1], "x", 1);
+			if (i == 0)
+				_exit(w == -1 && errno == EPIPE ? 0
+				      : w == -1 ? 2 : 1);
+			sleep(5);
+			_exit(3);
+		}
+	}
+	(void)close(fds[1]);
+	killed = watch_children(pid, 2, 30, status, &others);
+	quiet = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
+	loud = WIFSIGNALED(status[1]) ? WTERMSIG(status[1]) : -1;
+	verdict(43, killed == 0 && others == 0 && quiet == 0 &&
+		loud == SIGPIPE,
+		"with no reader left, the child that ignores SIGPIPE got %s, "
+		"and the other ended %s; %d of 2 still there after 30 s, %d "
+		"other children collected",
+		quiet == 0 ? "-1 with EPIPE" : quiet == 1 ? "its byte WRITTEN"
+		: quiet == 2 ? "another errno" : "no answer",
+		loud == SIGPIPE ? "by SIGPIPE"
+		: WIFEXITED(status[1]) && WEXITSTATUS(status[1]) == 3
+		? "with NO SIGPIPE" : "some other way", killed, others);
+}
+
+/*
+ * ── [44] A holder killed with an end open (#904) ─────────────────────────
+ *
+ * Memory cannot tell that a task died; the death of its tokens can.  A child
+ * that holds the write end and sleeps is killed, and a reader in another
+ * child must then see end of file.  And a writer killed while it holds the
+ * writers' lock: the pipe is full when it writes one byte, so it sleeps
+ * inside write() with the lock held, and killed there it can never let the
+ * lock go.  pipe_server frees it once the dead writer has no token on the
+ * pipe left; then a second writer's ten bytes come out, after a reader has
+ * drained the ring.  Without the free, the second writer waits for the lock
+ * for good, and the reader for its bytes: both are watched.
+ */
+#define HK_FILL		65536	/* the ring, full */
+
+/* What the draining reader answers: 0, its ten bytes after the fill. */
+static int
+hk_drain(int fd)
+{
+	static char	chunk[4096];
+	char		got[10];
+	ssize_t		n;
+	long		drained = 0;
+	size_t		have = 0;
+
+	while (drained < HK_FILL) {
+		n = read(fd, chunk, sizeof chunk);
+		if (n <= 0)
+			return 1;
+		drained += n;
+	}
+	while (have < sizeof got) {
+		n = read(fd, got + have, sizeof got - have);
+		if (n <= 0)
+			return 2;
+		have += (size_t)n;
+	}
+	return memcmp(got, "0123456789", sizeof got) == 0 ? 0 : 3;
+}
+
+static void
+arm_pipe_holder_killed(void)
+{
+	static char	chunk[4096];
+	char		got[16];
+	pid_t		pid[2], w1, two[2];
+	int		fds[2], status[2], killed, others, i, rstat;
+	int		n, dstat = -1, w2stat = -1;
+
+	/* A writer that sleeps, killed: the reader's end of file. */
+	if (pipe(fds) != 0) {
+		verdict(44, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	for (i = 0; i < 2; i++) {
+		pid[i] = fork();
+		if (pid[i] < 0) {
+			while (--i >= 0) {
+				(void)kill(pid[i], SIGKILL);
+				(void)waitpid(pid[i], NULL, 0);
+			}
+			(void)close(fds[0]);
+			(void)close(fds[1]);
+			not_asked(44, "fork refused: no process server on "
+				  "this boot");
+			return;
+		}
+		if (pid[i] == 0) {
+			if (i == 0) {
+				(void)close(fds[1]);
+				_exit(read(fds[0], got, sizeof got) == 0 ? 0
+				      : 1);
+			}
+			(void)close(fds[0]);
+			sleep(60);
+			_exit(0);
+		}
+	}
+	(void)close(fds[0]);
+	(void)close(fds[1]);
+	usleep(300 * 1000);
+	(void)kill(pid[1], SIGKILL);
+	killed = watch_children(pid, 2, 30, status, &others);
+	rstat = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
+
+	/* A writer killed holding the writers' lock. */
+	if (pipe(fds) != 0) {
+		verdict(44, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	memset(chunk, 'f', sizeof chunk);
+	for (n = 0; n < HK_FILL; n += (int)sizeof chunk)
+		if (write(fds[1], chunk, sizeof chunk) != (ssize_t)sizeof chunk)
+			break;
+	w1 = fork();
+	if (w1 == 0) {
+		(void)write(fds[1], "!", 1);	/* full: sleeps with the lock */
+		_exit(0);
+	}
+	two[0] = two[1] = -1;
+	if (w1 > 0) {
+		usleep(500 * 1000);
+		(void)kill(w1, SIGKILL);
+		(void)waitpid(w1, NULL, 0);
+		for (i = 0; i < 2; i++) {
+			two[i] = fork();
+			if (two[i] == 0) {
+				if (i == 0)
+					_exit(write(fds[1], "0123456789", 10)
+					      == 10 ? 0 : 1);
+				_exit(hk_drain(fds[0]));
+			}
+		}
+	}
+	(void)close(fds[0]);
+	(void)close(fds[1]);
+	if (two[0] > 0 && two[1] > 0) {
+		int	st[2] = { 0, 0 }, oth = 0;
+
+		killed += watch_children(two, 2, 30, st, &oth);
+		others += oth;
+		w2stat = WIFEXITED(st[0]) ? WEXITSTATUS(st[0]) : -1;
+		dstat = WIFEXITED(st[1]) ? WEXITSTATUS(st[1]) : -1;
+	} else {
+		for (i = 0; i < 2; i++)
+			if (two[i] > 0) {
+				(void)kill(two[i], SIGKILL);
+				(void)waitpid(two[i], NULL, 0);
+			}
+	}
+	verdict(44, killed == 0 && others == 0 && rstat == 0 && w1 > 0 &&
+		w2stat == 0 && dstat == 0,
+		"the reader of a pipe whose writer was killed asleep ended %d "
+		"(%s); after a writer was killed holding the writers' lock, a "
+		"second writer of 10 bytes ended %d and the reader of the full "
+		"ring and those 10 ended %d (%s); %d still there after their "
+		"time, %d other children collected",
+		rstat, rstat == 0 ? "end of file" : "NO end of file", w2stat,
+		dstat, dstat == 0 ? "the lock was freed"
+		: dstat == 3 ? "WRONG bytes" : "the lock was NOT freed",
+		killed, others);
+}
+
+/*
  * ── [34] A pipe from one process to another, in a stream (#904) ──────────
  *
  * One child writes 256 KiB in writes of 1000 bytes, which fit the ring's
@@ -2089,6 +2402,11 @@ main(int argc, char **argv)
 	/* #904: pipes, in this process and between processes. */
 	arm_pipe();
 	arm_pipe_writers();
+	/* #904: a pipe's ends going, which pipe_server sees by its tokens.
+	 * Numbered after #934's wait arms, and called here, before [34]. */
+	arm_pipe_eof();
+	arm_pipe_epipe();
+	arm_pipe_holder_killed();
 	arm_pipe_stream();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
