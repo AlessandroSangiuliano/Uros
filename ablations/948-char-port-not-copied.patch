@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #948
+Takes out: fork()'s copy into the child of the char_server port its tty fds go through (e52b849d) -- the child's tty fds name its parent's
+Script: scripts/ush-x86_64.py
+Expect: fork_tty_test: \[1\] WRONG -- a forked child's write on the terminal fd [0-9]+ it inherited was answered errno 5,
+
+diff --git a/uros/src/lib/libposix-uros/posix_fork.c b/uros/src/lib/libposix-uros/posix_fork.c
+--- a/uros/src/lib/libposix-uros/posix_fork.c
++++ b/uros/src/lib/libposix-uros/posix_fork.c
+@@ -263,7 +263,6 @@
+     inherit_send_right(mach_task_self(), child_task, __uros_get_clock_port(1));
+     /* #948: and char_server's, which the tty fds' I/O goes through: the
+      * child's fd table still says which fds are ttys. */
+-    inherit_send_right(mach_task_self(), child_task, __uros_get_char_port());
+ 
+     /*
+      * 2b. Inherit the fs_server send rights behind every open libvfs fd
