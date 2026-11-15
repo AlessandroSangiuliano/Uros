@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #952
+Takes out: fork()'s copy into the child of the char_server port its tty fds go through, as 948-char-port-not-copied does -- so that the merge test's @ush entry, and not ush-x86_64.py run by hand, is what says WRONG.  fork_tty_test's child is answered EIO on its terminal, ush-x86_64.py never sees the child's line, and its count says 2 of 3 commands answered, which the ush verdict refuses.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 14
+Script: -G
+Expect: merge-test: entry 14 kvm -smp 4 \(@ush\) -- WRONG \(ush\)
+Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, as for 765-char-build-without-char-server.  Each arm's merge test builds its own ush build from its own tree.  Read in the ablated arm's log of the @ush entry fork_tty_test's own WRONG line, which ush-x86_64.py prints when a line is missing.
+
+diff --git a/uros/src/lib/libposix-uros/posix_fork.c b/uros/src/lib/libposix-uros/posix_fork.c
+--- a/uros/src/lib/libposix-uros/posix_fork.c
++++ b/uros/src/lib/libposix-uros/posix_fork.c
+@@ -263,7 +263,6 @@
+     inherit_send_right(mach_task_self(), child_task, __uros_get_clock_port(1));
+     /* #948: and char_server's, which the tty fds' I/O goes through: the
+      * child's fd table still says which fds are ttys. */
+-    inherit_send_right(mach_task_self(), child_task, __uros_get_char_port());
+ 
+     /*
+      * 2b. Inherit the fs_server send rights behind every open libvfs fd
