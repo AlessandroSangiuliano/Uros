@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #911
+Takes out: the end of an entry with its last send right (0583964b) -- the no-senders notification is taken and nothing is freed, so every entry and the object it holds stay for good
+Run: --entry 14 1200 -smp 1
+Expect: cow_test: \[12\] 256 entries whose ports went one by one moved the zone by [0-9]+.* — WRONG, entries outlive their ports
+
+diff --git a/uros/src/mach_kernel/vm/vm_memory_entry.c b/uros/src/mach_kernel/vm/vm_memory_entry.c
+index e901957f..b3e11921 100644
+--- a/uros/src/mach_kernel/vm/vm_memory_entry.c
++++ b/uros/src/mach_kernel/vm/vm_memory_entry.c
+@@ -340,10 +340,6 @@ vm_memory_entry_notify(
+ 	}
+ 	me = (vm_memory_entry_t) port->ip_kobject;
+ 	ip_unlock(port);
+-
+-	ipc_kobject_set(port, IKO_NULL, IKOT_NONE);
+-	ipc_port_dealloc_kernel(port);
+-	vm_object_deallocate(me->object);
+-	zfree(vm_memory_entry_zone, (vm_offset_t) me);
++	(void) me;
+ 	return TRUE;
+ }

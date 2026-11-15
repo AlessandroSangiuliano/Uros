@@ -184,4 +184,5 @@ mach_task_self_init(void)
 	mach_task_self_ = mach_task_self();
 	mig_init(0);
 	urmach_netname_signature_forget();
+	urmach_lifetime_port_forget();		/* #911, for the same reason */
 }

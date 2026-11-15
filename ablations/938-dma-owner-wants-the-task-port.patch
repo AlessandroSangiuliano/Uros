@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #938
+Takes out: urmach_dma_region_owner taking a task's identity port (6afd75a4) -- it answers for the full task port alone, and cap_server, which keeps only identity ports, can no longer show a region its owner's
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[47\] WRONG — this task's own DMA region was not its own by its identity port
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 5bd25505..e2c755f9 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -5103,7 +5103,7 @@ urmach_dma_region_owner(
+ 	if (region_id == 0)
+ 		return KERN_INVALID_ARGUMENT;
+ 
+-	t = port_name_to_task_right(task, URMACH_TASK_RIGHTS_IDENTITY);
++	t = port_name_to_task_right(task, URMACH_TASK_RIGHTS_FULL);
+ 	if (t == TASK_NULL)
+ 		return KERN_INVALID_ARGUMENT;
+ 

@@ -116,6 +116,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_page.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_memory_entry.h>	/* #911 */
 #include <vm/memory_object.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_init.h>
@@ -178,4 +179,5 @@ void
 vm_mem_init(void)
 {
 	vm_object_init();
+	vm_memory_entry_init();		/* #911 */
 }

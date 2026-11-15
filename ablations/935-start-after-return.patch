@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #935
+Over: 935-widen-create-start.patch
+Takes out: the start under the task lock -- thread_create() asks thread_create_in() for its thread unstarted and starts it itself after the lock is gone, as it did, so a task_terminate() that reaches the listed thread first starts it through thread_unstop() and thread_create() puts it on a run queue a second time: still queued (thread_setrun()'s runq assertion), queued after it terminated (switch_context()'s new_act assertion), running while it is still marked waiting (mutex_lock_assert_safe), or a fault off what it left.  OMEGA 11/11, ablated: new_act 3 times, mutex_lock_assert_safe once, in [54]; the campaigns of 0a30077e and 36617991 gave the other two
+Run: --entry 14 300 -smp 4
+Expect: Assertion failed: .*th->runq == RUN_QUEUE_NULL
+Expect: Assertion failed: .*new_act != THR_ACT_NULL
+Expect: mutex_lock_assert_safe: thread 0x[0-9a-f]+ takes a mutex with wait_event 0x[0-9a-f]+, a wait it has not left
+Expect: faulting address 0x0{13}304
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index 340ba2e7..e3cc09e9 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1497,7 +1497,7 @@ thread_create(task_t task, thread_act_t *new_act)
+ 	 * thread_create_in(), under the task lock that lists it (#935).
+ 	 */
+ 	if ((rc = thread_create_in(thr_act, thread_bootstrap_return, &thread,
+-				   TRUE)) != KERN_SUCCESS) {
++				   FALSE)) != KERN_SUCCESS) {
+ 		thread_terminate(thr_act);
+ 		act_deallocate(thr_act);
+ 		return(rc);
+@@ -1509,6 +1509,8 @@ thread_create(task_t task, thread_act_t *new_act)
+ 		delay(2000);	/* 935-widen-create-start: hold the window before the start */
+ 	}
+ 
++	thread_start_running(thr_act, thread);	/* 935-start-after-return */
++
+ 	/*****
+ 	act_lock_thread(thr_act);
+ 	thread_dowait( thr_act, FALSE);

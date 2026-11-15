@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #743
+Takes out: the check that a no-senders notification came through cap_server's send-once right (380521e5) -- any message with the id ends the port it is sent to
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[43\] WRONG — a no-senders notification forged through a send right: sent 0x0, then block devices READ on the port: -?[0-9]+, not 0
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index b19628dd..5c2649b5 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -117,8 +117,7 @@ cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
+      * other bits and goes to MIG, which refuses it.  No reply: the one
+      * mach_msg_server() starts with is none.
+      */
+-    if (in->msgh_id == MACH_NOTIFY_NO_SENDERS &&
+-        in->msgh_bits == MACH_MSGH_BITS(0, MACH_MSG_TYPE_PORT_SEND_ONCE)) {
++    if (in->msgh_id == MACH_NOTIFY_NO_SENDERS) {
+         cap_task_port_gone(in->msgh_local_port);
+         return TRUE;
+     }

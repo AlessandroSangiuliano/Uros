@@ -35,9 +35,13 @@
  *   - flipc2_endpoint_connect() looks up the name and calls connect_port
  *   - flipc2_endpoint_connect_port() does the MIG handshake
  *
- * Dead peer detection:
- *   - Server requests MACH_NOTIFY_DEAD_NAME on client_task
- *   - On notification, the connection slot is cleaned up
+ * Dead peer detection (#911):
+ *   - The client sends a token it made for the connection, a port it holds
+ *     the receive right of, and maps the channels itself from the memory
+ *     entries the server answers.  Nobody holds anybody's task port.
+ *   - Server requests MACH_NOTIFY_DEAD_NAME on the token
+ *   - On notification, the connection slot is cleaned up: the client died,
+ *     or destroyed the token, which is how it disconnects
  */
 
 #include <flipc2.h>
@@ -47,6 +51,7 @@
 #include <mach/mig_errors.h>
 #include <mach/notify.h>
 #include <mach_init.h>
+#include <mach.h>			/* mach_msg_destroy() */
 #include <servers/netname.h>
 #include <string.h>
 
@@ -70,7 +75,8 @@ extern kern_return_t mach_msg_server_once(
 struct flipc2_ep_conn {
     flipc2_channel_t    fwd_ch;         /* server→client */
     flipc2_channel_t    rev_ch;         /* client→server */
-    mach_port_t         client_task;    /* send right to client task */
+    mach_port_t         client_token;   /* send right; the client holds the
+                                         * receive right (#911) */
     int                 active;         /* 1 = connected */
 };
 
@@ -185,7 +191,7 @@ flipc2_ep_cleanup_dead(struct flipc2_endpoint *ep,
     for (i = 0; i < ep->max_clients; i++) {
         if (!ep->conns[i].active)
             continue;
-        if (ep->conns[i].client_task != dead_port)
+        if (ep->conns[i].client_token != dead_port)
             continue;
 
         /* Found the dead client — destroy its channels */
@@ -196,7 +202,7 @@ flipc2_ep_cleanup_dead(struct flipc2_endpoint *ep,
         mach_port_deallocate(mach_task_self(), dead_port);
 
         ep->conns[i].active = 0;
-        ep->conns[i].client_task = MACH_PORT_NULL;
+        ep->conns[i].client_token = MACH_PORT_NULL;
         ep->n_clients--;
         return;
     }
@@ -223,14 +229,14 @@ flipc2_ep_cleanup_dead_reactor(struct flipc2_endpoint *ep,
     for (i = 0; i < ep->max_clients; i++) {
         if (!ep->conns[i].active)
             continue;
-        if (ep->conns[i].client_task != dead_port)
+        if (ep->conns[i].client_token != dead_port)
             continue;
 
         ep->pending_dead_fwd = ep->conns[i].fwd_ch;
         ep->pending_dead_rev = ep->conns[i].rev_ch;
         mach_port_deallocate(mach_task_self(), dead_port);
         ep->conns[i].active = 0;
-        ep->conns[i].client_task = MACH_PORT_NULL;
+        ep->conns[i].client_token = MACH_PORT_NULL;
         ep->n_clients--;
         return;
     }
@@ -288,23 +294,28 @@ flipc2_ep_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 /* ------------------------------------------------------------------ */
 
 /*
- * ds_flipc2_endpoint_connect — MIG server stub for client connect.
+ * ds_flipc2_endpoint_connect_rpc — MIG server stub for client connect.
  *
- * The first argument (server_port) is the protected payload, which
- * is the struct flipc2_endpoint pointer.
+ * The first argument (server_port) is the protected payload, the endpoint's
+ * slot (#498).
+ *
+ * 🔑 The server never holds the client's task (#911).  It used to be handed
+ * the client's task port and vm_remap() the channels into it; now it answers
+ * a memory entry for each channel and the client maps them.  What it keeps is
+ * the client's token, a send right whose receive right the client holds:
+ * the dead-name notification on it says the client died or disconnected,
+ * which is all the server needed the task port for.  One token, one
+ * connection: a second connection under the same token would share its one
+ * notification, and the first slot cleaned would leave the other for good.
  */
 kern_return_t
 ds_flipc2_endpoint_connect_rpc(
     mach_port_t         server_port,
-    mach_port_t         client_task,
+    mach_port_t         client_token,
     unsigned int        channel_size,
     unsigned int        ring_entries,
-    unsigned int       *fwd_addr,
-    unsigned int       *rev_addr,
-    mach_port_t        *fwd_sem,
-    mach_port_t        *fwd_sem_prod,
-    mach_port_t        *rev_sem,
-    mach_port_t        *rev_sem_prod,
+    mach_port_t        *fwd_entry,
+    mach_port_t        *rev_entry,
     unsigned int       *size_out,
     unsigned int       *entries_out)
 {
@@ -314,14 +325,15 @@ ds_flipc2_endpoint_connect_rpc(
     flipc2_channel_t    fwd_ch = (flipc2_channel_t)0;
     flipc2_channel_t    rev_ch = (flipc2_channel_t)0;
     mach_port_t         fwd_sem_port, rev_sem_port;
-    vm_address_t        fwd_client_addr, rev_client_addr;
+    mach_port_t         fwd_e = MACH_PORT_NULL;
+    mach_port_t         rev_e = MACH_PORT_NULL;
     kern_return_t       kr;
     mach_port_t         prev;
     uint32_t            i;
     uint32_t            cs, re;
     int                 slot;
 
-    if (ep == NULL)
+    if (ep == NULL || client_token == MACH_PORT_NULL)
         return KERN_INVALID_ARGUMENT;
 
     /* Check client limit */
@@ -342,12 +354,14 @@ ds_flipc2_endpoint_connect_rpc(
     if (re > FLIPC2_RING_ENTRIES_MAX)
         re = FLIPC2_RING_ENTRIES_MAX;
 
-    /* Find a free slot */
+    /* Find a free slot, and no live connection under this token */
     slot = -1;
     for (i = 0; i < ep->max_clients; i++) {
-        if (!ep->conns[i].active) {
+        if (ep->conns[i].active) {
+            if (ep->conns[i].client_token == client_token)
+                return KERN_INVALID_ARGUMENT;
+        } else if (slot < 0) {
             slot = (int)i;
-            break;
         }
     }
     if (slot < 0)
@@ -365,105 +379,50 @@ ds_flipc2_endpoint_connect_rpc(
         return KERN_RESOURCE_SHORTAGE;
     }
 
-    /* Map forward channel into client (server=producer, client=consumer) */
-    if (ep->flags & FLIPC2_CREATE_ISOLATED) {
-        ret = flipc2_channel_share_isolated(fwd_ch, client_task,
-                                            FLIPC2_ROLE_CONSUMER,
-                                            &fwd_client_addr);
-    } else {
-        ret = flipc2_channel_share(fwd_ch, client_task, &fwd_client_addr);
-    }
-    if (ret != FLIPC2_SUCCESS) {
-        flipc2_channel_destroy(rev_ch);
-        flipc2_channel_destroy(fwd_ch);
-        return KERN_FAILURE;
-    }
+    /* An entry for each, with what the client's role allows: it consumes
+     * the forward channel and produces the reverse one. */
+    ret = flipc2_channel_make_entry(fwd_ch, cs, FLIPC2_ROLE_CONSUMER, &fwd_e);
+    if (ret == FLIPC2_SUCCESS)
+        ret = flipc2_channel_make_entry(rev_ch, cs, FLIPC2_ROLE_PRODUCER,
+                                        &rev_e);
 
-    /* Map reverse channel into client (client=producer, server=consumer) */
-    if (ep->flags & FLIPC2_CREATE_ISOLATED) {
-        ret = flipc2_channel_share_isolated(rev_ch, client_task,
-                                            FLIPC2_ROLE_PRODUCER,
-                                            &rev_client_addr);
-    } else {
-        ret = flipc2_channel_share(rev_ch, client_task, &rev_client_addr);
+    /* Request dead-name notification on the client's token */
+    kr = KERN_FAILURE;
+    if (ret == FLIPC2_SUCCESS) {
+        prev = MACH_PORT_NULL;
+        kr = mach_port_request_notification(mach_task_self(), client_token,
+                                            MACH_NOTIFY_DEAD_NAME, 0,
+                                            ep->recv_port,
+                                            MACH_MSG_TYPE_MAKE_SEND_ONCE,
+                                            &prev);
+        if (kr == KERN_SUCCESS && prev != MACH_PORT_NULL)
+            mach_port_deallocate(mach_task_self(), prev);
     }
-    if (ret != FLIPC2_SUCCESS) {
-        vm_deallocate(client_task, fwd_client_addr, cs);
-        flipc2_channel_destroy(rev_ch);
-        flipc2_channel_destroy(fwd_ch);
-        return KERN_FAILURE;
-    }
-
-    /* Request dead-name notification on client task port */
-    prev = MACH_PORT_NULL;
-    kr = mach_port_request_notification(mach_task_self(), client_task,
-                                        MACH_NOTIFY_DEAD_NAME, 0,
-                                        ep->recv_port,
-                                        MACH_MSG_TYPE_MAKE_SEND_ONCE,
-                                        &prev);
     if (kr != KERN_SUCCESS) {
-        vm_deallocate(client_task, rev_client_addr, cs);
-        vm_deallocate(client_task, fwd_client_addr, cs);
+        if (fwd_e != MACH_PORT_NULL)
+            mach_port_deallocate(mach_task_self(), fwd_e);
+        if (rev_e != MACH_PORT_NULL)
+            mach_port_deallocate(mach_task_self(), rev_e);
         flipc2_channel_destroy(rev_ch);
         flipc2_channel_destroy(fwd_ch);
         return KERN_FAILURE;
     }
-    if (prev != MACH_PORT_NULL)
-        mach_port_deallocate(mach_task_self(), prev);
 
-    /* Fill in output parameters */
-    *fwd_addr     = (unsigned int)fwd_client_addr;
-    *rev_addr     = (unsigned int)rev_client_addr;
-    *fwd_sem      = fwd_ch->hdr->wakeup_sem;
-    *fwd_sem_prod = fwd_ch->hdr->wakeup_sem_prod;
-    *rev_sem      = rev_ch->hdr->wakeup_sem;
-    *rev_sem_prod = rev_ch->hdr->wakeup_sem_prod;
+    /* Fill in output parameters: the entries' rights go to the client */
+    *fwd_entry    = fwd_e;
+    *rev_entry    = rev_e;
     *size_out     = cs;
     *entries_out  = re;
 
     /* Store connection */
-    ep->conns[slot].fwd_ch      = fwd_ch;
-    ep->conns[slot].rev_ch      = rev_ch;
-    ep->conns[slot].client_task = client_task;
-    ep->conns[slot].active      = 1;
+    ep->conns[slot].fwd_ch       = fwd_ch;
+    ep->conns[slot].rev_ch       = rev_ch;
+    ep->conns[slot].client_token = client_token;
+    ep->conns[slot].active       = 1;
     ep->n_clients++;
     ep->pending_conn_idx = slot;
 
     return KERN_SUCCESS;
-}
-
-/*
- * ds_flipc2_endpoint_disconnect_rpc — MIG server stub for disconnect.
- */
-kern_return_t
-ds_flipc2_endpoint_disconnect_rpc(
-    mach_port_t         server_port,
-    mach_port_t         client_task)
-{
-    struct flipc2_endpoint *ep =
-        flipc2_ep_from_payload(server_port);
-    uint32_t i;
-
-    if (ep == NULL)
-        return KERN_INVALID_ARGUMENT;
-
-    for (i = 0; i < ep->max_clients; i++) {
-        if (!ep->conns[i].active)
-            continue;
-        if (ep->conns[i].client_task != client_task)
-            continue;
-
-        flipc2_channel_destroy(ep->conns[i].fwd_ch);
-        flipc2_channel_destroy(ep->conns[i].rev_ch);
-        mach_port_deallocate(mach_task_self(), client_task);
-
-        ep->conns[i].active = 0;
-        ep->conns[i].client_task = MACH_PORT_NULL;
-        ep->n_clients--;
-        return KERN_SUCCESS;
-    }
-
-    return KERN_INVALID_ARGUMENT;
 }
 
 /* ================================================================== */
@@ -646,6 +605,17 @@ flipc2_endpoint_pump(
      * records pending_dead_* without destroying). */
     (void)flipc2_ep_demux_reactor(&in.hdr, &out.hdr);
 
+    /* A routine that failed leaves the request's rights to whoever took it
+     * off the queue, as mach_msg_server_once() does for accept(): without
+     * this a refused connect kept the client's token -- before #911, its
+     * task port -- for good. */
+    if (!(out.hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+        ((mig_reply_error_t *)&out)->RetCode != KERN_SUCCESS &&
+        ((mig_reply_error_t *)&out)->RetCode != MIG_NO_REPLY) {
+        in.hdr.msgh_remote_port = MACH_PORT_NULL;
+        mach_msg_destroy(&in.hdr);
+    }
+
     /* Send the MIG reply when the routine produced one. */
     if (out.hdr.msgh_remote_port != MACH_PORT_NULL &&
         ((mig_reply_error_t *)&out)->RetCode != MIG_NO_REPLY) {
@@ -721,7 +691,7 @@ flipc2_endpoint_destroy(
             continue;
         flipc2_channel_destroy(ep->conns[i].fwd_ch);
         flipc2_channel_destroy(ep->conns[i].rev_ch);
-        mach_port_deallocate(mach_task_self(), ep->conns[i].client_task);
+        mach_port_deallocate(mach_task_self(), ep->conns[i].client_token);
         ep->conns[i].active = 0;
     }
 
@@ -756,6 +726,33 @@ flipc2_endpoint_port(
 /*  Client-side public API                                             */
 /* ================================================================== */
 
+/*
+ * The client's half of #911: map one channel's entry into this task.  Each
+ * section comes out with what the server's entry allows, so asking for
+ * read-write throughout asks for no more than that.  VM_INHERIT_SHARE is what
+ * vm_remap() gave the mapping when the server made it.
+ */
+static flipc2_return_t
+flipc2_ep_map_entry(
+    mach_port_t         entry,
+    uint32_t            size,
+    vm_address_t       *addr)
+{
+    vm_size_t           span;
+    kern_return_t       kr;
+
+    span = ((vm_size_t)size + vm_page_size - 1) & ~(vm_page_size - 1);
+    *addr = 0;
+    kr = vm_map(mach_task_self(), addr, span, 0, TRUE, entry, 0, FALSE,
+                VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE,
+                VM_INHERIT_SHARE);
+    if (kr != KERN_SUCCESS) {
+        *addr = 0;
+        return FLIPC2_ERR_MAP_FAILED;
+    }
+    return FLIPC2_SUCCESS;
+}
+
 flipc2_return_t
 flipc2_endpoint_connect_port(
     mach_port_t         server_port,
@@ -765,49 +762,77 @@ flipc2_endpoint_connect_port(
     flipc2_channel_t   *rev_ch_out)
 {
     kern_return_t       kr;
-    unsigned int        fwd_addr, rev_addr;
-    mach_port_t         fwd_sem, fwd_sem_prod;
-    mach_port_t         rev_sem, rev_sem_prod;
-    unsigned int        size_out, entries_out;
+    mach_port_t         token = MACH_PORT_NULL;
+    mach_port_t         fwd_e = MACH_PORT_NULL;
+    mach_port_t         rev_e = MACH_PORT_NULL;
+    vm_address_t        fwd_addr = 0, rev_addr = 0;
+    unsigned int        size_out = 0, entries_out = 0;
     flipc2_return_t     ret;
-    flipc2_channel_t    fwd_ch, rev_ch;
+    flipc2_channel_t    fwd_ch = (flipc2_channel_t)0;
+    flipc2_channel_t    rev_ch = (flipc2_channel_t)0;
 
     if (server_port == MACH_PORT_NULL || !fwd_ch_out || !rev_ch_out)
         return FLIPC2_ERR_INVALID_ARGUMENT;
 
-    /* Send connect request via MIG */
-    kr = flipc2_endpoint_connect_rpc(server_port, mach_task_self(),
-                                 channel_size, ring_entries,
-                                 &fwd_addr, &rev_addr,
-                                 &fwd_sem, &fwd_sem_prod,
-                                 &rev_sem, &rev_sem_prod,
-                                 &size_out, &entries_out);
+    /* The connection's token: this task keeps the receive right, and the
+     * server gets a send right made from it in transit (#911). */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &token);
+    if (kr != KERN_SUCCESS)
+        return FLIPC2_ERR_KERNEL;
+
+    kr = flipc2_endpoint_connect_rpc(server_port, token,
+                                     channel_size, ring_entries,
+                                     &fwd_e, &rev_e,
+                                     &size_out, &entries_out);
     if (kr != KERN_SUCCESS) {
+        (void)mach_port_mod_refs(mach_task_self(), token,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
         if (kr == KERN_RESOURCE_SHORTAGE)
             return FLIPC2_ERR_MAX_CLIENTS;
         return FLIPC2_ERR_KERNEL;
     }
 
-    /* Attach to forward channel (server→client, client consumes) */
-    ret = flipc2_channel_attach_remote((vm_address_t)fwd_addr,
-                                       size_out, &fwd_ch);
+    ret = flipc2_ep_map_entry(fwd_e, size_out, &fwd_addr);
+    if (ret == FLIPC2_SUCCESS)
+        ret = flipc2_ep_map_entry(rev_e, size_out, &rev_addr);
+
+    /* The mappings hold the pages: the entries are not needed again. */
+    (void)mach_port_deallocate(mach_task_self(), fwd_e);
+    (void)mach_port_deallocate(mach_task_self(), rev_e);
+
+    /* Forward channel: the server produces, this task consumes.  Reverse
+     * channel: the other way round. */
+    if (ret == FLIPC2_SUCCESS)
+        ret = flipc2_channel_attach_remote(fwd_addr, size_out, &fwd_ch);
+    if (ret == FLIPC2_SUCCESS)
+        ret = flipc2_channel_attach_remote(rev_addr, size_out, &rev_ch);
+
     if (ret != FLIPC2_SUCCESS) {
-        vm_deallocate(mach_task_self(), (vm_address_t)fwd_addr, size_out);
-        vm_deallocate(mach_task_self(), (vm_address_t)rev_addr, size_out);
+        /* A handle owns its mapping and detach() unmaps it; an address
+         * with no handle yet is unmapped here.  The token goes last, and
+         * its dead name tells the server to clean the connection up. */
+        if (rev_ch)
+            flipc2_channel_detach(rev_ch);
+        else if (rev_addr)
+            (void)vm_deallocate(mach_task_self(), rev_addr, size_out);
+        if (fwd_ch)
+            flipc2_channel_detach(fwd_ch);
+        else if (fwd_addr)
+            (void)vm_deallocate(mach_task_self(), fwd_addr, size_out);
+        (void)mach_port_mod_refs(mach_task_self(), token,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
         return ret;
     }
-    flipc2_channel_set_semaphores(fwd_ch, fwd_sem, fwd_sem_prod);
 
-    /* Attach to reverse channel (client→server, client produces) */
-    ret = flipc2_channel_attach_remote((vm_address_t)rev_addr,
-                                       size_out, &rev_ch);
-    if (ret != FLIPC2_SUCCESS) {
-        flipc2_channel_detach(fwd_ch);
-        vm_deallocate(mach_task_self(), (vm_address_t)rev_addr, size_out);
-        return ret;
-    }
-    flipc2_channel_set_semaphores(rev_ch, rev_sem, rev_sem_prod);
+    /* No semaphores travel since #324, and the handle must not take the
+     * names attach() read from the header: the server writes the header,
+     * and flipc2_endpoint_disconnect() deallocates these names in this
+     * task's space.  The reply used to overwrite them; nothing does now. */
+    flipc2_channel_set_semaphores(fwd_ch, MACH_PORT_NULL, MACH_PORT_NULL);
+    flipc2_channel_set_semaphores(rev_ch, MACH_PORT_NULL, MACH_PORT_NULL);
 
+    fwd_ch->conn_token = token;
     *fwd_ch_out = fwd_ch;
     *rev_ch_out = rev_ch;
     return FLIPC2_SUCCESS;
@@ -847,6 +872,8 @@ flipc2_endpoint_disconnect(
     flipc2_channel_t    fwd_ch,
     flipc2_channel_t    rev_ch)
 {
+    mach_port_t         token;
+
     if (!fwd_ch || !rev_ch)
         return FLIPC2_ERR_INVALID_ARGUMENT;
 
@@ -860,8 +887,17 @@ flipc2_endpoint_disconnect(
     if (rev_ch->sem_port_prod != MACH_PORT_NULL)
         mach_port_deallocate(mach_task_self(), rev_ch->sem_port_prod);
 
+    /* The token's dead name is how the server learns the connection is
+     * over (#911): it was never told before, and kept the slot until the
+     * client died. */
+    token = fwd_ch->conn_token;
+
     flipc2_channel_detach(fwd_ch);
     flipc2_channel_detach(rev_ch);
+
+    if (token != MACH_PORT_NULL)
+        (void)mach_port_mod_refs(mach_task_self(), token,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
 
     return FLIPC2_SUCCESS;
 }

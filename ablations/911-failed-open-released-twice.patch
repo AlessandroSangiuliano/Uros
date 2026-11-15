@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #911
+Takes out: a failed open's right left to the request's destruction (10862ee8) -- ext_server lets it go as well, and the second release comes out of the reference an open file's owner holds
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[31\] WRONG — after a failed open \(65537\) ext_server held NONE of the client's right
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+index 22511d05..6b247d3b 100644
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -1151,6 +1151,7 @@ vfs_open(
+ 	if (kr != KERN_SUCCESS) {
+ 		*handle_out = 0;
+ 		*type_out   = VFS_FT_UNKNOWN;
++		(void)mach_port_deallocate(mach_task_self(), client_token);
+ 		return kr;
+ 	}
+ 

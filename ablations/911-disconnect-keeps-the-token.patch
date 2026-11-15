@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #911
+Takes out: the disconnect's end of the token (953d5d2d) -- a client that disconnects keeps it, so the endpoint is never told and the slot stays the client's until it dies
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[29\] WRONG .*ended seen 0 time\(s\)
+
+diff --git a/uros/src/lib/libflipc2/flipc2_endpoint.c b/uros/src/lib/libflipc2/flipc2_endpoint.c
+index 761e0167..148a154d 100644
+--- a/uros/src/lib/libflipc2/flipc2_endpoint.c
++++ b/uros/src/lib/libflipc2/flipc2_endpoint.c
+@@ -895,9 +895,7 @@ flipc2_endpoint_disconnect(
+     flipc2_channel_detach(fwd_ch);
+     flipc2_channel_detach(rev_ch);
+ 
+-    if (token != MACH_PORT_NULL)
+-        (void)mach_port_mod_refs(mach_task_self(), token,
+-                                 MACH_PORT_RIGHT_RECEIVE, -1);
++    (void)token;
+ 
+     return FLIPC2_SUCCESS;
+ }

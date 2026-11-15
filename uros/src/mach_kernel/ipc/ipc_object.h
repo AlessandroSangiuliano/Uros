@@ -180,20 +180,14 @@ extern zone_t ipc_object_zones[IOT_NUMBER];
 #define	io_alloc(otype)		\
 		((ipc_object_t) zalloc(ipc_object_zones[(otype)]))
 
-#if	MACH_ASSERT
 /*
- *	DIPC must intercept the call to deallocate the IPC
- *	object in case the object in question is a port with
- *	a dipc_port extension.
+ *	#940: a function on every kernel, not a zfree() where MACH_ASSERT is
+ *	off: a port's memory goes back to its zone only after an RCU grace
+ *	period (see io_free() in ipc_object.c).
  */
 extern void	io_free(
 			unsigned int	otype,
 			ipc_object_t	object);
-
-#else	/* DIPC || MACH_ASSERT */
-#define	io_free(otype, io)	\
-		zfree(ipc_object_zones[(otype)], (vm_offset_t) (io))
-#endif	/* MACH_ASSERT */
 
 /*
  * Here we depend on the ipc_object being first within the ipc_common_data,

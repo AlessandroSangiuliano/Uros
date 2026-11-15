@@ -114,9 +114,10 @@ struct open_file {
 					 * (of_op_begin/of_op_end).  close waits
 					 * for pinned slots to drain; the dead-
 					 * client reclaim skips them. */
-	mach_port_t	owner;		/* #385: send right to the client task
-					 * that opened this fid via fs_open (0 for
-					 * the raw ext2_open path).  A SIGKILL'd
+	mach_port_t	owner;		/* #385: send right to the lifetime port
+					 * of the client that opened this fid via
+					 * fs_open (0 for the raw ext2_open path) --
+					 * its task port until #911.  A SIGKILL'd
 					 * client never sends ext2_close; the send
 					 * right turns into a dead name on its death,
 					 * and ds_ext2_open reclaims the slot when the
@@ -532,7 +533,7 @@ ds_ext2_open(
 			break;
 	if (fid == MAX_OPEN_FILES) {
 		/*
-		 * #385: pool full — reclaim any fid whose owning client task
+		 * #385: pool full — reclaim any fid whose owning client
 		 * has died.  A SIGKILL'd client never sends ext2_close, so its
 		 * slot would leak forever; but its owner send right (handed to
 		 * us at fs_open) turns into a dead name on task death, which we
@@ -1088,7 +1089,7 @@ vfs_fill_stat(fs_private_t priv, vfs_stat_t *st)
 kern_return_t
 vfs_open(
 	mach_port_t	fs_port,
-	mach_port_t	client_task,
+	mach_port_t	client_token,
 	vfs_path_t	path,
 	int		flags,
 	int		mode,
@@ -1105,13 +1106,22 @@ vfs_open(
 
 	kr = ds_ext2_open(fs_port, path, &fid);
 
+	/*
+	 * #911: on a failure the right is NOT let go here.  mach_msg_server()
+	 * destroys the request of a routine that fails, and the right with it;
+	 * this released it as well, so every failed open took one reference too
+	 * many from the name all of one client's opens share -- a reference an
+	 * open fid's `owner' was counting on.  With it gone the name could die
+	 * under the fid, and the client's death then found nothing to reclaim
+	 * by (#385).
+	 */
+
 	/* O_EXCL: a successful open of an existing file is an error. */
 	if (kr == KERN_SUCCESS &&
 	    (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
 		(void)ds_ext2_close(fs_port, fid);
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
-		(void)mach_port_deallocate(mach_task_self(), client_task);
 		return VFS_ERR_EXIST;			/* #599 */
 	}
 
@@ -1133,7 +1143,6 @@ vfs_open(
 			       mnt->service_name, rc);
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
-			(void)mach_port_deallocate(mach_task_self(), client_task);
 			return fs_error(rc);		/* #599 */
 		}
 		kr = ds_ext2_open(fs_port, path, &fid);
@@ -1142,11 +1151,10 @@ vfs_open(
 	if (kr != KERN_SUCCESS) {
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
-		(void)mach_port_deallocate(mach_task_self(), client_task);
 		return kr;
 	}
 
-	/* #385: record the client task so a dead-name reclaim can free this
+	/* #385: record the client's right so a dead-name reclaim can free this
 	 * fid if the client is killed before it calls close().  We keep the
 	 * send right (dropped in ds_ext2_close / the reclaim scan). */
 	{
@@ -1154,12 +1162,12 @@ vfs_open(
 		pthread_mutex_lock(&mnt->of_lock);
 		if (fid >= 1 && fid <= MAX_OPEN_FILES &&
 		    mnt->open_files[fid - 1].in_use) {
-			mnt->open_files[fid - 1].owner = client_task;
+			mnt->open_files[fid - 1].owner = client_token;
 			stored = 1;
 		}
 		pthread_mutex_unlock(&mnt->of_lock);
 		if (!stored)
-			(void)mach_port_deallocate(mach_task_self(), client_task);
+			(void)mach_port_deallocate(mach_task_self(), client_token);
 	}
 
 	priv = vfs_op_begin(mnt, (vfs_u64_t)fid);
@@ -2278,16 +2286,49 @@ main(int argc, char **argv)
 {
 	kern_return_t kr;
 	int	      i;
+	/*
+	 * #915: -p DEVICE:PATH, a partition to mount and where, in place of the
+	 * table below -- for a machine whose disks are not QEMU's, where
+	 * "ahci0a" is whatever partition the first disk with a device holds:
+	 * on lapsus the Linux that runs there.  DEVICE is a name the block
+	 * server publishes, "label:UROSLOG" for one, and PATH is what follows
+	 * the last colon, starting with '/'.  The first is waited for, as
+	 * ahci0a is; the rest are mounted if they are there.
+	 */
+	char		p_dev[MAX_MOUNTS][64];
+	const char	*p_path[MAX_MOUNTS];
+	const char	*p_bad = NULL;
+	int		n_p = 0;
 
 	/*
 	 * Unknown arguments are ignored rather than fatal: this server is
 	 * started by bootstrap from a line in bootstrap.conf, and a server that
 	 * refuses to boot over a flag it does not know is a worse failure than
-	 * one that ignores it.
+	 * one that ignores it.  A -p it cannot read is said, below, once there
+	 * is a console, and mounts nothing.
 	 */
-	for (i = 1; i < argc; i++)
-		if (strcmp(argv[i], "-v") == 0)
+	for (i = 1; i < argc; i++) {
+		const char *arg, *colon;
+
+		if (strcmp(argv[i], "-v") == 0) {
 			ext2_verbose = 1;
+			continue;
+		}
+		if (strcmp(argv[i], "-p") != 0)
+			continue;
+		arg = i + 1 < argc ? argv[++i] : "";
+		colon = strrchr(arg, ':');
+		if (n_p == MAX_MOUNTS || colon == NULL || colon == arg
+		    || colon[1] != '/'
+		    || (size_t)(colon - arg) >= sizeof(p_dev[0])) {
+			p_bad = arg;
+			continue;
+		}
+		memcpy(p_dev[n_p], arg, (size_t)(colon - arg));
+		p_dev[n_p][colon - arg] = '\0';
+		p_path[n_p] = colon + 1;
+		n_p++;
+	}
 
 	kr = bootstrap_ports(bootstrap_port,
 			     &host_port, &device_port,
@@ -2369,6 +2410,33 @@ main(int argc, char **argv)
 		printf("ext2: fs_pager_init failed\n");
 		return 1;
 	}
+
+	if (p_bad != NULL)
+		printf("ext2: -p \"%s\" is not DEVICE:/PATH, or one too many: "
+		       "not mounted (#915)\n", p_bad);
+
+	/* #915: the partitions -p names, and not the table. */
+	if (n_p > 0) {
+		for (i = 0; i < n_p; i++) {
+			char	svc[sizeof("ext_server:") + 3];
+			int	rc;
+
+			if (i == 0)
+				snprintf(svc, sizeof(svc), "ext_server");
+			else
+				snprintf(svc, sizeof(svc), "ext_server:%d", i);
+			rc = mount_partition(&mounts[i], p_dev[i], svc,
+					     p_path[i], /*blocking=*/ (i == 0));
+			if (rc < 0) {
+				if (i == 0)
+					return 1;	/* mandatory */
+				continue;		/* optional */
+			}
+			n_mounts++;
+		}
+		printf("ext2: %d partition(s) mounted, as -p names them "
+		       "(#915)\n", n_mounts);
+	} else
 
 	/* Mount partitions.
 	 * First partition (ahci0a) is mandatory — blocks until available.

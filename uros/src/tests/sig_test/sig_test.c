@@ -39,6 +39,8 @@
 
 /* MIG-generated user stubs from proc.defs (subsystem 3200). */
 #include "proc.h"
+#include <mach/task_rights.h>   /* #927 */
+#include <mach/mach_host.h>      /* #927: urmach_task_rights_port */
 
 extern kern_return_t bootstrap_ports(mach_port_t bootstrap,
                                      mach_port_t *host_port,
@@ -88,6 +90,36 @@ static unsigned int g_fail = 0;
 
 static mach_port_t proc_port    = MACH_PORT_NULL;
 static proc_pid_t  my_pid       = 0;
+
+/*
+ * #927: proc_server registers a process by its reduced port and refuses the
+ * task port.  This is that port, made from a task port this test holds; the
+ * caller gives it back once proc_server has been handed its own.
+ */
+static mach_port_t
+process_port(mach_port_t task)
+{
+    mach_port_t p = MACH_PORT_NULL;
+
+    if (urmach_task_rights_port(task, URMACH_TASK_RIGHTS_PROCESS, &p)
+            != KERN_SUCCESS)
+        return MACH_PORT_NULL;
+    return p;
+}
+
+/* proc_register() by the task's reduced port (#927). */
+static kern_return_t
+register_task(proc_pid_t parent, mach_port_t task, char *cmd,
+              proc_pid_t *pid, int *rc)
+{
+    mach_port_t   p = process_port(task);
+    kern_return_t kr;
+
+    kr = proc_register(proc_port, parent, p, cmd, pid, rc);
+    if (MACH_PORT_VALID(p))
+        (void)mach_port_deallocate(mach_task_self(), p);
+    return kr;
+}
 static mach_port_t my_sig_recv  = MACH_PORT_NULL;
 
 /*
@@ -133,7 +165,7 @@ setup_self(void)
 
     /* Register ourselves with proc_server.  parent_pid=0 so we don't
      * receive SIGCHLD for our own death. */
-    kr = proc_register(proc_port, PROC_PID_NONE, mach_task_self(),
+    kr = register_task(PROC_PID_NONE, mach_task_self(),
                        (char *)"sig_test", &my_pid, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_register");
     EXPECT_RC(rc, PROC_OK, "proc_register rc");
@@ -239,7 +271,7 @@ test_child_stop_cont(void)
                      FALSE, &child);
     EXPECT_KR(kr, KERN_SUCCESS, "task_create");
 
-    kr = proc_register(proc_port, my_pid, child, (char *)"stopchild",
+    kr = register_task(my_pid, child, (char *)"stopchild",
                        &child_pid, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
     EXPECT_RC(rc, PROC_OK, "proc_register child rc");
@@ -290,7 +322,7 @@ test_child_kill_sigchld(void)
                      FALSE, &child);
     EXPECT_KR(kr, KERN_SUCCESS, "task_create");
 
-    kr = proc_register(proc_port, my_pid, child, (char *)"killchild",
+    kr = register_task(my_pid, child, (char *)"killchild",
                        &child_pid, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
     EXPECT_RC(rc, PROC_OK, "proc_register child rc");
@@ -400,7 +432,7 @@ test_pgrp_inherit(void)
     kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
                      FALSE, &child);
     EXPECT_KR(kr, KERN_SUCCESS, "task_create");
-    kr = proc_register(proc_port, my_pid, child, (char *)"inh_child",
+    kr = register_task(my_pid, child, (char *)"inh_child",
                        &child_pid, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
     EXPECT_RC(rc, PROC_OK, "proc_register child rc");
@@ -461,7 +493,7 @@ test_setpgid_new_pgrp(void)
     kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
                      FALSE, &child);
     EXPECT_KR(kr, KERN_SUCCESS, "task_create");
-    kr = proc_register(proc_port, my_pid, child, (char *)"pgleader",
+    kr = register_task(my_pid, child, (char *)"pgleader",
                        &child_pid, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
 

@@ -308,8 +308,16 @@ thread_terminate(
 		/*
 		 * Release locks individually. (`act_unlock_thread()'
 		 * will not work since `pool_port' field has changed.)
+		 *
+		 * 🔴 ONLY IF THERE IS ONE (#935).  act_lock_thread() locks the
+		 * pool_port when the activation has one, and a threadless
+		 * activation that never had a pool_port -- the one a failed
+		 * thread_create_in() now hands here -- has none, so this would
+		 * ip_unlock() a NULL port.  The AGRESSIVE_ABORT path above
+		 * guards it the same way.
 		 */
-		ip_unlock(iplock);
+		if (iplock != IP_NULL)
+			ip_unlock(iplock);
 		act_unlock(thr_act);
 	}
 	else {
@@ -374,6 +382,9 @@ thread_hold(
 {
 	if (thr_act->suspend_count++ == 0) {
 		install_special_handler(thr_act);
+#if	WAKER_TRACK
+		thr_act->hold_from = __builtin_return_address(0);	/* #925 */
+#endif
 		nudge(thr_act);
 	}
 }
@@ -428,6 +439,10 @@ thread_suspend(
 		 */
 		thr_act->stop_asked_at = thr_act->user_faults;
 		thr_act->stop_asked = TRUE;
+#if	WAKER_TRACK
+		thr_act->stop_asked_by = current_thread();	/* #925 */
+		thr_act->stop_asked_tick = sched_tick;
+#endif
 		if (thread &&
 			thr_act == thread->top_act && thread != current_thread()) {
 			nudge(thr_act);
@@ -1070,6 +1085,16 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 	int rc;
 	vm_map_t map;
 
+	/*
+	 * 🔴 NO TASK, NO ACTIVATION (#935).  thread_create()'s MIG server
+	 * hands on what convert_port_to_task() gave it, and for a port whose
+	 * task has been terminated that is TASK_NULL; nothing between there
+	 * and here checked it.  All three creating paths come through this
+	 * call, so the refusal is here, before anything is allocated.
+	 */
+	if (task == TASK_NULL)
+		return(KERN_INVALID_ARGUMENT);
+
 	thr_act = (thread_act_t)zalloc(thr_act_zone);
 	if (thr_act == 0)
 		return(KERN_RESOURCE_SHORTAGE);
@@ -1139,20 +1164,19 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 		}
 	}
 
-	task_lock(task);
-
-	/* Chain the thr_act onto the task's list */
-	mutex_lock(&task->act_list_lock);
-	thr_act->thr_acts.next = task->thr_acts.next;
-	thr_act->thr_acts.prev = &task->thr_acts;
-	task->thr_acts.next->prev = &thr_act->thr_acts;
-	task->thr_acts.next = &thr_act->thr_acts;
-	task->thr_act_count++;
-	/* no need to check for transition from 0 -> 1 here */
-	task->res_act_count++;
-	mutex_unlock(&task->act_list_lock);
-
-	task_unlock(task);
+	/*
+	 * 🔴 NOT ON THE TASK'S LIST YET (#935).  The chaining moved to
+	 * thread_create_in(), which does it under the task lock once the
+	 * thread is attached and the task is still active -- so an activation
+	 * is discoverable through task->thr_acts only when it is whole.
+	 * Before, act_create() listed it here, with no thread; task_info(
+	 * TASK_THREAD_TIMES_INFO) and task_assign() walk that list and assert
+	 * a thread on every activation without a pool_port, and one caught a
+	 * half-built activation between here and the attach.  thr_acts.next is
+	 * NULL (bzero above), which act_disable_task_locked() reads as "not
+	 * listed", so an activation freed before it is listed unwinds
+	 * cleanly.
+	 */
 
 	/* Cache the task's map and take a reference to it */
 	thr_act->map = task->map;
@@ -1621,6 +1645,13 @@ install_special_handler(
 	spl = splsched();
 	if (thread)
 		thread_lock(thread);
+#if	WAKER_TRACK
+	/* #925: thread_hold() writes its own caller after this. */
+	thr_act->apc_from = __builtin_return_address(0);
+	thr_act->hold_from = 0;
+	thr_act->apc_by = current_thread();
+	thr_act->apc_tick = sched_tick;
+#endif
 	install_special_handler_locked(thr_act);
 	act_set_apc(thr_act);
 	if (thread)
@@ -2066,6 +2097,11 @@ special_handler(
  * Ensures that the activation will execute its returnhandlers
  * before it next executes any of its user-level code.
  *
+ * ⚠️ "Next" counts from when its processor hears of it (#925).  A thread in
+ * user mode on another processor runs on until the interrupt act_set_apc()
+ * sends there arrives -- and until #925 nothing was sent, so it ran on until
+ * that processor's tick.
+ *
  * Called with thr_act's act_lock() and "appropriate" thread-related
  * locks held.  (See act_lock_thread().)  Returns same way.
  */
@@ -2285,8 +2321,15 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 	gss.rh.next = thr_act->handlers;
 	thr_act->handlers = &gss.rh;
 
+	/*
+	 * Under the thread's lock, as act_set_apc() is called everywhere else:
+	 * it is what makes the processor that function reads the right one.
+	 */
+	assert(thr_act->thread);	/* Callers must ensure these */
 	s = splsched();
+	thread_lock(thr_act->thread);
 	act_set_apc(thr_act);
+	thread_unlock(thr_act->thread);
 	splx(s);
 
 #if	MACH_ASSERT
@@ -2300,7 +2343,6 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 	}
 #endif	/* MACH_ASSERT */
 
-	assert(thr_act->thread);	/* Callers must ensure these */
 	assert(thr_act != current_act());
 	for (;;) {
 		nudge(thr_act);
@@ -2420,16 +2462,50 @@ act_get_state(thread_act_t thr_act, int flavor, thread_state_t state,
 /*
  * These two should be called at splsched()
  * Set/clear indicator to run APC (layered on ASTs)
+ *
+ * 🔴 AND THE SETTING REACHES THE PROCESSOR THE THREAD RUNS ON (#925).
+ *
+ * The bit goes into the activation, and a return to user mode reads its own
+ * processor's need_ast[], so the bit means nothing to a running thread until
+ * something copies it across: ast_propagate() below for the caller's own
+ * activation, ast_check() on the processor of any other.  Nothing asked that
+ * processor, so only its tick did, every 10 ms.  A thread running in user mode
+ * there ran on with the stop pending, and an abort was answered by its next
+ * wait, whenever that came, ending at once with KERN_SUCCESS: act_test [56],
+ * at four processors, 300 rounds in 300.  cause_ast_check() asks, as
+ * thread_wait() does.
+ *
+ * ⚠️ With the thread's lock held, which is what makes last_processor the
+ * right processor: thread_invoke() writes it under that lock before
+ * ast_context() reads the activation's bits, so a switch-in either comes after
+ * this and reads the bit, or came before and is the processor asked.  Only the
+ * top activation, because ast_check() copies current_act()'s bits and no
+ * other's.  Not this processor: a thread that last ran here and is not its
+ * caller is on a run queue, and its switch-in reads the bit.
  */
 void
 act_set_apc(thread_act_t thr_act)
 {
+#if	NCPUS > 1
+	thread_t	thread = thr_act->thread;
+	processor_t	processor;
+#endif	/* NCPUS > 1 */
+
 	thread_ast_set(thr_act, AST_APC);
 	if (thr_act == current_act()) {
 		mp_disable_preemption();
 		ast_propagate(thr_act, cpu_number());
 		mp_enable_preemption();
+		return;
 	}
+#if	NCPUS > 1
+	if (thread == THREAD_NULL || thread->top_act != thr_act ||
+	    !(thread->state & TH_RUN))
+		return;
+	processor = thread->last_processor;
+	if (processor != PROCESSOR_NULL && processor != current_processor())
+		cause_ast_check(processor);
+#endif	/* NCPUS > 1 */
 }
 
 void

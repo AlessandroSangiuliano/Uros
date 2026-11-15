@@ -313,6 +313,15 @@ typedef struct flipc2_channel {
     uint32_t    mapped_size;
 
     /*
+     * The token of the connection this handle came from (#911), on the
+     * forward channel of a client's pair, MACH_PORT_NULL everywhere else.
+     * The client holds its receive right and the server a send right with
+     * a dead-name request on it, so destroying it is how a client
+     * disconnects: flipc2_endpoint_disconnect() does.
+     */
+    mach_port_t conn_token;
+
+    /*
      * Spurious wakeup counter (consumer-side).
      * Incremented when semaphore_wait returns but no data is available.
      * Reset to zero on every successful consume.
@@ -1296,6 +1305,22 @@ flipc2_channel_share_isolated(
     mach_port_t         target_task,
     uint32_t            target_role,
     vm_address_t       *out_addr);
+
+/*
+ * A memory entry for a channel this task made, for a peer in `role' to map
+ * into itself with vm_map() (#911): nobody holds anybody's task port, and
+ * the entry carries the most the peer may have on each section.
+ *
+ * size:          the size the channel was made with (not the header's)
+ * role:          FLIPC2_ROLE_PRODUCER or FLIPC2_ROLE_CONSUMER
+ * entry:         [out] a send right to the entry
+ */
+flipc2_return_t
+flipc2_channel_make_entry(
+    flipc2_channel_t    channel,
+    uint32_t            size,
+    uint32_t            role,
+    mach_port_t        *entry);
 
 /*
  * Insert a semaphore port into another task's IPC space.

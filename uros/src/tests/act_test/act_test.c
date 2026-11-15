@@ -76,6 +76,8 @@
 
 #include <stdio.h>
 #include <pthread.h>
+#include <sys/timers.h>	/* #925: getclock(), the bound of arm 39's joins */
+#include <mach/urmach_futex.h>	/* #925: arm fifty-six's waits */
 
 #include "exc_server.h"
 
@@ -2825,6 +2827,34 @@ arm_thirteen_message_to_a_receiver_being_read(void)
 #define	ARM14_RUN_MS		5
 #define	ARM14_TASK_INFO_ID	2098	/* task_info()'s msgh_id in mach.defs,
 					   as the generated mach_user.c sends it */
+#define	ARM14_DEPRESS_MS	1000	/* longer than a round: see below */
+#define	ARM14_ALONE_MAX_MS	10000	/* the rounds at one processor: see the end */
+
+static int	arm14_alone;	/* one processor; the child reads its copy */
+
+/*
+ * 🔴 AT ONE PROCESSOR A CHILD'S THREAD STEPS ASIDE AS IT STARTS (#941).
+ *
+ * Just started, it has a better priority than the main thread, which has used
+ * the processor.  So thread_resume() handed it the processor at once, and the
+ * main thread had it back only when the child's quantum ran out; the end of
+ * the main thread's nap did not preempt it either.  At one processor the
+ * three starts took 240 ms a round and the 5 ms nap 120 ms, and the arm 19.4
+ * to 19.7 s against 1.1 s at four (victus, 12/11).  Depressed, the thread
+ * runs while the main thread sleeps and is preempted when it wakes, at the
+ * points where its quantum's end would have preempted it.  SWITCH_OPTION_IDLE,
+ * whose depression lasts: SWITCH_OPTION_DEPRESS's is given back before
+ * thread_switch() returns (#925).  thread_switch() is the trap, like
+ * everything the child calls, and the child inherited arm14_alone with this
+ * task's memory.
+ */
+static void
+arm_fourteen_step_aside(void)
+{
+	if (arm14_alone)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_IDLE,
+				     ARM14_DEPRESS_MS);
+}
 
 static void
 arm_fourteen_trap_loop(void)
@@ -2833,6 +2863,7 @@ arm_fourteen_trap_loop(void)
 	struct task_basic_info	info;
 	mach_msg_type_number_t	n;
 
+	arm_fourteen_step_aside();
 	for (;;) {
 		n = TASK_BASIC_INFO_COUNT;
 		(void) syscall_task_info(self, TASK_BASIC_INFO,
@@ -2882,6 +2913,7 @@ arm_fourteen_rpc_loop(void)
 	mach_port_t	reply = mach_reply_port();
 	union arm14_msg	m;
 
+	arm_fourteen_step_aside();
 	for (;;)
 		(void) arm_fourteen_ask(self, reply, &m);
 }
@@ -2925,6 +2957,12 @@ arm_fourteen_terminate_inside_traps(void)
 	mach_port_type_t	type;
 	kern_return_t		kr;
 	int			round;
+	unsigned		cpus = processors();
+	struct timespec		start, end;
+	long			took;
+
+	/* Before the first child: each inherits it with this task's memory. */
+	arm14_alone = cpus <= 1;
 
 	/*
 	 * The third thread's question, asked here first: a message the kernel
@@ -2948,6 +2986,11 @@ arm_fourteen_terminate_inside_traps(void)
 		}
 	}
 
+	if (getclock(TIMEOFDAY, &start) != 0) {
+		printf("act_test: [14] the clock could not be read to time the "
+		       "rounds — WRONG (#941)\n");
+		return 0;
+	}
 	for (round = 0; round < ARM14_ROUNDS; round++) {
 		child = MACH_PORT_NULL;
 		kr = task_create(me, NULL, 0, TRUE, &child);
@@ -2988,10 +3031,1149 @@ arm_fourteen_terminate_inside_traps(void)
 		}
 	}
 
+	if (getclock(TIMEOFDAY, &end) != 0) {
+		printf("act_test: [14] the clock could not be read to time the "
+		       "rounds — WRONG (#941)\n");
+		return 0;
+	}
+	took = (long) (end.tv_sec - start.tv_sec) * 1000 +
+	       (long) (end.tv_nsec - start.tv_nsec) / 1000000;
+	/*
+	 * 🔴 AT ONE PROCESSOR THE ROUNDS STAND ON THE SCHEDULER, AND ARE JUDGED
+	 * FOR IT (#941, #785).
+	 *
+	 * The main thread has the processor back at each start and at its nap's
+	 * end only because thread_setrun() gives it to a woken thread of better
+	 * priority than the children's, depressed as they start.  Rounds that
+	 * waited for the children's quanta took 19.4 to 19.7 s, where they take
+	 * what they take at four processors.  A change to the preemption rule, or
+	 * a depression that stops holding, meets this line first.  Judged by the
+	 * processors counted, not by arm14_alone, which the ablation clears.
+	 */
+	if (cpus <= 1 && took > ARM14_ALONE_MAX_MS) {
+		printf("act_test: [14] the rounds took %ld ms at one processor, "
+		       "more than %d ms: the children step aside as they start, "
+		       "and rounds that waited for their quanta took 19.4 to "
+		       "19.7 s — WRONG (#941, #785)\n", took, ARM14_ALONE_MAX_MS);
+		return 0;
+	}
+	/* A line of its own: the one below is near the console's 256 (#802). */
+	printf("act_test: [14] the rounds took %ld ms at %u processor(s) "
+	       "(#941)\n", took, cpus);
 	printf("act_test: [14] %d children terminated, each with two threads "
 	       "in syscall_task_info() and one in task_info()'s message on its "
 	       "own task, and the kernel came through: every child's port "
 	       "was a dead name after (#688)\n", ARM14_ROUNDS);
+	return 1;
+}
+
+/*
+ * ── Arm fifty-four: create threads in a task as it is terminated (#935) ──
+ *
+ * thread_create() on another task runs thread_create_in() against THAT task,
+ * which checks its active flag last, after it has attached the new thread to
+ * the activation.  A task_terminate() that wins the race clears the flag, the
+ * create fails, and two things broke: the activation was left pointing at the
+ * thread it then freed, so the caller's thread_terminate() wrote through freed
+ * memory; and, for the window between act_create() listing the activation and
+ * the attach, task_info(TASK_THREAD_TIMES_INFO) walked the task's threads and
+ * asserted a thread on one that had none yet.  Both took a kernel down in
+ * #934's A/Bs on OMEGA.
+ *
+ * So: a child task, one thread of this task making and unmaking threads in
+ * it, another reading its thread times, and then this thread terminating it.
+ * The kernel has to come through every round.  The widens hold each window
+ * open; the ablations put each defect back.
+ *
+ * #940: and two more sending task_info()'s message to the child with no trap
+ * first, on through the terminate, so that a request is in mach_msg's hot
+ * path while another thread's refusal turns the child's name dead.  Every
+ * helper is joined with a bound: a request queued where nothing answers is
+ * said as WRONG rather than stopping the boot.  Every other round destroys
+ * the child's name right after the terminate instead, so that a send right
+ * whose port has died leaves the space by mach_port_destroy() too.
+ */
+#define	ARM54_ROUNDS	20
+#define	ARM54_RUN_MS	5
+
+static mach_port_t		arm54_child;
+static volatile int		arm54_stop;
+static volatile unsigned	arm54_made;
+static volatile unsigned	arm54_late;
+static volatile unsigned	arm54_asked;
+
+/*
+ * #940: each helper's MIG reply port, as it was before its last call.  The
+ * trap answers both calls while the child is a task; once it is not, the
+ * library sends the call as a message and sleeps on this port for the answer.
+ */
+static volatile mach_port_t	arm54_creator_reply;
+static volatile mach_port_t	arm54_poller_reply;
+
+/* #940: two messengers, and the reply port each receives on. */
+#define	ARM54_MESSENGERS	2
+static volatile mach_port_t	arm54_messenger_reply[ARM54_MESSENGERS];
+
+/* How many messages a messenger sends after the stop, at most, before it
+ * gives up on the name ever answering dead. */
+#define	ARM54_AFTER_MAX	1000
+
+/* Make and unmake threads in the child until told to stop or it is gone. */
+static void *
+arm54_creator(void *arg)
+{
+	mach_port_t	me = mach_task_self();
+
+	(void) arg;
+	while (!arm54_stop) {
+		mach_port_t	t = MACH_PORT_NULL;
+		kern_return_t	kr;
+
+		arm54_creator_reply = mig_get_reply_port();
+		kr = thread_create(arm54_child, &t);
+
+		/*
+		 * KERN_FAILURE comes from one place only: thread_create_in()
+		 * finding the task inactive after it had attached the thread,
+		 * the late failure (#935).  act_create() refuses a task
+		 * already gone with KERN_INVALID_ARGUMENT.
+		 */
+		if (kr == KERN_FAILURE)
+			arm54_late++;
+		if (kr != KERN_SUCCESS)
+			continue;	/* the child is gone, or will be */
+		arm54_made++;
+		(void) thread_terminate(t);
+		(void) mach_port_deallocate(me, t);
+	}
+	return NULL;
+}
+
+/* Read the child's thread times, which walks its activation list. */
+static void *
+arm54_poller(void *arg)
+{
+	(void) arg;
+	while (!arm54_stop) {
+		task_thread_times_info_data_t	times;
+		mach_msg_type_number_t		n = TASK_THREAD_TIMES_INFO_COUNT;
+
+		arm54_poller_reply = mig_get_reply_port();
+		if (task_info(arm54_child, TASK_THREAD_TIMES_INFO,
+			      (task_info_t) &times, &n) == KERN_SUCCESS)
+			arm54_asked++;
+	}
+	return NULL;
+}
+
+/*
+ * #940: task_info()'s message to the child, as [14]'s third thread sends it
+ * and as the library sends it once the trap refuses -- but with no trap
+ * first, which reads the name under the space's lock.  So a messenger is in
+ * mach_msg's hot path all the time.  There are two: the first to send after
+ * the death is the one whose refusal turns the child's name dead, and the
+ * other is in the hot path meanwhile.  On through the terminate, until the
+ * name answers dead.
+ */
+static void *
+arm54_messenger(void *arg)
+{
+	mach_port_t	me = mach_task_self();
+	mach_port_t	reply = mach_reply_port();
+	unsigned	after = 0;
+
+	arm54_messenger_reply[(int) (long) arg] = reply;
+	for (;;) {
+		union arm14_msg		m;
+		mach_msg_return_t	mr = arm_fourteen_ask(arm54_child, reply,
+							      &m);
+
+		if (mr == MACH_SEND_INVALID_DEST)
+			break;			/* the name is dead */
+		if (mr == MACH_RCV_PORT_DIED)
+			return NULL;		/* let out by arm54_join() */
+		if (arm54_stop && ++after > ARM54_AFTER_MAX)
+			break;
+	}
+	(void) mach_port_mod_refs(me, reply, MACH_PORT_RIGHT_RECEIVE, -1);
+	return NULL;
+}
+
+/*
+ * #940: a join with a bound.  A helper's last call after the terminate goes
+ * to the child's dead name as a message, and its answer comes back at once,
+ * a refusal; a request that went to a port with nothing behind it leaves
+ * the helper asleep on its reply port for good, and this thread in its join.
+ * So the join waits PATIENCE / 10 seconds at most, and one that does not
+ * return says which helper and what it asked, then lets it out by destroying
+ * its reply port, which ends the receive with MACH_RCV_PORT_DIED.  Answers
+ * whether the helper came back by itself.
+ */
+static int
+arm54_join(pthread_t t, int round, const char *who, const char *asked,
+	   volatile mach_port_t *reply)
+{
+	struct timespec	deadline;
+	mach_port_t	r;
+
+	if (getclock(TIMEOFDAY, &deadline) != 0) {
+		printf("act_test: [54] no clock to bound the join of the %s "
+		       "— WRONG\n", who);
+		return 0;
+	}
+	deadline.tv_sec += PATIENCE / 10;
+	if (pthread_timedjoin_np(t, NULL, &deadline) == 0)
+		return 1;
+	r = *reply;
+	printf("act_test: [54] round %d: the %s had not come back from "
+	       "%s on the terminated child %d s later: its request went "
+	       "where nothing answers — WRONG (#940)\n", round, who, asked,
+	       PATIENCE / 10);
+	if (r != MACH_PORT_NULL)
+		(void) mach_port_destroy(mach_task_self(), r);
+	if (getclock(TIMEOFDAY, &deadline) == 0) {
+		deadline.tv_sec += PATIENCE / 10;
+		if (pthread_timedjoin_np(t, NULL, &deadline) != 0)
+			printf("act_test: [54] round %d: and the %s stayed "
+			       "where it was with its reply port 0x%x "
+			       "destroyed\n", round, who, (unsigned) r);
+	}
+	return 0;
+}
+
+static int
+arm_fifty_four_create_on_a_dying_task(void)
+{
+	mach_port_t	me = mach_task_self();
+	int		round;
+
+	for (round = 0; round < ARM54_ROUNDS; round++) {
+		pthread_t		creator, poller;
+		pthread_t		messenger[ARM54_MESSENGERS];
+		mach_port_type_t	type = 0;
+		kern_return_t		kr, tkr;
+		int			back, i;
+		int			destroy = (round & 1) != 0;
+
+		arm54_child = MACH_PORT_NULL;
+		arm54_stop = 0;
+		kr = task_create(me, NULL, 0, FALSE, &arm54_child);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [54] round %d: task_create answered "
+			       "%d — WRONG\n", round, kr);
+			return 0;
+		}
+		if (pthread_create(&creator, NULL, arm54_creator, NULL) != 0 ||
+		    pthread_create(&poller, NULL, arm54_poller, NULL) != 0 ||
+		    pthread_create(&messenger[0], NULL, arm54_messenger,
+				   (void *) 0L) != 0 ||
+		    pthread_create(&messenger[1], NULL, arm54_messenger,
+				   (void *) 1L) != 0) {
+			printf("act_test: [54] round %d: pthread_create failed "
+			       "— WRONG\n", round);
+			arm54_stop = 1;
+			(void) task_terminate(arm54_child);
+			(void) mach_port_deallocate(me, arm54_child);
+			return 0;
+		}
+
+		nap(ARM54_RUN_MS);
+
+		/*
+		 * Terminate while a create may be mid-flight: the create then
+		 * meets the cleared active flag.  Stop the helpers only after,
+		 * so one is as likely as not to be inside thread_create_in().
+		 */
+		kr = task_terminate(arm54_child);
+
+		/*
+		 * #940: and every other round destroys the child's name right
+		 * after, while the messengers send to it.  A send right whose
+		 * port has died goes through ipc_right_destroy()'s own dead
+		 * branch then, where in the other rounds the first refusal
+		 * turns it into a dead name in ipc_right_check(): both drop the
+		 * port's last reference, and both must clear the entry first.
+		 */
+		if (kr == KERN_SUCCESS && destroy)
+			kr = mach_port_destroy(me, arm54_child);
+		arm54_stop = 1;
+		back = arm54_join(creator, round, "creator", "thread_create()",
+				  &arm54_creator_reply);
+		back = arm54_join(poller, round, "poller", "task_info()",
+				  &arm54_poller_reply) && back;
+		for (i = 0; i < ARM54_MESSENGERS; i++)
+			back = arm54_join(messenger[i], round, "messenger",
+					  "task_info()'s message",
+					  &arm54_messenger_reply[i]) && back;
+		if (!back) {
+			(void) mach_port_deallocate(me, arm54_child);
+			return 0;
+		}
+
+		if (destroy) {
+			tkr = KERN_INVALID_NAME;
+			if (kr == KERN_SUCCESS)
+				tkr = mach_port_type(me, arm54_child, &type);
+			if (kr != KERN_SUCCESS) {
+				printf("act_test: [54] round %d: terminating the "
+				       "child, or destroying its name after, "
+				       "answered %d — WRONG\n", round, kr);
+				return 0;
+			}
+			if (tkr != KERN_INVALID_NAME) {
+				printf("act_test: [54] round %d: the terminated "
+				       "child's name, destroyed, still answers %d "
+				       "(type 0x%x) — WRONG\n", round, tkr, type);
+				return 0;
+			}
+			continue;
+		}
+
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_type(me, arm54_child, &type);
+		(void) mach_port_deallocate(me, arm54_child);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [54] round %d: terminating the child, "
+			       "or asking about its port after, answered %d — "
+			       "WRONG\n", round, kr);
+			return 0;
+		}
+		if (!(type & MACH_PORT_TYPE_DEAD_NAME)) {
+			printf("act_test: [54] round %d: the terminated child's "
+			       "port is not a dead name (type 0x%x) — WRONG\n",
+			       round, type);
+			return 0;
+		}
+	}
+
+	printf("act_test: [54] %d tasks terminated while a thread made and "
+	       "unmade threads in each (%u made, %u met the task gone after "
+	       "the thread was attached) and another read its thread times "
+	       "(%u read), every other child's name destroyed right after, "
+	       "and the kernel came through (#935, #940)\n",
+	       ARM54_ROUNDS, arm54_made, arm54_late, arm54_asked);
+	return 1;
+}
+
+/*
+ * ── Arm fifty-five: a thread made while its task is being suspended runs
+ *    only once the task does (#935) ──
+ *
+ * A new thread carries one hold for its user stop and one for each
+ * task_suspend() in force on its task.  thread_create_in() read the task's
+ * count at its top, with no lock, and listed the activation on the task much
+ * later, under the task lock that task_suspend() and task_resume() count and
+ * walk under.  A suspend that landed in between held every thread of the task
+ * but the new one, which then ran in a suspended task once its user stop was
+ * resumed.  (Before #935 the list came first and the same suspend was counted
+ * twice: the thread stayed held after its task was resumed.)
+ *
+ * So, each round: a child that shares this program's text, a helper that
+ * suspends it while this thread creates a thread in it, and the new thread set
+ * to spin in that text, its user stop resumed.  While the task is suspended the
+ * thread must not run; once the task is resumed it must.  The widen
+ * 935-widen-create-terminate holds the window open: it delays the create
+ * between attaching the thread and taking the task lock.
+ */
+#define	ARM55_ROUNDS	20
+#define	ARM55_STACK	(4 * 4096)
+#define	ARM55_SETTLE_MS	20
+#define	ARM55_SAMPLES	10	/* five milliseconds apart */
+#define	ARM55_BOUND_MS	2000
+
+static mach_port_t		arm55_child;
+static volatile int		arm55_go;
+static volatile kern_return_t	arm55_suspend_kr;
+
+/* Where the new thread runs, in the child's copy of this text. */
+static void
+arm55_spin(void)
+{
+	for (;;)
+		__asm__ __volatile__("pause");
+}
+
+/* Suspend the child the moment this thread's creator starts its create. */
+static void *
+arm55_suspender(void *arg)
+{
+	(void) arg;
+	while (!arm55_go)
+		continue;
+	arm55_suspend_kr = task_suspend(arm55_child);
+	return NULL;
+}
+
+/* The thread's run state, or -1 when it cannot be read. */
+static int
+arm55_run_state(mach_port_t t)
+{
+	thread_basic_info_data_t	info;
+	mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
+
+	if (thread_info(t, THREAD_BASIC_INFO, (thread_info_t) &info, &n)
+	    != KERN_SUCCESS)
+		return -1;
+	return info.run_state;
+}
+
+/*
+ * One round; 1 when the thread ran exactly when its task let it.  A held
+ * thread can read RUNNING for a moment, woken to look at its count again, so
+ * it is taken for running only when every sample says so: a thread that
+ * spins says so every time.
+ */
+static int
+arm55_round(mach_port_t me, int round)
+{
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	vm_address_t			stack = 0;
+	mach_port_t			t = MACH_PORT_NULL;
+	pthread_t			helper;
+	kern_return_t			kr;
+	int				ok = 0, rs = -1, i, running, waited;
+
+	arm55_child = MACH_PORT_NULL;
+	arm55_go = 0;
+	arm55_suspend_kr = KERN_FAILURE;
+	kr = task_create(me, NULL, 0, TRUE, &arm55_child);
+	if (kr == KERN_SUCCESS)
+		kr = vm_allocate(arm55_child, &stack, ARM55_STACK, TRUE);
+	if (kr != KERN_SUCCESS)
+		printf("act_test: [55] round %d: no child to create in (%d) — "
+		       "WRONG\n", round, kr);
+	if (kr == KERN_SUCCESS &&
+	    pthread_create(&helper, NULL, arm55_suspender, NULL) != 0) {
+		printf("act_test: [55] round %d: pthread_create failed — "
+		       "WRONG\n", round);
+		kr = KERN_FAILURE;
+	} else if (kr == KERN_SUCCESS) {
+		/* Both at once: the suspend lands while the create runs. */
+		arm55_go = 1;
+		kr = thread_create(arm55_child, &t);
+		(void) pthread_join(helper, NULL);
+		if (kr != KERN_SUCCESS || arm55_suspend_kr != KERN_SUCCESS) {
+			printf("act_test: [55] round %d: thread_create answered "
+			       "%d and task_suspend %d — WRONG\n", round, kr,
+			       arm55_suspend_kr);
+			kr = KERN_FAILURE;
+		}
+	}
+	if (kr == KERN_SUCCESS) {
+		kr = thread_get_state(t, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, &count);
+		if (kr == KERN_SUCCESS) {
+			state.rip = (uint64_t) (uintptr_t) arm55_spin;
+			state.rsp = (uint64_t) (stack + ARM55_STACK - 8);
+			kr = thread_set_state(t, x86_64_THREAD_STATE,
+					      (thread_state_t) &state, count);
+		}
+		if (kr == KERN_SUCCESS)
+			kr = thread_resume(t);
+		if (kr != KERN_SUCCESS)
+			printf("act_test: [55] round %d: setting the thread up "
+			       "answered %d — WRONG\n", round, kr);
+	}
+	if (kr == KERN_SUCCESS) {
+		/* Its task still suspended, the thread must stay put. */
+		nap(ARM55_SETTLE_MS);
+		for (i = running = 0; i < ARM55_SAMPLES; i++) {
+			if ((rs = arm55_run_state(t)) == TH_STATE_RUNNING)
+				running++;
+			nap(5);
+		}
+		if (running == ARM55_SAMPLES)
+			printf("act_test: [55] round %d: a thread made while its "
+			       "task was being suspended runs with the task "
+			       "still suspended (%d of %d samples) — WRONG "
+			       "(#935)\n", round, running, ARM55_SAMPLES);
+		else {
+			/* The task resumed, it must run. */
+			(void) task_resume(arm55_child);
+			for (waited = 0; waited < ARM55_BOUND_MS; waited += 5) {
+				if ((rs = arm55_run_state(t))
+				    == TH_STATE_RUNNING)
+					break;
+				nap(5);
+			}
+			if (rs == TH_STATE_RUNNING)
+				ok = 1;
+			else
+				printf("act_test: [55] round %d: the thread is "
+				       "still held %d ms after its task was "
+				       "resumed (run state %d) — WRONG (#935)\n",
+				       round, ARM55_BOUND_MS, rs);
+		}
+	}
+	if (arm55_child != MACH_PORT_NULL) {
+		(void) task_terminate(arm55_child);
+		(void) mach_port_deallocate(me, arm55_child);
+	}
+	if (t != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, t);
+	return ok;
+}
+
+static int
+arm_fifty_five_created_while_suspended(void)
+{
+	mach_port_t	me = mach_task_self();
+	int		round;
+
+	for (round = 0; round < ARM55_ROUNDS; round++)
+		if (!arm55_round(me, round))
+			return 0;
+
+	printf("act_test: [55] %d threads made while their task was being "
+	       "suspended stayed put while it was suspended and ran once it "
+	       "was resumed (#935)\n", ARM55_ROUNDS);
+	return 1;
+}
+
+/*
+ * ── Arm fifty-six: an abort of a thread running in user mode reaches it there,
+ *    and does not outlive its return (#925) ──
+ *
+ * thread_abort() of a thread that is not waiting sets TH_ABORT, and every wait
+ * the thread blocks in while the bit is set ends at once.  special_handler()
+ * clears it, run through AST_APC on the way back to user mode.  For a thread
+ * running in user mode on another processor that AST is only in its activation
+ * until the processor copies it into need_ast[], which only its tick did, every
+ * 10 ms, until act_set_apc() sent it the interrupt that does it (#925).
+ *
+ * So a thread spins in user mode, with no system call, while this one aborts
+ * it, waits a millisecond by the clock and lets it go; then it makes two timed
+ * futex waits on a word nobody touches.
+ *
+ *   - The first must time out.  A millisecond is far longer than an interrupt
+ *     takes to arrive, and far shorter than the 10 ms between ticks, so
+ *     without the interrupt the abort is mostly still pending and the wait
+ *     ends at once.
+ *   - The second must time out whatever the first did.  A first wait ended by
+ *     the abort is still a switch away and back -- thread_select() keeps the
+ *     running thread only at exactly TH_RUN, which TH_ABORT is not -- and the
+ *     switch-in copies the activation's ASTs.  A bit that outlived that would
+ *     end every wait after the abort.
+ *
+ * Before the interrupt, with the go given at once: at four processors the
+ * first ended early in 300 rounds of 300 and the second in none; at one
+ * processor neither, the abort reaching the thread at its switch-in.  With
+ * the millisecond, 925-apc-no-interrupt at four processors: the first in 195
+ * rounds of 200 under KVM and 174 of 200 under TCG (one boot 28 of 50), the
+ * second in none; the fixed tree in none of 400, nor of 200 at one and two
+ * processors (victus, 11/11).
+ *
+ * At one processor the two threads take turns on it, and a spin on either
+ * side lasted until the spinner was preempted.  With the main thread spinning
+ * until the victim was in its loop and the victim spinning until the go, the
+ * rounds took 56.8 to 71.0 s, in a boot of 122 to 136 s that took 62 to 64 s
+ * without them, and the push campaign of 78a623e2 ran out of its 330 minutes
+ * on that (run 43042768930).  So the main thread naps until the victim is in
+ * its loop, and at one processor the victim depresses its priority first (see
+ * a56_victim()).  The nap's end preempts the victim there, in user mode; the
+ * abort finds it preempted, and the question at one processor is whether the
+ * switch back delivers it before the first wait.  The rounds take 4.0 s at one
+ * processor and at four, where they had taken 3.0: the nap costs two ticks a
+ * round.  As merged in 86d46d6a the depression was SWITCH_OPTION_DEPRESS's,
+ * given back before thread_switch() returned, and the rounds took 4.2 to 4.4 s
+ * at one processor on the aging rule (victus and OMEGA, 12/11).
+ * 925-apc-no-interrupt was caught 4 of 4, the fixed tree passing 4 of 4 (entry
+ * 14 on OMEGA, KVM and TCG, the trees alternated, 12/11).
+ */
+#define	A56_ROUNDS	50
+#define	A56_WAIT_MS	20
+#define	A56_GAP_US	1000
+#define	A56_NAP_MS	1	/* two ticks: convert_ipc_timeout_to_ticks() */
+#define	A56_DEPRESS_MS	100	/* longer than any nap: see a56_victim() */
+#define	A56_DEPRESS_TRIES 10	/* depressions run out in a row: a56_victim() */
+#define	A56_ALONE_MAX_MS 30000	/* the rounds at one processor: see the end */
+
+static volatile int		a56_spinning;
+static volatile int		a56_go;
+/*
+ * Volatile like the flag it is published under: a plain global could be read
+ * before the victim wrote it, the loop on a56_spinning being no barrier to the
+ * compiler -- under KVM at four processors round 11 aborted MACH_PORT_NULL.
+ */
+static volatile mach_port_t	a56_self;
+static volatile unsigned int	a56_word;	/* nobody wakes it */
+static volatile kern_return_t	a56_kr[2];
+static volatile long		a56_ms[2];
+static int			a56_alone;	/* one processor */
+static volatile kern_return_t	a56_depressed;
+static volatile long		a56_switch_ms;	/* that call's, -1 unread */
+static volatile int		a56_ran_out;	/* this round's, asked again */
+static volatile int		a56_was_depressed;	/* 1, 0, -1 unread */
+
+static long
+a56_ms_between(const struct timespec *a, const struct timespec *b)
+{
+	return (long) (b->tv_sec - a->tv_sec) * 1000 +
+	       (long) (b->tv_nsec - a->tv_nsec) / 1000000;
+}
+
+/*
+ * #925: the victim's last depression ran out -- ended by its timer, which
+ * thread_switch() answers KERN_ABORTED for, or found gone when read back
+ * after a KERN_SUCCESS -- after its whole time, so it is asked again.  One
+ * place for the victim's loop and the round's verdict, which must agree.
+ */
+static int
+a56_depression_ran_out(void)
+{
+	return (a56_depressed == KERN_ABORTED ||
+		(a56_depressed == KERN_SUCCESS && a56_was_depressed == 0)) &&
+	       a56_switch_ms >= A56_DEPRESS_MS;
+}
+
+/*
+ * Wait at least `us' microseconds by the clock -- a count of turns is no time
+ * under TCG -- and answer how many it read, or -1 if it could not read it.
+ */
+static long
+a56_gap(long us)
+{
+	struct timespec	t0, t;
+	long		d;
+
+	if (getclock(TIMEOFDAY, &t0) != 0)
+		return -1;
+	do {
+		if (getclock(TIMEOFDAY, &t) != 0)
+			return -1;
+		d = (long) (t.tv_sec - t0.tv_sec) * 1000000 +
+		    (long) (t.tv_nsec - t0.tv_nsec) / 1000;
+	} while (d < us);
+	return d;
+}
+
+/* Spin in user mode until told, then wait twice on a word nobody wakes. */
+static void *
+a56_victim(void *arg)
+{
+	struct timespec	t[3];
+	int		i;
+
+	(void) arg;
+	a56_self = mach_thread_self();
+	/*
+	 * 🔴 AT ONE PROCESSOR, DEPRESSED IN ITS LOOP -- BY SWITCH_OPTION_IDLE,
+	 * WHOSE DEPRESSION LASTS (#925).
+	 *
+	 * Below any priority the main thread can have, so that the end of its
+	 * nap preempts this thread in its loop, in user mode: thread_setrun()
+	 * preempts only for a better priority.  thread_switch() gives the
+	 * depression back before it returns, for every option but
+	 * SWITCH_OPTION_IDLE (syscall_subr.c: "Restore depressed priority unless
+	 * we just did a SWITCH_OPTION_IDLE"), so SWITCH_OPTION_DEPRESS depresses
+	 * a thread only while it waits to run again.  As merged in 86d46d6a this
+	 * asked for DEPRESS, and the victim read itself depressed in its loop in
+	 * none of 100 rounds at one processor (victus, 12/11).  The nap's end
+	 * preempted it all the same, because it had used the processor while
+	 * the main thread slept, and usage is what a timesharing priority is
+	 * made of -- the aging rule's doing, which is what the depression was
+	 * there to take the rounds off.  With IDLE, depressed in 100 of 100,
+	 * and the rounds take at one processor the 4.0 s they take at four.  At
+	 * more processors this one keeps its priority and its processor, and is
+	 * running there when the abort comes.
+	 */
+	if (a56_alone) {
+		policy_timeshare_info_data_t	ts;
+		mach_msg_type_number_t		n = POLICY_TIMESHARE_INFO_COUNT;
+		struct timespec			s[2];
+
+		/*
+		 * 🔴 A DEPRESSION THAT RAN OUT WHILE THIS THREAD WAITED TO RUN
+		 * IS ASKED AGAIN; ONE THAT ENDED BEFORE ITS TIME IS WRONG (#925).
+		 *
+		 * thread_switch() blocks when anything else is ready, and at the
+		 * lowest priority this thread runs again only once nothing else
+		 * is: the depression's own timer can end it first, and for
+		 * SWITCH_OPTION_IDLE thread_switch() then answers KERN_ABORTED.
+		 * That timer is the only thing on the way that ends it --
+		 * thread_abort() does not -- and it ran out in 2 of the 44 boots
+		 * at one processor under TCG of a merge test, with the boot's
+		 * other tests on the processor, and in none of 44 under KVM
+		 * (OMEGA, 13/11).  So the call is timed: KERN_ABORTED after the
+		 * whole depression is asked again, up to A56_DEPRESS_TRIES times
+		 * in a row, and before it is a depression something else ended.
+		 *
+		 * Ten in a row and the round goes on with this thread at its own
+		 * priority, counted as held: in the next merge test it ran out
+		 * ten times in a row in entry 53, whose -t holds the processor
+		 * on purpose (#688).  The round's abort is asked all the same,
+		 * at worst after a quantum, and the bound on the rounds' time
+		 * still holds.  A depressed thread kept off a processor nothing
+		 * else wanted would be counted there too, which is why the line
+		 * says how many rounds were held.
+		 *
+		 * A depression found gone when read back ran out the same way:
+		 * thread_switch() answered KERN_SUCCESS with this thread still
+		 * depressed, and the processor was held past the depression's
+		 * time before the reading -- entry 55, -t again, at one processor
+		 * in the merge test of a869dac2 (OMEGA, 13/11).  So the reading
+		 * is inside the loop and the clock is read after it: found gone
+		 * after the whole depression is asked again, and before it is
+		 * WRONG, as for KERN_ABORTED.  a56_depression_ran_out() says
+		 * which, here and in the round's verdict.
+		 */
+		for (;;) {
+			int	clocked = getclock(TIMEOFDAY, &s[0]) == 0;
+
+			a56_depressed = thread_switch(MACH_PORT_NULL,
+						      SWITCH_OPTION_IDLE,
+						      A56_DEPRESS_MS);
+			/*
+			 * And read back: that is how the depression that was
+			 * not there was found.  A call that answered
+			 * KERN_SUCCESS said nothing of the priority the thread
+			 * then ran at.
+			 */
+			n = POLICY_TIMESHARE_INFO_COUNT;
+			if (thread_info(a56_self, THREAD_SCHED_TIMESHARE_INFO,
+					(thread_info_t) &ts, &n) != KERN_SUCCESS)
+				a56_was_depressed = -1;
+			else
+				a56_was_depressed = ts.depressed ? 1 : 0;
+			a56_switch_ms = clocked &&
+					getclock(TIMEOFDAY, &s[1]) == 0 ?
+					a56_ms_between(&s[0], &s[1]) : -1;
+			if (!a56_depression_ran_out())
+				break;
+			a56_ran_out++;
+			if (a56_ran_out == A56_DEPRESS_TRIES)
+				break;
+		}
+	}
+	a56_spinning = 1;
+	while (!a56_go)
+		__asm__ __volatile__("pause");
+	(void) getclock(TIMEOFDAY, &t[0]);
+	for (i = 0; i < 2; i++) {
+		a56_kr[i] = urmach_futex((unsigned int *) &a56_word,
+					 URMACH_FUTEX_WAIT |
+					 URMACH_FUTEX_PRIVATE, 0, A56_WAIT_MS,
+					 0);
+		(void) getclock(TIMEOFDAY, &t[i + 1]);
+		a56_ms[i] = a56_ms_between(&t[i], &t[i + 1]);
+	}
+	/*
+	 * Not back to the pool depressed: thread_abort() does not end a
+	 * depression, and this one would follow the thread into whatever
+	 * pthread_create() reuses it next, at the lowest priority, until its
+	 * timer.  KERN_NOT_DEPRESSED, if the timer came first, is as good.
+	 */
+	if (a56_alone)
+		(void) thread_depress_abort(a56_self);
+	return NULL;
+}
+
+static int
+arm_fifty_six_abort_reaches_user_mode(void)
+{
+	mach_port_t	me = mach_task_self();
+	unsigned	cpus = processors();
+	int		round, i, early[2] = { 0, 0 }, depressed = 0, ran_out = 0;
+	int		held = 0;
+	long		gap, shortest_gap = 0, worst[2] = { 0, 0 }, took;
+	kern_return_t	kr, worst_kr[2] = { KERN_OPERATION_TIMED_OUT,
+					    KERN_OPERATION_TIMED_OUT };
+	struct timespec	start, end;
+
+	/*
+	 * How long the rounds take, read by the clock and said on the line:
+	 * at one processor they cost every boot about 75 s, and only the
+	 * campaign's running out of time showed it (#925).
+	 */
+	if (getclock(TIMEOFDAY, &start) != 0) {
+		printf("act_test: [56] the clock could not be read to time "
+		       "the rounds — WRONG (#925)\n");
+		return 0;
+	}
+	a56_alone = cpus <= 1;
+	for (round = 0; round < A56_ROUNDS; round++) {
+		pthread_t	victim;
+		kern_return_t	napped = MACH_RCV_TIMED_OUT;
+
+		a56_spinning = a56_go = 0;
+		a56_self = MACH_PORT_NULL;
+		a56_kr[0] = a56_kr[1] = KERN_FAILURE;
+		a56_depressed = KERN_SUCCESS;
+		a56_switch_ms = -1;
+		a56_ran_out = 0;
+		a56_was_depressed = 1;	/* read by the victim at one processor */
+		if (pthread_create(&victim, NULL, a56_victim, NULL) != 0) {
+			printf("act_test: [56] round %d: pthread_create failed "
+			       "— WRONG\n", round);
+			return 0;
+		}
+		/*
+		 * Asleep until it is in its loop, a nap at a time: a spin here
+		 * held, at one processor, the processor the victim needed to
+		 * get there until the quantum ran out (#925).
+		 */
+		while (!a56_spinning && napped == MACH_RCV_TIMED_OUT)
+			napped = nap(A56_NAP_MS);
+		if (napped != MACH_RCV_TIMED_OUT) {
+			a56_go = 1;
+			(void) pthread_join(victim, NULL);
+			(void) mach_port_deallocate(me, a56_self);
+			printf("act_test: [56] round %d: a nap answered 0x%x, not "
+			       "a timeout — WRONG (#925)\n", round, napped);
+			return 0;
+		}
+		/* It is in its loop, in user mode, making no system call. */
+		kr = thread_abort(a56_self);
+		gap = a56_gap(A56_GAP_US);
+		a56_go = 1;
+		(void) pthread_join(victim, NULL);
+		(void) mach_port_deallocate(me, a56_self);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [56] round %d: thread_abort answered "
+			       "%d — WRONG\n", round, kr);
+			return 0;
+		}
+		/*
+		 * Held: the depression ran out A56_DEPRESS_TRIES times in a row,
+		 * the processor taken by others, and the round went on with the
+		 * victim at its own priority (see a56_victim()).
+		 */
+		if (a56_ran_out == A56_DEPRESS_TRIES && a56_depression_ran_out())
+			held++;
+		else if (a56_depressed != KERN_SUCCESS) {
+			if (a56_depressed != KERN_ABORTED)
+				printf("act_test: [56] round %d: thread_switch() "
+				       "with SWITCH_OPTION_IDLE answered %d — "
+				       "WRONG (#925)\n", round, a56_depressed);
+			else if (a56_switch_ms < 0)
+				printf("act_test: [56] round %d: thread_switch() "
+				       "with SWITCH_OPTION_IDLE answered "
+				       "KERN_ABORTED, and the clock could not be "
+				       "read to say whether its depression had run "
+				       "out — WRONG (#925)\n", round);
+			else if (a56_switch_ms < A56_DEPRESS_MS)
+				printf("act_test: [56] round %d: thread_switch() "
+				       "with SWITCH_OPTION_IDLE answered "
+				       "KERN_ABORTED after %ld ms, before its %d ms "
+				       "depression could run out: something ended "
+				       "it early — WRONG (#925)\n", round,
+				       a56_switch_ms, A56_DEPRESS_MS);
+			else if (a56_ran_out < A56_DEPRESS_TRIES)
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim's depression ran out %d time(s) "
+				       "and it asked no more, the last after %ld "
+				       "ms, short of its %d tries — WRONG (#925)\n",
+				       round, a56_ran_out, a56_switch_ms,
+				       A56_DEPRESS_TRIES);
+			else
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim's depression ran out %d time(s) "
+				       "in a row before it ran again, the last "
+				       "after %ld ms: something held the processor "
+				       "that long — WRONG (#925)\n", round,
+				       a56_ran_out, a56_switch_ms);
+			return 0;
+		} else if (a56_alone && a56_was_depressed != 1) {
+			if (a56_was_depressed < 0)
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim could not read its priority in "
+				       "its loop, thread_switch() having answered "
+				       "%d — WRONG (#925)\n", round, a56_depressed);
+			else if (a56_switch_ms < 0)
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim read itself not depressed in its "
+				       "loop, and the clock could not be read to say "
+				       "whether its depression had run out — WRONG "
+				       "(#925)\n", round);
+			else
+				printf("act_test: [56] round %d: at one processor "
+				       "the victim read itself not depressed in its "
+				       "loop %ld ms after it asked, before its %d ms "
+				       "depression could run out, thread_switch() "
+				       "having answered %d: the end of the main "
+				       "thread's nap is to preempt it by its priority "
+				       "— WRONG (#925)\n", round, a56_switch_ms,
+				       A56_DEPRESS_MS, a56_depressed);
+			return 0;
+		} else if (a56_alone)
+			depressed++;
+		ran_out += a56_ran_out;
+		if (gap < 0) {
+			printf("act_test: [56] round %d: the clock could not be "
+			       "read to wait after the abort — WRONG\n", round);
+			return 0;
+		}
+		if (round == 0 || gap < shortest_gap)
+			shortest_gap = gap;
+		for (i = 0; i < 2; i++) {
+			if (a56_kr[i] == KERN_OPERATION_TIMED_OUT)
+				continue;
+			if (++early[i] == 1 || a56_ms[i] < worst[i]) {
+				worst[i] = a56_ms[i];
+				worst_kr[i] = a56_kr[i];
+			}
+		}
+	}
+
+	if (early[0] > 0) {
+		printf("act_test: [56] an abort of a thread spinning in user mode "
+		       "was still pending when it waited, %ld us or more later: "
+		       "the first of two %d ms futex waits ended early in %d of "
+		       "%d rounds (the shortest after %ld ms, answering 0x%x), "
+		       "the second in %d — WRONG (#925)\n", shortest_gap,
+		       A56_WAIT_MS, early[0], A56_ROUNDS, worst[0], worst_kr[0],
+		       early[1]);
+		return 0;
+	}
+	if (early[1] > 0) {
+		printf("act_test: [56] an abort of a thread spinning in user mode "
+		       "outlived its return there: the second of two %d ms futex "
+		       "waits ended early in %d of %d rounds (the shortest after "
+		       "%ld ms, answering 0x%x), the first in none — WRONG "
+		       "(#925)\n", A56_WAIT_MS, early[1], A56_ROUNDS, worst[1],
+		       worst_kr[1]);
+		return 0;
+	}
+	if (getclock(TIMEOFDAY, &end) != 0) {
+		printf("act_test: [56] the clock could not be read to time "
+		       "the rounds — WRONG (#925)\n");
+		return 0;
+	}
+	took = a56_ms_between(&start, &end);
+	/*
+	 * 🔴 AT ONE PROCESSOR THE ROUNDS STAND ON THE SCHEDULER, AND ARE JUDGED
+	 * FOR IT (#925, #785).
+	 *
+	 * The nap's end preempts the victim only because thread_setrun() gives
+	 * the processor to a woken thread of better priority.  With the two
+	 * threads spinning for each other, each round waited for a quantum,
+	 * and the rounds took 56.8 to 71.0 s where they take 4.0 (victus,
+	 * 12/11) -- a cost no line said, until a campaign ran out of its time
+	 * on it.  The bound is seven times what they take, and what they take
+	 * is ticks, the nap's and the waits', more than processor time: a
+	 * change to the preemption rule meets this line first.  The victim's
+	 * depression is judged in every round above, so this one is about
+	 * what the scheduler makes of it.
+	 */
+	if (cpus <= 1 && took > A56_ALONE_MAX_MS) {
+		printf("act_test: [56] the rounds took %ld ms at one processor, "
+		       "more than %d ms: the end of the main thread's nap is to "
+		       "preempt the victim at once, and rounds that waited for "
+		       "its quantum took 57 to 71 s — WRONG (#925, #785)\n",
+		       took, A56_ALONE_MAX_MS);
+		return 0;
+	}
+	/* A line of its own: the one below is near the console's 256 (#802). */
+	if (a56_alone)
+		printf("act_test: [56] at one processor the victim read itself "
+		       "depressed in its loop in %d of %d rounds, by "
+		       "SWITCH_OPTION_IDLE; %d depressions ran out and were "
+		       "asked again, and %d rounds ran undepressed, the "
+		       "processor held (#925)\n",
+		       depressed, A56_ROUNDS, ran_out, held);
+	printf("act_test: [56] an abort of a thread spinning in user mode was "
+	       "spent before it waited: in %d rounds both of two %d ms futex "
+	       "waits made %ld us or more after it timed out; the rounds took "
+	       "%ld ms at %u processor(s) (#925)\n",
+	       A56_ROUNDS, A56_WAIT_MS, shortest_gap, took, cpus);
+	return 1;
+}
+
+/*
+ * ── Arm fifty-seven: a task terminated while its thread asks a port of its
+ *    own through mach_msg()'s hot path (#940) ──
+ *
+ * The hot path resolves a request's two names with nothing locked, in an RCU
+ * read section, and a thread of a task being terminated can still be inside
+ * mach_msg() after its space has died (#688).  ipc_space_destroy() clears
+ * is_active, then ipc_right_clean() drops each entry's reference and leaves
+ * the entry naming its port: a port whose receive right was in that space
+ * dies, and its memory goes back to its zone a grace period later, while the
+ * dead space's table still names it.  So the resolve asks whether the space
+ * is alive before it touches a port.
+ *
+ * Each round makes a child with this task's memory and a port in its space,
+ * the receive right and a send right under one name, and starts two threads
+ * in it: one receives on the port and answers, the other asks it, an RPC
+ * that takes the hot path.  After ARM57_RUN_MS the child is terminated from
+ * here.  The kernel must come through every round, and the child's port must
+ * be a dead name after each one.  As in [14], the threads use traps only,
+ * and from here nothing shows whether the asking thread was in the window
+ * when its space died: 940-widen-dead-space puts it to sleep before its
+ * resolve, where task_terminate() stops it and lets it go, and holds it
+ * until the port is back in its zone; 940-dead-space-read takes the check
+ * out, and 940-probe-given-back sees the port's lock taken in the zone.
+ */
+#define	ARM57_ROUNDS	20
+#define	ARM57_RUN_MS	5
+#define	ARM57_STACK	(16 * 1024)
+#define	ARM57_ID	5757	/* the question's msgh_id: 940-widen-dead-space
+				   knows it */
+
+union arm57_msg {
+	mach_msg_header_t	head;
+	char			room[128];
+};
+
+/* The child's server: receives the question on `name' and answers it. */
+static void
+arm_fifty_seven_server(mach_port_t name)
+{
+	union arm57_msg	m;
+
+	for (;;) {
+		if (mach_msg_overwrite_trap(&m.head, MACH_RCV_MSG, 0, sizeof(m),
+					    name, MACH_MSG_TIMEOUT_NONE,
+					    MACH_PORT_NULL,
+					    (mach_msg_header_t *) 0, 0)
+		    != MACH_MSG_SUCCESS)
+			continue;
+		m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE,
+						  0);
+		m.head.msgh_size = sizeof(m.head);
+		m.head.msgh_local_port = MACH_PORT_NULL;
+		m.head.msgh_id = ARM57_ID + 100;
+		(void) mach_msg_overwrite_trap(&m.head, MACH_SEND_MSG,
+					       sizeof(m.head), 0,
+					       MACH_PORT_NULL,
+					       MACH_MSG_TIMEOUT_NONE,
+					       MACH_PORT_NULL,
+					       (mach_msg_header_t *) 0, 0);
+	}
+}
+
+/* The child's asker: the RPC to `name', for ever, as a MIG stub sends it. */
+static void
+arm_fifty_seven_asker(mach_port_t name)
+{
+	mach_port_t	reply = mach_reply_port();
+	union arm57_msg	m;
+
+	for (;;) {
+		m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						  MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		m.head.msgh_size = sizeof(m.head);
+		m.head.msgh_remote_port = name;
+		m.head.msgh_local_port = reply;
+		m.head.msgh_id = ARM57_ID;
+		(void) mach_msg_overwrite_trap(&m.head,
+					       MACH_SEND_MSG | MACH_RCV_MSG,
+					       sizeof(m.head), sizeof(m), reply,
+					       MACH_MSG_TIMEOUT_NONE,
+					       MACH_PORT_NULL,
+					       (mach_msg_header_t *) 0, 0);
+	}
+}
+
+/* A thread of the child, started at `fn' with `name' as its argument. */
+static kern_return_t
+arm_fifty_seven_start(mach_port_t child, void (*fn)(mach_port_t),
+		      mach_port_t name)
+{
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	vm_address_t			stack = 0;
+	mach_port_t			th = MACH_PORT_NULL;
+	kern_return_t			kr;
+
+	kr = vm_allocate(child, &stack, ARM57_STACK, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = thread_create(child, &th);
+	if (kr == KERN_SUCCESS)
+		kr = thread_get_state(th, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, &count);
+	if (kr == KERN_SUCCESS) {
+		/* As a call leaves it, with its argument in rdi. */
+		state.rip = (uint64_t) (uintptr_t) fn;
+		state.rsp = (uint64_t) (stack + ARM57_STACK - 8);
+		state.rdi = (uint64_t) name;
+		kr = thread_set_state(th, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, count);
+	}
+	if (kr == KERN_SUCCESS)
+		kr = thread_resume(th);
+	if (th != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), th);
+	return kr;
+}
+
+static int
+arm_fifty_seven_dead_space(void)
+{
+	mach_port_t	me = mach_task_self();
+	int		round;
+
+	for (round = 0; round < ARM57_ROUNDS; round++) {
+		mach_port_t		child = MACH_PORT_NULL;
+		mach_port_t		name = MACH_PORT_NULL;
+		mach_port_t		send = MACH_PORT_NULL;
+		mach_msg_type_name_t	sendtype;
+		mach_port_type_t	type;
+		kern_return_t		kr;
+
+		/*
+		 * The port's receive right made in the child's space, a send
+		 * right made from it, and that send right given back under the
+		 * same name: one entry with both, so that the child's death
+		 * takes the port's last reference with it.
+		 */
+		kr = task_create(me, NULL, 0, TRUE, &child);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_allocate(child, MACH_PORT_RIGHT_RECEIVE,
+						&name);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_extract_right(child, name,
+						     MACH_MSG_TYPE_MAKE_SEND,
+						     &send, &sendtype);
+		if (kr == KERN_SUCCESS) {
+			/* moved with the request, whatever the answer */
+			kr = mach_port_insert_right(child, name, send,
+						    MACH_MSG_TYPE_MOVE_SEND);
+			send = MACH_PORT_NULL;
+		}
+		if (kr == KERN_SUCCESS)
+			kr = arm_fifty_seven_start(child,
+						   arm_fifty_seven_server,
+						   name);
+		if (kr == KERN_SUCCESS)
+			kr = arm_fifty_seven_start(child, arm_fifty_seven_asker,
+						   name);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [57] round %d: a child with a port of "
+			       "its own and two threads could not be started "
+			       "(%d) — WRONG\n", round, kr);
+			if (child != MACH_PORT_NULL) {
+				(void) task_terminate(child);
+				(void) mach_port_deallocate(me, child);
+			}
+			return 0;
+		}
+
+		nap(ARM57_RUN_MS);
+
+		kr = task_terminate(child);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_type(me, child, &type);
+		(void) mach_port_deallocate(me, child);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [57] round %d: terminating the child, or "
+			       "asking about its port after, answered %d — "
+			       "WRONG\n", round, kr);
+			return 0;
+		}
+		if (!(type & MACH_PORT_TYPE_DEAD_NAME)) {
+			printf("act_test: [57] round %d: the terminated child's "
+			       "port is not a dead name (type 0x%x) — WRONG\n",
+			       round, type);
+			return 0;
+		}
+	}
+
+	printf("act_test: [57] %d children terminated, each with a thread "
+	       "asking a port of its own through mach_msg()'s hot path, and "
+	       "the kernel came through: every child's port was a dead name "
+	       "after (#940)\n", ARM57_ROUNDS);
 	return 1;
 }
 
@@ -5303,6 +6485,90 @@ arm_sixteen_spin(void)
 }
 
 /*
+ * What one name of this task's space is, for [16]'s WRONG (#935): its rights
+ * and, for a send right, whether it names a thread or a task.  The campaigns of
+ * 0a30077e and 36617991 said "1 name(s) left behind" a hundred times and never
+ * which.  Called only after the second count, so nothing here is counted.
+ */
+static void
+arm_sixteen_say_name(const char *how, mach_port_t name, mach_port_type_t type)
+{
+	mach_port_t		me = mach_task_self();
+	mach_port_urefs_t	refs = 0;
+
+	if (type & MACH_PORT_TYPE_RECEIVE) {
+		mach_port_status_t	st;
+		mach_msg_type_number_t	n = MACH_PORT_RECEIVE_STATUS_COUNT;
+
+		if (mach_port_get_attributes(me, name, MACH_PORT_RECEIVE_STATUS,
+					     (mach_port_info_t) &st, &n)
+		    == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a receive "
+			       "right, %u queued, seqno %u, send rights %s, %u "
+			       "send-once\n", how, name, type, st.mps_msgcount,
+			       st.mps_seqno, st.mps_srights ? "out" : "none",
+			       st.mps_sorights);
+		else
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a receive "
+			       "right whose status could not be read\n", how,
+			       name, type);
+	} else if (type & MACH_PORT_TYPE_SEND) {
+		thread_basic_info_data_t	tb;
+		task_basic_info_data_t		kb;
+		mach_msg_type_number_t		tn = THREAD_BASIC_INFO_COUNT;
+		mach_msg_type_number_t		kn = TASK_BASIC_INFO_COUNT;
+
+		(void) mach_port_get_refs(me, name, MACH_PORT_RIGHT_SEND, &refs);
+		if (thread_info(name, THREAD_BASIC_INFO, (thread_info_t) &tb,
+				&tn) == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to a thread, run state %d, suspend "
+			       "count %d\n", how, name, type, refs, tb.run_state,
+			       tb.suspend_count);
+		else if (task_info(name, TASK_BASIC_INFO, (task_info_t) &kb,
+				   &kn) == KERN_SUCCESS)
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to a task, suspend count %d\n", how,
+			       name, type, refs, kb.suspend_count);
+		else
+			printf("act_test: [16]   %s 0x%x, type 0x%x: a send right "
+			       "(%u urefs) to neither a live thread nor a live "
+			       "task\n", how, name, type, refs);
+	} else if (type & MACH_PORT_TYPE_DEAD_NAME) {
+		(void) mach_port_get_refs(me, name, MACH_PORT_RIGHT_DEAD_NAME,
+					  &refs);
+		printf("act_test: [16]   %s 0x%x, type 0x%x: a dead name "
+		       "(%u urefs)\n", how, name, type, refs);
+	} else
+		printf("act_test: [16]   %s 0x%x, type 0x%x\n", how, name, type);
+}
+
+/* Every name that came, went or changed between two counts of the space. */
+static void
+arm_sixteen_say_difference(mach_port_array_t bn, mach_port_type_array_t bt,
+			   mach_msg_type_number_t bc, mach_port_array_t an,
+			   mach_port_type_array_t at, mach_msg_type_number_t ac)
+{
+	mach_msg_type_number_t	i, j;
+
+	for (i = 0; i < ac; i++) {
+		for (j = 0; j < bc && bn[j] != an[i]; j++)
+			continue;
+		if (j == bc)
+			arm_sixteen_say_name("came:", an[i], at[i]);
+		else if (bt[j] != at[i])
+			arm_sixteen_say_name("changed:", an[i], at[i]);
+	}
+	for (j = 0; j < bc; j++) {
+		for (i = 0; i < ac && an[i] != bn[j]; i++)
+			continue;
+		if (i == ac)
+			printf("act_test: [16]   went: 0x%x, type 0x%x\n", bn[j],
+			       bt[j]);
+	}
+}
+
+/*
  * ── [16] A creation whose name cannot be copied out leaves no name behind ──
  *
  * syscall_thread_create(), syscall_thread_create_running() and
@@ -5326,9 +6592,9 @@ arm_sixteen_name_not_copied_out(void)
 {
 	mach_port_t			me = mach_task_self();
 	vm_address_t			ro = 0, stack = 0;
-	mach_port_array_t		names = 0;
-	mach_port_type_array_t		types = 0;
-	mach_msg_type_number_t		nn = 0, nt = 0;
+	mach_port_array_t		names = 0, bnames = 0;
+	mach_port_type_array_t		types = 0, btypes = 0;
+	mach_msg_type_number_t		nn = 0, nt = 0, bnn = 0, bnt = 0;
 	struct x86_64_thread_state	rstate;
 	mach_msg_type_number_t		rcount = x86_64_THREAD_STATE_COUNT;
 	mach_port_t			tmp = MACH_PORT_NULL;
@@ -5345,16 +6611,14 @@ arm_sixteen_name_not_copied_out(void)
 		return 0;
 	}
 
-	kr = mach_port_names(me, &names, &nn, &types, &nt);
+	kr = mach_port_names(me, &bnames, &bnn, &btypes, &bnt);
 	if (kr != KERN_SUCCESS) {
 		printf("act_test: [16] mach_port_names before (%d) — WRONG\n",
 		       kr);
 		(void) vm_deallocate(me, ro, vm_page_size);
 		return 0;
 	}
-	before = (int) nn;
-	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
-	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+	before = (int) bnn;	/* the list is kept, to say what changed */
 
 	/*
 	 * #756: a valid x86-64 state for thread_create_running, so it creates
@@ -5393,19 +6657,49 @@ arm_sixteen_name_not_copied_out(void)
 	if (kr != KERN_SUCCESS) {
 		printf("act_test: [16] mach_port_names after (%d) — WRONG\n",
 		       kr);
+		(void) vm_deallocate(me, (vm_address_t) bnames,
+				     bnn * sizeof(*bnames));
+		(void) vm_deallocate(me, (vm_address_t) btypes,
+				     bnt * sizeof(*btypes));
 		return 0;
 	}
 	after = (int) nn;
-	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
-	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
 
 	if (after != before) {
+		mach_port_array_t	lnames = 0;
+		mach_port_type_array_t	ltypes = 0;
+		mach_msg_type_number_t	lnn = 0, lnt = 0;
+
 		printf("act_test: [16] %d name(s) left behind after creations "
 		       "whose name could not be copied out (%d -> %d): a right "
 		       "the caller was never told and cannot release — WRONG "
 		       "(#662)\n", after - before, before, after);
-		return 0;
+		/*
+		 * #935: which names, and whether they stay.  A count back
+		 * where it was three seconds on says the names were another
+		 * thread's, passing through, and not rights the traps left.
+		 */
+		arm_sixteen_say_difference(bnames, btypes, bnn, names, types,
+					   nn);
+		nap(3000);
+		if (mach_port_names(me, &lnames, &lnn, &ltypes, &lnt)
+		    == KERN_SUCCESS) {
+			printf("act_test: [16]   3 s later the space holds %u "
+			       "names (%d before the traps, %d after)\n", lnn,
+			       before, after);
+			(void) vm_deallocate(me, (vm_address_t) lnames,
+					     lnn * sizeof(*lnames));
+			(void) vm_deallocate(me, (vm_address_t) ltypes,
+					     lnt * sizeof(*ltypes));
+		}
 	}
+	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
+	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+	(void) vm_deallocate(me, (vm_address_t) bnames, bnn * sizeof(*bnames));
+	(void) vm_deallocate(me, (vm_address_t) btypes, bnt * sizeof(*btypes));
+
+	if (after != before)
+		return 0;
 
 	printf("act_test: [16] a creation whose name could not be copied out "
 	       "left no name behind: %d names before and after, trap codes "
@@ -5884,6 +7178,20 @@ static volatile unsigned arm_thirty_nine_got;
 static volatile mach_port_t arm_thirty_nine_thread;
 static volatile int	arm_thirty_nine_stop;
 
+/* #925: the receiver's way out, set as it returns: the last receive's answer. */
+static volatile int	arm_thirty_nine_returned;
+static volatile mach_msg_return_t arm_thirty_nine_rcv_mr;
+static volatile int	arm_thirty_nine_rcv_id;
+
+/*
+ * #925: the structure each of the arm's threads finds as its own, written by
+ * the thread as it returns.  A join waits on the handle pthread_create() gave;
+ * the thread's exit works on what pthread_self() answers; the two must be one.
+ */
+static pthread_t volatile arm_thirty_nine_receiver_self;
+static pthread_t volatile arm_thirty_nine_server_self;
+static pthread_t volatile arm_thirty_nine_noise_self;
+
 /*
  * A thread the kernel has in a wait.  A flag set before mach_msg() says only
  * that it is on its way, so a message sent on that word reaches a queue with no
@@ -5956,15 +7264,22 @@ arm_thirty_nine_receiver(void *arg)
 		mach_msg_header_t	h;
 		char			bytes[128];
 	} m;
+	mach_msg_return_t	mr;
 
 	(void) arg;
 	arm_thirty_nine_thread = mach_thread_self();
 	for (;;) {
-		if (mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
-			     arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
-			     MACH_PORT_NULL) != MACH_MSG_SUCCESS ||
-		    m.h.msgh_id != A39_WAKE)
+		mr = mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
+			      arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS || m.h.msgh_id != A39_WAKE) {
+			arm_thirty_nine_rcv_mr = mr;
+			arm_thirty_nine_rcv_id = mr == MACH_MSG_SUCCESS ?
+						 m.h.msgh_id : 0;
+			arm_thirty_nine_receiver_self = pthread_self();
+			arm_thirty_nine_returned = 1;
 			return NULL;
+		}
 		arm_thirty_nine_got++;
 	}
 }
@@ -5985,18 +7300,182 @@ arm_thirty_nine_send(mach_port_t port, mach_msg_option_t option, int id)
 			sizeof h, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
 }
 
-/* The last message a server sees: the queue may be full, so until it is taken. */
-static void
+/*
+ * The last message a server sees: the queue may be full, so until it is taken.
+ * Answers the last send's result: MACH_MSG_SUCCESS once one went in (#925).
+ */
+static mach_msg_return_t
 arm_thirty_nine_stop_it(void)
 {
-	unsigned	i;
+	mach_msg_return_t	mr = MACH_SEND_TIMED_OUT;
+	unsigned		i;
 
 	for (i = 0; i < 2000; i++) {
-		if (arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP)
-		    == MACH_MSG_SUCCESS)
-			return;
+		mr = arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP);
+		if (mr == MACH_MSG_SUCCESS)
+			return mr;
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 	}
+	return mr;
+}
+
+/*
+ * #925: the receiver's port as the kernel counts it.  The count is what the
+ * port has accepted and not given up, the limit what a send is measured
+ * against, and the sequence number how many messages it has given to a
+ * receiver: two WAKEs, and the STOP would be the third.
+ */
+static void
+arm_thirty_nine_port_said(void)
+{
+	mach_port_status_t	st;
+	mach_msg_type_number_t	n = MACH_PORT_RECEIVE_STATUS_COUNT;
+
+	if (mach_port_get_attributes(mach_task_self(), arm_thirty_nine_port,
+				     MACH_PORT_RECEIVE_STATUS,
+				     (mach_port_info_t) &st, &n)
+	    != KERN_SUCCESS) {
+		printf("act_test: [39] the receiver's port refused its "
+		       "status\n");
+		return;
+	}
+	printf("act_test: [39] the receiver's port counts %u message(s) "
+	       "against a limit of %u, and has given %u\n",
+	       (unsigned) st.mps_msgcount, (unsigned) st.mps_qlimit,
+	       (unsigned) st.mps_seqno);
+}
+
+/* #925: the receiver as the kernel sees it. */
+static void
+arm_thirty_nine_receiver_said(void)
+{
+	struct thread_basic_info	info;
+	mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
+
+	if (arm_thirty_nine_thread == MACH_PORT_NULL ||
+	    thread_info(arm_thirty_nine_thread, THREAD_BASIC_INFO,
+			(thread_info_t) &info, &n) != KERN_SUCCESS) {
+		printf("act_test: [39] the receiver refused its state\n");
+		return;
+	}
+	printf("act_test: [39] the receiver: run_state %d, suspend_count %d, "
+	       "flags 0x%x, asleep %d s\n", (int) info.run_state,
+	       (int) info.suspend_count, (unsigned) info.flags,
+	       (int) info.sleep_time);
+}
+
+/* #925: one structure's side of the join handshake, one line. */
+static void
+arm_thirty_nine_join_said(const char *who, const char *as, pthread_t t)
+{
+	int		detached, num_joiners;
+	unsigned int	joiners, death;
+
+	if (pthread_join_state_np(t, &detached, &num_joiners, &joiners,
+				  &death) != 0) {
+		printf("act_test: [39] the %s's %s %p is no thread's\n", who, as,
+		       (void *) t);
+		return;
+	}
+	printf("act_test: [39] the %s's %s %p: state %d (1 joinable, 2 "
+	       "detached, 3 exited), joiners counted %d, joiners word %u, "
+	       "death word %u\n", who, as, (void *) t, detached, num_joiners,
+	       joiners, death);
+}
+
+/*
+ * #925: a join with a bound.  In four boots pthread_join() of a thread that had
+ * already exited did not return: the joiner slept on the thread's joiners word
+ * while the thread slept on its death word.  So every join of this arm waits
+ * ten seconds at most, and one that does not return says what the handshake
+ * shows, on the handle pthread_create() gave and on the structure the thread
+ * found as its own, and leaves the thread where it is.  Answers whether the
+ * join returned.
+ */
+static int
+arm_thirty_nine_join(pthread_t t, const char *who, pthread_t volatile *self)
+{
+	struct timespec	deadline;
+	pthread_t	seen;
+	int		r;
+
+	if (getclock(TIMEOFDAY, &deadline) != 0) {
+		printf("act_test: [39] no clock to bound the join of the %s "
+		       "— WRONG\n", who);
+		return 0;
+	}
+	deadline.tv_sec += PATIENCE / 10;
+	r = pthread_timedjoin_np(t, NULL, &deadline);
+	if (r == 0)
+		return 1;
+	seen = *self;
+	printf("act_test: [39] the join of the %s answered %d %d s after it "
+	       "was asked — WRONG\n", who, r, PATIENCE / 10);
+	arm_thirty_nine_join_said(who, "handle", t);
+	if (seen == (pthread_t) 0)
+		printf("act_test: [39] the %s never said which structure was "
+		       "its own\n", who);
+	else if (seen != t)
+		arm_thirty_nine_join_said(who, "own structure", seen);
+	else
+		printf("act_test: [39] the %s found the handle as its own "
+		       "structure\n", who);
+	return 0;
+}
+
+/*
+ * #925: ends the receiver, and never waits for it without a bound.  The STOP
+ * goes in, or the arm says what refused it.  The receiver returns on it within
+ * PATIENCE naps, or the arm says what the receiver and its port look like.
+ * Either way a receiver still in its receive is let out by destroying the
+ * port, which ends the receive with MACH_RCV_PORT_DIED, so that act_test goes
+ * on.  Answers whether the STOP ended it.
+ */
+static int
+arm_thirty_nine_end_receiver(pthread_t receiver)
+{
+	mach_msg_return_t	mr = arm_thirty_nine_stop_it();
+	int			i, ok = 0;
+
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [39] the STOP was refused 2000 times, the "
+		       "last with 0x%x — WRONG\n", (int) mr);
+		arm_thirty_nine_port_said();
+	} else {
+		for (i = 0; i < PATIENCE && !arm_thirty_nine_returned; i++)
+			nap(100);
+		if (!arm_thirty_nine_returned) {
+			printf("act_test: [39] the STOP went in, and the "
+			       "receiver had not returned %d ms later — "
+			       "WRONG\n", PATIENCE * 100);
+			arm_thirty_nine_port_said();
+			arm_thirty_nine_receiver_said();
+		} else if (arm_thirty_nine_rcv_mr != MACH_MSG_SUCCESS ||
+			   arm_thirty_nine_rcv_id != A39_STOP)
+			printf("act_test: [39] the receiver returned on 0x%x, "
+			       "message %d, and not on the STOP — WRONG\n",
+			       (int) arm_thirty_nine_rcv_mr,
+			       arm_thirty_nine_rcv_id);
+		else
+			ok = 1;
+	}
+	if (!arm_thirty_nine_returned) {
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_nine_port);
+		arm_thirty_nine_port = MACH_PORT_NULL;
+		for (i = 0; i < PATIENCE && !arm_thirty_nine_returned; i++)
+			nap(100);
+		if (!arm_thirty_nine_returned) {
+			/* Not joined: the join would wait for ever. */
+			printf("act_test: [39] the receiver did not return "
+			       "when its port was destroyed either — WRONG\n");
+			return 0;
+		}
+	}
+	if (!arm_thirty_nine_join(receiver, "receiver",
+				  &arm_thirty_nine_receiver_self))
+		return 0;
+	return ok;
 }
 
 static mach_msg_return_t
@@ -6118,6 +7597,7 @@ arm_thirty_nine_server(void *arg)
 				      sizeof m, arm_thirty_nine_port, 10000,
 				      MACH_PORT_NULL);
 	}
+	arm_thirty_nine_server_self = pthread_self();	/* #925 */
 	return NULL;
 }
 
@@ -6135,6 +7615,7 @@ arm_thirty_nine_noise(void *arg)
 		       !arm_thirty_nine_stop)
 			;
 	}
+	arm_thirty_nine_noise_self = pthread_self();	/* #925 */
 	return NULL;
 }
 
@@ -6150,10 +7631,13 @@ arm_thirty_nine_window(mach_port_t host)
 	mach_port_t		reply;
 	mach_msg_return_t	mr = MACH_MSG_SUCCESS;
 	unsigned		i, reach, r0, t0, r1, t1;
+	int			joined;
 
 	reply = arm_own_port(39);
 	if (reply == MACH_PORT_NULL)
 		return 0;
+	arm_thirty_nine_server_self = (pthread_t) 0;
+	arm_thirty_nine_noise_self = (pthread_t) 0;
 	if (!arm_thirty_nine_counts(host, &reach, &r0, &t0) ||
 	    pthread_create(&server, NULL, arm_thirty_nine_server, NULL) != 0) {
 		(void) mach_port_destroy(mach_task_self(), reply);
@@ -6162,8 +7646,9 @@ arm_thirty_nine_window(mach_port_t host)
 	arm_thirty_nine_stop = 0;
 	if (pthread_create(&noise, NULL, arm_thirty_nine_noise, NULL) != 0) {
 		arm_thirty_nine_stop = 1;
-		arm_thirty_nine_stop_it();
-		(void) pthread_join(server, NULL);
+		(void) arm_thirty_nine_stop_it();
+		(void) arm_thirty_nine_join(server, "server",
+					    &arm_thirty_nine_server_self);
 		(void) mach_port_destroy(mach_task_self(), reply);
 		return 0;
 	}
@@ -6180,15 +7665,19 @@ arm_thirty_nine_window(mach_port_t host)
 			      10000, MACH_PORT_NULL);
 	}
 	arm_thirty_nine_stop = 1;
-	(void) pthread_join(noise, NULL);
-	arm_thirty_nine_stop_it();
-	(void) pthread_join(server, NULL);
+	joined = arm_thirty_nine_join(noise, "noise thread",
+				      &arm_thirty_nine_noise_self);
+	(void) arm_thirty_nine_stop_it();
+	joined &= arm_thirty_nine_join(server, "server",
+				       &arm_thirty_nine_server_self);
 	(void) mach_port_destroy(mach_task_self(), reply);
 	if (mr != MACH_MSG_SUCCESS) {
 		printf("act_test: [39] RPC %u of the window answered 0x%x — "
 		       "WRONG\n", i, (int) mr);
 		return 0;
 	}
+	if (!joined)
+		return 0;
 	if (!arm_thirty_nine_counts(host, &reach, &r1, &t1))
 		return 0;
 	printf("act_test: [39] the queue filled in the window %u time(s) in %u "
@@ -6228,21 +7717,28 @@ arm_thirty_nine_asked(mach_port_t host)
 		return 0;
 	}
 	arm_thirty_nine_thread = MACH_PORT_NULL;
+	arm_thirty_nine_returned = 0;
+	arm_thirty_nine_receiver_self = (pthread_t) 0;
 	if (pthread_create(&receiver, NULL, arm_thirty_nine_receiver, NULL)
 	    != 0) {
 		printf("act_test: [39] pthread_create failed — WRONG\n");
 	} else {
 		ok = arm_thirty_nine_break(host, own, 0, cpus);
 		ok &= arm_thirty_nine_break(host, own, 1, cpus);
-		arm_thirty_nine_stop_it();
-		(void) pthread_join(receiver, NULL);
-		(void) mach_port_deallocate(mach_task_self(),
-					    arm_thirty_nine_thread);
-		if (cpus > 1 && arm_thirty_nine_window(host) == 0)
+		/* #925: a receiver the STOP did not end has no port left. */
+		if (!arm_thirty_nine_end_receiver(receiver))
+			ok = 0;
+		if (arm_thirty_nine_thread != MACH_PORT_NULL)
+			(void) mach_port_deallocate(mach_task_self(),
+						    arm_thirty_nine_thread);
+		if (arm_thirty_nine_port != MACH_PORT_NULL && cpus > 1 &&
+		    arm_thirty_nine_window(host) == 0)
 			ok = 0;
 	}
 	(void) mach_port_destroy(mach_task_self(), own);
-	(void) mach_port_destroy(mach_task_self(), arm_thirty_nine_port);
+	if (arm_thirty_nine_port != MACH_PORT_NULL)
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_nine_port);
 	if (ok)
 		printf("act_test: [39] a lost bet is undone, at a receive and "
 		       "at a return — OK\n");
@@ -8755,6 +10251,69 @@ arm_fifty_three_threads_fault_together(void)
 	return 1;
 }
 
+/*
+ * ── How long each arm took (#941) ──
+ *
+ * By the clock, around each arm, said at the end in lines of their own, each
+ * under the console's 256 bytes (#802) and printed whole (#644).  The harness
+ * waits for this program in about 80 of the merge test's 94 lines, and
+ * nothing said where the time went: [56] took a minute of every boot at one
+ * processor, and only a campaign that ran out of its time showed it (#925).
+ * An arm whose clock could not be read says so, instead of a time.
+ */
+#define	ARMS_MAX	64
+#define	ARMS_A_LINE	10
+
+static long	arm_ms[ARMS_MAX];
+static int	arm_ran[ARMS_MAX];	/* 1 timed, 2 its clock unread */
+
+static int
+timed(int n, int (*arm)(void))
+{
+	struct timespec	t0, t1;
+	int		r, read;
+
+	read = getclock(TIMEOFDAY, &t0) == 0;
+	r = arm();
+	read = read && getclock(TIMEOFDAY, &t1) == 0;
+	if (n > 0 && n < ARMS_MAX) {
+		arm_ran[n] = read ? 1 : 2;
+		arm_ms[n] = read ? (long) (t1.tv_sec - t0.tv_sec) * 1000 +
+				   (long) (t1.tv_nsec - t0.tv_nsec) / 1000000 : 0;
+	}
+	return r;
+}
+
+/* The arms' times in the order of their numbers, ARMS_A_LINE to a line. */
+static void
+say_arm_times(void)
+{
+	char	line[200];
+	int	n, len = 0, on_line = 0, unread = 0;
+	long	total = 0;
+
+	for (n = 1; n < ARMS_MAX; n++) {
+		if (!arm_ran[n])
+			continue;
+		if (arm_ran[n] == 2) {
+			len += snprintf(line + len, sizeof line - len, " [%d] ?", n);
+			unread++;
+		} else {
+			len += snprintf(line + len, sizeof line - len, " [%d] %ld",
+					n, arm_ms[n]);
+			total += arm_ms[n];
+		}
+		if (++on_line == ARMS_A_LINE) {
+			printf("act_test: arm times in ms (#941):%s\n", line);
+			len = on_line = 0;
+		}
+	}
+	if (on_line > 0)
+		printf("act_test: arm times in ms (#941):%s\n", line);
+	printf("act_test: the arms took %ld ms in all, %d with a clock that "
+	       "could not be read (#941)\n", total, unread);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8773,61 +10332,61 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	arm_one_passed = arm_one_terminate_in_exception();
+	arm_one_passed = timed(1, arm_one_terminate_in_exception);
 	passed += arm_one_passed;
-	passed += arm_two_abort_in_mach_msg();
-	passed += arm_three_suspend_in_mach_msg();
-	passed += arm_four_state_of_a_thread_in_a_trap();
-	passed += arm_five_registers_a_trap_leaves();
-	passed += arm_seven_suspend_in_page_faults();
+	passed += timed(2, arm_two_abort_in_mach_msg);
+	passed += timed(3, arm_three_suspend_in_mach_msg);
+	passed += timed(4, arm_four_state_of_a_thread_in_a_trap);
+	passed += timed(5, arm_five_registers_a_trap_leaves);
+	passed += timed(7, arm_seven_suspend_in_page_faults);
 
 	/*
 	 * An arm that was not asked is not an arm that passed: at more than
 	 * one processor this one says NOT ASKED, and the count below is of the
 	 * arms that were.
 	 */
-	r = arm_eight_suspend_a_spinner();
+	r = timed(8, arm_eight_suspend_a_spinner);
 	if (r == ARM8_NOT_ASKED)
 		arms--;
 	else
 		passed += r;
 
-	passed += arm_nine_refused_create_running();
-	passed += arm_ten_abort_an_rpc_with_its_reply_on_the_way();
-	passed += arm_eleven_abort_a_thread_that_keeps_asking();
-	passed += arm_twelve_look_at_the_reply_port();
-	r = arm_thirteen_message_to_a_receiver_being_read();
+	passed += timed(9, arm_nine_refused_create_running);
+	passed += timed(10, arm_ten_abort_an_rpc_with_its_reply_on_the_way);
+	passed += timed(11, arm_eleven_abort_a_thread_that_keeps_asking);
+	passed += timed(12, arm_twelve_look_at_the_reply_port);
+	r = timed(13, arm_thirteen_message_to_a_receiver_being_read);
 	if (r == ARM13_NOT_ASKED)	/* not asked is not passed (arm eight) */
 		arms--;
 	else
 		passed += r;
-	passed += arm_fourteen_terminate_inside_traps();
+	passed += timed(14, arm_fourteen_terminate_inside_traps);
 	arms++;		/* arm twenty, #783: counted here, beside its call */
-	r = arm_twenty_no_empty_activation();
+	r = timed(20, arm_twenty_no_empty_activation);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-one, #786 */
-	r = arm_twenty_one_set_limit_never_raises();
+	r = timed(21, arm_twenty_one_set_limit_never_raises);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-three, #786: harmless even ablated */
-	r = arm_twenty_three_float_state_is_what_the_thread_finds();
+	r = timed(23, arm_twenty_three_float_state_is_what_the_thread_finds);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-four, #786: harmless even ablated */
-	r = arm_twenty_four_initial_reads_initial();
+	r = timed(24, arm_twenty_four_initial_reads_initial);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-five, #786 */
-	r = arm_twenty_five_fifo_rr_need_the_set();
+	r = timed(25, arm_twenty_five_fifo_rr_need_the_set);
 	if (r < 0)
 		arms--;
 	else
@@ -8839,80 +10398,88 @@ main(int argc, char **argv)
 	 * processor_exit ablation the action thread panics (#453).
 	 */
 	arms++;		/* arm twenty-two, #786 */
-	r = arm_twenty_two_processor_ports_are_privileged();
+	r = timed(22, arm_twenty_two_processor_ports_are_privileged);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm twenty-six, #771 */
-	r = arm_twenty_six_a_receive_that_slept_keeps_six();
+	r = timed(26, arm_twenty_six_a_receive_that_slept_keeps_six);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 
 	arms++;		/* arm twenty-seven, #808 */
-	passed += arm_twenty_seven_send_size_cannot_take_the_trailer();
+	passed += timed(27, arm_twenty_seven_send_size_cannot_take_the_trailer);
 	arms++;		/* arm twenty-eight, #808 */
-	passed += arm_twenty_eight_send_past_the_inline_limit();
+	passed += timed(28, arm_twenty_eight_send_past_the_inline_limit);
 	arms++;		/* arm twenty-nine, #808 */
-	passed += arm_twenty_nine_receive_measured_with_its_trailer();
+	passed += timed(29, arm_twenty_nine_receive_measured_with_its_trailer);
 	arms++;		/* arm thirty, #808 */
-	passed += arm_thirty_scatter_list_one_word_short();
+	passed += timed(30, arm_thirty_scatter_list_one_word_short);
 	arms++;		/* arm thirty-one, #840 */
-	passed += arm_thirty_one_descriptor_count_past_the_message();
+	passed += timed(31, arm_thirty_one_descriptor_count_past_the_message);
 	arms++;		/* arm thirty-two, #841 */
-	passed += arm_thirty_two_exception_answered_too_large();
+	passed += timed(32, arm_thirty_two_exception_answered_too_large);
 	arms++;		/* arm thirty-three, #842 */
-	passed += arm_thirty_three_trailer_not_there();
+	passed += timed(33, arm_thirty_three_trailer_not_there);
 	arms++;		/* arm thirty-four, #844 */
-	passed += arm_thirty_four_rpc_reply_seqno();
+	passed += timed(34, arm_thirty_four_rpc_reply_seqno);
 	arms++;		/* arm thirty-five, #843 */
-	passed += arm_thirty_five_port_array_with_no_room();
+	passed += timed(35, arm_thirty_five_port_array_with_no_room);
 	arms++;		/* arm thirty-six, #810 */
-	passed += arm_thirty_six_vm_write_small_physical_copy();
+	passed += timed(36, arm_thirty_six_vm_write_small_physical_copy);
 	arms++;		/* arm thirty-seven, #812 */
-	passed += arm_thirty_seven_snapshot_of_untouched_memory();
+	passed += timed(37, arm_thirty_seven_snapshot_of_untouched_memory);
 	arms++;		/* arm thirty-eight, #813 */
-	passed += arm_thirty_eight_task_wire_unprivileged();
+	passed += timed(38, arm_thirty_eight_task_wire_unprivileged);
 	arms++;		/* arm thirty-nine, #777 */
-	passed += arm_thirty_nine_lost_bet_undone();
+	passed += timed(39, arm_thirty_nine_lost_bet_undone);
 	arms++;		/* arm forty, #777 */
-	passed += arm_forty_nothing_after_the_hand_off();
+	passed += timed(40, arm_forty_nothing_after_the_hand_off);
 	arms++;		/* arm forty-one, #867 */
-	passed += arm_forty_one_body_disposition();
+	passed += timed(41, arm_forty_one_body_disposition);
 	arms++;		/* arm forty-two, #870 */
-	passed += arm_forty_two_simple_message_scattered();
+	passed += timed(42, arm_forty_two_simple_message_scattered);
 	arms++;		/* arm forty-three, #871 */
-	passed += arm_forty_three_receive_gives_back();
+	passed += timed(43, arm_forty_three_receive_gives_back);
 	arms++;		/* arm forty-four, #880 */
-	passed += arm_forty_four_index_zero_name();
+	passed += timed(44, arm_forty_four_index_zero_name);
 	arms++;		/* arm forty-five, #881 */
-	r = arm_forty_five_parked_sender();
+	r = timed(45, arm_forty_five_parked_sender);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm forty-six, #887 */
-	passed += arm_forty_six_exception_flavor();
+	passed += timed(46, arm_forty_six_exception_flavor);
 	arms++;		/* arm forty-seven, #887 */
-	r = arm_forty_seven_failed_state_gives_back();
+	r = timed(47, arm_forty_seven_failed_state_gives_back);
 	if (r < 0)
 		arms--;
 	else
 		passed += r;
 	arms++;		/* arm fifty, #851 */
-	passed += arm_fifty_holes_come_back_zero();
+	passed += timed(50, arm_fifty_holes_come_back_zero);
 	arms++;		/* arm forty-eight, #889 */
-	passed += arm_forty_eight_hint_and_lock_order();
+	passed += timed(48, arm_forty_eight_hint_and_lock_order);
 	arms++;		/* arm forty-nine, #869 */
-	passed += arm_forty_nine_subsystem_released_once();
+	passed += timed(49, arm_forty_nine_subsystem_released_once);
 	arms++;		/* arm fifty-one, #868 */
-	passed += arm_fifty_one_rights_that_left();
+	passed += timed(51, arm_fifty_one_rights_that_left);
 	arms++;		/* arm fifty-two, #414 */
-	passed += arm_fifty_two_fs_base_goes_with_the_thread();
+	passed += timed(52, arm_fifty_two_fs_base_goes_with_the_thread);
 	arms++;		/* arm fifty-three, #414 */
-	passed += arm_fifty_three_threads_fault_together();
+	passed += timed(53, arm_fifty_three_threads_fault_together);
+	arms++;		/* arm fifty-seven, #940 */
+	passed += timed(57, arm_fifty_seven_dead_space);
+	arms++;		/* arm fifty-six, #925 */
+	passed += timed(56, arm_fifty_six_abort_reaches_user_mode);
+	arms++;		/* arm fifty-five, #935: before [54], which [16] follows */
+	passed += timed(55, arm_fifty_five_created_while_suspended);
+	arms++;		/* arm fifty-four, #935 */
+	passed += timed(54, arm_fifty_four_create_on_a_dying_task);
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
@@ -8920,10 +10487,10 @@ main(int argc, char **argv)
 	 * the #752 ablation it provokes the same kind of machine stop arm six
 	 * does, so it belongs down here beside it.
 	 */
-	passed += arm_sixteen_name_not_copied_out();
+	passed += timed(16, arm_sixteen_name_not_copied_out);
 
-	passed += arm_fifteen_kernel_task_needs_privilege();
-	passed += arm_nineteen_last_page_unmapped();
+	passed += timed(15, arm_fifteen_kernel_task_needs_privilege);
+	passed += timed(19, arm_nineteen_last_page_unmapped);
 
 	/*
 	 * ⚠️ Last, and not by accident.  On a healthy tree this is the only arm
@@ -8932,15 +10499,15 @@ main(int argc, char **argv)
 	 * that caused it, nothing after this line runs.  Everything the other
 	 * arms have to say is already printed by the time it is provoked.
 	 */
-	passed += arm_six_non_canonical_return();
+	passed += timed(6, arm_six_non_canonical_return);
 
 	/*
 	 * And the two IRETQ returns after it (#780), for the same reason: each
 	 * can stop the machine on a kernel without the fix, and does nothing to
 	 * one with it.
 	 */
-	passed += arm_seventeen_start_at_a_noncanonical_rip();
-	passed += arm_eighteen_stopped_in_a_trap();
+	passed += timed(17, arm_seventeen_start_at_a_noncanonical_rip);
+	passed += timed(18, arm_eighteen_stopped_in_a_trap);
 
 	/*
 	 * The last thing arm one is owed, asked now that the two arms after it
@@ -8955,6 +10522,7 @@ main(int argc, char **argv)
 			passed--;
 	}
 
+	say_arm_times();
 	printf("act_test: %d of %d arms passed\n", passed, arms);
 
 	/*

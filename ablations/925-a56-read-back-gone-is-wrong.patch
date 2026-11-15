@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #925
+Over: 925-widen-a56-read-back-held.patch
+Takes out: 9f51d85a -- a depression found gone when read back counts as run out no more, only KERN_ABORTED does, so over the widen the victim reads itself not depressed 300 ms after it asked and [56] calls it WRONG, as entry 55 met at -smp 1 under TCG in the merge test of a869dac2
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[56\] round [0-9]+: at one processor the victim read itself not depressed in its loop [0-9]+ ms after it asked
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 3f09bfad..c9611488 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3401,9 +3401,7 @@ a56_ms_between(const struct timespec *a, const struct timespec *b)
+ static int
+ a56_depression_ran_out(void)
+ {
+-	return (a56_depressed == KERN_ABORTED ||
+-		(a56_depressed == KERN_SUCCESS && a56_was_depressed == 0)) &&
+-	       a56_switch_ms >= A56_DEPRESS_MS;
++	return a56_depressed == KERN_ABORTED && a56_switch_ms >= A56_DEPRESS_MS;
+ }
+ 
+ /*

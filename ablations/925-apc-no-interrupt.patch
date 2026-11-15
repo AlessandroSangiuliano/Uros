@@ -1,0 +1,37 @@
+Kind: ablation
+Issue: #925
+Takes out: the interrupt act_set_apc() sends to the processor a running thread is on -- it raises AST_APC in the activation and nowhere else, as it did, so act_test [56]'s abort of a thread spinning in user mode on another processor waits there for that processor's tick, and the first futex wait the thread makes a millisecond later ends at once unless a tick fell in between
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[56\] an abort of a thread spinning in user mode was still pending when it waited
+
+diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
+index 76d88209..4489b010 100644
+--- a/uros/src/mach_kernel/kern/thread_act.c
++++ b/uros/src/mach_kernel/kern/thread_act.c
+@@ -2486,11 +2486,6 @@ act_get_state(thread_act_t thr_act, int flavor, thread_state_t state,
+ void
+ act_set_apc(thread_act_t thr_act)
+ {
+-#if	NCPUS > 1
+-	thread_t	thread = thr_act->thread;
+-	processor_t	processor;
+-#endif	/* NCPUS > 1 */
+-
+ 	thread_ast_set(thr_act, AST_APC);
+ 	if (thr_act == current_act()) {
+ 		mp_disable_preemption();
+@@ -2498,14 +2493,6 @@ act_set_apc(thread_act_t thr_act)
+ 		mp_enable_preemption();
+ 		return;
+ 	}
+-#if	NCPUS > 1
+-	if (thread == THREAD_NULL || thread->top_act != thr_act ||
+-	    !(thread->state & TH_RUN))
+-		return;
+-	processor = thread->last_processor;
+-	if (processor != PROCESSOR_NULL && processor != current_processor())
+-		cause_ast_check(processor);
+-#endif	/* NCPUS > 1 */
+ }
+ 
+ void

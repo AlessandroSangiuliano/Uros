@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #925
+Takes out: the nap and the depression of act_test [56] -- the main thread spins until the victim is in its loop and the victim spins until the go, as merged in 78a623e2, so at one processor each round waits for a quantum and the rounds take about a minute, which the bound at one processor is there to call WRONG
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[56\] the rounds took [0-9]+ ms at one processor, more than
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 2fa1c330..2ab676d2 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3468,7 +3468,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
+ 		       "the rounds — WRONG (#925)\n");
+ 		return 0;
+ 	}
+-	a56_alone = cpus <= 1;
++	a56_alone = 0;
+ 	for (round = 0; round < A56_ROUNDS; round++) {
+ 		pthread_t	victim;
+ 		kern_return_t	napped = MACH_RCV_TIMED_OUT;
+@@ -3487,8 +3487,8 @@ arm_fifty_six_abort_reaches_user_mode(void)
+ 		 * held, at one processor, the processor the victim needed to
+ 		 * get there until the quantum ran out (#925).
+ 		 */
+-		while (!a56_spinning && napped == MACH_RCV_TIMED_OUT)
+-			napped = nap(A56_NAP_MS);
++		while (!a56_spinning)
++			__asm__ __volatile__("pause");
+ 		if (napped != MACH_RCV_TIMED_OUT) {
+ 			a56_go = 1;
+ 			(void) pthread_join(victim, NULL);

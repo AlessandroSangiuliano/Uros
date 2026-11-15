@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #937
+Over: 937-widen-family-to-the-quota.patch
+Takes out: the quota on derived ports (0c4d44d7) -- over 937-widen-family-to-the-quota, cap_test derives until the table is full, and bootstrap has no slot left for the tasks it starts
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[46\] WRONG — at the refusal 64 of 64 slots were taken
+
+diff --git a/uros/src/servers/cap_server/cap_manifest_table.c b/uros/src/servers/cap_server/cap_manifest_table.c
+index 979de353..c7242c0f 100644
+--- a/uros/src/servers/cap_server/cap_manifest_table.c
++++ b/uros/src/servers/cap_server/cap_manifest_table.c
+@@ -147,7 +147,7 @@ may_derive(mach_port_t parent, mach_port_t self, uint64_t *family)
+     }
+     if (mine >= CAP_MANIFEST_FAMILY_MAX)
+         return CAP_ERR_LINEAGE_FULL;
+-    if (all >= CAP_MANIFEST_DERIVED_QUOTA)
++    if (all >= CAP_MANIFEST_DERIVED_QUOTA && 0)
+         return CAP_ERR_DERIVED_QUOTA;
+     *family = p->family;
+     return CAP_ERR_NONE;

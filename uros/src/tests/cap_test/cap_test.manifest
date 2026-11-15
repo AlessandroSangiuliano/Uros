@@ -47,3 +47,15 @@ required 10 any 0x3
 #
 # The line above is what block_device_server would declare.  Its absence
 # here is the policy, and cap_test [13] is what reads it back.
+
+# ── What it may hand on (#743) ────────────────────────────────────────
+#
+# RESOURCE_BLK_DEVICE (4), any device, CAP_OP_BLK_READ (0x1) and no more.
+#
+# 🔑 THE FIRST delegatable[] ANY MANIFEST HAS SHIPPED, and it is here to be
+# narrower than what this task holds.  [39] derives a child that asks for
+# block devices READ|WRITE and for DMA buffers, and the child must come back
+# with READ alone: its policy is this line cut by what it asked, and never
+# what it asked.  A line equal to the required one above would let a
+# derivation that ignored it pass.
+delegatable 4 any 0x1

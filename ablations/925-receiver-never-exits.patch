@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #925
+Takes out: the receiver's exit -- arm 39's receiver says it returned and then never leaves, so its join cannot end: the bounded join must say WRONG within ten seconds with the handshake it reads, where an unbounded pthread_join() waited until the harness's budget ran out
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[39\] the join of the receiver answered
+Note: 4 of 4 caught and 4 of 4 passed at 151c42db on victus, TCG and KVM, two boots each: each ablated arm said the join of the receiver answered 60 (ETIMEDOUT) 10 s after it was asked, the handle joinable with both words at 0, and the receiver found the handle as its own structure; act_test went on to its closing line, 48 of 49 arms under KVM and 47 of 48 under TCG
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 68b58d55..117fb934 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -5985,6 +5985,9 @@ arm_thirty_nine_receiver(void *arg)
+ 						 m.h.msgh_id : 0;
+ 			arm_thirty_nine_receiver_self = pthread_self();
+ 			arm_thirty_nine_returned = 1;
++			/* 925-receiver-never-exits: said, and never gone */
++			for (;;)
++				nap(100000);
+ 			return NULL;
+ 		}
+ 		arm_thirty_nine_got++;

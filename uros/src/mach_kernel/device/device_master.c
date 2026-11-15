@@ -70,14 +70,8 @@
 #include <kern/cpu_data.h>	/* #537: disable_preemption */
 #include <kern/cpu_number.h>
 #include <cpus.h>		/* NCPUS */
-#include <kern/ipc_mig.h>
-/*
- * ⚠️ Declared here rather than found in a header: port_name_to_task is defined
- * in kern/ipc_mig.c and named in no header this file can reach.  Written out
- * so the day one appears, this line is the one that stops compiling instead of
- * the one that silently shadows it.
- */
-extern task_t port_name_to_task(mach_port_t name);
+#include <kern/ipc_mig.h>	/* port_name_to_task_right (#938) */
+#include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
 
 /*
  * #448: the interface, so the compiler can compare it with what is below.
@@ -5090,6 +5084,12 @@ device_master_task_terminating(task_t task)
  * global anything.  It is the send right cap_provision_task was handed and
  * that interface has carried since #216 as "informational for now (audit /
  * future cross-reference)".  This is that cross-reference.
+ *
+ * 🔑 WHICH TASK, AND NOTHING ELSE (#938).  The question needs the task's
+ * identity, so the name may be any port on the task, its identity port
+ * included -- which is all cap_server keeps of a task now.  It kept the full
+ * task port, the task's memory and its port rights, of every task with a
+ * manifest, for this comparison alone.
  */
 kern_return_t
 urmach_dma_region_owner(
@@ -5103,7 +5103,7 @@ urmach_dma_region_owner(
 	if (region_id == 0)
 		return KERN_INVALID_ARGUMENT;
 
-	t = port_name_to_task(task);
+	t = port_name_to_task_right(task, URMACH_TASK_RIGHTS_IDENTITY);
 	if (t == TASK_NULL)
 		return KERN_INVALID_ARGUMENT;
 

@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #938
+Takes out: cap_server's refusal of a task port that carries more than the task's identity (b0917ab6) -- a full task port handed over is taken and kept
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[47\] WRONG — a derivation handed a child's task port answered 0, not CAP_ERR_TASK_NOT_IDENTITY
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 13a1d9f5..73d5ede9 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -763,7 +763,8 @@ is_an_identity_port(mach_port_t task_port)
+ 
+     kr = urmach_task_port_rights(host, task_port, &rights);
+     (void)mach_port_deallocate(mach_task_self(), host);
+-    return kr == KERN_SUCCESS && rights == URMACH_TASK_RIGHTS_IDENTITY;
++    (void)kr;
++    return 1;
+ }
+ 
+ /*

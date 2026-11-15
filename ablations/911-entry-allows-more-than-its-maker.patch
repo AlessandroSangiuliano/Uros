@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #911
+Takes out: the check that no segment allows more than the maker's own mapping (0583964b) -- a task with a read-only mapping makes an entry that maps it writable
+Run: --entry 14 1200 -smp 1
+Expect: cow_test: \[11\] a segment allowing write over a mapping that is read-only at most: answered 0, not 2 — WRONG
+
+diff --git a/uros/src/mach_kernel/vm/vm_memory_entry.c b/uros/src/mach_kernel/vm/vm_memory_entry.c
+index e901957f..c8302571 100644
+--- a/uros/src/mach_kernel/vm/vm_memory_entry.c
++++ b/uros/src/mach_kernel/vm/vm_memory_entry.c
+@@ -133,12 +133,6 @@ vm_memory_entry_object(
+ 		vm_map_unlock(map);
+ 		return KERN_INVALID_ADDRESS;
+ 	}
+-	for (i = 0; i < segments; i++) {
+-		if ((prots[i] & ~map_entry->max_protection) != 0) {
+-			vm_map_unlock(map);
+-			return KERN_PROTECTION_FAILURE;
+-		}
+-	}
+ 
+ 	object = map_entry->object.vm_object;
+ 	entry_size = (vm_size_t) (map_entry->vme_end - map_entry->vme_start);

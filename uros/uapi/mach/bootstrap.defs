@@ -123,3 +123,19 @@ routine bootstrap_console(
 skip;	/* bootstrap_console — userspace only */
 #endif
 
+/*
+ *	#743: cap_server's provisioning port, given to bootstrap once.
+ *	cap_provision_task answers on that port and no other, so its one
+ *	send right decides who provisions.  bootstrap takes it only from
+ *	the cap_server it started, on that server's own bootstrap port,
+ *	and only the first time.  Appended: MIG numbers routines by
+ *	position.
+ */
+#if	!KERNEL_SERVER
+routine bootstrap_cap_provisioner(
+		bootstrap		: mach_port_t;
+		provisioner		: mach_port_make_send_t);
+#else
+skip;	/* bootstrap_cap_provisioner — userspace only */
+#endif
+

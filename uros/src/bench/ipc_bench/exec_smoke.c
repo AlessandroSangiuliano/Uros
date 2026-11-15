@@ -18,16 +18,14 @@
 #include <stdio.h>
 #include <string.h>
 
-/* MIG user stub generated from exec.defs (subsystem 3100). */
-extern kern_return_t exec_load(
-    mach_port_t exec_port,
-    mach_port_t client_task,
-    char *path,
-    pointer_t argv_blob, mach_msg_type_number_t argv_blobCnt,
-    pointer_t envp_blob, mach_msg_type_number_t envp_blobCnt,
-    mach_port_t *new_task,
-    mach_port_t *new_thread,
-    int *result_code);
+/*
+ * The MIG user stub's own header, generated from exec.defs into this
+ * directory's build, so a call that disagrees with the routine does not
+ * compile.  proc_smoke.c's hand-written prototype went on declaring
+ * exec_load() without the parent_caps it gained in #743.
+ */
+#include "exec_types.h"
+#include "exec.h"
 
 void
 bench_exec_smoke(void)
@@ -53,18 +51,24 @@ bench_exec_smoke(void)
         return;
     }
 
-    kr = exec_load(exec_port, mach_task_self(),
+    /* #926: the task is made here, and lent to exec_server to load into. */
+    kr = task_create(mach_task_self(), NULL, 0, FALSE, &new_task);
+    if (kr != KERN_SUCCESS) {
+        printf("  exec: task_create failed kr=%d — FAIL\n", kr);
+        return;
+    }
+    kr = exec_load(exec_port, new_task, mach_cap_port,
                    (char *)"/hello_exec",
                    (pointer_t)argv, sizeof(argv),
                    (pointer_t)envp, sizeof(envp),
-                   &new_task, &new_thread, &rc);
-    if (kr != KERN_SUCCESS) {
-        printf("  exec: exec_load RPC failed kr=%d — FAIL\n", kr);
-        return;
-    }
-
-    if (rc != 0) {
-        printf("  exec: exec_load returned EXEC_ERR=%d — FAIL\n", rc);
+                   &new_thread, &rc);
+    if (kr != KERN_SUCCESS || rc != 0) {
+        if (kr != KERN_SUCCESS)
+            printf("  exec: exec_load RPC failed kr=%d — FAIL\n", kr);
+        else
+            printf("  exec: exec_load returned EXEC_ERR=%d — FAIL\n", rc);
+        (void)task_terminate(new_task);
+        (void)mach_port_deallocate(mach_task_self(), new_task);
         return;
     }
 
@@ -83,9 +87,13 @@ bench_exec_smoke(void)
                        0, sizeof(hdr), waste,
                        /* timeout ms */ 200,
                        MACH_PORT_NULL);
-        (void)mach_port_deallocate(mach_task_self(), waste);
+        /* A receive right goes with its last reference, not with
+         * mach_port_deallocate(), which gives back send rights. */
+        (void)mach_port_mod_refs(mach_task_self(), waste,
+                                 MACH_PORT_RIGHT_RECEIVE, -1);
     }
 
     (void)task_terminate(new_task);
+    (void)mach_port_deallocate(mach_task_self(), new_task);
     (void)mach_port_deallocate(mach_task_self(), new_thread);
 }

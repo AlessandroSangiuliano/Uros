@@ -1,0 +1,34 @@
+Kind: ablation
+Issue: #911
+Takes out: the lifetime token in fs_open (d62ac663) -- libvfs sends its task port again, as a copied send right, and every filesystem server holds every client with a file open
+Run: --entry 14 1200 -smp 1
+Expect: mount_test: \[27\] WRONG — [0-9]+ open\(s\) answered, [1-9][0-9]* with a task port
+
+diff --git a/uros/src/lib/libvfs/libvfs.c b/uros/src/lib/libvfs/libvfs.c
+index e2c43802..9ad17b58 100644
+--- a/uros/src/lib/libvfs/libvfs.c
++++ b/uros/src/lib/libvfs/libvfs.c
+@@ -314,9 +314,7 @@ vfs_open_rc(const char *path, int flags, int mode, vfs_fd_t *fd_out)
+     /* #385, #911: what the fs_server learns our death by.  Not our task
+      * port, which it was: that turns into a dead name on our death too, and
+      * is also all of this task, to every server we open a file through. */
+-    kr = urmach_lifetime_port(&token);
+-    if (kr != KERN_SUCCESS)
+-        return kr;
++    token = mach_task_self();
+ 
+     /*
+      * Resolve + open, retrying once if the chosen fs_server turns out to
+diff --git a/uros/src/lib/libvfs/vfs.defs b/uros/src/lib/libvfs/vfs.defs
+index 327f2966..5d09d156 100644
+--- a/uros/src/lib/libvfs/vfs.defs
++++ b/uros/src/lib/libvfs/vfs.defs
+@@ -100,7 +100,7 @@ type vfs_dirent_array_t  = pointer_t;
+  */
+ routine fs_open(
+ 		fs_port		: mach_port_t;
+-	in	client_token	: mach_port_make_send_t;
++	in	client_token	: mach_port_t;
+ 	in	path		: vfs_path_t;
+ 	in	flags		: int;
+ 	in	mode		: int;

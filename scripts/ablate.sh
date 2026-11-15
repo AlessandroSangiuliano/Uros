@@ -147,7 +147,7 @@ SHORT=$(git -C "$REPO" rev-parse --short "$REV")
 # base the command line did not name is said: the run is not then the patches
 # given alone.
 with_bases() {
-	local p=$1 b
+	local p=$1 b stray
 
 	case " ${EXPANDED[*]} " in
 	*" $p "*) return ;;
@@ -158,6 +158,16 @@ with_bases() {
 	VISITING+=("$p")
 	[ -r "$p" ] || die 2 "cannot read $p"
 	grep -q '^diff --git ' "$p" || die 2 "$p is not a patch: it has no diff"
+	# #935: a header line is a key and its value, or blank.  header() reads
+	# keyed lines only, so a second Expect written as a bare line under the
+	# first was no expectation at all: 935-start-after-return said NOT CAUGHT
+	# of four boots, each stopped by a signature on such a line.  What nothing
+	# would read is refused, not dropped.
+	stray=$(sed -n -E -e '/^diff --git /q' -e '/^$/d' \
+		-e '/^(Kind|Issue|Takes out|Holds open|Over|Run|Expect|Measure|Accel|Script|Screen|Note|Machine):/d' \
+		-e p "$p" | head -n 1)
+	[ -z "$stray" ] ||
+		die 2 "$(basename "$p") has a header line with no key, which nothing reads: '$stray' -- one Expect: per line"
 	for b in $(header "$p" Over); do
 		[ -r "$(dirname "$p")/$b" ] ||
 			die 2 "$(basename "$p") goes over $b, which is not next to it"

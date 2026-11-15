@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #925
+Over: 925-widen-a56-processor-held.patch
+Takes out: the round held (9cb5351c) -- a round whose depression ran out ten times in a row, the processor taken by others, is WRONG again instead of going on undepressed: what entry 53, whose -t holds the processor on purpose, met at -smp 1 under TCG in the merge test of 9076e340, here in the first round under the widen
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[56\] round [0-9]+: at one processor the victim's depression ran out [0-9]+ time\(s\) in a row before it ran again
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index c0af2417..7d17ff8b 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3639,9 +3639,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
+ 		 * the processor taken by others, and the round went on with the
+ 		 * victim at its own priority (see a56_victim()).
+ 		 */
+-		if (a56_ran_out == A56_DEPRESS_TRIES && a56_depression_ran_out())
+-			held++;
+-		else if (a56_depressed != KERN_SUCCESS) {
++		if (a56_depressed != KERN_SUCCESS) {
+ 			if (a56_depressed != KERN_ABORTED)
+ 				printf("act_test: [56] round %d: thread_switch() "
+ 				       "with SWITCH_OPTION_IDLE answered %d — "

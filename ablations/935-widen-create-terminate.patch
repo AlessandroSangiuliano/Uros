@@ -1,0 +1,22 @@
+Kind: widen
+Issue: #935
+Holds open: delays thread_create_in() 2 ms after it has attached the new thread and before it takes the task lock, so a task_terminate() racing it clears the task's active flag first and the create meets a dead task every time -- the window in which thr_act->thread is set but the task may already be gone
+Run: --entry 14 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index 1d05e9f1..0a4d1583 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1217,6 +1217,12 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
+ 	ipc_thread_init(new_thread);
+ 	thread_start(new_thread, start_pos);
+ 
++	{
++		extern void delay(int);
++
++		delay(2000);	/* 935-widen-create-terminate: let task_terminate() clear active first */
++	}
++
+ 	pset = parent_task->processor_set;
+ 	if (!pset->active) {
+ 		pset = &default_pset;

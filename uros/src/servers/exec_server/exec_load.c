@@ -339,10 +339,14 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
 /*  Top-level: orchestrate a full exec                                  */
 /* ------------------------------------------------------------------ */
 
+/*
+ * A load that failed after it began on the task.  The task is the caller's
+ * (#926): it is left as it is, half loaded, for the caller to terminate --
+ * this server does not end a task it was only lent.
+ */
 static int
-fail_after_task(mach_port_t new_task, elf_image_t *img, void *file_buf, int rc)
+fail_after_task(elf_image_t *img, void *file_buf, int rc)
 {
-    (void)task_terminate(new_task);
     elf_close(img);
     free(file_buf);
     return rc;
@@ -413,16 +417,20 @@ extract_manifest(const elf_image_t *img,
 }
 
 /*
- * Provision a per-task cap_port for `new_task` from the manifest
- * embedded in `img` (or the empty default).  Best-effort: failure
- * here is logged but non-fatal — the spawned task boots without a
- * TASK_CAP_PORT and falls through to the legacy permissive
- * well-known cap_server path, same behaviour as exec_server before
- * #235.  Returns 1 on a successful install, 0 otherwise.
+ * Give `new_task' its per-task cap_port, derived from its caller's (#743):
+ * what the manifest embedded in `img' asks for -- or the empty default --
+ * cut to what the caller's manifest may hand on.  Best-effort: a task left
+ * without a TASK_CAP_PORT is refused every capability it asks for (#511).
+ * Returns 1 when the port is installed, 0 otherwise.
+ *
+ * 🔴 THE PROGRAM'S OWN FILE USED TO BE ITS POLICY.  This provisioned the
+ * manifest in the binary as it stood, so whoever could write a binary that
+ * something would exec wrote what it was allowed.  The file still says what
+ * the program asks for; what it gets is the caller's to give.
  */
 static int
-provision_cap_port(mach_port_t new_task, const elf_image_t *img,
-                   const char *path)
+derive_cap_port(mach_port_t new_task, const elf_image_t *img,
+                const char *path, mach_port_t parent_caps)
 {
     const void   *blob;
     uint32_t      blen;
@@ -431,10 +439,26 @@ provision_cap_port(mach_port_t new_task, const elf_image_t *img,
 
     extract_manifest(img, &blob, &blen);
 
-    kr = cap_provision(new_task, blob, blen, &cap_port);
+    if (!MACH_PORT_VALID(parent_caps)) {
+        printf("exec: %s -> no TASK_CAP_PORT: its caller has none to derive "
+               "one from (#743)\n", path ? path : "(?)");
+        return 0;
+    }
+
+    kr = cap_derive_child(parent_caps, new_task, blob, blen, &cap_port);
+    /*
+     * #937: nothing the program asks for is the caller's to hand on.  A port
+     * would grant nothing, and cap_server gives none: the program runs with
+     * no TASK_CAP_PORT, as one whose caller has none.
+     */
+    if (kr == CAP_ERR_NOTHING_TO_DERIVE) {
+        printf("exec: %s -> no TASK_CAP_PORT: its caller has nothing it asks "
+               "for to hand on (#937)\n", path ? path : "(?)");
+        return 0;
+    }
     if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
-        printf("exec: cap_provision(%s) failed kr=%d — legacy path\n",
-               path ? path : "(?)", kr);
+        printf("exec: cap_derive_child(%s) failed kr=%d — it runs without a "
+               "TASK_CAP_PORT (#743)\n", path ? path : "(?)", kr);
         return 0;
     }
 
@@ -446,22 +470,29 @@ provision_cap_port(mach_port_t new_task, const elf_image_t *img,
         return 0;
     }
 
-    printf("exec: %s -> TASK_CAP_PORT=0x%x (manifest %u bytes%s)\n",
+    printf("exec: %s -> TASK_CAP_PORT=0x%x, derived from its caller's "
+           "(manifest %u bytes%s) (#743)\n",
            path ? path : "(?)", (unsigned)cap_port, blen,
            (blob == &default_manifest_blob) ? ", default" : "");
+
+    /*
+     * The task holds the port now; this copy would keep it from ever having
+     * no senders, and cap_server from giving its slot back (#743).
+     */
+    (void)mach_port_deallocate(mach_task_self(), cap_port);
     return 1;
 }
 
 int
-exec_do_load(mach_port_t client_task, const char *path,
+exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
+             const char *path,
              const void *argv_blob, mach_msg_type_number_t argv_len,
              const void *envp_blob, mach_msg_type_number_t envp_len,
-             mach_port_t *out_task, mach_port_t *out_thread)
+             mach_port_t *out_thread)
 {
     void *file_buf = NULL;
     vm_size_t file_sz = 0;
     elf_image_t img;
-    mach_port_t new_task = MACH_PORT_NULL;
     mach_port_t new_thread = MACH_PORT_NULL;
     vm_address_t stack_top;
     vm_address_t main_bias = 0;     /* ET_DYN load bias, 0 for ET_EXEC */
@@ -471,7 +502,6 @@ exec_do_load(mach_port_t client_task, const char *path,
     int rc;
     kern_return_t kr;
 
-    *out_task   = MACH_PORT_NULL;
     *out_thread = MACH_PORT_NULL;
 
     /* 1. Read the binary. */
@@ -496,15 +526,12 @@ exec_do_load(mach_port_t client_task, const char *path,
         }
     }
 
-    /* 3. Create the child task — IPC space inherited from the
-     *    requester (caps copy through), VM is fresh. */
-    kr = task_create(client_task, (ledger_port_array_t)0, 0,
-                     FALSE, &new_task);
-    if (kr != KERN_SUCCESS) {
-        elf_close(&img);
-        free(file_buf);
-        return EXEC_ERR_TASK_CREATE;
-    }
+    /*
+     * 3. The task is the caller's, made empty by the caller (#926): this
+     *    server was handed it to load into, and is handed nothing else of
+     *    the caller.  It used to be handed the caller's own task, to make
+     *    this one with, and kept it.
+     */
 
     /*
      * Page zero is nobody's (#421).  A task starts with an empty map, and an
@@ -521,8 +548,7 @@ exec_do_load(mach_port_t client_task, const char *path,
                     VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_COPY);
         if (kr != KERN_SUCCESS) {
             printf("exec: reserving page zero kr=%d\n", kr);
-            return fail_after_task(new_task, &img, file_buf,
-                                   EXEC_ERR_VM_SETUP);
+            return fail_after_task(&img, file_buf, EXEC_ERR_VM_SETUP);
         }
     }
 
@@ -532,7 +558,7 @@ exec_do_load(mach_port_t client_task, const char *path,
     /* 4. Map every PT_LOAD into the child. */
     rc = install_segments(new_task, &img, main_bias);
     if (rc != EXEC_OK)
-        return fail_after_task(new_task, &img, file_buf, rc);
+        return fail_after_task(&img, file_buf, rc);
 
     /* 4.1. If the image names a dynamic linker (PT_INTERP), load it and
      *      hand control to its entry instead of the app's e_entry; the
@@ -541,16 +567,17 @@ exec_do_load(mach_port_t client_task, const char *path,
     if (interp != NULL) {
         rc = load_interp(new_task, interp, &interp_base, &start_entry);
         if (rc != EXEC_OK)
-            return fail_after_task(new_task, &img, file_buf, rc);
+            return fail_after_task(&img, file_buf, rc);
     } else {
         start_entry = (uintptr_t)(elf_entry(&img) + main_bias);
     }
 
-    /* 4.25. Provision the child's per-task cap_port from the binary's
-     *       .uros_manifest section (#235).  Done before vDSO + stack
-     *       so libmach init reads TASK_CAP_PORT on the very first
-     *       instruction.  Best-effort — see provision_cap_port. */
-    (void)provision_cap_port(new_task, &img, path);
+    /* 4.25. Derive the child's per-task cap_port from its caller's, by
+     *       what the binary's .uros_manifest section asks for (#235,
+     *       #743).  Done before vDSO + stack so libmach init reads
+     *       TASK_CAP_PORT on the very first instruction.  Best-effort
+     *       — see derive_cap_port. */
+    (void)derive_cap_port(new_task, &img, path, parent_caps);
 
     /* 4.5. Install the vDSO placeholder (v0.4.0 / #236).  Failure
      *      here is non-fatal — the binary can still run, libposix
@@ -606,18 +633,17 @@ exec_do_load(mach_port_t client_task, const char *path,
                               envp_blob, envp_len, &hints, &stack_top);
     }
     if (rc != EXEC_OK)
-        return fail_after_task(new_task, &img, file_buf, rc);
+        return fail_after_task(&img, file_buf, rc);
 
     /* 6. Bring up the entry thread — at the interpreter's entry when a
      *    PT_INTERP was present, otherwise at the app's (biased) entry. */
     rc = start_thread(new_task, start_entry, stack_top, &new_thread);
     if (rc != EXEC_OK)
-        return fail_after_task(new_task, &img, file_buf, rc);
+        return fail_after_task(&img, file_buf, rc);
 
     elf_close(&img);
     free(file_buf);
 
-    *out_task   = new_task;
     *out_thread = new_thread;
     return EXEC_OK;
 }

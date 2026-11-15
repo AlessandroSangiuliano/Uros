@@ -120,6 +120,44 @@
 #include <kern/ipc_tt.h>
 #include <kern/thread_act.h>
 #include <kern/misc_protos.h>
+#include <kern/zalloc.h>		/* #927: the reduced ports' records */
+#include <kern/mach_param.h>		/* #927: TASK_MAX */
+#include <mach/task_rights.h>		/* #927 */
+
+/*
+ * #927: a task's reduced ports.  See <mach/task_rights.h>.
+ *
+ * One record per set of rights a task has been asked for, on the task's
+ * itk_rights list under itk_lock.  The port's kobject is the record, and the
+ * record names the task WITHOUT a reference.  That is safe because the port
+ * never outlives the task's own port: ipc_task_disable() takes every record's
+ * kobject away with the task port's, and ipc_task_terminate() destroys the
+ * ports and frees the records.  A conversion reads a record only under its
+ * port's lock, while the port is active and still a reduced port.
+ *
+ * A record is added only under itk_lock and while the task is active, and
+ * ipc_task_disable() walks the list under the same lock after the task has
+ * stopped being active; so a port made while the task is being terminated is
+ * disabled with the rest.
+ */
+struct task_rights {
+	queue_chain_t	tr_link;	/* on task->itk_rights */
+	ipc_port_t	tr_port;	/* the kernel's receive right */
+	task_t		tr_task;	/* not a reference: see above */
+	natural_t	tr_rights;	/* URMACH_TASK_RIGHT_* */
+};
+
+static zone_t	task_rights_zone;
+
+void
+ipc_task_rights_init(void)
+{
+	/* An identity and a process port for every task, at most. */
+	task_rights_zone = zinit((vm_size_t) sizeof(struct task_rights),
+				 TASK_MAX * 2 * sizeof(struct task_rights),
+				 PAGE_SIZE, "task rights");
+	zone_change(task_rights_zone, Z_EXHAUST, TRUE);
+}
 
 /*
  *	Routine:	ipc_task_init
@@ -153,6 +191,7 @@ ipc_task_init(
 		panic("ipc_task_init");
 
 	itk_lock_init(task);
+	queue_init(&task->itk_rights);		/* #927 */
 	task->itk_self = kport;
 	task->itk_sself = ipc_port_make_send(kport);
 	task->itk_space = space;
@@ -232,11 +271,15 @@ ipc_task_disable(
 	task_t		task)
 {
 	ipc_port_t kport;
+	struct task_rights *tr;
 
 	itk_lock(task);
 	kport = task->itk_self;
 	if (kport != IP_NULL)
 		ipc_kobject_set(kport, IKO_NULL, IKOT_NONE);
+	/* #927: and the reduced ports, which must not outlive the task's. */
+	queue_iterate(&task->itk_rights, tr, struct task_rights *, tr_link)
+		ipc_kobject_set(tr->tr_port, IKO_NULL, IKOT_NONE);
 	itk_unlock(task);
 }
 
@@ -255,7 +298,10 @@ ipc_task_terminate(
 {
 	ipc_port_t kport;
 	int i;
+	queue_head_t gone;
+	struct task_rights *tr;
 
+	queue_init(&gone);
 	itk_lock(task);
 	kport = task->itk_self;
 
@@ -266,6 +312,12 @@ ipc_task_terminate(
 	}
 
 	task->itk_self = IP_NULL;
+	/* #927: the reduced ports go with the task, destroyed below. */
+	while (!queue_empty(&task->itk_rights)) {
+		queue_remove_first(&task->itk_rights, tr,
+				   struct task_rights *, tr_link);
+		queue_enter(&gone, tr, struct task_rights *, tr_link);
+	}
 	itk_unlock(task);
 
 	/* release the naked send rights */
@@ -295,6 +347,17 @@ ipc_task_terminate(
 	/* destroy the kernel port */
 
 	ipc_port_dealloc_kernel(kport);
+
+	/*
+	 * #927: and the reduced ones.  Every send right to them becomes a
+	 * dead name now, as every one to the task port has: a dead-name
+	 * request on a reduced port says the task has died.
+	 */
+	while (!queue_empty(&gone)) {
+		queue_remove_first(&gone, tr, struct task_rights *, tr_link);
+		ipc_port_dealloc_kernel(tr->tr_port);
+		zfree(task_rights_zone, (vm_offset_t) tr);
+	}
 }
 
 /*
@@ -918,6 +981,217 @@ ref_task_port_locked( ipc_port_t port, task_t *ptask )
 	*ptask = task;
 	ip_unlock(port);
 	return (TRUE);
+}
+
+/*
+ *	Routine:	ref_task_right_port_locked
+ *	Purpose:
+ *		#927: THE check of a port's rights on a task, the one every
+ *		path takes -- MIG's conversions below and the traps'
+ *		port_name_to_task_right() -- so that no path can accept a
+ *		reduced port without asking it.  `port' carries `need'
+ *		(URMACH_TASK_RIGHT_*) if it is the full task port, which
+ *		carries every right, or a reduced port made with it.  Then
+ *		*ptask is its task, referenced; otherwise TASK_NULL.
+ *	Conditions:
+ *		`port' locked; unlocked on return.  FALSE if the task's lock
+ *		was contended and nothing was done: the caller locks the port
+ *		and asks again, as with ref_task_port_locked().
+ */
+boolean_t
+ref_task_right_port_locked(
+	ipc_port_t	port,
+	natural_t	need,
+	task_t		*ptask)
+{
+	struct task_rights	*tr;
+	task_t			task = TASK_NULL;
+
+	if (ip_active(port) && ip_kotype(port) == IKOT_TASK)
+		return ref_task_port_locked(port, ptask);	/* unlocks */
+	if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS) {
+		tr = (struct task_rights *) port->ip_kobject;
+		if ((tr->tr_rights & need) == need) {
+			/* As ref_task_port_locked(): out of order. */
+			if (!task_lock_try(tr->tr_task)) {
+				ip_unlock(port);
+				mutex_pause();
+				return FALSE;
+			}
+			task = tr->tr_task;
+			task->ref_count++;
+			task_unlock(task);
+		}
+	}
+	*ptask = task;
+	ip_unlock(port);
+	return TRUE;
+}
+
+/*
+ *	Routine:	convert_port_to_task_right
+ *	Purpose:
+ *		#927: convert from a port to a task, if the port carries
+ *		`need' (ref_task_right_port_locked()).  Doesn't consume the
+ *		port ref; produces a task ref, which may be null.
+ *	Conditions:
+ *		Nothing locked.
+ */
+task_t
+convert_port_to_task_right(
+	ipc_port_t	port,
+	natural_t	need)
+{
+	boolean_t	r = FALSE;
+	task_t		task = TASK_NULL;
+
+	while (!r && IP_VALID(port)) {
+		ip_lock(port);
+		r = ref_task_right_port_locked(port, need, &task);
+		/* port unlocked */
+	}
+	return task;
+}
+
+/* task_info(), by the full port or one that carries the info right. */
+task_t
+convert_port_to_task_inspect(
+	ipc_port_t	port)
+{
+	return convert_port_to_task_right(port, URMACH_TASK_RIGHT_INFO);
+}
+
+/* task_terminate(), task_suspend(), task_resume(), likewise. */
+task_t
+convert_port_to_task_lifecycle(
+	ipc_port_t	port)
+{
+	return convert_port_to_task_right(port, URMACH_TASK_RIGHT_LIFECYCLE);
+}
+
+/*
+ *	Routine:	urmach_task_rights_port [kernel call]
+ *	Purpose:
+ *		#927: the reduced port of `task' that carries `rights' and
+ *		nothing else.  `task' came through the full task port -- the
+ *		MIG type is task_t, whose conversion takes no other -- so only
+ *		a holder of the whole task makes one.  One port per set: asked
+ *		again, the same port, with another send right.
+ *	Conditions:
+ *		Nothing locked.
+ *	Returns:
+ *		KERN_SUCCESS		*portp is a send right.
+ *		KERN_INVALID_ARGUMENT	no task.
+ *		KERN_INVALID_VALUE	a right a reduced port cannot carry.
+ *		KERN_TERMINATED		the task is being terminated.
+ *		KERN_RESOURCE_SHORTAGE	no record or no port.
+ */
+kern_return_t
+urmach_task_rights_port(
+	task_t		task,
+	natural_t	rights,
+	ipc_port_t	*portp)
+{
+	struct task_rights	*tr, *mine = NULL;
+	ipc_port_t		port = IP_NULL;
+	kern_return_t		kr = KERN_SUCCESS;
+
+	*portp = IP_NULL;
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (rights & ~URMACH_TASK_RIGHTS_REDUCIBLE)
+		return KERN_INVALID_VALUE;
+
+	for (;;) {
+		itk_lock(task);
+		if (!task->active || task->itk_self == IP_NULL) {
+			kr = KERN_TERMINATED;
+		} else {
+			queue_iterate(&task->itk_rights, tr,
+				      struct task_rights *, tr_link)
+				if (tr->tr_rights == rights) {
+					port = ipc_port_make_send(tr->tr_port);
+					break;
+				}
+			if (port == IP_NULL && mine != NULL) {
+				/* Made outside the lock; nobody beat us to it. */
+				ipc_kobject_set(mine->tr_port,
+						(ipc_kobject_t) mine,
+						IKOT_TASK_RIGHTS);
+				queue_enter(&task->itk_rights, mine,
+					    struct task_rights *, tr_link);
+				port = ipc_port_make_send(mine->tr_port);
+				mine = NULL;
+			}
+		}
+		itk_unlock(task);
+		if (kr != KERN_SUCCESS || port != IP_NULL)
+			break;
+
+		/* None yet: make one outside the lock, then look again. */
+		mine = (struct task_rights *) zalloc(task_rights_zone);
+		if (mine == NULL)
+			return KERN_RESOURCE_SHORTAGE;
+		mine->tr_port = ipc_port_alloc_kernel();
+		if (mine->tr_port == IP_NULL) {
+			zfree(task_rights_zone, (vm_offset_t) mine);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		mine->tr_task = task;
+		mine->tr_rights = rights;
+	}
+
+	if (mine != NULL) {
+		/* Not wanted after all: another made the set, or the task went. */
+		ipc_port_dealloc_kernel(mine->tr_port);
+		zfree(task_rights_zone, (vm_offset_t) mine);
+	}
+	*portp = port;
+	return kr;
+}
+
+/*
+ *	Routine:	urmach_task_port_rights [kernel call]
+ *	Purpose:
+ *		#927: the rights `port' carries on a task:
+ *		URMACH_TASK_RIGHTS_FULL for the full task port, the set it was
+ *		made with for a reduced one.  Asked of the host and not of the
+ *		port, so that a port which is no kernel object is answered too,
+ *		instead of queuing a request nobody would ever answer -- which
+ *		is what asking the port itself would do.
+ *	Conditions:
+ *		Nothing locked.  On success the send right the request
+ *		carried is consumed here; on an error it is left to the
+ *		request's destruction, as every kernel call leaves it.
+ *	Returns:
+ *		KERN_SUCCESS		*rightsp is the port's rights.
+ *		KERN_INVALID_ARGUMENT	no host, or not a live task port.
+ */
+kern_return_t
+urmach_task_port_rights(
+	host_t		host,
+	ipc_port_t	port,
+	natural_t	*rightsp)
+{
+	kern_return_t	kr = KERN_INVALID_ARGUMENT;
+
+	*rightsp = 0;
+	if (host == HOST_NULL || !IP_VALID(port))
+		return KERN_INVALID_ARGUMENT;
+
+	ip_lock(port);
+	if (ip_active(port) && ip_kotype(port) == IKOT_TASK) {
+		*rightsp = URMACH_TASK_RIGHTS_FULL;
+		kr = KERN_SUCCESS;
+	} else if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS) {
+		*rightsp = ((struct task_rights *) port->ip_kobject)->tr_rights;
+		kr = KERN_SUCCESS;
+	}
+	ip_unlock(port);
+
+	if (kr == KERN_SUCCESS)
+		ipc_port_release_send(port);
+	return kr;
 }
 
 /*

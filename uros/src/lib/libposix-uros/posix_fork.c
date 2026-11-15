@@ -269,8 +269,13 @@ __uros_fork(void)
     int         prc     = PROC_ERR_INVAL;
     if (__uros_proc_port != MACH_PORT_NULL) {
         char cmd[128] = "forked";
-        (void)proc_register(__uros_proc_port, __uros_my_pid,
-                            child_task, cmd, &new_pid, &prc);
+        mach_port_t proc_task = MACH_PORT_NULL;
+        /* #927: by the child's reduced port, never its task port. */
+        if (__uros_process_port(child_task, &proc_task) == KERN_SUCCESS) {
+            (void)proc_register(__uros_proc_port, __uros_my_pid,
+                                proc_task, cmd, &new_pid, &prc);
+            (void)mach_port_deallocate(mach_task_self(), proc_task);
+        }
     }
 
     /*

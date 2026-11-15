@@ -43,4 +43,15 @@ typedef long (*__uros_handler_t)(long a1, long a2, long a3,
  */
 __uros_handler_t __uros_lookup(long n);
 
+/*
+ * #927: the port a process is registered with proc_server by: the task's
+ * reduced port with the info and lifecycle rights (<mach/task_rights.h>).
+ * proc_server ends, stops and resumes the process and reads its counters
+ * through it, and can do nothing else with it; it refuses the task port.
+ * On success the caller holds a send right, to give back once proc_server
+ * has been handed its own.  In signals.c.
+ */
+__uros_kern_return_t __uros_process_port(__uros_port_t task,
+                                         __uros_port_t *port);
+
 #endif /* UROS_LIBPOSIX_INTERNAL_H */

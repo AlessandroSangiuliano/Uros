@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #935
+Over: 935-widen-create-terminate.patch
+Takes out: the task's holds read under the task lock -- thread_create_in() reads its task's suspend count at its top again, with no lock, so act_test [55]'s task_suspend(), landing while the widen holds the create between the attach and the task lock, holds every thread of the task but the new one, which then runs in the suspended task once its user stop is resumed
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[55\] round [0-9]+: a thread made while its task was being suspended runs with the task still suspended
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index 8be8e0bc..ed506b62 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1186,7 +1186,8 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
+ 	 * activation was listed: the thread ran in a suspended task.
+ 	 */
+ 	thr_act->user_stop_count = 1;
+-	thread_hold(thr_act);
++	for (sc = thr_act->task->suspend_count + 1; sc; --sc)	/* 935-holds-read-unlocked */
++		thread_hold(thr_act);
+ 
+ #if	MACH_ASSERT
+ 	if (watchacts & WA_THR)
+@@ -1334,8 +1335,6 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
+ 	 * the count or finds the activation listed, and each resume finds it
+ 	 * listed.  Still unlisted, it can't be known to anyone, as above.
+ 	 */
+-	for (sc = parent_task->suspend_count; sc; --sc)
+-		thread_hold(thr_act);
+ 
+ 	/*
+ 	 * 🔴 CHAIN IT ONTO THE TASK NOW, WHOLE (#935).  act_create() used to

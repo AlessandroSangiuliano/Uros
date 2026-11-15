@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #925
+Takes out: the SWITCH_OPTION_IDLE depression's outliving thread_switch() -- the call ends it itself before it returns and answers KERN_ABORTED at once, a few ms into its 100: a depression something ended before its time, which act_test [56] must still call WRONG now that one that ran out by its timer is asked again (00c14596)
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[56\] round [0-9]+: thread_switch\(\) with SWITCH_OPTION_IDLE answered KERN_ABORTED after [0-9]+ ms, before
+
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index bf14eccb..495ff3a6 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -473,6 +473,8 @@ syscall_thread_switch(
+     /*
+      *  Restore depressed priority unless we just did a SWITCH_OPTION_IDLE.
+      */
++    if (option == SWITCH_OPTION_IDLE)
++	(void) thread_depress_abort(cur_thread->top_act);
+     if (cur_thread->depress_priority != -1) {
+ 	if (option != SWITCH_OPTION_IDLE)
+ 	    (void) thread_depress_abort(cur_thread->top_act);

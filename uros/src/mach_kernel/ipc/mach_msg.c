@@ -1123,9 +1123,11 @@ boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
  *		A receive right is written in the port, and the port is
  *		locked.  A send right is written nowhere in the port, so the
  *		entry is read, as urmach_msg_lockfree_resolve() reads it.  A
- *		remover clears the entry before it takes the port's lock to
- *		drop the right, so an entry seen here means the right is still
- *		counted in the port this holds.
+ *		live port's send right is dropped with the port locked, so with
+ *		this port locked and active an entry seen here means the right
+ *		is still counted in it.  A dead port's right is dropped without
+ *		the lock, but only once its entry is cleared (ipc_right_check(),
+ *		#940), and the caller has given up on a dead port already.
  *
  *		`gen' is a generation read before the mapping was: it is a
  *		filter, and one that is no longer current is a miss.  is_seq
@@ -1182,14 +1184,68 @@ urmach_msg_rights_hold(
  *		FALSE so the locked path handles it.
  *	Why it is safe without the lock:
  *		ipc_entry_lookup_lockfree reads the entry from type-stable storage
- *		under the per-space seqlock (no fault, table-consistent); the ports
- *		are type-stable too, so ip_lock never faults.  What that gives is
- *		only a guess: with the ports locked urmach_msg_rights_hold()
- *		asks whether it is true.  So it never misdelivers: it confirms
- *		name->port at a valid linearization point or gives up.
+ *		under the per-space seqlock (no fault, table-consistent).  What
+ *		that gives is only a guess: right after it is read the entry may
+ *		be cleared and the port's last reference dropped.  So the resolve
+ *		is an RCU read section, and a port's memory goes back to its zone
+ *		only after a grace period (io_free(), #940).  An entry's reference
+ *		that can be the port's last, a dead port's, goes only once the
+ *		entry is cleared (ipc_right_check(), ipc_right_destroy()), and a
+ *		dead space is asked about first, since ipc_right_clean()
+ *		leaves its entries naming their ports: so the grace period of a
+ *		port read here began after the read, and until the section ends
+ *		the port is the port it was, live or dead, never one handed out
+ *		again.  A port dies before its last reference goes, so
+ *		ip_active() tells a live one, and with both ports locked
+ *		urmach_msg_rights_hold() asks whether the mapping is still true.
+ *		So it never misdelivers: it confirms name->port at a valid
+ *		linearization point or gives up.  On success the ports stay
+ *		locked past the section, which is safe: the entry's right is
+ *		counted in the destination, and dropping it takes the port's lock.
+ *
+ *		#940: as merged in #331 the resolve held no read section and
+ *		locked the destination outright, and ports were freed at once.
+ *		The zone wrote its free pointer over io_bits, which on x86-64 made
+ *		a freed port read as active, so a port ipc_right_check() had just
+ *		freed passed the check and act_test [54]'s request was queued on
+ *		freed memory, its reply never to come.  The grace period alone
+ *		did not close it: ipc_right_check() dropped the reference before
+ *		it cleared the entry, and preempted in between, its processor
+ *		counted as quiescent while the entry still named the port.
  */
+static boolean_t	urmach_msg_lockfree_resolve_in_section(
+				ipc_space_t, mach_port_t, mach_port_t,
+				ipc_port_t *, ipc_port_t *);
+
 static boolean_t
 urmach_msg_lockfree_resolve(
+	ipc_space_t	space,
+	mach_port_t	reply_name,
+	mach_port_t	dest_name,
+	ipc_port_t	*reply_portp,
+	ipc_port_t	*dest_portp)
+{
+	boolean_t	resolved;
+
+	urmach_rcu_read_lock();
+	resolved = urmach_msg_lockfree_resolve_in_section(space, reply_name,
+							  dest_name,
+							  reply_portp,
+							  dest_portp);
+	urmach_rcu_read_unlock();
+	return resolved;
+}
+
+/*
+ * How many times the resolve tries the destination's lock.  A read section
+ * may not block, and a port's mutex sleeps when it is held, so a destination
+ * that stays held is left to the locked lookup.
+ */
+#define	URMACH_RESOLVE_LOCK_TRIES	64
+
+/* The resolve's body, inside its read section. */
+static boolean_t
+urmach_msg_lockfree_resolve_in_section(
 	ipc_space_t	space,
 	mach_port_t	reply_name,
 	mach_port_t	dest_name,
@@ -1199,8 +1255,23 @@ urmach_msg_lockfree_resolve(
 	natural_t	gen0 = space->is_generation;
 	ipc_entry_t	re, de;
 	ipc_port_t	rp, dp;
+	int		tries;
 
 	urmach_rcu_barrier();
+
+	/*
+	 * #940: a dead space names nothing.  ipc_space_destroy() clears
+	 * is_active and then ipc_right_clean() drops each entry's reference
+	 * with the entry still naming its port, so a port read from a dead
+	 * space's table may have gone back to its zone.  Asked inside the
+	 * section, before any port is touched: a grace period can end while
+	 * this section runs only if this processor reported quiescent for it
+	 * before the section began, so it began before the section -- and
+	 * after the release it waits on, which came after is_active was
+	 * cleared.  A section that can outlive it reads is_active cleared.
+	 */
+	if (!space->is_active)
+		return FALSE;
 
 	re = ipc_entry_lookup_lockfree(space, reply_name);
 	if (re == IE_NULL || !(re->ie_bits & MACH_PORT_TYPE_RECEIVE))
@@ -1215,7 +1286,9 @@ urmach_msg_lockfree_resolve(
 	if (rp == IP_NULL || dp == IP_NULL)
 		return FALSE;
 
-	ip_lock(dp);
+	for (tries = 1; !ip_lock_try(dp); tries++)
+		if (tries == URMACH_RESOLVE_LOCK_TRIES)
+			return FALSE;
 	if (!ip_active(dp) || !ip_lock_try(rp)) {
 		ip_unlock(dp);
 		return FALSE;
@@ -2951,6 +3024,9 @@ urmach_msg_overwrite_trap_call(
 	    {
 		register ipc_port_t	reply_port;
 		mach_port_seqno_t	local_seqno;
+#if	WAKER_TRACK
+		mach_msg_id_t		request_id = kmsg->ikm_header.msgh_id;
+#endif	/* WAKER_TRACK */
 
 		/*
 		 * Perform the kernel function.
@@ -2962,6 +3038,16 @@ urmach_msg_overwrite_trap_call(
 			 * No reply.  Take the
 			 * slow receive path.
 			 */
+#if	WAKER_TRACK
+			/*
+			 * 🔴 EACH WAY TO THE SLOW RECEIVE SAYS ITSELF (#940): this
+			 * one, the two below and slow_send, every way there is.
+			 * A record for the walk, under the switch of the other
+			 * records of IPC waits.
+			 */
+			self->ith_slow_why = "the kernel server made no reply";
+			self->ith_slow_id = request_id;
+#endif	/* WAKER_TRACK */
 			HOT(c_mmot_cold_051++);
 			goto slow_get_rcv_port;
 		}
@@ -2999,6 +3085,11 @@ urmach_msg_overwrite_trap_call(
 		    (reply_port->ip_pset != IPS_NULL))
 		{
 			ip_unlock(reply_port);
+#if	WAKER_TRACK
+			self->ith_slow_why = "its reply queued, the reply port not "
+					     "as the receive expects";
+			self->ith_slow_id = hdr->msgh_id;
+#endif	/* WAKER_TRACK */
 			ipc_mqueue_send_always(kmsg);
 			HOT(c_mmot_cold_052++);
 			goto slow_get_rcv_port;
@@ -3020,6 +3111,11 @@ urmach_msg_overwrite_trap_call(
 		{
 			imq_unlock(rcv_mqueue);
 			ip_unlock(reply_port);
+#if	WAKER_TRACK
+			self->ith_slow_why = "its reply queued, the reply port "
+					     "holding messages or receivers";
+			self->ith_slow_id = hdr->msgh_id;
+#endif	/* WAKER_TRACK */
 			ipc_mqueue_send_always(kmsg);
 			HOT(c_mmot_cold_053++);
 			goto slow_get_rcv_port;
@@ -3082,6 +3178,14 @@ urmach_msg_overwrite_trap_call(
 				self->handoff_hint = TRUE;
 		}
 #endif	/* NCPUS > 1 */
+#if	WAKER_TRACK
+		/*
+		 * Before the send, which can destroy the request at a port
+		 * already dead: ith_sent_dead says whether it did.
+		 */
+		self->ith_slow_why = "sent by ipc_mqueue_send()";
+		self->ith_slow_id = hdr->msgh_id;
+#endif	/* WAKER_TRACK */
 		mr = ipc_mqueue_send(kmsg, MACH_MSG_OPTION_NONE,
 				     MACH_MSG_TIMEOUT_NONE);
 #if	NCPUS > 1
@@ -3119,6 +3223,23 @@ urmach_msg_overwrite_trap_call(
 		self->ith_option = option;
 		self->ith_scatter_list = MACH_MSG_BODY_NULL;
 		self->ith_scatter_list_size = scatter_list_size;
+		/*
+		 * 🔴 AND THE OBJECT, BESIDE THE QUEUE ipc_mqueue_receive()
+		 * RECORDS (#940).
+		 *
+		 * Called with the sentinel below, ipc_mqueue_receive() writes
+		 * the queue it parks on, and only mach_msg_receive() wrote the
+		 * object.  A thread parked here was walked with the queue of
+		 * this park and the object of an earlier one, and act_test
+		 * [54]'s helper, waiting for good for a reply, could not be
+		 * told the port it waited on.  The two halves of one record.
+		 * A record for the walk, under the switch of the other records
+		 * of IPC waits (<kern/waker_track.h>): one store on a path that
+		 * is about to block, and i386's .text as it was.
+		 */
+#if	WAKER_TRACK
+		self->ith_object = (void *) rcv_object;
+#endif	/* WAKER_TRACK */
 
 		mr = ipc_mqueue_receive(rcv_mqueue,
 					MACH_MSG_OPTION_NONE,

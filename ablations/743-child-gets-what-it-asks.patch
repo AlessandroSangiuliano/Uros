@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #743
+Takes out: the cut in cap_derive_task (b31c9ee2) -- the child's manifest is installed as it asked, as exec_server's provisioning used to
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[39\] WRONG — derived on this task's port: 0; then block devices READ: 0 \(want 0\), WRITE: 0
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index b19628dd..41c17c37 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -877,8 +877,15 @@ cap_derive_task(mach_port_t            server,
+     memcpy(copy, manifest_buf, manifest_len);
+ 
+     vrc = cap_manifest_validate(copy, (uint32_t)manifest_len, &asked);
+-    if (vrc == CAP_ERR_NONE)
+-        vrc = cap_manifest_derive(parent, asked, &derived, &derived_len);
++    if (vrc == CAP_ERR_NONE) {
++        derived = malloc(manifest_len);
++        if (derived == NULL)
++            vrc = CAP_ERR_NO_MEMORY;
++        else {
++            memcpy(derived, copy, manifest_len);
++            derived_len = (uint32_t)manifest_len;
++        }
++    }
+     if (vrc != CAP_ERR_NONE) {
+         printf("cap: derive_task — manifest refused (rc=%d, len=%u)\n",
+                vrc, (unsigned)manifest_len);

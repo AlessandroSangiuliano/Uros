@@ -278,6 +278,9 @@ typedef struct task {
 					   per-task cap_server port */
 	struct ipc_port *itk_registered[TASK_PORT_REGISTER_MAX];
 					/* all send rights */
+	queue_head_t	itk_rights;	/* #927: its reduced ports, one per
+					   set of rights, made when first
+					   asked for; under itk_lock */
 
 	struct ipc_space *itk_space;
 

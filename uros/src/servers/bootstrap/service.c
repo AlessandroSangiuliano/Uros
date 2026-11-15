@@ -138,13 +138,6 @@ bootstrap_cap_server_port(void)
 	return services[CAP_SERVER_SLOT].service;
 }
 
-/* #744: whether cap_server has taken its slot's receive right. */
-boolean_t
-service_cap_server_taken(void)
-{
-	return services[CAP_SERVER_SLOT].taken;
-}
-
 /*
  * #744: what waits on an untaken slot is refused from now on -- its server
  * died before it took it, or bootstrap.conf does not name one.  The port goes
@@ -604,7 +597,7 @@ do_service_checkin(mach_port_t request,
 	    }
 
 	    *granted = requested;
-	    bootstrap_wake();		/* #744: cap_server_checked_in() */
+	    bootstrap_wake();		/* #744: a fact for start_condition */
 	    return KERN_SUCCESS;
 	}
 

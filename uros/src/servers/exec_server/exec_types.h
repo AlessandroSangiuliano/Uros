@@ -113,7 +113,7 @@ typedef pointer_t       exec_blob_t;
 #define EXEC_ERR_READ           -2   /* vfs_read failed */
 #define EXEC_ERR_PARSE          -3   /* libelf rejected the image */
 #define EXEC_ERR_NOT_STATIC     -4   /* PT_INTERP present (v0.2.0 needed) */
-#define EXEC_ERR_TASK_CREATE    -5   /* kernel task_create failed */
+#define EXEC_ERR_TASK_CREATE    -5   /* no longer returned: the caller makes the task (#926) */
 #define EXEC_ERR_VM_SETUP       -6   /* vm_allocate / vm_write / vm_protect */
 #define EXEC_ERR_THREAD_CREATE  -7   /* thread_create or set_state failed */
 #define EXEC_ERR_BAD_BLOB       -8   /* argv/envp blob malformed */

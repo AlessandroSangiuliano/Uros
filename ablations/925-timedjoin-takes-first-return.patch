@@ -1,0 +1,45 @@
+Kind: ablation
+Issue: #925
+Takes out: pthread_timedjoin_np()'s loop -- one futex wait, and a return that is not a timeout is taken for the exit, as before #925, so a timed join whose wait an abort ended answers EINVAL for a thread still running, long before its deadline: pthread_test's timed joiner, aborted while thread_info() says it waits, must be seen returning before its thread ends
+Run: --entry 14 600 -smp 4
+Expect: a join whose wait is aborted goes on waiting: FAIL — pthread_timedjoin_np\(\) answered
+
+diff --git a/uros/src/lib/libpthreads/pthread.c b/uros/src/lib/libpthreads/pthread.c
+index b1e72c57..17991aa2 100644
+--- a/uros/src/lib/libpthreads/pthread.c
++++ b/uros/src/lib/libpthreads/pthread.c
+@@ -1421,22 +1421,19 @@ pthread_timedjoin_np(pthread_t thread,
+ 		 * then answered EINVAL for a thread still running, well before
+ 		 * its deadline.  Each turn waits for what is left of it.
+ 		 */
+-		kern_res = KERN_SUCCESS;
+-		while (thread->detached == PTHREAD_CREATE_JOINABLE &&
+-		       kern_res != KERN_OPERATION_TIMED_OUT) {
+-			j_snap = *PTH_FW(thread->joiners);
+-			UNLOCK(thread->lock);
++		/* 925-timedjoin-takes-first-return: one wait, any return */
++		j_snap = *PTH_FW(thread->joiners);
++		UNLOCK(thread->lock);
+ 
+-			/* #324: deadline already passed -> immediate timeout
+-			 * (don't pass 0 ms to the futex, which would mean
+-			 * "wait forever"). */
+-			if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
+-				kern_res = KERN_OPERATION_TIMED_OUT;
+-			else
+-				kern_res = _pthread_futex_wait(
+-				    PTH_FW(thread->joiners), j_snap, tmo_ms);
+-			LOCK(thread->lock);
+-		}
++		/* #324: deadline already passed -> immediate timeout
++		 * (don't pass 0 ms to the futex, which would mean
++		 * "wait forever"). */
++		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
++			kern_res = KERN_OPERATION_TIMED_OUT;
++		else
++			kern_res = _pthread_futex_wait(
++			    PTH_FW(thread->joiners), j_snap, tmo_ms);
++		LOCK(thread->lock);
+ 		thread->num_joiners--;
+ 
+ 		if (kern_res == KERN_OPERATION_TIMED_OUT &&

@@ -53,6 +53,15 @@
 #include "device_master.h"	/* #432: a device has one driver */
 #include "ahci_batch.h"	/* #432: a disk reading into a page it does not own */
 #include <libcap.h>
+#include <mach/cap_manifest.h>	/* #743: the manifests [38]-[40] send */
+#include <mach/notify.h>	/* #743: [43]'s forged no-senders */
+#include <mach/ndr.h>		/* #743: NDR_record, for the same */
+#include "cap_server.h"		/* #743: the stubs, asked on ports of the arms' choosing */
+#include "exec.h"		/* #743: [42]'s exec_load */
+#include "exec_types.h"		/* #743: EXEC_OK */
+#include "proc.h"		/* #927: [45]'s proc_register */
+#include "proc_types.h"		/* #927: PROC_OK, PROC_ERR_FULL_TASK */
+#include <mach/task_rights.h>	/* #927 */
 #include <servers/netname_defs.h>	/* #744: [33]'s refusals */
 #include "service.h"			/* #744: [34]'s service_checkin */
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
@@ -358,6 +367,1210 @@ revocation_notices_are_a_permission(void)
                "CAP_ERR_NOT_IN_MANIFEST(%d) (#744)\n", (int)own,
                (int)well_known, CAP_ERR_NOT_IN_MANIFEST);
     (void)mach_port_destroy(mach_task_self(), p);
+    return ok;
+}
+
+/*
+ * ── #743: who provisions, what a child gets, and slots given back ──────────
+ *
+ * A manifest blob for the arms below: `name', then `nr' required entries and
+ * `nd' delegatable ones, laid out as mkmanifest lays them.  Answers its
+ * length, or 0 when `cap' bytes are too few.
+ */
+static uint32_t
+manifest_make(void *buf, uint32_t cap, const char *name,
+              const cap_manifest_entry_t *req, uint32_t nr,
+              const cap_manifest_entry_t *del, uint32_t nd)
+{
+    cap_manifest_header_t *h = buf;
+    uint32_t name_len = (uint32_t)strlen(name) + 1;
+    uint32_t name_off = (uint32_t)(sizeof(*h) +
+                                   (nr + nd) * sizeof(cap_manifest_entry_t));
+    uint32_t total = name_off + ((name_len + 3u) & ~3u);
+
+    if (total > cap)
+        return 0;
+    memset(buf, 0, total);
+    h->magic              = CAP_MANIFEST_MAGIC;
+    h->version            = CAP_MANIFEST_VERSION;
+    h->header_size        = (uint16_t)sizeof(*h);
+    h->total_size         = total;
+    h->required_offset    = (uint32_t)sizeof(*h);
+    h->required_count     = nr;
+    h->delegatable_offset = (uint32_t)(sizeof(*h) +
+                                       nr * sizeof(cap_manifest_entry_t));
+    h->delegatable_count  = nd;
+    h->name_offset        = name_off;
+    h->name_length        = name_len;
+    if (nr != 0)
+        memcpy((char *)buf + h->required_offset, req,
+               nr * sizeof(cap_manifest_entry_t));
+    if (nd != 0)
+        memcpy((char *)buf + h->delegatable_offset, del,
+               nd * sizeof(cap_manifest_entry_t));
+    memcpy((char *)buf + name_off, name, name_len);
+    return total;
+}
+
+/* cap_acquire on `port', whichever port that is; the token is not kept. */
+static kern_return_t
+acquire_on(mach_port_t port, uint32_t type, uint64_t id, uint64_t ops)
+{
+    char                   tok[CAP_TOKEN_MAX];
+    mach_msg_type_number_t n = CAP_TOKEN_MAX;
+
+    return mig_cap_acquire(port, type, id, ops, 0, tok, &n);
+}
+
+/*
+ * cap_slots' census, asked on `port' (#743, #937): the table's slots, and the
+ * bounds on derived ones -- `family' is the count of the family `port'
+ * belongs to.
+ */
+struct slots {
+    natural_t in_use, size, derived, quota, family, family_max;
+};
+
+static kern_return_t
+slots_now(mach_port_t port, struct slots *s)
+{
+    return mig_cap_slots(port, &s->in_use, &s->size, &s->derived, &s->quota,
+                         &s->family, &s->family_max);
+}
+
+/*
+ * Test [38]: only bootstrap provisions (#743).
+ *
+ * cap_provision_task answered whichever port it was asked on, so a task could
+ * provision itself with a manifest of its own writing -- here, PCI devices,
+ * which this task's own manifest withholds ([13]) -- and acquire through the
+ * port it got back.  Asked on the port every task inherits and on this task's
+ * own per-task port, it must be refused both times with
+ * CAP_ERR_NOT_PROVISIONER.  A port that came anyway is given back.
+ *
+ * It asks through libcap, which hands cap_server this task's identity port
+ * (#938).  With the task port, cap_server would refuse it before the rule
+ * this arm is about -- CAP_ERR_TASK_NOT_IDENTITY -- and a task can make its
+ * own identity port: the rule would be taken out with nothing to say so.
+ */
+static int
+only_bootstrap_provisions(void)
+{
+    static uint64_t blob[64];
+    static const cap_manifest_entry_t pci[] = {
+        { RESOURCE_PCI_DEVICE, 0, CAP_MANIFEST_ANY_ID, 0x7 },
+    };
+    uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_self",
+                                      pci, 1, NULL, 0);
+    mach_port_t   got = MACH_PORT_NULL;
+    kern_return_t on_shared, on_own;
+    int           ok;
+
+    if (len == 0 || !MACH_PORT_VALID(urmach_cap_server_port) ||
+        !MACH_PORT_VALID(mach_cap_port)) {
+        printf("cap_test: [38] WRONG — no manifest to send, or no port to "
+               "send it on: shared 0x%x, per-task 0x%x (#743)\n",
+               (unsigned)urmach_cap_server_port, (unsigned)mach_cap_port);
+        return 0;
+    }
+
+    on_shared = cap_provision(urmach_cap_server_port, mach_task_self(),
+                              blob, len, &got);
+    if (on_shared == KERN_SUCCESS && MACH_PORT_VALID(got))
+        (void)mach_port_deallocate(mach_task_self(), got);
+    got = MACH_PORT_NULL;
+    on_own = cap_provision(mach_cap_port, mach_task_self(), blob, len, &got);
+    if (on_own == KERN_SUCCESS && MACH_PORT_VALID(got))
+        (void)mach_port_deallocate(mach_task_self(), got);
+
+    ok = on_shared == CAP_ERR_NOT_PROVISIONER &&
+         on_own == CAP_ERR_NOT_PROVISIONER;
+    if (ok)
+        printf("cap_test: [38] provisioning itself with a manifest of its "
+               "own, on the port every task inherits and on its own "
+               "per-task port: refused both times with "
+               "CAP_ERR_NOT_PROVISIONER (#743)\n");
+    else
+        printf("cap_test: [38] WRONG — provisioning itself with a manifest "
+               "of its own, on the port every task inherits: %d, on its own "
+               "per-task port: %d, not CAP_ERR_NOT_PROVISIONER(%d) (#743)\n",
+               (int)on_shared, (int)on_own, CAP_ERR_NOT_PROVISIONER);
+    return ok;
+}
+
+/*
+ * Test [39]: a child gets what it asks for, cut to what its parent may hand
+ * on (#743).
+ *
+ * This task holds block devices READ|WRITE and DMA buffers, and may hand on
+ * block devices READ alone (cap_test.manifest).  A child derived on its
+ * per-task port that asks for block devices READ|WRITE, for DMA buffers, and
+ * to hand block devices on READ|WRITE must come back with block devices READ:
+ * granted that, and refused WRITE and DMA buffers with
+ * CAP_ERR_NOT_IN_MANIFEST.  The same request on the port every task inherits
+ * has no parent manifest to cut by, and is refused with
+ * CAP_ERR_NOT_DELEGABLE.
+ *
+ * The child is a task made for the purpose and never run: a per-task port
+ * keeps its task's port (#432), and a real one is what exec_server hands
+ * over.  Every port the arm got is given back, and the task ended.
+ */
+static int
+a_child_gets_what_its_parent_may_hand_on(void)
+{
+    static uint64_t blob[64];
+    static const cap_manifest_entry_t want[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID,
+          CAP_OP_BLK_READ | CAP_OP_BLK_WRITE },
+        { RESOURCE_DMA_BUFFER, 0, CAP_MANIFEST_ANY_ID, 0x3 },
+    };
+    static const cap_manifest_entry_t pass_on[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID,
+          CAP_OP_BLK_READ | CAP_OP_BLK_WRITE },
+    };
+    uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_child",
+                                      want, 2, pass_on, 1);
+    mach_port_t   child = MACH_PORT_NULL;
+    mach_port_t   port = MACH_PORT_NULL, other = MACH_PORT_NULL;
+    kern_return_t kr, rd = -1, wr = -1, dma = -1, shared;
+    int           ok;
+
+    if (len == 0 ||
+        task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                    &child) != KERN_SUCCESS) {
+        printf("cap_test: [39] WRONG — no child task to derive for (#743)\n");
+        return 0;
+    }
+
+    kr = cap_derive_child(mach_cap_port, child, blob, len, &port);
+    if (kr == KERN_SUCCESS) {
+        rd  = acquire_on(port, RESOURCE_BLK_DEVICE, 0x743, CAP_OP_BLK_READ);
+        wr  = acquire_on(port, RESOURCE_BLK_DEVICE, 0x743, CAP_OP_BLK_WRITE);
+        dma = acquire_on(port, RESOURCE_DMA_BUFFER, 0x743, 0x1);
+        (void)mach_port_deallocate(mach_task_self(), port);
+    }
+    shared = cap_derive_child(urmach_cap_server_port, child, blob, len,
+                              &other);
+    if (shared == KERN_SUCCESS && MACH_PORT_VALID(other))
+        (void)mach_port_deallocate(mach_task_self(), other);
+    (void)task_terminate(child);
+    (void)mach_port_deallocate(mach_task_self(), child);
+
+    ok = kr == KERN_SUCCESS && rd == KERN_SUCCESS &&
+         wr == CAP_ERR_NOT_IN_MANIFEST && dma == CAP_ERR_NOT_IN_MANIFEST &&
+         shared == CAP_ERR_NOT_DELEGABLE;
+    if (ok) {
+        /* Two lines, each within the console's 256 bytes (#802). */
+        printf("cap_test: [39] a child that asked for block devices "
+               "READ|WRITE and DMA buffers got block devices READ, all this "
+               "task may hand on: WRITE and DMA buffers refused with "
+               "CAP_ERR_NOT_IN_MANIFEST (#743)\n");
+        printf("cap_test: [39] the port every task inherits refused to "
+               "derive with CAP_ERR_NOT_DELEGABLE (#743)\n");
+    } else
+        printf("cap_test: [39] WRONG — derived on this task's port: %d; "
+               "then block devices READ: %d (want 0), WRITE: %d and DMA "
+               "buffers: %d (want CAP_ERR_NOT_IN_MANIFEST %d); derived on "
+               "the port every task inherits: %d (want "
+               "CAP_ERR_NOT_DELEGABLE %d) (#743)\n", (int)kr, (int)rd,
+               (int)wr, (int)dma, CAP_ERR_NOT_IN_MANIFEST, (int)shared,
+               CAP_ERR_NOT_DELEGABLE);
+    return ok;
+}
+
+/*
+ * Test [40]: a port given back gives its slot back (#743).
+ *
+ * cap_server's table has 64 slots and gave none back: a copy of every
+ * per-task port stayed with cap_server, and one with whoever provisioned it,
+ * so no port ever had no senders.  Eighty ports derived and given back one
+ * at a time -- more than the table holds, whatever else holds slots now --
+ * must all be made.  cap_server learns that a port is given back from a
+ * notification, which may wait behind the next request, so a derivation
+ * refused for want of a slot is asked again, for up to two seconds -- and
+ * since #937 one refused by the bounds on derived slots, which the ports
+ * given back and not yet counted out would fill as well.
+ *
+ * Each port keeps block devices READ, which this task may hand on: a
+ * derivation that keeps nothing takes no slot since #937, and the eighty
+ * this arm derived before were empty.
+ */
+static int
+a_port_given_back_gives_its_slot_back(void)
+{
+    static uint64_t blob[16];
+    static const cap_manifest_entry_t rd[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
+    uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_slot",
+                                      rd, 1, NULL, 0);
+    mach_port_t   child = MACH_PORT_NULL;
+    unsigned      i, waits = 0, most = 0;
+    kern_return_t kr = KERN_SUCCESS;
+
+    if (len == 0 ||
+        task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                    &child) != KERN_SUCCESS) {
+        printf("cap_test: [40] WRONG — no child task to derive for (#743)\n");
+        return 0;
+    }
+
+    for (i = 0; i < 80; i++) {
+        mach_port_t port = MACH_PORT_NULL;
+
+        for (waits = 0; ; waits++) {
+            kr = cap_derive_child(mach_cap_port, child, blob, len, &port);
+            if ((kr != CAP_ERR_NO_MANIFEST_SLOT &&
+                 kr != CAP_ERR_DERIVED_QUOTA && kr != CAP_ERR_LINEAGE_FULL) ||
+                waits == 200)
+                break;
+            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+        }
+        if (waits > most)
+            most = waits;
+        if (kr != KERN_SUCCESS)
+            break;
+        (void)mach_port_deallocate(mach_task_self(), port);
+    }
+    (void)task_terminate(child);
+    (void)mach_port_deallocate(mach_task_self(), child);
+
+    if (i == 80) {
+        printf("cap_test: [40] 80 ports derived and each given back, more "
+               "than cap_server's 64 slots: all 80 made, the longest wait "
+               "for a slot %u wait(s) of 10 ms (#743)\n", most);
+        return 1;
+    }
+    printf("cap_test: [40] WRONG — port %u of 80 refused with %d after %u "
+           "wait(s) of 10 ms: the slots of the ports given back did not "
+           "come back (#743)\n", i + 1, (int)kr, waits);
+    return 0;
+}
+
+/*
+ * Test [43]: a no-senders notification is the kernel's to send (#743).
+ *
+ * cap_server gives a per-task port's slot back, and destroys the port, on a
+ * no-senders notification.  Any holder of a send right can send a message
+ * with that id: forged, it would end the port of whatever task it names, for
+ * every holder at once.  The kernel's comes through the send-once right
+ * cap_server made for the request, and a forgery through a send right, which
+ * is what this arm sends to a port derived for the purpose -- after which the
+ * port must still answer, granting block devices READ.  The port is given
+ * back at the end.
+ */
+static int
+a_no_senders_forgery_ends_nothing(void)
+{
+    static uint64_t blob[64];
+    static const cap_manifest_entry_t read_only[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
+    uint32_t       len = manifest_make(blob, sizeof(blob), "cap_test_forged",
+                                       read_only, 1, NULL, 0);
+    mach_no_senders_notification_t fake;
+    mach_port_t    port = MACH_PORT_NULL;
+    mach_msg_return_t mr;
+    kern_return_t  kr, after = -1;
+
+    if (len == 0 ||
+        (kr = cap_derive_child(mach_cap_port, mach_task_self(), blob, len,
+                               &port)) != KERN_SUCCESS) {
+        printf("cap_test: [43] WRONG — no port derived to forge to (#743)\n");
+        return 0;
+    }
+
+    memset(&fake, 0, sizeof(fake));
+    fake.not_header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    fake.not_header.msgh_size = (mach_msg_size_t)(sizeof(fake) -
+                                                  sizeof(fake.trailer));
+    fake.not_header.msgh_remote_port = port;
+    fake.not_header.msgh_local_port = MACH_PORT_NULL;
+    fake.not_header.msgh_id = MACH_NOTIFY_NO_SENDERS;
+    fake.NDR = NDR_record;
+    fake.not_count = 1;
+    mr = mach_msg(&fake.not_header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                  fake.not_header.msgh_size, 0, MACH_PORT_NULL, 1000,
+                  MACH_PORT_NULL);
+
+    /* Behind the forgery on the same port, so it is handled after it. */
+    if (mr == MACH_MSG_SUCCESS)
+        after = acquire_on(port, RESOURCE_BLK_DEVICE, 0x743,
+                           CAP_OP_BLK_READ);
+    (void)mach_port_deallocate(mach_task_self(), port);
+
+    if (mr == MACH_MSG_SUCCESS && after == KERN_SUCCESS) {
+        printf("cap_test: [43] a no-senders notification forged through a "
+               "send right to a derived port ended nothing: the port still "
+               "granted block devices READ (#743)\n");
+        return 1;
+    }
+    printf("cap_test: [43] WRONG — a no-senders notification forged through "
+           "a send right: sent 0x%x, then block devices READ on the port: %d, "
+           "not 0 (#743)\n", (unsigned)mr, (int)after);
+    return 0;
+}
+
+/*
+ * Test [46]: derived ports are bounded (#937).
+ *
+ * cap_server's table has 64 slots, and a derivation took one for every call:
+ * a task with a per-task port could hold them all, and every task bootstrap
+ * started after that ran without its manifest.  A derivation that keeps
+ * nothing must now be refused with CAP_ERR_NOTHING_TO_DERIVE, taking no slot;
+ * derived ports are held to a quota of the table, which leaves bootstrap the
+ * rest; and those of one family -- a task bootstrap provisioned and all that
+ * is derived from it, down any chain -- to a smaller bound.
+ *
+ * The arm waits for this task's family to hold no derived port -- the arms
+ * before gave theirs back, and cap_server counts a port out on a notification
+ * that may come late -- then derives an empty port, and then ports that keep
+ * block devices READ for a child task, holding them, until it is refused.
+ * The bound it must meet is read from cap_slots: the family's, with
+ * CAP_ERR_LINEAGE_FULL, when the family has no more room than the quota, and
+ * the quota's, with CAP_ERR_DERIVED_QUOTA, otherwise.  This task is one
+ * family, so it meets the quota only under a widen that lifts the family's
+ * bound.  A slot must be left free either way, and once every port is given
+ * back the family must come back to none, within two seconds.
+ */
+static int
+family_drained(struct slots *s, unsigned *waits)
+{
+    for (*waits = 0; ; (*waits)++) {
+        if (slots_now(mach_cap_port, s) != KERN_SUCCESS)
+            return 0;
+        if (s->family == 0 || *waits == 200)
+            return s->family == 0;
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+    }
+}
+
+static int
+derived_ports_are_bounded(void)
+{
+    static uint64_t blob[16], empty[16];
+    static const cap_manifest_entry_t rd[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
+    static mach_port_t held[64];
+    uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_bound",
+                                      rd, 1, NULL, 0);
+    uint32_t      elen = manifest_make(empty, sizeof(empty), "cap_test_empty",
+                                       NULL, 0, NULL, 0);
+    mach_port_t   child = MACH_PORT_NULL, eport = MACH_PORT_NULL;
+    struct slots  s0 = { 0 }, s1 = { 0 }, at = { 0 }, s2 = { 0 };
+    kern_return_t kr_empty, kr = KERN_SUCCESS, want;
+    unsigned      n, i, w0 = 0, w2 = 0;
+    int           room_family, room_quota, want_n;
+    int           ok_start, ok_empty, ok_bound, ok_free, ok_back, ok;
+
+    if (len == 0 || elen == 0 ||
+        task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                    &child) != KERN_SUCCESS) {
+        printf("cap_test: [46] WRONG — no child task to derive for (#937)\n");
+        return 0;
+    }
+    ok_start = family_drained(&s0, &w0);
+
+    /* A derivation that keeps nothing; the census before its port goes. */
+    kr_empty = cap_derive_child(mach_cap_port, child, empty, elen, &eport);
+    if (slots_now(mach_cap_port, &s1) != KERN_SUCCESS) {
+        s1 = s0;
+        s1.family = (natural_t)-1;
+    }
+    if (MACH_PORT_VALID(eport))
+        (void)mach_port_deallocate(mach_task_self(), eport);
+    ok_empty = kr_empty == CAP_ERR_NOTHING_TO_DERIVE &&
+               eport == MACH_PORT_NULL && s1.family == s0.family;
+
+    /* The bound to meet first, and after how many more ports. */
+    room_family = (int)s1.family_max - (int)s1.family;
+    room_quota  = (int)s1.quota - (int)s1.derived;
+    if (room_family <= room_quota) {
+        want   = CAP_ERR_LINEAGE_FULL;
+        want_n = room_family;
+    } else {
+        want   = CAP_ERR_DERIVED_QUOTA;
+        want_n = room_quota;
+    }
+    for (n = 0; n < 64; n++) {
+        held[n] = MACH_PORT_NULL;
+        kr = cap_derive_child(mach_cap_port, child, blob, len, &held[n]);
+        if (kr != KERN_SUCCESS)
+            break;
+    }
+    if (slots_now(mach_cap_port, &at) != KERN_SUCCESS)
+        at.in_use = at.size = 0;
+    ok_bound = kr == want && (int)n == want_n;
+    ok_free  = at.in_use < at.size;
+
+    for (i = 0; i < n; i++)
+        (void)mach_port_deallocate(mach_task_self(), held[i]);
+    (void)task_terminate(child);
+    (void)mach_port_deallocate(mach_task_self(), child);
+    ok_back = family_drained(&s2, &w2);
+
+    ok = ok_start && ok_empty && ok_bound && ok_free && ok_back;
+    /* One line per check, each within the console's 256 bytes (#802). */
+    if (ok) {
+        printf("cap_test: [46] a derivation that keeps nothing was refused "
+               "with CAP_ERR_NOTHING_TO_DERIVE, and the family stayed at %u "
+               "(#937)\n", (unsigned)s1.family);
+        printf("cap_test: [46] %u derived port(s) held, then refused with "
+               "%s: family %u of %u, derived %u of a quota of %u, %u of %u "
+               "slots taken (#937)\n", n,
+               want == CAP_ERR_LINEAGE_FULL ? "CAP_ERR_LINEAGE_FULL"
+                                            : "CAP_ERR_DERIVED_QUOTA",
+               (unsigned)at.family, (unsigned)at.family_max,
+               (unsigned)at.derived, (unsigned)at.quota,
+               (unsigned)at.in_use, (unsigned)at.size);
+        printf("cap_test: [46] all given back, the family at %u after %u "
+               "wait(s) of 10 ms (#937)\n", (unsigned)s2.family, w2);
+    }
+    if (!ok_start)
+        printf("cap_test: [46] WRONG — this task's family held %u derived "
+               "port(s) before the arm, after %u wait(s) of 10 ms (#937)\n",
+               (unsigned)s0.family, w0);
+    if (!ok_empty)
+        printf("cap_test: [46] WRONG — a derivation that keeps nothing "
+               "answered %d, not CAP_ERR_NOTHING_TO_DERIVE, and the family "
+               "went from %u to %u (#937)\n", (int)kr_empty,
+               (unsigned)s0.family, (unsigned)s1.family);
+    if (!ok_bound)
+        printf("cap_test: [46] WRONG — refused with %d after %u derived "
+               "port(s), not %s after %d (#937)\n", (int)kr, n,
+               want == CAP_ERR_LINEAGE_FULL ? "CAP_ERR_LINEAGE_FULL"
+                                            : "CAP_ERR_DERIVED_QUOTA",
+               want_n);
+    if (!ok_free)
+        printf("cap_test: [46] WRONG — at the refusal %u of %u slots were "
+               "taken: bootstrap had none left (#937)\n",
+               (unsigned)at.in_use, (unsigned)at.size);
+    if (!ok_back)
+        printf("cap_test: [46] WRONG — the family held %u derived port(s) "
+               "after all were given back and %u wait(s) of 10 ms (#937)\n",
+               (unsigned)s2.family, w2);
+    return ok;
+}
+
+/*
+ * Test [41]: no task gives bootstrap a provisioning port (#743).
+ *
+ * cap_provision_task answers on one port, and bootstrap provisions through
+ * whatever port it holds: a task that could give it one would write the
+ * policy of every task bootstrap starts from then on.  Offered on this task's
+ * own bootstrap port, which names it to bootstrap (#620), a port of this
+ * task's must be refused with KERN_NO_ACCESS.
+ *
+ * By now cap_server has given its port, so the rule that takes one port only
+ * would refuse this offer too -- with KERN_NAME_EXISTS, a different answer, so
+ * that a refusal by that rule alone is not read as the rule this arm is about.
+ */
+static int
+only_cap_server_gives_the_provisioning_port(void)
+{
+    mach_port_t   mine = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mine)
+            != KERN_SUCCESS) {
+        printf("cap_test: [41] WRONG — no port to offer (#743)\n");
+        return 0;
+    }
+    kr = bootstrap_cap_provisioner(bootstrap_port, mine);
+    (void)mach_port_destroy(mach_task_self(), mine);
+
+    if (kr == KERN_NO_ACCESS) {
+        printf("cap_test: [41] a port of this task's, offered to bootstrap "
+               "as the provisioning port on this task's own bootstrap port: "
+               "refused with KERN_NO_ACCESS (#743)\n");
+        return 1;
+    }
+    if (kr == KERN_NAME_EXISTS) {
+        printf("cap_test: [41] WRONG — a port of this task's, offered to "
+               "bootstrap as the provisioning port: refused with "
+               "KERN_NAME_EXISTS, because cap_server gave one already — not "
+               "with KERN_NO_ACCESS, because this task is not cap_server "
+               "(#743)\n");
+        return 0;
+    }
+    printf("cap_test: [41] WRONG — a port of this task's, offered to "
+           "bootstrap as the provisioning port: %d, not KERN_NO_ACCESS(%d) "
+           "(#743)\n", (int)kr, KERN_NO_ACCESS);
+    return 0;
+}
+
+/*
+ * Test [42]: a program this task execs gets what its file asks for, cut to
+ * what its caller may hand on, and both slots come back when it ends (#743).
+ *
+ * /hello_exec's manifest asks for block devices READ|WRITE and DMA buffers,
+ * and this task may hand on block devices READ alone.  The exec carries a
+ * per-task port of the caller's, as libposix-uros's carries the caller's
+ * own; here it is one derived from this task's for the purpose, so that a
+ * copy exec_server kept of it would be seen.  exec_server derives the
+ * program's port from it.  The program comes back suspended, and its
+ * TASK_CAP_PORT must grant block devices READ and refuse WRITE and DMA
+ * buffers with CAP_ERR_NOT_IN_MANIFEST.  It is ended before it runs, the
+ * caller's port is given back, and the slots cap_slots reports must come back
+ * to their count before, within two seconds: a copy of either port kept by
+ * exec_server would hold its slot for good.
+ *
+ * It runs last: bootstrap.conf starts exec_server well after this task, and
+ * its name is waited for, in time.  NOT ASKED only when it never comes.
+ *
+ * ⚠️ A count and not a name, so another task taking a slot meanwhile would
+ * read as one kept.  Today no other task derives one, and bootstrap makes
+ * its own before any test starts.
+ */
+static int
+an_execd_program_gets_what_its_caller_may_hand_on(void)
+{
+    static char   argv_blob[] = "hello_exec\0";
+    static char   envp_blob[] = "\0";
+    static uint64_t pblob[64];
+    static const cap_manifest_entry_t caller[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID,
+          CAP_OP_BLK_READ | CAP_OP_BLK_WRITE },
+    };
+    uint32_t      plen = manifest_make(pblob, sizeof(pblob),
+                                       "cap_test_exec_caller", caller, 1,
+                                       caller, 1);
+    mach_port_t   exec_port = MACH_PORT_NULL, parent = MACH_PORT_NULL;
+    mach_port_t   task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
+    mach_port_t   port = MACH_PORT_NULL;
+    natural_t     before = 0, after = 0, size = 0;
+    struct slots  s = { 0 };
+    unsigned      waits, waited;
+    int           rc = -1, ok;
+    kern_return_t kr, rd = -1, wr = -1, dma = -1;
+
+    for (waited = 0; ; waited += 100) {
+        if (netname_look_up(name_server_port, "", (char *)"exec_server",
+                            &exec_port) == KERN_SUCCESS)
+            break;
+        if (waited >= 30000) {
+            printf("cap_test: [42] exec_server's name did not come in 30 s "
+                   "— NOT ASKED (#743)\n");
+            return 1;
+        }
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+    }
+    /* The census is read before the caller's port is derived. */
+    if (plen == 0 || slots_now(mach_cap_port, &s) != KERN_SUCCESS ||
+        cap_derive_child(mach_cap_port, mach_task_self(), pblob, plen,
+                         &parent) != KERN_SUCCESS) {
+        printf("cap_test: [42] WRONG — no slot count, or no caller's port "
+               "derived for the exec (#743)\n");
+        (void)mach_port_deallocate(mach_task_self(), exec_port);
+        return 0;
+    }
+    before = s.in_use;
+    size   = s.size;
+
+    /* #926: the program's task is made here and lent to exec_server. */
+    kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
+    if (kr == KERN_SUCCESS)
+        kr = exec_load(exec_port, task, parent,
+                       (char *)"/hello_exec",
+                       (pointer_t)argv_blob, sizeof(argv_blob),
+                       (pointer_t)envp_blob, sizeof(envp_blob),
+                       &thread, &rc);
+    (void)mach_port_deallocate(mach_task_self(), exec_port);
+    (void)mach_port_deallocate(mach_task_self(), parent);
+    if (kr != KERN_SUCCESS || rc != EXEC_OK) {
+        printf("cap_test: [42] WRONG — /hello_exec did not load: kr %d, "
+               "result %d (#743)\n", (int)kr, rc);
+        if (MACH_PORT_VALID(task)) {
+            (void)task_terminate(task);
+            (void)mach_port_deallocate(mach_task_self(), task);
+        }
+        return 0;
+    }
+
+    if (task_get_special_port(task, TASK_CAP_PORT, &port) == KERN_SUCCESS &&
+        MACH_PORT_VALID(port)) {
+        rd  = acquire_on(port, RESOURCE_BLK_DEVICE, 0x743, CAP_OP_BLK_READ);
+        wr  = acquire_on(port, RESOURCE_BLK_DEVICE, 0x743, CAP_OP_BLK_WRITE);
+        dma = acquire_on(port, RESOURCE_DMA_BUFFER, 0x743, 0x1);
+        (void)mach_port_deallocate(mach_task_self(), port);
+    }
+    (void)task_terminate(task);
+    (void)mach_port_deallocate(mach_task_self(), task);
+    (void)mach_port_deallocate(mach_task_self(), thread);
+
+    for (waits = 0; ; waits++) {
+        if (slots_now(mach_cap_port, &s) != KERN_SUCCESS)
+            after = before + 1;
+        else
+            after = s.in_use;
+        if (after <= before || waits == 200)
+            break;
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+    }
+
+    ok = rd == KERN_SUCCESS && wr == CAP_ERR_NOT_IN_MANIFEST &&
+         dma == CAP_ERR_NOT_IN_MANIFEST && after <= before;
+    /*
+     * Each line within the console's 256 bytes (#802), and a failure says
+     * which half failed: the line that said both was 260 bytes, and its
+     * Expect ended three bytes short of the cut.
+     */
+    if (ok) {
+        printf("cap_test: [42] /hello_exec, which asks for block devices "
+               "READ|WRITE and DMA buffers, exec'd with a caller's port that "
+               "may hand on block devices READ: its port granted READ and "
+               "refused WRITE and DMA buffers (#743)\n");
+        printf("cap_test: [42] once both ports were given back the slots "
+               "were back to %u of %u after %u wait(s) of 10 ms; "
+               "exec_server's name came after %u ms (#743)\n",
+               (unsigned)after, (unsigned)size, waits, waited);
+    }
+    if (rd != KERN_SUCCESS || wr != CAP_ERR_NOT_IN_MANIFEST ||
+        dma != CAP_ERR_NOT_IN_MANIFEST)
+        printf("cap_test: [42] WRONG — /hello_exec exec'd with a caller's "
+               "port: block devices READ %d (want 0), WRITE %d and DMA "
+               "buffers %d (want CAP_ERR_NOT_IN_MANIFEST %d) (#743)\n",
+               (int)rd, (int)wr, (int)dma, CAP_ERR_NOT_IN_MANIFEST);
+    if (after > before)
+        printf("cap_test: [42] WRONG — the slots were %u before the exec "
+               "and %u after both ports were given back and %u wait(s) of "
+               "10 ms (#743)\n", (unsigned)before, (unsigned)after, waits);
+    return ok;
+}
+
+/*
+ * How many of `task''s names hold a send right to the port this task names
+ * `mine' -- with `need' MACH_PORT_TYPE_RECEIVE, the receive right as well.
+ * Each such right is copied out, compared and given back: a task holds one
+ * name for all its rights to one port, so a copy that comes in under `mine'
+ * is a right to it.  -1 when `task''s names cannot be read (#926).
+ *
+ * 🔴 COPIED, NEVER MADE.  A send right made from another task's receive right
+ * and dropped again would end that port's senders as far as a no-senders
+ * request can tell, and cap_server gives a per-task port's slot back on
+ * exactly that (#743).  A copy adds a sender and takes it away.
+ */
+static int
+rights_to(mach_port_t task, mach_port_t mine, mach_port_type_t need)
+{
+    mach_port_t            me = mach_task_self();
+    mach_port_array_t      names = 0;
+    mach_port_type_array_t types = 0;
+    mach_msg_type_number_t nn = 0, nt = 0, i;
+    int                    held = 0;
+
+    if (mach_port_names(task, &names, &nn, &types, &nt) != KERN_SUCCESS)
+        return -1;
+    for (i = 0; i < nn && i < nt; i++) {
+        mach_port_t          copy = MACH_PORT_NULL;
+        mach_msg_type_name_t got = 0;
+
+        if (!(types[i] & MACH_PORT_TYPE_SEND) || (types[i] & need) != need)
+            continue;
+        if (mach_port_extract_right(task, names[i], MACH_MSG_TYPE_COPY_SEND,
+                                    &copy, &got) != KERN_SUCCESS)
+            continue;
+        if (copy == mine)
+            held++;
+        (void)mach_port_deallocate(me, copy);
+    }
+    (void)vm_deallocate(me, (vm_address_t)names, nn * sizeof(*names));
+    (void)vm_deallocate(me, (vm_address_t)types, nt * sizeof(*types));
+    return held;
+}
+
+/* How many of `task''s names are dead: rights to ports that have gone. */
+static int
+dead_names(mach_port_t task)
+{
+    mach_port_t            me = mach_task_self();
+    mach_port_array_t      names = 0;
+    mach_port_type_array_t types = 0;
+    mach_msg_type_number_t nn = 0, nt = 0, i;
+    int                    dead = 0;
+
+    if (mach_port_names(task, &names, &nn, &types, &nt) != KERN_SUCCESS)
+        return -1;
+    for (i = 0; i < nt; i++)
+        if (types[i] & MACH_PORT_TYPE_DEAD_NAME)
+            dead++;
+    (void)vm_deallocate(me, (vm_address_t)names, nn * sizeof(*names));
+    (void)vm_deallocate(me, (vm_address_t)types, nt * sizeof(*types));
+    return dead;
+}
+
+/*
+ * The task that receives on the port this task names `port': the one among
+ * the default processor set's tasks with a name holding both the receive
+ * right and a send right to it (#926).  The tasks come through the
+ * privileged host port bootstrap hands this task (#546).  A server that
+ * inserts a send right under its receive right's name, as exec_server does
+ * with its service port, is found; one that does not is not.
+ */
+static kern_return_t
+the_task_receiving_on(mach_port_t host_priv, mach_port_t port,
+                      mach_port_t *out)
+{
+    mach_port_t            me = mach_task_self();
+    mach_port_t            host = mach_host_self();
+    mach_port_t            name = MACH_PORT_NULL, pset = MACH_PORT_NULL;
+    task_port_array_t      tasks = 0;
+    mach_msg_type_number_t ntasks = 0, i;
+    kern_return_t          kr;
+
+    *out = MACH_PORT_NULL;
+    kr = processor_set_default(host, &name);
+    if (kr == KERN_SUCCESS)
+        kr = host_processor_set_priv(host_priv, name, &pset);
+    if (kr == KERN_SUCCESS)
+        kr = processor_set_tasks(pset, &tasks, &ntasks);
+    for (i = 0; kr == KERN_SUCCESS && i < ntasks; i++) {
+        if (*out == MACH_PORT_NULL && tasks[i] != me &&
+            rights_to(tasks[i], port, MACH_PORT_TYPE_RECEIVE) > 0)
+            *out = tasks[i];
+        else
+            (void)mach_port_deallocate(me, tasks[i]);
+    }
+    if (tasks != 0)
+        (void)vm_deallocate(me, (vm_address_t)tasks,
+                            ntasks * sizeof(*tasks));
+    if (MACH_PORT_VALID(pset))
+        (void)mach_port_deallocate(me, pset);
+    if (MACH_PORT_VALID(name))
+        (void)mach_port_deallocate(me, name);
+    (void)mach_port_deallocate(me, host);
+    if (kr == KERN_SUCCESS && *out == MACH_PORT_NULL)
+        kr = KERN_FAILURE;
+    return kr;
+}
+
+/*
+ * Test [44]: exec_server holds nothing of a spawn once it has answered (#926).
+ *
+ * A send right to a task port is the task: its memory, its threads and its
+ * rights.  exec_server needs the task it loads into, for the length of the
+ * call, and nothing of the task that asks; so once exec_load has answered it
+ * must hold no send right to this task, to the program's task or to the
+ * program's first thread.  It is lent the program's task, which this task
+ * makes, and answers the thread moved (exec.defs).  Measured on the tree
+ * before: one right to each of the three, and 26 dead names in its space
+ * at this point of the boot, the ones earlier spawns had left.
+ *
+ * Nobody sees a task's rights but the holder of its task port, so the arm
+ * takes exec_server's (the_task_receiving_on()) and copies out each of its
+ * send rights in turn (rights_to()).  The program is loaded with no per-task
+ * cap port, which keeps [42]'s slots out of it, and ended before it runs.
+ * It runs after [42], which has waited for exec_server's name.
+ */
+static int
+exec_server_holds_nothing_of_a_spawn(mach_port_t host_priv)
+{
+    static char   argv_blob[] = "hello_exec\0";
+    static char   envp_blob[] = "\0";
+    mach_port_t   me = mach_task_self();
+    mach_port_t   exec_port = MACH_PORT_NULL, exec_task = MACH_PORT_NULL;
+    mach_port_t   task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
+    int           rc = -1, spawner, prog, first, dead;
+    kern_return_t kr;
+
+    if (netname_look_up(name_server_port, "", (char *)"exec_server",
+                        &exec_port) != KERN_SUCCESS) {
+        printf("cap_test: [44] exec_server's name is not registered — NOT "
+               "ASKED (#926)\n");
+        return 1;
+    }
+    kr = the_task_receiving_on(host_priv, exec_port, &exec_task);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [44] WRONG — no task among the processor set's "
+               "receives on exec_server's port (%d) (#926)\n", (int)kr);
+        (void)mach_port_deallocate(me, exec_port);
+        return 0;
+    }
+
+    kr = task_create(me, NULL, 0, FALSE, &task);
+    if (kr == KERN_SUCCESS)
+        kr = exec_load(exec_port, task, MACH_PORT_NULL,
+                       (char *)"/hello_exec",
+                       (pointer_t)argv_blob, sizeof(argv_blob),
+                       (pointer_t)envp_blob, sizeof(envp_blob),
+                       &thread, &rc);
+    (void)mach_port_deallocate(me, exec_port);
+    if (kr != KERN_SUCCESS || rc != EXEC_OK) {
+        printf("cap_test: [44] WRONG — /hello_exec did not load: kr %d, "
+               "result %d (#926)\n", (int)kr, rc);
+        if (MACH_PORT_VALID(task)) {
+            (void)task_terminate(task);
+            (void)mach_port_deallocate(me, task);
+        }
+        (void)mach_port_deallocate(me, exec_task);
+        return 0;
+    }
+
+    spawner = rights_to(exec_task, me, MACH_PORT_TYPE_SEND);
+    prog    = rights_to(exec_task, task, MACH_PORT_TYPE_SEND);
+    first   = rights_to(exec_task, thread, MACH_PORT_TYPE_SEND);
+    dead    = dead_names(exec_task);
+    (void)task_terminate(task);
+    (void)mach_port_deallocate(me, task);
+    (void)mach_port_deallocate(me, thread);
+    (void)mach_port_deallocate(me, exec_task);
+
+    if (spawner == 0 && prog == 0 && first == 0) {
+        printf("cap_test: [44] once exec_load had answered, exec_server held "
+               "no send right to the task that asked, to the program's task "
+               "or to its first thread; %d dead name(s) in its space "
+               "(#926)\n", dead);
+        return 1;
+    }
+    printf("cap_test: [44] WRONG — once exec_load had answered, exec_server "
+           "held send rights to the task that asked: %d, to the program's "
+           "task: %d, to its first thread: %d (want 0, 0, 0); %d dead "
+           "name(s) in its space (#926)\n", spawner, prog, first, dead);
+    return 0;
+}
+
+/*
+ * Test [45]: proc_server holds a registered process's reduced port, and that
+ * port reaches nothing but what proc_server needs (#927).
+ *
+ * A process is registered by its reduced port (<mach/task_rights.h>,
+ * URMACH_TASK_RIGHTS_PROCESS).  With it proc_server can end the process,
+ * stop it and let it go on, read its counters and see it die, and nothing
+ * else.  The arm makes a child with a page that holds a word, registers it
+ * by that port, and asks:
+ *
+ *   - proc_server's send rights, copied out as [44] does exec_server's: none
+ *     to the child's task port, one to its reduced port -- and still none to
+ *     the task port after a registration by it has been tried;
+ *   - the kernel, what the reduced port carries: the process set;
+ *   - the word, through the task port (there) and the reduced one (refused);
+ *   - the child's counters through the reduced port (granted);
+ *   - the traps of task_info() and task_suspend(), asked directly with the
+ *     reduced port (granted): when a trap refuses, libmach goes through
+ *     MIG, which answers the same, so only the trap can say it refused;
+ *   - a stop through an identity port, a reduced port with no rights
+ *     (refused), and a process port made from an info-only port (refused:
+ *     a right is taken away, never added);
+ *   - a reduced port with a right no routine names (KERN_INVALID_VALUE);
+ *   - a registration by the full task port (PROC_ERR_FULL_TASK).
+ *
+ * The child is then ended through the reduced port, which may.
+ */
+static int
+proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
+{
+    mach_port_t   me = mach_task_self();
+    mach_port_t   host = MACH_PORT_NULL, proc = MACH_PORT_NULL;
+    mach_port_t   proc_task = MACH_PORT_NULL, child = MACH_PORT_NULL;
+    mach_port_t   pp = MACH_PORT_NULL, idp = MACH_PORT_NULL;
+    mach_port_t   amp = MACH_PORT_NULL, odd = MACH_PORT_NULL;
+    mach_port_t   infop = MACH_PORT_NULL;
+    vm_address_t  page = 0;
+    vm_offset_t   data = 0;
+    mach_msg_type_number_t cnt = 0, icnt = TASK_BASIC_INFO_COUNT;
+    struct task_basic_info info;
+    natural_t     word = 0x927927, read_back = 0, rights = 0;
+    proc_pid_t    pid = 0, fpid = 0;
+    int           rc = -1, frc = -1;
+    int           full_held = -1, reduced_held = -1, full_after = -1;
+    unsigned      waited;
+    int           ok;
+    kern_return_t kr, kr_rights = -1, kr_full_read = -1, kr_read = -1;
+    kern_return_t kr_info = -1, kr_idstop = -1, kr_amp = -1, kr_odd = -1;
+    kern_return_t kr_end = -1, kr_trap_info = -1, kr_trap_stop = -1;
+    mach_msg_type_number_t tcnt = TASK_BASIC_INFO_COUNT;
+
+    for (waited = 0; ; waited += 100) {
+        if (netname_look_up(name_server_port, "", (char *)"proc_server",
+                            &proc) == KERN_SUCCESS)
+            break;
+        if (waited >= 30000) {
+            printf("cap_test: [45] proc_server's name did not come in 30 s "
+                   "— NOT ASKED (#927)\n");
+            return 1;
+        }
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+    }
+
+    kr = task_create(me, NULL, 0, FALSE, &child);
+    if (kr == KERN_SUCCESS)
+        kr = vm_allocate(child, &page, vm_page_size, TRUE);
+    if (kr == KERN_SUCCESS)
+        kr = vm_write(child, page, (vm_offset_t)&word, sizeof(word));
+    if (kr == KERN_SUCCESS)
+        kr = urmach_task_rights_port(child, URMACH_TASK_RIGHTS_PROCESS, &pp);
+    if (kr == KERN_SUCCESS)
+        kr = proc_register(proc, PROC_PID_NONE, pp, (char *)"cap_test_45",
+                           &pid, &rc);
+    if (kr != KERN_SUCCESS || rc != PROC_OK || pid == 0) {
+        printf("cap_test: [45] WRONG — a child registered by its reduced "
+               "port: kr %d, result %d, pid %u (#927)\n", (int)kr, rc,
+               (unsigned)pid);
+        if (MACH_PORT_VALID(pp))
+            (void)mach_port_deallocate(me, pp);
+        if (MACH_PORT_VALID(child)) {
+            (void)task_terminate(child);
+            (void)mach_port_deallocate(me, child);
+        }
+        (void)mach_port_deallocate(me, proc);
+        return 0;
+    }
+
+    if (the_task_receiving_on(host_priv, proc, &proc_task) == KERN_SUCCESS) {
+        full_held    = rights_to(proc_task, child, MACH_PORT_TYPE_SEND);
+        reduced_held = rights_to(proc_task, pp, MACH_PORT_TYPE_SEND);
+    }
+
+    host = mach_host_self();
+    kr_rights = urmach_task_port_rights(host, pp, &rights);
+
+    kr_full_read = vm_read(child, page, sizeof(word), &data, &cnt);
+    if (kr_full_read == KERN_SUCCESS) {
+        if (cnt >= sizeof(word))
+            read_back = *(natural_t *)data;
+        (void)vm_deallocate(me, data, cnt);
+    }
+    kr_read = vm_read(pp, page, sizeof(word), &data, &cnt);
+    if (kr_read == KERN_SUCCESS)
+        (void)vm_deallocate(me, data, cnt);
+    kr_info = task_info(pp, TASK_BASIC_INFO, (task_info_t)&info, &icnt);
+    kr_trap_info = syscall_task_info(pp, TASK_BASIC_INFO, (task_info_t)&info,
+                                     &tcnt);
+    kr_trap_stop = syscall_task_suspend(pp);
+    if (kr_trap_stop == KERN_SUCCESS)
+        (void)task_resume(pp);
+
+    if (urmach_task_rights_port(child, 0, &idp) == KERN_SUCCESS) {
+        kr_idstop = task_suspend(idp);
+        if (kr_idstop == KERN_SUCCESS)
+            (void)task_resume(child);
+    }
+    if (urmach_task_rights_port(child, URMACH_TASK_RIGHT_INFO, &infop)
+            == KERN_SUCCESS)
+        kr_amp = urmach_task_rights_port(infop, URMACH_TASK_RIGHTS_PROCESS,
+                                         &amp);
+    kr_odd = urmach_task_rights_port(child, 0x80000000U, &odd);
+
+    (void)proc_register(proc, PROC_PID_NONE, child, (char *)"cap_test_45f",
+                        &fpid, &frc);
+    if (MACH_PORT_VALID(proc_task))
+        full_after = rights_to(proc_task, child, MACH_PORT_TYPE_SEND);
+
+    kr_end = task_terminate(pp);
+
+    ok = full_held == 0 && reduced_held == 1 && full_after == 0 &&
+         kr_rights == KERN_SUCCESS && rights == URMACH_TASK_RIGHTS_PROCESS &&
+         kr_full_read == KERN_SUCCESS && read_back == word &&
+         kr_read != KERN_SUCCESS && kr_info == KERN_SUCCESS &&
+         kr_trap_info == KERN_SUCCESS && kr_trap_stop == KERN_SUCCESS &&
+         kr_idstop != KERN_SUCCESS && kr_amp != KERN_SUCCESS &&
+         kr_odd == KERN_INVALID_VALUE && frc == PROC_ERR_FULL_TASK &&
+         kr_end == KERN_SUCCESS;
+    if (ok) {
+        printf("cap_test: [45] proc_server held the registered child's "
+               "reduced port and not its task port; the port carried 0x%x, "
+               "read the child's counters, ended it, and was refused its "
+               "memory (%d) (#927)\n", (unsigned)rights, (int)kr_read);
+        printf("cap_test: [45] an identity port could not stop the child, an "
+               "info-only port could not make a process port, a right no "
+               "routine names was refused, and a registration by the task "
+               "port with PROC_ERR_FULL_TASK (#927)\n");
+        printf("cap_test: [45] the traps of task_info and task_suspend took "
+               "the reduced port themselves (#927)\n");
+    }
+    /*
+     * One line per check that failed, each short and its own: a long line is
+     * cut by another thread's output (#757), and ablate.sh reads the raw log
+     * line by line, so an Expect across the cut is never matched.  It was:
+     * 927-reduced-port-reaches-memory under KVM, the defect said WRONG and the
+     * run read NOT CAUGHT.
+     */
+    if (full_held != 0)
+        printf("cap_test: [45] WRONG — proc_server held the child's task "
+               "port: %d name(s) (#927)\n", full_held);
+    if (reduced_held != 1)
+        printf("cap_test: [45] WRONG — proc_server held the child's reduced "
+               "port under %d name(s), not 1 (#927)\n", reduced_held);
+    if (full_after != 0)
+        printf("cap_test: [45] WRONG — proc_server kept a task port it was "
+               "handed: %d name(s) (#927)\n", full_after);
+    if (kr_rights != KERN_SUCCESS || rights != URMACH_TASK_RIGHTS_PROCESS)
+        printf("cap_test: [45] WRONG — the reduced port carries 0x%x (%d), "
+               "not 0x%x (#927)\n", (unsigned)rights, (int)kr_rights,
+               URMACH_TASK_RIGHTS_PROCESS);
+    if (kr_full_read != KERN_SUCCESS || read_back != word)
+        printf("cap_test: [45] WRONG — the child's word through its task "
+               "port: %d, 0x%x (#927)\n", (int)kr_full_read,
+               (unsigned)read_back);
+    if (kr_read == KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — the reduced port read the child's "
+               "memory (#927)\n");
+    if (kr_info != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_info through the reduced port: "
+               "%d (#927)\n", (int)kr_info);
+    if (kr_trap_info != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_info's trap refused the reduced "
+               "port: %d (#927)\n", (int)kr_trap_info);
+    if (kr_trap_stop != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — task_suspend's trap refused the "
+               "reduced port: %d (#927)\n", (int)kr_trap_stop);
+    if (kr_idstop == KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — an identity port stopped the child "
+               "(#927)\n");
+    if (kr_amp == KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — an info-only port made a process port "
+               "(#927)\n");
+    if (kr_odd != KERN_INVALID_VALUE)
+        printf("cap_test: [45] WRONG — a right no routine names: %d, not "
+               "KERN_INVALID_VALUE (#927)\n", (int)kr_odd);
+    if (frc != PROC_ERR_FULL_TASK)
+        printf("cap_test: [45] WRONG — a registration by the task port "
+               "answered %d, not PROC_ERR_FULL_TASK (#927)\n", frc);
+    if (kr_end != KERN_SUCCESS)
+        printf("cap_test: [45] WRONG — the reduced port did not end the "
+               "child: %d (#927)\n", (int)kr_end);
+
+    if (MACH_PORT_VALID(amp))
+        (void)mach_port_deallocate(me, amp);
+    if (MACH_PORT_VALID(odd))
+        (void)mach_port_deallocate(me, odd);
+    if (MACH_PORT_VALID(idp))
+        (void)mach_port_deallocate(me, idp);
+    if (MACH_PORT_VALID(infop))
+        (void)mach_port_deallocate(me, infop);
+    if (kr_end != KERN_SUCCESS)
+        (void)task_terminate(child);
+    (void)mach_port_deallocate(me, pp);
+    (void)mach_port_deallocate(me, child);
+    if (MACH_PORT_VALID(proc_task))
+        (void)mach_port_deallocate(me, proc_task);
+    (void)mach_port_deallocate(me, host);
+    (void)mach_port_deallocate(me, proc);
+    return ok;
+}
+
+/*
+ * Test [47]: cap_server keeps a task's identity, and not the task (#938).
+ *
+ * cap_server kept the full port of every task it made a per-task port for --
+ * the task's memory, its threads and its port rights -- to ask the kernel,
+ * when a DMA buffer capability is asked for, whether the buffer is the
+ * task's.  It now keeps the task's identity port, the reduced port with no
+ * right (<mach/task_rights.h>), which libcap makes and hands over, and it
+ * refuses any other.  The arm asks:
+ *
+ *   - cap_server's send rights, copied out as [44] does exec_server's: none
+ *     to this task's full port, one to its identity port, the one bootstrap's
+ *     libcap made when it provisioned this task;
+ *   - a derivation handed a child's full task port, bypassing libcap:
+ *     refused with CAP_ERR_TASK_NOT_IDENTITY;
+ *   - the kernel's owner check, which is what cap_server asks it with: a DMA
+ *     region this task allocates is this task's by its identity port, and
+ *     not the child's by the child's.  [12] asks it through cap_server.
+ */
+static int
+cap_server_keeps_identities(mach_port_t host_priv, mach_port_t device_port)
+{
+    static uint64_t blob[16];
+    static const cap_manifest_entry_t rd[] = {
+        { RESOURCE_BLK_DEVICE, 0, CAP_MANIFEST_ANY_ID, CAP_OP_BLK_READ },
+    };
+    uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_identity",
+                                      rd, 1, NULL, 0);
+    mach_port_t   me = mach_task_self();
+    mach_port_t   cs_task = MACH_PORT_NULL, child = MACH_PORT_NULL;
+    mach_port_t   my_id = MACH_PORT_NULL, child_id = MACH_PORT_NULL;
+    mach_port_t   got = MACH_PORT_NULL;
+    vm_address_t  kva = 0, uva = 0;
+    vm_address_t *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    uint64_t      region = 0;
+    int           full_held = -1, id_held = -1, ok, dma_asked;
+    kern_return_t kr_full = -1, kr_mine = -1, kr_child = -1, kr_alloc;
+
+    if (len == 0 ||
+        task_create(me, (ledger_port_array_t)0, 0, FALSE, &child)
+            != KERN_SUCCESS ||
+        urmach_task_rights_port(me, URMACH_TASK_RIGHTS_IDENTITY, &my_id)
+            != KERN_SUCCESS ||
+        urmach_task_rights_port(child, URMACH_TASK_RIGHTS_IDENTITY,
+                                &child_id) != KERN_SUCCESS) {
+        printf("cap_test: [47] WRONG — no child, or no identity port for "
+               "this task or the child (#938)\n");
+        if (MACH_PORT_VALID(my_id))
+            (void)mach_port_deallocate(me, my_id);
+        if (MACH_PORT_VALID(child)) {
+            (void)task_terminate(child);
+            (void)mach_port_deallocate(me, child);
+        }
+        return 0;
+    }
+
+    if (the_task_receiving_on(host_priv, urmach_cap_server_port, &cs_task)
+            == KERN_SUCCESS) {
+        full_held = rights_to(cs_task, me, MACH_PORT_TYPE_SEND);
+        id_held   = rights_to(cs_task, my_id, MACH_PORT_TYPE_SEND);
+    }
+
+    kr_full = mig_cap_derive_task(mach_cap_port, child, (const char *)blob,
+                                  len, &got);
+    if (kr_full == KERN_SUCCESS && MACH_PORT_VALID(got))
+        (void)mach_port_deallocate(me, got);
+
+    kr_alloc = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1, me,
+                                   &kva, &uva, &pa_list, &pa_cnt, &region);
+    dma_asked = kr_alloc == KERN_SUCCESS && pa_cnt == 1;
+    if (dma_asked) {
+        kr_mine  = urmach_dma_region_owner(region, my_id);
+        kr_child = urmach_dma_region_owner(region, child_id);
+    }
+    if (kr_alloc == KERN_SUCCESS)
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    if (pa_list != NULL)
+        (void)vm_deallocate(me, (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+
+    ok = full_held == 0 && id_held == 1 &&
+         kr_full == CAP_ERR_TASK_NOT_IDENTITY &&
+         (!dma_asked || (kr_mine == KERN_SUCCESS && kr_child == KERN_NO_ACCESS));
+    /* One line per check, each within the console's 256 bytes (#802). */
+    if (ok) {
+        printf("cap_test: [47] cap_server held this task's identity port and "
+               "not its task port, and refused a child's task port with "
+               "CAP_ERR_TASK_NOT_IDENTITY (#938)\n");
+        if (dma_asked)
+            printf("cap_test: [47] a DMA region this task allocated was its "
+                   "own by its identity port, and not the child's by the "
+                   "child's (%d) (#938)\n", (int)kr_child);
+        else
+            printf("cap_test: [47] the owner check NOT ASKED: no "
+                   "scatter-gather page (kr=%d) (#938)\n", (int)kr_alloc);
+    }
+    if (full_held != 0)
+        printf("cap_test: [47] WRONG — cap_server held this task's task "
+               "port: %d name(s) (#938)\n", full_held);
+    if (id_held != 1)
+        printf("cap_test: [47] WRONG — cap_server held this task's identity "
+               "port under %d name(s), not 1 (#938)\n", id_held);
+    if (kr_full != CAP_ERR_TASK_NOT_IDENTITY)
+        printf("cap_test: [47] WRONG — a derivation handed a child's task "
+               "port answered %d, not CAP_ERR_TASK_NOT_IDENTITY (#938)\n",
+               (int)kr_full);
+    if (dma_asked && kr_mine != KERN_SUCCESS)
+        printf("cap_test: [47] WRONG — this task's own DMA region was not its "
+               "own by its identity port: %d (#938)\n", (int)kr_mine);
+    if (dma_asked && kr_child != KERN_NO_ACCESS)
+        printf("cap_test: [47] WRONG — this task's DMA region answered %d for "
+               "the child's identity port, not KERN_NO_ACCESS (#938)\n",
+               (int)kr_child);
+
+    (void)mach_port_deallocate(me, child_id);
+    (void)mach_port_deallocate(me, my_id);
+    (void)task_terminate(child);
+    (void)mach_port_deallocate(me, child);
+    if (MACH_PORT_VALID(cs_task))
+        (void)mach_port_deallocate(me, cs_task);
     return ok;
 }
 
@@ -3975,6 +5188,21 @@ main(int argc, char **argv)
     if (!revocation_notices_are_a_permission())
         pass = 0;
 
+    /* #743: who provisions, what a child gets, and slots given back. */
+    if (!only_bootstrap_provisions())
+        pass = 0;
+    if (!a_child_gets_what_its_parent_may_hand_on())
+        pass = 0;
+    if (!a_port_given_back_gives_its_slot_back())
+        pass = 0;
+    if (!only_cap_server_gives_the_provisioning_port())
+        pass = 0;
+    if (!a_no_senders_forgery_ends_nothing())
+        pass = 0;
+    /* #937: and derived ports are bounded. */
+    if (!derived_ports_are_bounded())
+        pass = 0;
+
     /*
      * #395 probe.  Fill xmm0..7 with a known pattern, cross the kernel once,
      * read them back.  Interleaved:
@@ -4479,6 +5707,16 @@ main(int argc, char **argv)
         }
         (void)mach_port_deallocate(mach_task_self(), p);
     }
+
+    /* #743: last, because exec_server starts well after this task. */
+    if (!an_execd_program_gets_what_its_caller_may_hand_on())
+        pass = 0;
+    if (!exec_server_holds_nothing_of_a_spawn(host_port))
+        pass = 0;		/* #926 */
+    if (!proc_server_holds_only_a_reduced_port(host_port))
+        pass = 0;		/* #927 */
+    if (!cap_server_keeps_identities(host_port, device_port))
+        pass = 0;		/* #938 */
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");

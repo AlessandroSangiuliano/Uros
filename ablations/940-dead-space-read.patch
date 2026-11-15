@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #940
+Over: 940-widen-dead-space.patch
+Takes out: 11089259 -- the resolve with nothing locked asks whether the space is alive only at its end again, in urmach_msg_rights_hold(), so over 940-widen-dead-space act_test [57]'s question, let go after its space has died, reads the dead space's table, which still names the port ipc_right_clean() let go, and locks a port whose memory is back in its zone; 940-probe-given-back stops the kernel when the zone hands the port out
+Run: --entry 14 600 -smp 4
+Expect: 940-probe-given-back: a port's lock was taken after its memory went back to its zone
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index b7670608..cfa26041 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1282,20 +1282,6 @@ urmach_msg_lockfree_resolve_in_section(
+ 
+ 	urmach_rcu_barrier();
+ 
+-	/*
+-	 * #940: a dead space names nothing.  ipc_space_destroy() clears
+-	 * is_active and then ipc_right_clean() drops each entry's reference
+-	 * with the entry still naming its port, so a port read from a dead
+-	 * space's table may have gone back to its zone.  Asked inside the
+-	 * section, before any port is touched: a grace period can end while
+-	 * this section runs only if this processor reported quiescent for it
+-	 * before the section began, so it began before the section -- and
+-	 * after the release it waits on, which came after is_active was
+-	 * cleared.  A section that can outlive it reads is_active cleared.
+-	 */
+-	if (!space->is_active)
+-		return FALSE;
+-
+ 	re = ipc_entry_lookup_lockfree(space, reply_name);
+ 	if (re == IE_NULL || !(re->ie_bits & MACH_PORT_TYPE_RECEIVE))
+ 		return FALSE;

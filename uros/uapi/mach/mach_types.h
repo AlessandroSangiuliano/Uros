@@ -187,6 +187,7 @@
 #include <mach/vm_inherit.h>
 #include <mach/vm_behavior.h>
 #include <mach/vm_prot.h>
+#include <mach/memory_entry.h>		/* #911 */
 #include <mach/vm_statistics.h>
 #include <mach/vm_sync.h>
 #include <mach/vm_region.h>

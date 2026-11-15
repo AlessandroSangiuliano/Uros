@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #743
+Takes out: bootstrap giving back the per-task port once the task holds it (c0b1a6b5) -- it keeps one for every task it provisions, itself included
+Run: --entry 14 600 -smp 4
+Expect: bootstrap: [a-z_]+: still holds a send right to its TASK_CAP_PORT after giving it back — WRONG
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index bfd2bfac..1caf6661 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -824,7 +824,6 @@ provision_cap_port_for_child(task_port_t child_task,
+ 	 * provisioned, itself included, and cap_server could never learn that a
+ 	 * task was gone.
+ 	 */
+-	(void)mach_port_deallocate(mach_task_self(), cap_port);
+ 
+ 	/*
+ 	 * And checked, because nothing else can see it: a right kept here is a

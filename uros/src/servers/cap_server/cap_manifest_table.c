@@ -18,15 +18,35 @@
 
 #define CAP_MANIFEST_TABLE_SIZE  64
 
+/*
+ * What derivations may hold (#937).  A derivation took a slot for every call,
+ * and nothing bounded how many one caller held: a task with a per-task port
+ * could take all 64, and every task bootstrap started after that ran without
+ * its manifest.  Derived ports may hold half the table, so the other half is
+ * bootstrap's whatever they do -- it provisions 11 tasks on x86-64 and 18 on
+ * i386 -- and one family half of that, so that it cannot leave the others
+ * without.
+ */
+#define CAP_MANIFEST_DERIVED_QUOTA  32
+#define CAP_MANIFEST_FAMILY_MAX     16
+
 struct cap_manifest_slot {
     int            in_use;
     mach_port_t    port;       /* per-task cap_port receive name */
     mach_port_t    task;       /* the task it was provisioned for (#432) */
     void          *blob;       /* owned copy, freed on uninstall */
     uint32_t       len;
+    int            derived;    /* made by cap_derive_task (#937) */
+    uint64_t       family;     /* the provisioned task's lineage (#937) */
 };
 
 static struct cap_manifest_slot g_table[CAP_MANIFEST_TABLE_SIZE];
+
+/*
+ * A family's number, given at provisioning and never given again (#937): a
+ * family outlives the task at its top, whose port name a new task may take.
+ */
+static uint64_t g_next_family = 1;
 
 void
 cap_manifest_table_init(void)
@@ -100,14 +120,57 @@ cap_manifest_validate(const void *blob, uint32_t blob_len,
 /*  Install / lookup                                                    */
 /* ------------------------------------------------------------------ */
 
+/*
+ * May a child of `parent' take a derived slot (#937)?  Answers the parent's
+ * family in *family when it may.  `self' is the port being installed: a
+ * re-install on its name gives its own slot up, so that slot is not counted.
+ */
+static int
+may_derive(mach_port_t parent, mach_port_t self, uint64_t *family)
+{
+    const struct cap_manifest_slot *p = NULL;
+    unsigned all = 0, mine = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == parent)
+            p = &g_table[i];
+    if (p == NULL)
+        return CAP_ERR_NOT_DELEGABLE;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++) {
+        if (!g_table[i].in_use || !g_table[i].derived ||
+            g_table[i].port == self)
+            continue;
+        all++;
+        if (g_table[i].family == p->family)
+            mine++;
+    }
+    if (mine >= CAP_MANIFEST_FAMILY_MAX)
+        return CAP_ERR_LINEAGE_FULL;
+    if (all >= CAP_MANIFEST_DERIVED_QUOTA)
+        return CAP_ERR_DERIVED_QUOTA;
+    *family = p->family;
+    return CAP_ERR_NONE;
+}
+
 int
 cap_manifest_table_install(mach_port_t task_cap_port,
                            mach_port_t task_port,
+                           mach_port_t parent_cap_port,
                            const void *blob, uint32_t blob_len)
 {
     int slot = -1;
     int i;
     void *copy;
+    uint64_t family = 0;
+    int derived = MACH_PORT_VALID(parent_cap_port);
+
+    if (derived) {
+        int rc = may_derive(parent_cap_port, task_cap_port, &family);
+
+        if (rc != CAP_ERR_NONE)
+            return rc;
+    }
 
     for (i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++) {
         if (!g_table[i].in_use) {
@@ -130,11 +193,15 @@ cap_manifest_table_install(mach_port_t task_cap_port,
         return CAP_ERR_NO_MEMORY;
     memcpy(copy, blob, blob_len);
 
-    g_table[slot].in_use = 1;
-    g_table[slot].port   = task_cap_port;
-    g_table[slot].task   = task_port;
-    g_table[slot].blob   = copy;
-    g_table[slot].len    = blob_len;
+    if (!derived)
+        family = g_next_family++;
+    g_table[slot].in_use  = 1;
+    g_table[slot].port    = task_cap_port;
+    g_table[slot].task    = task_port;
+    g_table[slot].blob    = copy;
+    g_table[slot].len     = blob_len;
+    g_table[slot].derived = derived;
+    g_table[slot].family  = family;
     return CAP_ERR_NONE;
 }
 
@@ -148,6 +215,80 @@ cap_manifest_table_task(mach_port_t task_cap_port)
     return MACH_PORT_NULL;
 }
 
+unsigned
+cap_manifest_table_in_use(void)
+{
+    unsigned n = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use)
+            n++;
+    return n;
+}
+
+unsigned
+cap_manifest_table_size(void)
+{
+    return CAP_MANIFEST_TABLE_SIZE;
+}
+
+unsigned
+cap_manifest_table_derived(void)
+{
+    unsigned n = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].derived)
+            n++;
+    return n;
+}
+
+unsigned
+cap_manifest_table_derived_quota(void)
+{
+    return CAP_MANIFEST_DERIVED_QUOTA;
+}
+
+unsigned
+cap_manifest_table_family(mach_port_t task_cap_port)
+{
+    const struct cap_manifest_slot *s = NULL;
+    unsigned n = 0;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == task_cap_port)
+            s = &g_table[i];
+    if (s == NULL)
+        return 0;
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].derived &&
+            g_table[i].family == s->family)
+            n++;
+    return n;
+}
+
+unsigned
+cap_manifest_table_family_max(void)
+{
+    return CAP_MANIFEST_FAMILY_MAX;
+}
+
+mach_port_t
+cap_manifest_table_remove(mach_port_t task_cap_port)
+{
+    mach_port_t task;
+
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == task_cap_port) {
+            task = g_table[i].task;
+            free(g_table[i].blob);
+            memset(&g_table[i], 0, sizeof(g_table[i]));
+            return task;
+        }
+
+    return MACH_PORT_NULL;
+}
+
 const cap_manifest_header_t *
 cap_manifest_table_get(mach_port_t task_cap_port)
 {
@@ -157,6 +298,127 @@ cap_manifest_table_get(mach_port_t task_cap_port)
             return (const cap_manifest_header_t *)g_table[i].blob;
     }
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Derivation (#743)                                                   */
+/* ------------------------------------------------------------------ */
+
+static const cap_manifest_entry_t *
+manifest_entries(const cap_manifest_header_t *m, uint32_t offset)
+{
+    return (const cap_manifest_entry_t *)((const char *)m + offset);
+}
+
+/*
+ * One list of `asked', cut to what `may' lets a parent hand on.  An entry
+ * survives for a type `may' names, for an instance it names -- one that asks
+ * for any instance gets the instance `may' names, or any if `may' says any --
+ * and for the operations both name; an entry left with no operation is
+ * dropped.  Answers how many entries went to `out', or -1 when more than
+ * CAP_MANIFEST_MAX_ENTRIES would.
+ */
+static int
+derive_list(const cap_manifest_entry_t *asked, uint32_t n_asked,
+            const cap_manifest_entry_t *may, uint32_t n_may,
+            cap_manifest_entry_t *out)
+{
+    int n = 0;
+
+    for (uint32_t i = 0; i < n_asked; i++) {
+        for (uint32_t j = 0; j < n_may; j++) {
+            uint64_t id, ops;
+
+            if (asked[i].type != may[j].type)
+                continue;
+            if (asked[i].resource_id == CAP_MANIFEST_ANY_ID)
+                id = may[j].resource_id;
+            else if (may[j].resource_id == CAP_MANIFEST_ANY_ID ||
+                     may[j].resource_id == asked[i].resource_id)
+                id = asked[i].resource_id;
+            else
+                continue;
+            ops = asked[i].ops & may[j].ops;
+            if (ops == 0)
+                continue;
+            if (n == CAP_MANIFEST_MAX_ENTRIES)
+                return -1;
+            out[n].type        = asked[i].type;
+            out[n]._pad        = 0;
+            out[n].resource_id = id;
+            out[n].ops         = ops;
+            n++;
+        }
+    }
+    return n;
+}
+
+int
+cap_manifest_derive(const cap_manifest_header_t *parent,
+                    const cap_manifest_header_t *asked,
+                    void **out_blob, uint32_t *out_len)
+{
+    cap_manifest_entry_t req[CAP_MANIFEST_MAX_ENTRIES];
+    cap_manifest_entry_t del[CAP_MANIFEST_MAX_ENTRIES];
+    const cap_manifest_entry_t *may;
+    cap_manifest_header_t *h;
+    uint32_t name_off, total;
+    char *blob;
+    int nr, nd;
+
+    /*
+     * 🔑 BOTH LISTS ARE CUT BY THE PARENT'S delegatable[].  The child's
+     * required[] is what it may hold; its delegatable[] is what it may hand
+     * on in turn, and a grandchild must get no more than the parent could
+     * have given -- so the parent's limit is carried down a whole chain of
+     * execs, and the child's own words can only narrow it.
+     */
+    may = manifest_entries(parent, parent->delegatable_offset);
+    nr = derive_list(manifest_entries(asked, asked->required_offset),
+                     asked->required_count, may, parent->delegatable_count,
+                     req);
+    nd = derive_list(manifest_entries(asked, asked->delegatable_offset),
+                     asked->delegatable_count, may,
+                     parent->delegatable_count, del);
+    if (nr < 0 || nd < 0)
+        return CAP_ERR_MANIFEST_INVALID;
+
+    name_off = (uint32_t)(sizeof(*h) +
+                          (uint32_t)(nr + nd) * sizeof(cap_manifest_entry_t));
+    total = name_off + ((asked->name_length + 3u) & ~3u);
+    blob = malloc(total);
+    if (blob == NULL)
+        return CAP_ERR_NO_MEMORY;
+    memset(blob, 0, total);
+
+    h = (cap_manifest_header_t *)blob;
+    h->magic              = CAP_MANIFEST_MAGIC;
+    h->version            = CAP_MANIFEST_VERSION;
+    h->header_size        = (uint16_t)sizeof(*h);
+    h->total_size         = total;
+    h->flags              = 0;
+    h->required_offset    = (uint32_t)sizeof(*h);
+    h->required_count     = (uint32_t)nr;
+    h->delegatable_offset = (uint32_t)(sizeof(*h) +
+                                       (uint32_t)nr * sizeof(cap_manifest_entry_t));
+    h->delegatable_count  = (uint32_t)nd;
+    h->name_offset        = name_off;
+    h->name_length        = asked->name_length;
+    memcpy(blob + h->required_offset, req,
+           (size_t)nr * sizeof(cap_manifest_entry_t));
+    memcpy(blob + h->delegatable_offset, del,
+           (size_t)nd * sizeof(cap_manifest_entry_t));
+    memcpy(blob + name_off, (const char *)asked + asked->name_offset,
+           asked->name_length);
+
+    /* What this function builds, the table's own check must accept. */
+    if (cap_manifest_validate(blob, total, NULL) != CAP_ERR_NONE) {
+        free(blob);
+        return CAP_ERR_INTERNAL;
+    }
+    *out_blob = blob;
+    *out_len  = total;
+    return CAP_ERR_NONE;
 }
 
 /* ------------------------------------------------------------------ */

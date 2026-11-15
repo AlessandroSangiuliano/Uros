@@ -98,6 +98,8 @@ target_include_directories(mount_test_bin PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR}                    # vfs_server.h
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
   ${CMAKE_SOURCE_DIR}/src/lib/libvfs
+  ${CMAKE_BINARY_DIR}/src/lib/libvfs             # vfs.h: fs_open() by hand, #911
+  ${CMAKE_BINARY_DIR}/src/lib/libflipc2          # flipc2_endpoint.h, #911
 )
 
 # libvfs exports the rest of its include directories, which are this

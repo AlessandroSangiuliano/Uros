@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #915
+Takes out: O_EXCL from bootlog's open of DIR/boot-N.txt -- the open of the first name succeeds whether or not a file has it, so the second boot on the same disk opens the first boot's file and writes over it from its first byte instead of making boot-2.txt; boot-log-disk-x86_64.sh, booting twice on the same disks, finds no /log/boot-2.txt and boot-1.txt not as the first boot left it
+Accel: tcg,kvm
+Script: scripts/boot-log-disk-x86_64.sh
+Script: --boots
+Script: 2
+Script: 240
+Note: two boots of 240 s each, the -b deadline, as with ext_server in the bundle no quiet census comes; ablate.sh puts --kvm in front under KVM
+Expect: boot-log-disk: WRONG -- boot 2: no /log/boot-2.txt
+
+diff --git a/uros/src/servers/bootlog/bootlog.c b/uros/src/servers/bootlog/bootlog.c
+index 2c1171e1..a6ab8ad4 100644
+--- a/uros/src/servers/bootlog/bootlog.c
++++ b/uros/src/servers/bootlog/bootlog.c
+@@ -139,7 +139,7 @@ open_next(const char *dir, char *path, size_t pathlen, unsigned int *n_out)
+ 
+ 	for (n = 1; n <= NAMES_MAX; n++) {
+ 		snprintf(path, pathlen, "%s/boot-%u.txt", dir, n);
+-		kr = vfs_open_rc(path, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_EXCL,
++		kr = vfs_open_rc(path, VFS_O_WRONLY | VFS_O_CREAT,	/* 915-boot-file-not-exclusive */
+ 				 0644, &fd);
+ 		if (kr == KERN_SUCCESS) {
+ 			*n_out = n;

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #927
+Takes out: the check of a reduced port's rights (97042db7, 8af6a812) -- a reduced port converts for every routine and trap that takes one, whatever set it carries
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[45\] WRONG — an identity port stopped the child
+
+diff --git a/uros/src/mach_kernel/kern/ipc_tt.c b/uros/src/mach_kernel/kern/ipc_tt.c
+index 873be74e..58b7e561 100644
+--- a/uros/src/mach_kernel/kern/ipc_tt.c
++++ b/uros/src/mach_kernel/kern/ipc_tt.c
+@@ -1011,7 +1011,7 @@ ref_task_right_port_locked(
+ 		return ref_task_port_locked(port, ptask);	/* unlocks */
+ 	if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS) {
+ 		tr = (struct task_rights *) port->ip_kobject;
+-		if ((tr->tr_rights & need) == need) {
++		if ((tr->tr_rights & need) == need || TRUE) {
+ 			/* As ref_task_port_locked(): out of order. */
+ 			if (!task_lock_try(tr->tr_task)) {
+ 				ip_unlock(port);

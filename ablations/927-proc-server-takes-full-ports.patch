@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #927
+Takes out: proc_server's refusal of a full task port (4c24018d) -- it keeps whatever port it is handed
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[45\] WRONG — a registration by the task port answered 0, not PROC_ERR_FULL_TASK
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 0c6cf1b4..c97beb5a 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -213,7 +213,8 @@ is_a_full_task_port(mach_port_t port)
+ 
+     kr = urmach_task_port_rights(host, port, &rights);
+     (void)mach_port_deallocate(mach_task_self(), host);
+-    return kr == KERN_SUCCESS && rights == URMACH_TASK_RIGHTS_FULL;
++    (void)kr;
++    return 0;
+ }
+ 
+ kern_return_t
