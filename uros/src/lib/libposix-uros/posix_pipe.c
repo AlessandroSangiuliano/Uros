@@ -580,6 +580,81 @@ __uros_pipe_token_put(unsigned int token)
 	(void)mach_port_deallocate(mach_task_self(), (mach_port_t)token);
 }
 
+/*
+ * execve(), the new image's side (posix_exec_fds.c): an end of a pipe the
+ * old image held.  The pipe's port and the end's token came into this task
+ * under the names the handoff records.  The pipe is mapped once, however
+ * many of its ends came, from pipe_server's memory entry, and checked to be
+ * where this file's constants put it: attach_remote() takes the ring's and
+ * the data's places from the header, which any holder may have written.
+ * NULL when it cannot be mapped; the rights stay this task's, and go with it.
+ */
+struct uros_pipe *
+__uros_pipe_adopt(unsigned int port, unsigned int token, int end)
+{
+	struct uros_pipe	*p = NULL;
+	flipc2_channel_t	ch = NULL;
+	mach_port_t		entry = MACH_PORT_NULL;
+	vm_address_t		base = 0;
+	kern_return_t		kr;
+	int			i;
+
+	if (port == MACH_PORT_NULL || (end != PIPE_END_READ &&
+				       end != PIPE_END_WRITE))
+		return NULL;
+	pthread_mutex_lock(&pipes_lock);
+	for (i = 0; i < PIPES_MAX && p == NULL; i++)
+		if (pipes[i].in_use && pipes[i].port == port)
+			p = &pipes[i];
+	pthread_mutex_unlock(&pipes_lock);
+	if (p != NULL) {
+		p->token[end] = token;
+		return p;
+	}
+
+	if (pipe_entry((mach_port_t)port, &entry) != KERN_SUCCESS)
+		return NULL;
+	kr = vm_map(mach_task_self(), &base, PIPE_CHANNEL_SIZE, 0, TRUE, entry,
+		    0, FALSE, VM_PROT_READ | VM_PROT_WRITE,
+		    VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_SHARE);
+	(void)mach_port_deallocate(mach_task_self(), entry);
+	if (kr != KERN_SUCCESS)
+		return NULL;
+	if (flipc2_channel_attach_remote(base, PIPE_CHANNEL_SIZE, &ch)
+	    != FLIPC2_SUCCESS) {
+		(void)vm_deallocate(mach_task_self(), base, PIPE_CHANNEL_SIZE);
+		return NULL;
+	}
+	if ((vm_address_t)ch->hdr != base ||
+	    (uint8_t *)ch->ring != (uint8_t *)base + PIPE_HEADER_BYTES ||
+	    (uint8_t *)ch->data != (uint8_t *)base + PIPE_DATA_OFFSET ||
+	    ch->ring_entries != PIPE_SLOTS || ch->ring_mask != PIPE_SLOTS - 1 ||
+	    ((struct uros_pipe_shared *)ch->data)->magic != UROS_PIPE_MAGIC) {
+		(void)flipc2_channel_detach(ch);
+		return NULL;
+	}
+	pthread_mutex_lock(&pipes_lock);
+	for (i = 0; i < PIPES_MAX; i++)
+		if (!pipes[i].in_use) {
+			p = &pipes[i];
+			p->in_use = 1;
+			break;
+		}
+	pthread_mutex_unlock(&pipes_lock);
+	if (p == NULL) {
+		(void)flipc2_channel_detach(ch);
+		return NULL;
+	}
+	p->refs = 0;
+	p->ch = ch;
+	p->sh = (struct uros_pipe_shared *)ch->data;
+	p->port = port;
+	p->token[PIPE_END_READ] = p->token[PIPE_END_WRITE] = MACH_PORT_NULL;
+	p->token[end] = token;
+	p->ends[PIPE_END_READ] = p->ends[PIPE_END_WRITE] = 0;
+	return p;
+}
+
 /* A copy of this task's send right `name' into `child', under that name. */
 static void
 copy_send(mach_port_t child, mach_port_t name)

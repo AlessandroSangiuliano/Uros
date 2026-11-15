@@ -63,6 +63,11 @@ void         __uros_pipe_end_get(struct uros_pipe *p, int end);
 unsigned int __uros_pipe_end_put(struct uros_pipe *p, int end);
 void         __uros_pipe_token_put(unsigned int token);
 
+/* execve(), the new image: end `end' of the pipe whose port and token came
+ * under these names, mapped once a pipe.  NULL when it cannot be. */
+struct uros_pipe *__uros_pipe_adopt(unsigned int port, unsigned int token,
+				    int end);
+
 /* fork(), posix_fork.c: the child (a task port) given this task's pipes
  * under the names it knows, and a token of its own for each end, asked for
  * child_pid.  Before the child's first instruction. */

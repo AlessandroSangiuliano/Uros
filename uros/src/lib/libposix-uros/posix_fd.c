@@ -1340,8 +1340,7 @@ int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
     pfd_init_locked();
     for (int i = 3; i < POSIX_OPEN_MAX && n < max; i++) {
         struct posix_ofd *o = pfds[i].ofd;
-        /* #904: a pipe's ends cross an exec once the new image can map the
-         * pipe, with #911's memory entries; until then they do not. */
+        /* #904: a pipe's ends go by __uros_pfd_enum_pipes(), below. */
         if (o == NULL || o->kind == OFD_CONSOLE || OFD_IS_PIPE(o->kind) ||
             pfds[i].cloexec)
             continue;
@@ -1351,6 +1350,69 @@ int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
     }
     pthread_mutex_unlock(&pfd_lock);
     return n;
+}
+
+/*
+ * #904: the pipe ends that survive execve, from fd 0 up: a pipe on a shell's
+ * stdin or stdout is what `a | b' is.  For each, its pipe, its end, whether
+ * O_NONBLOCK, and its description's index, which two descriptors of one
+ * description share.  Only ends pipe_server knows and this task holds a
+ * token for: a pipe with no port has no memory entry to be mapped from in
+ * the new image.  Returns the count (<= max).
+ */
+int __uros_pfd_enum_pipes(int *posix_fds, struct uros_pipe **pipes, int *ends,
+                          int *nonblock, int *desc, int max)
+{
+    int n = 0;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    for (int i = 0; i < POSIX_OPEN_MAX && n < max; i++) {
+        struct posix_ofd *o = pfds[i].ofd;
+        if (o == NULL || !OFD_IS_PIPE(o->kind) || pfds[i].cloexec ||
+            o->pipe->port == 0 || o->pipe->token[OFD_PIPE_END(o->kind)] == 0)
+            continue;
+        posix_fds[n] = i;
+        pipes[n]     = o->pipe;
+        ends[n]      = OFD_PIPE_END(o->kind);
+        nonblock[n]  = o->nonblock;
+        desc[n]      = (int)(o - ofds);
+        n++;
+    }
+    pthread_mutex_unlock(&pfd_lock);
+    return n;
+}
+
+/*
+ * #904: bind POSIX fd 'posix_fd' in the freshly-execed task to a new
+ * description of end 'end' of pipe 'p', which __uros_pipe_adopt() mapped.
+ * From fd 0 up: a pipe on stdin or stdout takes the console's place.
+ * Returns 0, or -1.
+ */
+int __uros_pfd_install_pipe(int posix_fd, struct uros_pipe *p, int end,
+                            int nonblock)
+{
+    struct posix_ofd gone, *o;
+    int freed = 0;
+
+    if (posix_fd < 0 || posix_fd >= POSIX_OPEN_MAX)
+        return -1;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    if (pfds[posix_fd].ofd != NULL)
+        freed = pfd_unbind_locked(posix_fd, &gone);
+    o = ofd_alloc_locked(end == PIPE_END_WRITE ? OFD_PIPE_WRITE : OFD_PIPE_READ,
+                         VFS_FD_INVALID, 0);
+    if (o != NULL) {
+        o->pipe = p;
+        o->nonblock = nonblock;
+        p->refs++;
+        __uros_pipe_end_get(p, end);
+        pfd_bind_locked(posix_fd, o, 0);
+    }
+    pthread_mutex_unlock(&pfd_lock);
+    if (freed)
+        ofd_release(&gone);
+    return o != NULL ? 0 : -1;
 }
 
 /*
@@ -1383,13 +1445,15 @@ void __uros_pfd_install(int posix_fd, vfs_fd_t vfd)
  * Bind POSIX fd 'posix_fd' in the freshly-execed task to the description
  * 'of_fd' already names: the two were one description before the exec, a
  * dup() of each other (#897).  Returns 0, or -1 when 'of_fd' names nothing.
+ * From fd 0 up: a pipe's descriptors come from 0 (#904), and the files'
+ * from 3, so a file never names one of the first three here.
  */
 int __uros_pfd_install_alias(int posix_fd, int of_fd)
 {
     struct posix_ofd gone, *o;
     int freed = 0;
 
-    if (posix_fd < 3 || posix_fd >= POSIX_OPEN_MAX || posix_fd == of_fd)
+    if (posix_fd < 0 || posix_fd >= POSIX_OPEN_MAX || posix_fd == of_fd)
         return -1;
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();

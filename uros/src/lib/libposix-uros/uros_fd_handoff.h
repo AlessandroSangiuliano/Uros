@@ -25,6 +25,20 @@
 #define UROS_FD_HANDOFF_MAGIC   0x46444831u    /* "FDH1" */
 #define UROS_FD_HANDOFF_MAX     61             /* fits a 4 KiB page */
 
+/*
+ * #904: a pipe end's record.  type is UROS_FD_HANDOFF_FIFO (libvfs's
+ * VFS_FT_FIFO, which posix_exec_fds.c checks), fs_port the pipe's port at
+ * pipe_server, handle the end's token, both names inserted into the new task
+ * as they are, flags the end and O_NONBLOCK, offset 0.  The new image maps
+ * the pipe from pipe_server's memory entry and keeps the token, which is the
+ * same process's after the exec: its pid does not change.  Pipe records come
+ * from fd 0 up, since a pipe on stdin or stdout is what `a | b' is; the
+ * files' records still start at 3.
+ */
+#define UROS_FD_HANDOFF_FIFO            6      /* VFS_FT_FIFO */
+#define UROS_FD_HANDOFF_PIPE_WRITE      0x1    /* flags: the write end */
+#define UROS_FD_HANDOFF_PIPE_NONBLOCK   0x2    /* flags: O_NONBLOCK */
+
 struct uros_fd_handoff_rec {
     int32_t   posix_fd;     /* POSIX fd number to recreate */
     uint32_t  fs_port;      /* Mach port NAME (inserted into the new task) */
