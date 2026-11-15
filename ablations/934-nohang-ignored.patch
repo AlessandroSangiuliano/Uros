@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #934
+Takes out: WNOHANG with a pid -- the wait blocks until the child ends, as it did: musl_test's [35] must see its first WNOHANG answer the child's pid, after the child's 300 ms
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[35\] WRONG -- a running child's first WNOHANG answered [1-9]
+
+diff --git a/uros/src/lib/libposix-uros/posix_wait.c b/uros/src/lib/libposix-uros/posix_wait.c
+index 1e5ba69c..d8167729 100644
+--- a/uros/src/lib/libposix-uros/posix_wait.c
++++ b/uros/src/lib/libposix-uros/posix_wait.c
+@@ -191,6 +191,8 @@ __uros_wait4(int pid, int *status_out, int options, void *rusage)
+ 
+     if (opts < 0)
+         return -EINVAL;
++    if (pid > 0)
++        opts &= ~PROC_WAIT_NOHANG;      /* 934-nohang-ignored */
+     r = wait_child(pid, opts, &status, &usage);
+     if (r <= 0)
+         return r;

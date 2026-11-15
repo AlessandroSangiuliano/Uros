@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #934
+Takes out: the death by signal told from an exit -- any code from 128 to 191 reads as a signal, as encode_status() read it: musl_test's [41] must see exit(130) come back as a death by SIGINT
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[41\] WRONG -- .*the exit NOT read as an exit with 130
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..981c3a01 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -262,8 +262,9 @@ wait_status_locked(const struct pid_entry *e, enum wait_report r)
+         return ((int32_t)e->stop_signal << 8) | 0x7f;
+     if (r == REPORT_CONT)
+         return 0xffff;
+-    if (e->end_signal != 0)
+-        return e->end_signal & 0x7f;
++    /* 934-exit-130-as-signal: 128 to 191 read as a signal, as before */
++    if (e->exit_code >= 128 && e->exit_code <= 191)
++        return (e->exit_code - 128) & 0x7f;
+     return (e->exit_code & 0xff) << 8;
+ }
+ 

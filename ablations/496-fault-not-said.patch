@@ -6,13 +6,14 @@ Run: --entry 14 300 -smp 4
 Expect: musl_test: \[17\] WRONG -- a child that wrote to a page nobody mapped left status 0x9
 
 diff --git a/uros/src/lib/libposix-uros/exceptions.c b/uros/src/lib/libposix-uros/exceptions.c
+index b70873af..66c1a5a6 100644
 --- a/uros/src/lib/libposix-uros/exceptions.c
 +++ b/uros/src/lib/libposix-uros/exceptions.c
-@@ -119,7 +119,6 @@
- #endif
+@@ -122,7 +122,6 @@ catch_exception_raise(mach_port_t exception_port,
  
-     /* So that waitpid says what ended this task (#496). */
--    __uros_record_exit_code(128 + signo);
+     /* So that waitpid says what ended this task (#496), and that it was a
+      * signal and not an exit with the same number (#934). */
+-    __uros_record_signal_death(signo);
      (void)task_terminate(task);
      return KERN_SUCCESS;
  }

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #934
+Takes out: a stop signal's default action -- the signal thread drops SIGTSTP, SIGTTIN and SIGTTOU, as it did: musl_test's [37] must see its wait for raise(SIGTSTP)'s stop not return in its 60 s
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[37\] WRONG -- .*the waits did not end in 60 s
+
+diff --git a/uros/src/lib/libposix-uros/signals.c b/uros/src/lib/libposix-uros/signals.c
+index 84982fed..410074e6 100644
+--- a/uros/src/lib/libposix-uros/signals.c
++++ b/uros/src/lib/libposix-uros/signals.c
+@@ -179,7 +179,7 @@ __uros_sig_loop(void)
+                  * reply comes when a SIGCONT resumes it.  The signal was
+                  * dropped here, so a program of musl went on through ^Z.
+                  */
+-                __uros_stop_self(signo);
++                (void)signo;            /* 934-tstp-dropped */
+                 continue;
+             default:
+                 continue;

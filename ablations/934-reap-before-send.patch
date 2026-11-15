@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #934
+Takes out: the reap after the report is queued -- a child is reaped first and its report sent after, as proc_subscribe_exit() does, so a report to a waiter that has gone takes the child with it: musl_test's [40] must see the exec'd image's wait never end, since the child ends after 3 s, with the new image already waiting, and its report goes to the thread the exec took
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[40\] WRONG -- a waiting thread gone with an exec, and the new image's wait answered -[0-9]+: it did not end in 30 s
+Note: Its Expect was "it did NOT find the child's exit", what the new image would have said with a child ending after 500 ms, before its wait.  Since the child ends after 3 s (92cf0d98) the new image is waiting when the child ends, and its wait does not end.  Judged against that Expect under QEMU (TCG and KVM), on OMEGA 10/11/2026 at 92cf0d98 and on omen 15/11/2026 at the union a79ae4d8, it was caught 0 of 4 each time: every ablated boot that reached [40] said its wait did not end in 30 s, seven of eight (the eighth, under TCG, was cut by the 600 s watchdog after [38]); the fixed tree passed 3 of 4 (its fourth trapped in the kernel, outside [40]) and 4 of 4, finding the exit.  The Expect is what those boots said.
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..2719f4cc 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -373,18 +373,11 @@ wait_poke(proc_pid_t pid)
+         memset(w, 0, sizeof(*w));
+         status = wait_status_locked(e, r);
+         usage = e->last_rusage;
++        /* 934-reap-before-send: reaped first, sent after, as before */
++        wait_consume_locked(e, r, options, &sigport, &old_notify);
+         pthread_mutex_unlock(&pid_lock);
+ 
+-        if (send_wait_report(notify, pid, status, &usage) != KERN_SUCCESS)
+-            continue;                   /* that waiter had gone */
+-
+-        pthread_mutex_lock(&pid_lock);
+-        e = find_by_pid_locked(pid);
+-        sigport = MACH_PORT_NULL;
+-        old_notify = MACH_PORT_NULL;
+-        if (e != NULL)
+-            wait_consume_locked(e, r, options, &sigport, &old_notify);
+-        pthread_mutex_unlock(&pid_lock);
++        (void)send_wait_report(notify, pid, status, &usage);
+         if (sigport != MACH_PORT_NULL)
+             (void)mach_port_deallocate(mach_task_self(), sigport);
+         if (old_notify != MACH_PORT_NULL)

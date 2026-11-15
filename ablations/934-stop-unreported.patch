@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #934
+Takes out: the report of a stop -- a stopped child is never unreported, so WUNTRACED waits on: musl_test's [37] must see its first wait, for raise(SIGTSTP)'s stop, not return in its 60 s
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[37\] WRONG -- .*the waits did not end in 60 s
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..63601419 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -447,8 +447,7 @@ stop_task(proc_pid_t pid, int signo)
+     if (e != NULL && e->task_port == task) {
+         e->stopped = 1;
+         e->stop_signal = (uint8_t)signo;
+-        e->stop_unreported = 1;
+-        e->cont_unreported = 0;
++        e->cont_unreported = 0;         /* 934-stop-unreported */
+     }
+     pthread_mutex_unlock(&pid_lock);
+     wait_poke(pid);

@@ -69,6 +69,11 @@
 
 #include "uros/libposix.h"
 
+/* #934: below, used by the handler thread above them. */
+void __uros_die_of_signal(int signo) __attribute__((noreturn));
+void __uros_stop_self(int signo);
+void __uros_record_signal_death(int signo);
+
 /* ------------------------------------------------------------------ */
 /* State                                                              */
 /* ------------------------------------------------------------------ */
@@ -167,9 +172,18 @@ __uros_sig_loop(void)
             case 'I':   /* ignore */
                 continue;
             case 'T':   /* terminate */
-                __uros_syscall1(SYS_exit_group, 128 + signo);
+                __uros_die_of_signal(signo);
                 continue;     /* unreachable */
-            case 'S':   /* stop — Phase 4b will handle properly */
+            case 'S':
+                /*
+                 * #934: stopped, as SIGSTOP stops it, with this signal's
+                 * number for the parent's WSTOPSIG.  The stop is proc_server's
+                 * to make: it suspends the task, this thread with it, and the
+                 * reply comes when a SIGCONT resumes it.  The signal was
+                 * dropped here, so a program of musl went on through ^Z.
+                 */
+                __uros_stop_self(signo);
+                continue;
             default:
                 continue;
             }
@@ -353,6 +367,40 @@ __uros_record_exit_code(int status)
                              __uros_my_pid, status, &rc);
 }
 
+/*
+ * #934: record a death by signal `signo' as one.  It was recorded as the
+ * exit code 128 + signo, which an exit(128 + signo) also records, so a
+ * parent took exit(130) for a death by SIGINT.  PROC_EXIT_SIGNALED tells
+ * proc_server which it is.
+ */
+void
+__uros_record_signal_death(int signo)
+{
+    __uros_record_exit_code(PROC_EXIT_SIGNALED | (signo & 0x7f));
+}
+
+/* A signal's default action ended the process: say so, and end.  Not
+ * through exit_group(), whose handler would record an exit over it. */
+void
+__uros_die_of_signal(int signo)
+{
+    __uros_record_signal_death(signo);
+    (void)task_terminate(mach_task_self());
+    for (;;)
+        ;
+}
+
+/* A stop signal's default action (#934): proc_server stops this process. */
+void
+__uros_stop_self(int signo)
+{
+    int rc = 0;
+
+    if (__uros_proc_port == MACH_PORT_NULL || __uros_my_pid == 0)
+        return;
+    (void)proc_stop(__uros_proc_port, __uros_my_pid, signo, &rc);
+}
+
 /* ------------------------------------------------------------------ */
 /* Public POSIX surface — called by handlers.c via the syscall path   */
 /* ------------------------------------------------------------------ */
@@ -462,6 +510,42 @@ __uros_sigprocmask(int how, const void *set_, void *old_, unsigned setsize)
     sigdelset(&__sig_mask, PROC_SIGKILL);
     sigdelset(&__sig_mask, PROC_SIGSTOP);
     return 0;
+}
+
+/*
+ * kill() of a process group (#934): pid 0 is the caller's own group, below
+ * -1 the group -pid.  It went to proc_kill() as a pid, which none is, and
+ * answered ESRCH; proc_killpg() reaches every process of the group.
+ * kill(-1), every process, is not served, and answers ESRCH as before.
+ */
+int
+__uros_kill_group(int pid, int signo)
+{
+    proc_pid_t group = 0;
+    unsigned   n_sent = 0;
+    int        rc = PROC_ERR_INVAL;
+
+    if (__uros_proc_port == MACH_PORT_NULL)
+        return -ESRCH;
+    if (signo < 0 || signo >= PROC_NSIG)
+        return -EINVAL;
+    if (pid == -1)
+        return -ESRCH;
+    if (pid == 0) {
+        if (proc_getpgid(__uros_proc_port, __uros_my_pid, &group, &rc)
+            != KERN_SUCCESS || rc != PROC_OK)
+            return -ESRCH;
+    } else {
+        group = (proc_pid_t)(0u - (unsigned)pid);
+    }
+    if (proc_killpg(__uros_proc_port, group, signo, &n_sent, &rc)
+        != KERN_SUCCESS)
+        return -ESRCH;
+    switch (rc) {
+    case PROC_OK:               return 0;
+    case PROC_ERR_BAD_SIGNO:    return -EINVAL;
+    default:                    return -ESRCH;
+    }
 }
 
 int

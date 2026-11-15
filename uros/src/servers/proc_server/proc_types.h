@@ -201,4 +201,45 @@ typedef struct proc_rusage {
     uint32_t  msgrcv;
 } proc_rusage_t;
 
+/* ------------------------------------------------------------------ */
+/*  Waiting for children (#934)                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * proc_wait()'s options: the values of musl's <sys/wait.h>, which
+ * libposix-uros passes on as they are.  wait4() always asks
+ * PROC_WAIT_EXITED; waitid() asks what its caller asked.
+ */
+#define PROC_WAIT_NOHANG      0x1        /* WNOHANG                      */
+#define PROC_WAIT_UNTRACED    0x2        /* WUNTRACED, waitid's WSTOPPED */
+#define PROC_WAIT_EXITED      0x4        /* WEXITED                      */
+#define PROC_WAIT_CONTINUED   0x8        /* WCONTINUED                   */
+#define PROC_WAIT_NOWAIT      0x1000000  /* WNOWAIT: report, do not reap */
+
+/* proc_wait() kept the notify right: the report comes on it later, as a
+ * proc_wait_msg_t.  The other results are PROC_OK (reported now),
+ * PROC_ERR_NOT_FOUND (WNOHANG, nothing yet) and PROC_ERR_NO_CHILD. */
+#define PROC_WAIT_QUEUED      1
+
+/* The report proc_wait() sends to a kept notify right.  status is the wait
+ * status in Linux's encoding, which musl's W* macros read.  Below the
+ * signal and exit messages' ids, and below the subsystem's reply ids
+ * (3300 up). */
+#define PROC_WAIT_MSGID      3297
+
+typedef struct proc_wait_msg {
+    mach_msg_header_t   head;
+    proc_pid_t          pid;
+    int32_t             status;
+    proc_rusage_t       usage;
+    mach_msg_trailer_t  trailer;
+} proc_wait_msg_t;
+
+/*
+ * proc_set_exit_code() with this bit set declares a death by signal
+ * (code & 0x7f) rather than an exit, so that exit(130) and a death by
+ * SIGINT are told apart (#934); without it the code is an exit status.
+ */
+#define PROC_EXIT_SIGNALED    0x100
+
 #endif /* _PROC_TYPES_H_ */

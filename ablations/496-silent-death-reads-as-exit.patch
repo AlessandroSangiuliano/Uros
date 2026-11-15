@@ -6,14 +6,16 @@ Run: --entry 14 300 -smp 4
 Expect: musl_test: \[18\] WRONG -- a program with no library that faulted left status 0
 
 diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..1e967ce6 100644
 --- a/uros/src/servers/proc_server/proc_main.c
 +++ b/uros/src/servers/proc_server/proc_main.c
-@@ -1964,10 +1964,6 @@
+@@ -2424,11 +2424,6 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
           * ended from outside, by a fault with nothing to catch it or by
           * a task_terminate of somebody's, and left at the 0 it was born
           * with that read "exited normally" (#496, the class of #580). */
 -        if (!e->exit_declared) {
 -            e->exit_code = 128 + PROC_SIGKILL;
+-            e->end_signal = PROC_SIGKILL;   /* #934 */
 -            e->exit_declared = 1;
 -        }
          subscriber    = e->exit_notify;

@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #934
+Takes out: the report of a continue -- a SIGCONT resumes the child and leaves nothing for WCONTINUED: musl_test's [37] must see its wait for the first continue not return in its 60 s
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[37\] WRONG -- .*the waits did not end in 60 s
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..ec80d068 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -466,8 +466,7 @@ mark_continued_locked(struct pid_entry *e)
+         return 0;
+     e->stopped = 0;
+     e->stop_unreported = 0;
+-    e->cont_unreported = 1;
+-    return 1;
++    return 1;                           /* 934-continue-unreported */
+ }
+ 
+ /* ------------------------------------------------------------------ */

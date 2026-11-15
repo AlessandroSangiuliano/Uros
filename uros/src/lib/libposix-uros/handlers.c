@@ -731,6 +731,7 @@ extern int  __uros_sigaction(int signo, const void *act, void *old);
 extern int  __uros_sigprocmask(int how, const void *set, void *old,
                                unsigned setsize);
 extern int  __uros_kill(unsigned int pid, int signo);
+extern int  __uros_kill_group(int pid, int signo);	/* #934 */
 
 /*
  * The pointers here are in the *kernel* sigaction ABI (struct
@@ -771,6 +772,8 @@ static long h_kill(long pid, long sig, long a3,
                    long a4, long a5, long a6)
 {
     (void)a3; (void)a4; (void)a5; (void)a6;
+    if ((int)pid <= 0)              /* a process group (#934) */
+        return __uros_kill_group((int)pid, (int)sig);
     return __uros_kill((unsigned int)pid, (int)sig);
 }
 
@@ -800,6 +803,9 @@ static long h_tgkill(long tgid, long tid, long sig,
 extern int __uros_execve(const char *path,
                          char *const argv[], char *const envp[]);
 extern int __uros_waitpid(int pid, int *status, int options);
+extern int __uros_wait4(int pid, int *status, int options, void *rusage);	/* #934 */
+extern int __uros_waitid(int idtype, unsigned long id, void *info,
+                         int options, void *rusage);			/* #934 */
 extern int __uros_fork(void);
 
 static long h_fork(long a1, long a2, long a3,
@@ -827,14 +833,24 @@ static long h_waitpid(long pid, long status, long options,
 }
 #endif
 
-/* wait4(pid, status*, options, rusage*) — we ignore rusage entirely
- * in Phase 5 and route to waitpid.  Resource accounting in proc_server
- * (#240) can be exposed later if anyone cares. */
+/* wait4(pid, status*, options, rusage*) — with the child's usage in
+ * rusage, as proc_server last read it (#934). */
 static long h_wait4(long pid, long status, long options, long rusage,
                     long a5, long a6)
 {
-    (void)rusage; (void)a5; (void)a6;
-    return __uros_waitpid((int)pid, (int *)status, (int)options);
+    (void)a5; (void)a6;
+    return __uros_wait4((int)pid, (int *)status, (int)options,
+                        (void *)rusage);
+}
+
+/* waitid(idtype, id, siginfo*, options, rusage*) (#934): the system call
+ * fills a rusage it is given, as Linux's does; musl's waitid() passes none. */
+static long h_waitid(long idtype, long id, long info, long options,
+                     long rusage, long a6)
+{
+    (void)a6;
+    return __uros_waitid((int)idtype, (unsigned long)id, (void *)info,
+                         (int)options, (void *)rusage);
 }
 
 /* ------------------------------------------------------------------ */
@@ -921,6 +937,7 @@ static const struct entry table[] = {
     { SYS_execve,           h_execve          },
     { SYS_getpid,           h_getpid          },
     { SYS_wait4,            h_wait4           },
+    { SYS_waitid,           h_waitid          },	/* #934 */
     { SYS_getuid,           h_getuid          },
     { SYS_kill,             h_kill            },
     { SYS_brk,              h_brk             },

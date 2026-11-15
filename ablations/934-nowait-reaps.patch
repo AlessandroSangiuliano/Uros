@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #934
+Takes out: WNOWAIT -- a reported exit is reaped all the same: musl_test's [39] must see its second waitid() of the child answer other than the first
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[39\] WRONG -- 
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index 321b3d9c..79889694 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -280,8 +280,7 @@ wait_consume_locked(struct pid_entry *e, enum wait_report r, int options,
+ {
+     *sigport = MACH_PORT_NULL;
+     *notify = MACH_PORT_NULL;
+-    if (options & PROC_WAIT_NOWAIT)
+-        return;
++    (void)options;                      /* 934-nowait-reaps */
+     switch (r) {
+     case REPORT_EXIT:
+         *sigport = e->signal_port;

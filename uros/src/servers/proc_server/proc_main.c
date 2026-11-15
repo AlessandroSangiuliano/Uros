@@ -97,6 +97,16 @@ struct pid_entry {
      * separate flag because 0 is a code a process can declare. */
     uint8_t         exit_declared;
 
+    /* #934: how the process ended, and what its parent's wait has still to
+     * be told.  end_signal is the signal that ended it, 0 for an exit with
+     * exit_code; exit_code keeps 128 + N for a signal too, for an image whose
+     * waitpid reads it the old way.  A stop and a continue are reported
+     * once, to a wait that asks WUNTRACED or WCONTINUED. */
+    uint8_t         end_signal;
+    uint8_t         stop_signal;     /* the signal it is stopped on */
+    uint8_t         stop_unreported; /* a stop no wait has reported yet */
+    uint8_t         cont_unreported; /* a continue no wait has reported yet */
+
     /* Single subscriber for v0.1.0; v0.x.0 widens to a list. */
     mach_port_t     exit_notify;     /* send-once right, MACH_PORT_NULL if none */
 
@@ -186,6 +196,281 @@ fire_exit_notify(mach_port_t notify, proc_pid_t pid, int32_t exit_code)
                    sizeof(msg) - sizeof(mach_msg_trailer_t),
                    0, MACH_PORT_NULL,
                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Waiting for children (#934)                                        */
+/* ------------------------------------------------------------------ */
+
+static void refresh_rusage_for_pid(proc_pid_t pid);
+
+/*
+ * A wait that found nothing to report keeps a send-once right here until a
+ * matching child has something: proc_S_wait() stores it, wait_poke() sends
+ * to it when a child changes.  Each waiting thread has a slot of its own,
+ * so several threads of one process may wait at once.
+ */
+#define PROC_WAITERS_MAX	64
+
+struct waiter {
+    int         in_use;
+    proc_pid_t  parent;
+    int         which;          /* waitpid()'s pid argument */
+    int         options;        /* PROC_WAIT_* */
+    mach_port_t notify;         /* send-once right */
+};
+
+static struct waiter waiters[PROC_WAITERS_MAX];
+
+enum wait_report { REPORT_NONE = 0, REPORT_EXIT, REPORT_STOP, REPORT_CONT };
+
+/* Is `e' a child of `parent' that a wait for `which' asks about?  `pgrp' is
+ * the parent's process group, for `which' 0.  The group of a negative
+ * `which' is taken in unsigned arithmetic, so INT_MIN names no group
+ * rather than overflowing.  Caller holds pid_lock. */
+static int
+wait_matches_locked(const struct pid_entry *e, proc_pid_t parent,
+                    int which, proc_pid_t pgrp)
+{
+    if (!e->in_use || e->ppid != parent)
+        return 0;
+    if (which > 0)
+        return e->pid == (proc_pid_t)which;
+    if (which == -1)
+        return 1;
+    if (which == 0)
+        return e->pgrp_id == pgrp;
+    return e->pgrp_id == (proc_pid_t)(0u - (unsigned)which);
+}
+
+/* What `e' has for a wait with `options'.  Caller holds pid_lock. */
+static enum wait_report
+wait_report_locked(const struct pid_entry *e, int options)
+{
+    if (e->state == PROC_STATE_ZOMBIE)
+        return (options & PROC_WAIT_EXITED) ? REPORT_EXIT : REPORT_NONE;
+    if ((options & PROC_WAIT_UNTRACED) && e->stopped && e->stop_unreported)
+        return REPORT_STOP;
+    if ((options & PROC_WAIT_CONTINUED) && e->cont_unreported)
+        return REPORT_CONT;
+    return REPORT_NONE;
+}
+
+/* That report as a wait status, in Linux's encoding.  Caller holds
+ * pid_lock. */
+static int32_t
+wait_status_locked(const struct pid_entry *e, enum wait_report r)
+{
+    if (r == REPORT_STOP)
+        return ((int32_t)e->stop_signal << 8) | 0x7f;
+    if (r == REPORT_CONT)
+        return 0xffff;
+    if (e->end_signal != 0)
+        return e->end_signal & 0x7f;
+    return (e->exit_code & 0xff) << 8;
+}
+
+/*
+ * The report reached its waiter: an exit is reaped (the #378 reap), and a
+ * stop or a continue is reported -- unless the wait asked PROC_WAIT_NOWAIT,
+ * which leaves the child to be waited for again.  The rights a reaped entry
+ * held come back in *sigport and *notify, for the caller to give back with
+ * the lock dropped.  Caller holds pid_lock.
+ */
+static void
+wait_consume_locked(struct pid_entry *e, enum wait_report r, int options,
+                    mach_port_t *sigport, mach_port_t *notify)
+{
+    *sigport = MACH_PORT_NULL;
+    *notify = MACH_PORT_NULL;
+    if (options & PROC_WAIT_NOWAIT)
+        return;
+    switch (r) {
+    case REPORT_EXIT:
+        *sigport = e->signal_port;
+        *notify = e->exit_notify;
+        memset(e, 0, sizeof(*e));
+        break;
+    case REPORT_STOP:
+        e->stop_unreported = 0;
+        break;
+    case REPORT_CONT:
+        e->cont_unreported = 0;
+        break;
+    default:
+        break;
+    }
+}
+
+/* Send a report to a waiter's send-once right.  KERN_SUCCESS once it is
+ * queued; otherwise the waiter has gone, and the dead right is given back. */
+static kern_return_t
+send_wait_report(mach_port_t notify, proc_pid_t pid, int32_t status,
+                 const proc_rusage_t *usage)
+{
+    proc_wait_msg_t msg;
+    kern_return_t kr;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.head.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+    msg.head.msgh_size        = sizeof(msg) - sizeof(mach_msg_trailer_t);
+    msg.head.msgh_remote_port = notify;
+    msg.head.msgh_local_port  = MACH_PORT_NULL;
+    msg.head.msgh_id          = PROC_WAIT_MSGID;
+    msg.pid                   = pid;
+    msg.status                = status;
+    msg.usage                 = *usage;
+
+    kr = mach_msg(&msg.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                  msg.head.msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+    if (kr != MACH_MSG_SUCCESS)
+        (void)mach_port_deallocate(mach_task_self(), notify);
+    return kr;
+}
+
+/*
+ * Child `pid' has something new: offer it to its parent's waiters, one
+ * after the other, until one has it.  A waiter whose right is dead -- its
+ * thread gave up, or its process ended -- is let go, and the child stays
+ * for the next one, or for a later wait.  A WNOWAIT report leaves the child
+ * as it was, so the waiters after may have it too.
+ */
+static void
+wait_poke(proc_pid_t pid)
+{
+    for (;;) {
+        struct pid_entry *e, *p;
+        struct waiter *w = NULL;
+        enum wait_report r = REPORT_NONE;
+        proc_pid_t parent, pgrp = 0;
+        proc_rusage_t usage;
+        mach_port_t notify, sigport, old_notify;
+        int32_t status;
+        int options, i;
+
+        pthread_mutex_lock(&pid_lock);
+        e = find_by_pid_locked(pid);
+        if (e == NULL) {
+            pthread_mutex_unlock(&pid_lock);
+            return;
+        }
+        parent = e->ppid;
+        p = find_by_pid_locked(parent);
+        if (p != NULL)
+            pgrp = p->pgrp_id;
+        for (i = 0; i < PROC_WAITERS_MAX && w == NULL; i++) {
+            if (!waiters[i].in_use || waiters[i].parent != parent)
+                continue;
+            if (!wait_matches_locked(e, parent, waiters[i].which, pgrp))
+                continue;
+            r = wait_report_locked(e, waiters[i].options);
+            if (r != REPORT_NONE)
+                w = &waiters[i];
+        }
+        if (w == NULL) {
+            pthread_mutex_unlock(&pid_lock);
+            return;
+        }
+        notify = w->notify;
+        options = w->options;
+        memset(w, 0, sizeof(*w));
+        status = wait_status_locked(e, r);
+        usage = e->last_rusage;
+        pthread_mutex_unlock(&pid_lock);
+
+        if (send_wait_report(notify, pid, status, &usage) != KERN_SUCCESS)
+            continue;                   /* that waiter had gone */
+
+        pthread_mutex_lock(&pid_lock);
+        e = find_by_pid_locked(pid);
+        sigport = MACH_PORT_NULL;
+        old_notify = MACH_PORT_NULL;
+        if (e != NULL)
+            wait_consume_locked(e, r, options, &sigport, &old_notify);
+        pthread_mutex_unlock(&pid_lock);
+        if (sigport != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), sigport);
+        if (old_notify != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), old_notify);
+        if (!(options & PROC_WAIT_NOWAIT))
+            return;
+    }
+}
+
+/* A process that has ended waits for nothing more: its waiters go. */
+static void
+wait_drop_parent(proc_pid_t parent)
+{
+    mach_port_t gone[PROC_WAITERS_MAX];
+    int n = 0, i;
+
+    pthread_mutex_lock(&pid_lock);
+    for (i = 0; i < PROC_WAITERS_MAX; i++)
+        if (waiters[i].in_use && waiters[i].parent == parent) {
+            gone[n++] = waiters[i].notify;
+            memset(&waiters[i], 0, sizeof(waiters[i]));
+        }
+    pthread_mutex_unlock(&pid_lock);
+    for (i = 0; i < n; i++)
+        (void)mach_port_deallocate(mach_task_self(), gone[i]);
+}
+
+/*
+ * Stop `pid' for `signo' as a stop signal's default action does, once: a
+ * task already stopped is left as it is, as a second task_suspend() would
+ * take a second SIGCONT to undo.  The stop is then unreported, for its
+ * parent's WUNTRACED.  Returns PROC_OK or a PROC_ERR_*.
+ */
+static int
+stop_task(proc_pid_t pid, int signo)
+{
+    struct pid_entry *e;
+    mach_port_t task;
+    kern_return_t kr;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e == NULL || e->state == PROC_STATE_ZOMBIE) {
+        pthread_mutex_unlock(&pid_lock);
+        return PROC_ERR_NOT_FOUND;
+    }
+    if (e->stopped) {
+        pthread_mutex_unlock(&pid_lock);
+        return PROC_OK;
+    }
+    task = e->task_port;
+    pthread_mutex_unlock(&pid_lock);
+
+    kr = task_suspend(task);
+    if (kr != KERN_SUCCESS)
+        return PROC_ERR_KERNEL;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e != NULL && e->task_port == task) {
+        e->stopped = 1;
+        e->stop_signal = (uint8_t)signo;
+        e->stop_unreported = 1;
+        e->cont_unreported = 0;
+    }
+    pthread_mutex_unlock(&pid_lock);
+    wait_poke(pid);
+    return PROC_OK;
+}
+
+/* `e' is being resumed by SIGCONT: no longer stopped, and if it was, its
+ * continue is unreported, for its parent's WCONTINUED.  Returns whether it
+ * was stopped.  Caller holds pid_lock, and resumes the task and calls
+ * wait_poke() with it dropped. */
+static int
+mark_continued_locked(struct pid_entry *e)
+{
+    if (!e->stopped)
+        return 0;
+    e->stopped = 0;
+    e->stop_unreported = 0;
+    e->cont_unreported = 1;
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -550,6 +835,117 @@ proc_S_reap_zombie(
     return KERN_SUCCESS;
 }
 
+/*
+ * proc_wait() (#934): every form of POSIX's wait, see proc.defs.  A child
+ * that has something to report is reported in the reply; with nothing and
+ * no WNOHANG, `notify' is kept in a waiter slot, and wait_poke() sends the
+ * first matching report to it.
+ */
+kern_return_t
+proc_S_wait(
+    mach_port_t   server_port,
+    proc_pid_t    parent_pid,
+    int           which,
+    int           options,
+    mach_port_t   notify,
+    proc_pid_t   *pid_out,
+    int          *status_out,
+    proc_rusage_t *usage_out,
+    int          *result)
+{
+    const int known = PROC_WAIT_NOHANG | PROC_WAIT_UNTRACED |
+                      PROC_WAIT_EXITED | PROC_WAIT_CONTINUED |
+                      PROC_WAIT_NOWAIT;
+    const int asks = PROC_WAIT_EXITED | PROC_WAIT_UNTRACED |
+                     PROC_WAIT_CONTINUED;
+    struct pid_entry *p, *e, *found = NULL;
+    enum wait_report r = REPORT_NONE;
+    mach_port_t sigport = MACH_PORT_NULL, old_notify = MACH_PORT_NULL;
+    proc_pid_t pgrp = 0;
+    int children = 0, i;
+
+    (void)server_port;
+    *pid_out = 0;
+    *status_out = 0;
+    memset(usage_out, 0, sizeof(*usage_out));
+
+    if ((options & ~known) != 0 || (options & asks) == 0) {
+        *result = PROC_ERR_INVAL;
+    } else {
+        pthread_mutex_lock(&pid_lock);
+        p = find_by_pid_locked(parent_pid);
+        if (p != NULL)
+            pgrp = p->pgrp_id;
+        for (i = 0; i < PROC_MAX_TASKS && found == NULL; i++) {
+            e = &pid_table[i];
+            if (!wait_matches_locked(e, parent_pid, which, pgrp))
+                continue;
+            children++;
+            r = wait_report_locked(e, options);
+            if (r != REPORT_NONE)
+                found = e;
+        }
+        if (found != NULL) {
+            *pid_out = found->pid;
+            *status_out = wait_status_locked(found, r);
+            *usage_out = found->last_rusage;
+            wait_consume_locked(found, r, options, &sigport, &old_notify);
+            *result = PROC_OK;
+        } else if (children == 0) {
+            *result = PROC_ERR_NO_CHILD;
+        } else if (options & PROC_WAIT_NOHANG) {
+            *result = PROC_ERR_NOT_FOUND;
+        } else if (notify == MACH_PORT_NULL) {
+            *result = PROC_ERR_INVAL;   /* would wait, and nowhere to say */
+        } else {
+            *result = PROC_ERR_NO_SLOT;
+            for (i = 0; i < PROC_WAITERS_MAX; i++) {
+                if (waiters[i].in_use)
+                    continue;
+                waiters[i].in_use = 1;
+                waiters[i].parent = parent_pid;
+                waiters[i].which = which;
+                waiters[i].options = options;
+                waiters[i].notify = notify;
+                notify = MACH_PORT_NULL;        /* kept */
+                *result = PROC_WAIT_QUEUED;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&pid_lock);
+    }
+
+    if (notify != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), notify);
+    if (sigport != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), sigport);
+    if (old_notify != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), old_notify);
+    return KERN_SUCCESS;
+}
+
+/*
+ * proc_stop() (#934): a stop signal's default action, asked by the
+ * stopping program's own signal thread, which knows what it has left at
+ * SIG_DFL.  SIGSTOP is accepted as well, the same stop.
+ */
+kern_return_t
+proc_S_stop(
+    mach_port_t   server_port,
+    proc_pid_t    pid,
+    int           signo,
+    int          *result)
+{
+    (void)server_port;
+    if (signo != PROC_SIGSTOP && signo != PROC_SIGTSTP &&
+        signo != PROC_SIGTTIN && signo != PROC_SIGTTOU) {
+        *result = PROC_ERR_BAD_SIGNO;
+        return KERN_SUCCESS;
+    }
+    *result = stop_task(pid, signo);
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 proc_S_list(
     mach_port_t                 server_port,
@@ -691,9 +1087,12 @@ terminate_for_signal(proc_pid_t pid, int signo, mach_port_t task)
     e = find_by_pid_locked(pid);
     if (e != NULL && e->task_port == task && !e->exit_declared) {
         e->exit_code = 128 + signo;
+        e->end_signal = (uint8_t)signo;     /* #934: a death, not an exit */
         e->exit_declared = 1;
     }
     pthread_mutex_unlock(&pid_lock);
+    /* #934: its usage while it can still be asked, for wait4()'s rusage. */
+    refresh_rusage_for_pid(pid);
     return task_terminate(task);
 }
 
@@ -704,7 +1103,6 @@ terminate_for_signal(proc_pid_t pid, int signo, mach_port_t task)
 static int
 apply_default_disposition(proc_pid_t pid, int signo, mach_port_t task)
 {
-    struct pid_entry *e;
     kern_return_t kr;
 
     if (task == MACH_PORT_NULL)
@@ -715,16 +1113,8 @@ apply_default_disposition(proc_pid_t pid, int signo, mach_port_t task)
         kr = terminate_for_signal(pid, signo, task);
         return (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
     case SIG_DFL_STOP:
-        kr = task_suspend(task);
-        if (kr == KERN_SUCCESS) {
-            /* Mark the pid stopped so a later SIGCONT resumes it. */
-            pthread_mutex_lock(&pid_lock);
-            e = find_by_pid_locked(pid);
-            if (e)
-                e->stopped = 1;
-            pthread_mutex_unlock(&pid_lock);
-        }
-        return (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
+        /* Once, marked, and reported to the parent's WUNTRACED (#934). */
+        return stop_task(pid, signo);
     case SIG_DFL_IGN:
     default:
         return PROC_OK;                 /* delivered to a process that ignores it */
@@ -808,6 +1198,7 @@ proc_S_kill(
      */
     if (signo == PROC_SIGCONT) {
         mach_port_t cont_tasks[PROC_MAX_TASKS];
+        proc_pid_t  cont_pids[PROC_MAX_TASKS];
         unsigned n_cont = 0, j;
         proc_pid_t grp = e->pgrp_id;
         int k;
@@ -816,15 +1207,17 @@ proc_S_kill(
             if (pid_table[k].in_use &&
                 pid_table[k].state != PROC_STATE_ZOMBIE &&
                 pid_table[k].pgrp_id == grp &&
-                pid_table[k].stopped) {
-                cont_tasks[n_cont++] = pid_table[k].task_port;
-                pid_table[k].stopped = 0;
+                mark_continued_locked(&pid_table[k])) {
+                cont_tasks[n_cont] = pid_table[k].task_port;
+                cont_pids[n_cont++] = pid_table[k].pid;
             }
         }
         pthread_mutex_unlock(&pid_lock);
 
-        for (j = 0; j < n_cont; j++)
+        for (j = 0; j < n_cont; j++) {
             (void)task_resume(cont_tasks[j]);
+            wait_poke(cont_pids[j]);    /* #934: for a WCONTINUED */
+        }
         *result = PROC_OK;
         return KERN_SUCCESS;
     }
@@ -847,16 +1240,8 @@ proc_S_kill(
         *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
         return KERN_SUCCESS;
     case PROC_SIGSTOP:
-        kr = task_suspend(task);
-        if (kr == KERN_SUCCESS) {
-            /* Mark the pid stopped so a later SIGCONT resumes it. */
-            pthread_mutex_lock(&pid_lock);
-            e = find_by_pid_locked(pid);
-            if (e)
-                e->stopped = 1;
-            pthread_mutex_unlock(&pid_lock);
-        }
-        *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
+        /* Once, marked, and reported to the parent's WUNTRACED (#934). */
+        *result = stop_task(pid, signo);
         return KERN_SUCCESS;
     default:
         break;
@@ -1132,8 +1517,33 @@ proc_S_killpg(
             switch (signo) {
             case PROC_SIGKILL: kr = terminate_for_signal(uncatch[i].pid, signo,
                                                          uncatch[i].port); break;
-            case PROC_SIGSTOP: kr = task_suspend  (uncatch[i].port); break;
-            case PROC_SIGCONT: kr = task_resume   (uncatch[i].port); break;
+            /*
+             * #934: as proc_kill() does, which a group's members took no part
+             * in: a stop marked, once, and reported, and a continue only for
+             * what is marked stopped.  It suspended and resumed bare, so a
+             * kill(pid, SIGCONT), which resumes what is marked, left a group
+             * stopped here as it was.
+             */
+            case PROC_SIGSTOP:
+                kr = stop_task(uncatch[i].pid, signo) == PROC_OK
+                     ? KERN_SUCCESS : KERN_FAILURE;
+                break;
+            case PROC_SIGCONT: {
+                struct pid_entry *ce;
+                int was;
+
+                pthread_mutex_lock(&pid_lock);
+                ce = find_by_pid_locked(uncatch[i].pid);
+                was = ce != NULL && ce->task_port == uncatch[i].port &&
+                      mark_continued_locked(ce);
+                pthread_mutex_unlock(&pid_lock);
+                kr = KERN_SUCCESS;
+                if (was) {
+                    kr = task_resume(uncatch[i].port);
+                    wait_poke(uncatch[i].pid);
+                }
+                break;
+            }
             default:           kr = KERN_INVALID_ARGUMENT;           break;
             }
             if (kr == KERN_SUCCESS) sent++;
@@ -1547,6 +1957,23 @@ query_kernel_rusage(mach_port_t task_port, proc_rusage_t *out)
     if (kr_basic != KERN_SUCCESS)
         return kr_basic;
 
+    /*
+     * #934: TASK_BASIC_INFO's times are those of the task's threads that
+     * have ended, task->total_*_time; the threads still running are in
+     * TASK_THREAD_TIMES_INFO.  Read alone, a running process with one thread
+     * spent no time, and neither did one read as it exits, with its thread
+     * still there: wait4()'s rusage and getrusage() both want the sum.
+     */
+    {
+        task_thread_times_info_data_t live;
+        mach_msg_type_number_t lcnt = TASK_THREAD_TIMES_INFO_COUNT;
+
+        if (task_info(task_port, TASK_THREAD_TIMES_INFO,
+                      (task_info_t)&live, &lcnt) == KERN_SUCCESS) {
+            time_value_add(&basic.user_time, &live.user_time);
+            time_value_add(&basic.system_time, &live.system_time);
+        }
+    }
     out->utime_sec   = (uint32_t)basic.user_time.seconds;
     out->utime_usec  = (uint32_t)basic.user_time.microseconds;
     out->stime_sec   = (uint32_t)basic.system_time.seconds;
@@ -1656,10 +2083,23 @@ proc_S_set_exit_code(
     pthread_mutex_lock(&pid_lock);
     e = find_by_pid_locked(pid);
     if (e) {
-        e->exit_code = code;
+        /* #934: PROC_EXIT_SIGNALED marks a death by signal, which the
+         * process declares on its way out; exit_code keeps 128 + N for an
+         * image whose waitpid reads it the old way. */
+        if (code & PROC_EXIT_SIGNALED) {
+            e->end_signal = (uint8_t)(code & 0x7f);
+            e->exit_code = 128 + (code & 0x7f);
+        } else {
+            e->end_signal = 0;
+            e->exit_code = code;
+        }
         e->exit_declared = 1;
     }
     pthread_mutex_unlock(&pid_lock);
+
+    /* #934: the process is about to end; its usage, while it can be read. */
+    if (e)
+        refresh_rusage_for_pid(pid);
 
     *result = e ? PROC_OK : PROC_ERR_NOT_FOUND;
     return KERN_SUCCESS;
@@ -2034,6 +2474,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
          * with that read "exited normally" (#496, the class of #580). */
         if (!e->exit_declared) {
             e->exit_code = 128 + PROC_SIGKILL;
+            e->end_signal = PROC_SIGKILL;   /* #934 */
             e->exit_declared = 1;
         }
         subscriber    = e->exit_notify;
@@ -2089,6 +2530,13 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 
     if (subscriber != MACH_PORT_NULL)
         fire_exit_notify(subscriber, pid, code);
+    /* #934: no old-style subscriber reaped it: a waiting parent's proc_wait
+     * has it, reaped once its report is queued, or it waits for the next. */
+    else if (pid != 0)
+        wait_poke(pid);
+    /* And what the dead process was waiting for goes with it. */
+    if (pid != 0)
+        wait_drop_parent(pid);
 
     /* Deliver SIGCHLD to parent.  sender_pid carries the dead child's
      * pid so the parent can waitpid() it.  Best-effort — if the port
