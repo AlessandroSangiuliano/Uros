@@ -1,0 +1,55 @@
+Kind: ablation
+Issue: #904
+Takes out: the event counts -- a reader sleeps on FLIPC's prod_tail and a writer on cons_head, as before them, where pipe_server's wake for an end gone does not reach: [44]'s reader of a writer killed asleep sleeps for good, and the watch ends it
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[44\] WRONG -- the reader of a pipe whose writer was killed asleep ended -1
+
+diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
+index fc47e263..05f08198 100644
+--- a/uros/src/lib/libposix-uros/posix_pipe.c
++++ b/uros/src/lib/libposix-uros/posix_pipe.c
+@@ -202,21 +202,33 @@ head_pos(flipc2_channel_t ch, uint32_t tail)
+ static void
+ wait_for_room(struct uros_pipe_shared *sh, uint32_t ev)
+ {
+-	__atomic_store_n(&sh->writer_sleeps, 1, __ATOMIC_SEQ_CST);
+-	if (!__atomic_load_n(&sh->readers_gone, __ATOMIC_SEQ_CST))
+-		(void)urmach_futex((unsigned int *)&sh->ev_room,
+-				   URMACH_FUTEX_WAIT, ev, 0, (unsigned int *)0);
+-	__atomic_store_n(&sh->writer_sleeps, 0, __ATOMIC_RELAXED);
++	/* 904-gone-slept-through: on FLIPC's cons_head, as before them */
++	struct flipc2_channel_header *hdr = (struct flipc2_channel_header *)
++		((uint8_t *)sh - PIPE_DATA_OFFSET);
++	uint32_t seen = hdr->cons_head;
++
++	(void)ev;
++	hdr->prod_sleeping = 1;
++	FLIPC2_FULL_FENCE();
++	if (hdr->cons_head == seen && !sh->readers_gone)
++		(void)FLIPC2_FUTEX_WAIT(&hdr->cons_head, seen, 0);
++	hdr->prod_sleeping = 0;
+ }
+ 
+ static void
+ wait_for_data(struct uros_pipe_shared *sh, uint32_t ev)
+ {
+-	__atomic_store_n(&sh->reader_sleeps, 1, __ATOMIC_SEQ_CST);
+-	if (!__atomic_load_n(&sh->writers_gone, __ATOMIC_SEQ_CST))
+-		(void)urmach_futex((unsigned int *)&sh->ev_data,
+-				   URMACH_FUTEX_WAIT, ev, 0, (unsigned int *)0);
+-	__atomic_store_n(&sh->reader_sleeps, 0, __ATOMIC_RELAXED);
++	/* 904-gone-slept-through: on FLIPC's prod_tail, as before them */
++	struct flipc2_channel_header *hdr = (struct flipc2_channel_header *)
++		((uint8_t *)sh - PIPE_DATA_OFFSET);
++	uint32_t head = hdr->cons_head;
++
++	(void)ev;
++	hdr->cons_sleeping = 1;
++	FLIPC2_FULL_FENCE();
++	if (hdr->prod_tail == head && !sh->writers_gone)
++		(void)FLIPC2_FUTEX_WAIT(&hdr->prod_tail, head, 0);
++	hdr->cons_sleeping = 0;
+ }
+ 
+ /* A reader released a descriptor: room for a writer that waits for it. */

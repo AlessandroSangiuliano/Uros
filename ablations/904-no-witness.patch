@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #904
+Takes out: the registration with pipe_server -- pipe() makes the pipe and asks pipe_server for nothing, so no token stands for an end and nothing ever says one has gone: [42]'s third read, after the write end's close(), answers EAGAIN where it must answer end of file
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[42\] WRONG -- in one process, 5 bytes and the write end closed: reads of 2, 3 and -1
+
+diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
+index fc47e263..b82e1f73 100644
+--- a/uros/src/lib/libposix-uros/posix_pipe.c
++++ b/uros/src/lib/libposix-uros/posix_pipe.c
+@@ -516,8 +516,7 @@ pipe_witness(struct uros_pipe *p)
+ 	p->port = MACH_PORT_NULL;
+ 	p->token[PIPE_END_READ] = p->token[PIPE_END_WRITE] = MACH_PORT_NULL;
+ 	p->ends[PIPE_END_READ] = p->ends[PIPE_END_WRITE] = 0;
+-	if (service == MACH_PORT_NULL)
+-		return 0;
++	return 0;	/* 904-no-witness */
+ 	if (flipc2_channel_make_entry(p->ch, PIPE_CHANNEL_SIZE,
+ 				      FLIPC2_ROLE_PRODUCER, &entry)
+ 	    != FLIPC2_SUCCESS)

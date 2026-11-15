@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #904
+Takes out: the child's own tokens -- fork() gives the child a copy of each of the parent's, so that parent and child are one holder to pipe_server, and the parent's close() of an end, which tells pipe_server it is gone, takes the end from the children too: [42]'s writer child, its end gone with the parent's close(), gets EPIPE
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[42\] WRONG -- 
+
+diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
+index fc47e263..f7f4b6b0 100644
+--- a/uros/src/lib/libposix-uros/posix_pipe.c
++++ b/uros/src/lib/libposix-uros/posix_pipe.c
+@@ -703,12 +703,10 @@ __uros_pipe_fork(mach_port_t child, unsigned int child_pid)
+ 
+ 			if (p->token[e] == MACH_PORT_NULL)
+ 				continue;
+-			if (pipe_token(p->port, e, (int)child_pid, &t)
+-			    == KERN_SUCCESS &&
+-			    mach_port_insert_right(child, p->token[e], t,
+-						   MACH_MSG_TYPE_MOVE_SEND)
+-			    == KERN_SUCCESS)
+-				continue;
++			/* 904-child-shares-tokens: the parent's own token, copied */
++			(void)child_pid;
++			copy_send(child, p->token[e]);
++			continue;
+ 			if (t != MACH_PORT_NULL)
+ 				(void)mach_port_deallocate(mach_task_self(), t);
+ 			(void)vm_write(child, (vm_address_t)&p->token[e],

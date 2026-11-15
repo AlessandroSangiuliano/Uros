@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #904
+Takes out: the freeing of a dead holder's lock -- a writer killed inside write() on a full pipe leaves the writers' lock held by its pid for good: [44]'s second writer waits for it, and the reader for its bytes
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[44\] WRONG -- .*the lock was NOT freed
+
+diff --git a/uros/src/servers/pipe_server/pipe_server.c b/uros/src/servers/pipe_server/pipe_server.c
+index 0d5cdecd..6c285a97 100644
+--- a/uros/src/servers/pipe_server/pipe_server.c
++++ b/uros/src/servers/pipe_server/pipe_server.c
+@@ -224,10 +224,11 @@ token_gone(struct token_rec *t)
+ 	if (p->port == MACH_PORT_NULL || p->live[end] == 0)
+ 		return;
+ 	p->live[end]--;
+-	if (!pid_holds(pi, pid)) {
+-		free_lock(&p->sh->wlock, pid, end_name[PIPE_END_WRITE], pi);
+-		free_lock(&p->sh->rlock, pid, end_name[PIPE_END_READ], pi);
+-	}
++	/* 904-dead-lock-kept: a dead holder's lock stays held */
++	(void)free_lock;
++	(void)pid_holds;
++	(void)end_name;
++	(void)pid;
+ 	if (p->live[end] == 0)
+ 		end_gone(p, end);
+ 	if (p->live[PIPE_END_READ] == 0 && p->live[PIPE_END_WRITE] == 0)
