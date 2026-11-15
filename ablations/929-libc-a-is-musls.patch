@@ -1,0 +1,38 @@
+Kind: ablation
+Issue: #929
+Takes out: the static umbrella's name -- it is libc-uros.a again, and libc.a in the install directory is musl's own, with the weak -ENOSYS stubs and no dispatcher: a static link with a plain -lc finds that one, and musl_test's [29] must see /static_lc_test fail
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[29\] WRONG -- /static_lc_test ended with status
+Note: 4 of 4 caught and 4 of 4 passed at 042b79cb on victus, TCG and KVM: in every ablated boot /static_lc_test, linked against musl's own libc.a, printed nothing and ended with status 0x9
+
+diff --git a/uros/src/contrib/CMakeLists.txt b/uros/src/contrib/CMakeLists.txt
+index 92aa4b88..cd795a1f 100644
+--- a/uros/src/contrib/CMakeLists.txt
++++ b/uros/src/contrib/CMakeLists.txt
+@@ -18,7 +18,7 @@ if(UROS_BUILD_MUSL)
+   # static link with a plain -lc gets the dispatcher; musl's make install
+   # still writes its own there, and the umbrella's archive step, which every
+   # install makes run again, writes over it.
+-  set(MUSL_LIB      ${MUSL_BUILD}/lib/libc.a)
++  set(MUSL_LIB      ${MUSL_PREFIX}/lib/libc.a)  # 929-libc-a-is-musls
+   set(MUSL_OUT      ${MUSL_PREFIX}/lib/libc-musl.a)
+   # Phase 7 (#234 incr 2a): shared build also emits libc.so (which IS the
+   # musl dynamic linker, entry _dlstart) and the ld-musl-i386.so.1 symlink.
+@@ -82,7 +82,7 @@ if(UROS_BUILD_MUSL)
+     # umbrella with the musl from before.
+     # #929: not the installed libc.a, which the umbrella's archive step
+     # declares as its own.
+-    INSTALL_BYPRODUCTS ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
++    INSTALL_BYPRODUCTS ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
+     LOG_CONFIGURE     ON
+     LOG_BUILD         ON
+     LOG_INSTALL       ON
+@@ -234,7 +234,7 @@ if(UROS_BUILD_MUSL)
+   # libc-uros.a, beside musl's own libc.a with its -ENOSYS stubs, which is
+   # what such a link found: #291 again, in every program a build that is not
+   # ours would link.
+-  set(UROS_LIBC_A    ${MUSL_PREFIX}/lib/libc.a)
++  set(UROS_LIBC_A    ${MUSL_PREFIX}/lib/libc-uros.a)  # 929-libc-a-is-musls
+   set(UROS_LIBC_MRI  ${CMAKE_CURRENT_BINARY_DIR}/libc-uros.mri)
+   set(UROS_LIBC_PARTS libcap libnetname libvfs-musl libflipc2 libmach_core libposix-uros)
+ 

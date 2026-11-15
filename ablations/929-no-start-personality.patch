@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #929
+Takes out: the start of the Mach personality in musl's __libc_start_main() -- a program linked statically with a plain -lc comes in through crt1 with no task port seeded, no well-known ports and no proc_server identity: musl_test's [29] must see /static_lc_test fail
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[29\] WRONG -- /static_lc_test ended with status
+Note: 4 of 4 caught and 4 of 4 passed at 042b79cb on victus, TCG and KVM: in every ablated boot /static_lc_test printed that getpid() answered 1, where proc_server had handed it pid 222, and ended with status 0x9; the fixed tree's printed 222 and ended 0
+
+diff --git a/uros/src/contrib/musl/src/env/__libc_start_main.c b/uros/src/contrib/musl/src/env/__libc_start_main.c
+index dcca5f17..43dfe9f5 100644
+--- a/uros/src/contrib/musl/src/env/__libc_start_main.c
++++ b/uros/src/contrib/musl/src/env/__libc_start_main.c
+@@ -100,7 +100,7 @@ static int libc_start_main_stage2(int (*main)(int,char **,char **), int argc, ch
+ 	 * build that is not ours links.  libc.so's constructor has already done
+ 	 * it for a dynamic program, and the call returns at once; libmach's crt0
+ 	 * does not come here at all. */
+-	__uros_start_personality();
++	/* 929-no-start-personality: no Mach personality from here */
+ 	__libc_start_init();
+ 
+ 	/* Pass control to the application */

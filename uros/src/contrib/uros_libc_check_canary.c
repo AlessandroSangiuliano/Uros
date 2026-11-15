@@ -2,7 +2,8 @@
  * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * SPDX-License-Identifier: MIT
  *
- * What uros_libc_check.sh has to refuse every time libc-uros.a is made (#733).
+ * What uros_libc_check.sh has to refuse every time the static umbrella libc.a
+ * is made (#733; libc-uros.a until #929).
  * This object goes once into each of the canary's first two parts.  Seven of
  * its names are names musl defines: strchr and __errno_location strong, malloc
  * and pthread_create only weak, environ as a weak object, in6addr_any

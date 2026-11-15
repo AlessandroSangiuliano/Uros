@@ -159,6 +159,7 @@ set(LIBPOSIX_UROS_SRCS
   posix_fd.c
   posix_time.c
   posix_exec_fds.c
+  uros_start.c
   stubs.c
   libmach_musl.c
   signals.c

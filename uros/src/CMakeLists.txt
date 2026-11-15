@@ -631,6 +631,8 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
   add_subdirectory(tests/hello_dyn_world)
   # #917: mach_error() in a program of musl, static and dynamic.
   add_subdirectory(tests/mach_error_test)
+  # #929: a program linked -static with a plain -lc, as a foreign build would.
+  add_subdirectory(tests/static_lc_test)
   add_subdirectory(tests/musl_test)
   add_subdirectory(cmds/ush)
 endif()

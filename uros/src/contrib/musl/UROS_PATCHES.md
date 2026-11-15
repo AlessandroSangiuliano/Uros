@@ -40,6 +40,9 @@ each entry by hand.
 | 2026-11-06 | `src/internal/uros_main_thread.c`    | #414  | `libc.auxv` is set: a NULL there is a read of address 0 in `malloc()`'s first call. |
 | 2026-11-06 | `src/internal/pthread_impl.h`        | #414  | `struct __pthread` gains `uros_mach_state`, in part 2: each thread's MIG reply port. |
 | 2026-11-06 | `src/internal/uros_main_thread.c`    | #414  | `__uros_mach_thread_state()`, what libposix-uros hands to `mig_init()`. |
+| 2026-11-09 | `src/internal/uros_main_thread.c`    | #916  | `__uros_libc_init(envp, pn)`: crt0 hands over the environment and argv[0], and it sets `__environ`, `__progname` and `__progname_full` as `__init_libc()` does.  A static program's `getenv()` answered NULL for every name, and `err()` printed `(null)`. |
+| 2026-11-09 | `src/env/__libc_start_main.c`        | #929  | `libc_start_main_stage2()` calls libposix-uros's `__uros_start_personality()` before the program's constructors: the Mach personality for a program that comes in through crt1 linked statically with a plain `-lc`.  In a dynamic program libc.so's constructor has done it already and the call returns at once. |
+| 2026-11-09 | `src/internal/uros_syscall_stub.c`   | #929  | WEAK `__uros_start_personality`, so that musl's own libc.so links standalone. |
 
 ## Planned future patches (Phase 3+)
 

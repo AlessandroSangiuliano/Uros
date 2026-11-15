@@ -64,29 +64,20 @@
  * constructor executes with all of it already live.  Calling __uros_libc_init() wholesale
  * would redo (and disturb) that.  So we run only its personality tail
  * here, giving dynamic tools the same proc identity + ctty routing as
- * static ones.  Both symbols are weak: a smoke build that folds this
- * TU without the rest of libposix-uros still links.
+ * static ones.
+ *
+ * #929: the seeding and the tail are __uros_start_personality(), in
+ * uros_start.c, which musl's __libc_start_main() calls as well, for a
+ * program linked statically with a plain -lc that comes in through crt1
+ * too.  This constructor runs first, inside libc.so before the program's
+ * crt1, and the later call finds the work done.
  */
 
-extern void mach_task_self_init(void);
-extern void mach_init_ports(void);
-extern void __uros_signals_init(void) __attribute__((weak));
-extern void __uros_absorb_inherited_fds(void) __attribute__((weak));
+void __uros_start_personality(void);
 
 __attribute__((constructor))
 static void
 __uros_dyn_bootstrap(void)
 {
-    /* mach_init_ports() reads mach_task_self_ via the `mach_task_self()`
-     * macro; if we don't seed it the trap arg is 0 and every
-     * special-port lookup fails.  Static binaries seed it inside
-     * mach_init(); mach_task_self_init() does the equivalent here. */
-    mach_task_self_init();
-    mach_init_ports();
-
-    /* Personality tail — needs the well-known ports seeded just above. */
-    if (__uros_signals_init)
-        __uros_signals_init();
-    if (__uros_absorb_inherited_fds)
-        __uros_absorb_inherited_fds();
+    __uros_start_personality();
 }
