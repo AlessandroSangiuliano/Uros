@@ -53,6 +53,7 @@
 #pragma GCC diagnostic pop
 
 #include "posix_pipe.h"
+#include "pipe_types.h"		/* the layout pipe_server shares (#904) */
 
 extern unsigned int __uros_my_pid;	/* signals.c */
 
@@ -65,13 +66,13 @@ extern unsigned int __uros_my_pid;	/* signals.c */
  *   data region:
  *     struct uros_pipe_shared   PIPE_SHARED bytes, at data offset 0
  *     the byte ring             PIPE_RING bytes, the bytes a pipe holds
+ *
+ * The constants and the shared state are pipe_types.h's: pipe_server finds
+ * the words it writes by them, in a mapping of its own.
  */
-#define PIPE_SLOTS	256u
-#define PIPE_SHARED	4096u
-#define PIPE_RING	65536u
-#define PIPE_CHANNEL_SIZE						\
-	((FLIPC2_HEADER_SIZE + PIPE_SLOTS * FLIPC2_DESC_SIZE +		\
-	  PIPE_SHARED + PIPE_RING + 4095u) & ~4095u)
+_Static_assert(PIPE_HEADER_BYTES == FLIPC2_HEADER_SIZE &&
+	       PIPE_DESC_BYTES == FLIPC2_DESC_SIZE,
+	       "pipe_types.h's layout and flipc2.h's disagree");
 
 #define PIPE_OP_DATA	1u
 
@@ -82,32 +83,6 @@ _Static_assert((PIPE_RING & (PIPE_RING - 1)) == 0,
 	       "the byte ring's size must be a power of two");
 _Static_assert(PIPE_BUF <= PIPE_RING,
 	       "a write of PIPE_BUF bytes must fit the ring whole");
-
-/*
- * The pipe's own state, at data offset 0 of the channel.  Every holder may
- * write any of it, so nothing here is trusted to stay in bounds.
- */
-struct uros_pipe_shared {
-	uint32_t		magic;
-	uint32_t		ring_bytes;
-	uint32_t		_pad0[14];
-
-	/* The writers' line. */
-	volatile uint32_t	wlock;		/* 0 free; else holder | PL_WAITERS */
-	uint32_t		_pad1[15];
-
-	/* The readers' line. */
-	volatile uint32_t	rlock;
-	volatile uint32_t	partial;	/* bytes of the head descriptor read */
-	uint32_t		_pad2[14];
-
-	/* What pipe_server will set (#911). */
-	volatile uint32_t	writers_gone;	/* end of file */
-	volatile uint32_t	readers_gone;	/* EPIPE */
-	uint32_t		_pad3[14];
-};
-
-#define UROS_PIPE_MAGIC	0x50495031u	/* "PIP1" */
 
 _Static_assert(sizeof(struct uros_pipe_shared) <= PIPE_SHARED,
 	       "the pipe's shared state outgrew its page");
@@ -124,14 +99,11 @@ static pthread_mutex_t	pipes_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
  * A lock word holds its holder's pid, with the top bit for "others sleep on
- * it", so that pipe_server can free the lock of a holder that died (#911):
- * it knows the holders of a pipe by pid.  A task with no pid holds it as
- * PL_NO_PID.  A forked child has a pid of its own, and the word is in the
- * shared page, so a fork never copies a lock as held.
+ * it" (PL_WAITERS, PL_NO_PID: pipe_types.h), so that pipe_server can free the
+ * lock of a holder that died: it knows the holders of a pipe by the pid each
+ * token was asked for.  A forked child has a pid of its own, and the word is
+ * in the shared page, so a fork never copies a lock as held.
  */
-#define PL_WAITERS	0x80000000u
-#define PL_NO_PID	0x7fffffffu
-
 static uint32_t
 pipe_owner(void)
 {
@@ -210,39 +182,59 @@ head_pos(flipc2_channel_t ch, uint32_t tail)
 }
 
 /*
- * Sleep until a reader releases a descriptor, as flipc2_produce_wait() does:
- * flipc2_consume_release() wakes every producer that said it sleeps.  The
- * futex returns at once if cons_head has already moved, so a release between
- * the look and the wait is not lost -- once the release's store is visible.
- * ⚠️ flipc2_consume_release() orders that store before its load of
- * prod_sleeping with a compiler barrier only, an order x86 does not keep:
- * the fence #299 put on the commit side is not on this one: #933, FLIPC's
- * to fix.
+ * The waits sleep on the event counts of pipe_types.h, not on FLIPC's
+ * cons_head and prod_tail, for one reason: a wait must also end when the
+ * other end goes, and that is pipe_server's flag, in another word.  Slept on
+ * cons_head, a writer that looked at readers_gone just before pipe_server set
+ * it would sleep for good, since the kernel compares only the word it sleeps
+ * on, and nothing would move cons_head again.
+ *
+ * The count is read at the top of the caller's loop, before it looks at the
+ * ring, and passed here.  Whatever ends the wait -- a release, a commit, the
+ * other end gone -- adds one to the count, then looks whether anybody sleeps.
+ * So either the sleeper's count is no longer the kernel's, and it does not
+ * sleep, or the waker sees the sleeper's flag, and wakes it: the store of
+ * the flag and the add are each ordered before the other side's load.  One
+ * writer and one reader at most sleep here, each holding its side's lock.
  */
 static void
-wait_for_room(flipc2_channel_t ch, struct uros_pipe_shared *sh)
+wait_for_room(struct uros_pipe_shared *sh, uint32_t ev)
 {
-	uint32_t	seen = *ch->cons_head;
-
-	*ch->prod_sleeping = 1;
-	FLIPC2_FULL_FENCE();
-	if (*ch->cons_head == seen && !sh->readers_gone)
-		(void)FLIPC2_FUTEX_WAIT(ch->cons_head, seen, 0);
-	*ch->prod_sleeping = 0;
+	__atomic_store_n(&sh->writer_sleeps, 1, __ATOMIC_SEQ_CST);
+	if (!__atomic_load_n(&sh->readers_gone, __ATOMIC_SEQ_CST))
+		(void)urmach_futex((unsigned int *)&sh->ev_room,
+				   URMACH_FUTEX_WAIT, ev, 0, (unsigned int *)0);
+	__atomic_store_n(&sh->writer_sleeps, 0, __ATOMIC_RELAXED);
 }
 
-/* The same on the other side, as flipc2_consume_wait() does: a commit wakes
- * the consumer that said it sleeps. */
 static void
-wait_for_data(flipc2_channel_t ch, struct uros_pipe_shared *sh)
+wait_for_data(struct uros_pipe_shared *sh, uint32_t ev)
 {
-	uint32_t	head = *ch->cons_head;
+	__atomic_store_n(&sh->reader_sleeps, 1, __ATOMIC_SEQ_CST);
+	if (!__atomic_load_n(&sh->writers_gone, __ATOMIC_SEQ_CST))
+		(void)urmach_futex((unsigned int *)&sh->ev_data,
+				   URMACH_FUTEX_WAIT, ev, 0, (unsigned int *)0);
+	__atomic_store_n(&sh->reader_sleeps, 0, __ATOMIC_RELAXED);
+}
 
-	*ch->cons_sleeping = 1;
-	FLIPC2_FULL_FENCE();
-	if (*ch->prod_tail == head && !sh->writers_gone)
-		(void)FLIPC2_FUTEX_WAIT(ch->prod_tail, head, 0);
-	*ch->cons_sleeping = 0;
+/* A reader released a descriptor: room for a writer that waits for it. */
+static void
+room_made(struct uros_pipe_shared *sh)
+{
+	__atomic_add_fetch(&sh->ev_room, 1, __ATOMIC_SEQ_CST);
+	if (__atomic_load_n(&sh->writer_sleeps, __ATOMIC_SEQ_CST))
+		(void)urmach_futex((unsigned int *)&sh->ev_room,
+				   URMACH_FUTEX_WAKE, 1, 0, (unsigned int *)0);
+}
+
+/* A writer committed a descriptor: data for a reader that waits for it. */
+static void
+data_made(struct uros_pipe_shared *sh)
+{
+	__atomic_add_fetch(&sh->ev_data, 1, __ATOMIC_SEQ_CST);
+	if (__atomic_load_n(&sh->reader_sleeps, __ATOMIC_SEQ_CST))
+		(void)urmach_futex((unsigned int *)&sh->ev_data,
+				   URMACH_FUTEX_WAKE, 1, 0, (unsigned int *)0);
 }
 
 /* n bytes from the caller's pieces, from piece *k at *koff on. */
@@ -327,6 +319,9 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
 	/* Another task's writer moved cons_head on since this handle looked. */
 	ch->cached_cons_head = *ch->cons_head;
 	while (done < total) {
+		/* Before the look at the ring: see wait_for_room(). */
+		uint32_t		ev = __atomic_load_n(&sh->ev_room,
+							     __ATOMIC_ACQUIRE);
 		uint32_t		tail = *ch->prod_tail;
 		uint32_t		tpos = tail_pos(ch);
 		uint32_t		used = tpos - head_pos(ch, tpos);
@@ -358,7 +353,7 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
 				stopped = -EAGAIN;
 				break;
 			}
-			wait_for_room(ch, sh);
+			wait_for_room(sh, ev);
 			continue;
 		}
 		chunk = left;
@@ -382,6 +377,7 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
 		d->param[2] = 0;
 		d->status = 0;
 		flipc2_produce_commit(ch);
+		data_made(sh);
 		done += chunk;
 	}
 	pipe_unlock(&sh->wlock);
@@ -408,6 +404,9 @@ __uros_pipe_read(struct uros_pipe *p, const struct uros_pipe_iov *iov,
 	/* Another task's reader moved prod_tail's view on since this one. */
 	ch->cached_prod_tail = *ch->prod_tail;
 	for (;;) {
+		/* Before the look at the ring: see wait_for_room(). */
+		uint32_t		ev = __atomic_load_n(&sh->ev_data,
+							     __ATOMIC_ACQUIRE);
 		struct flipc2_desc	*d = flipc2_consume_peek(ch);
 		uint64_t		off, len;
 		uint32_t		part;
@@ -420,7 +419,7 @@ __uros_pipe_read(struct uros_pipe *p, const struct uros_pipe_iov *iov,
 				stopped = -EAGAIN;
 				break;
 			}
-			wait_for_data(ch, sh);
+			wait_for_data(sh, ev);
 			continue;
 		}
 		/*
@@ -448,6 +447,7 @@ __uros_pipe_read(struct uros_pipe *p, const struct uros_pipe_iov *iov,
 		if (part == len) {
 			sh->partial = 0;
 			flipc2_consume_release(ch);
+			room_made(sh);
 		} else {
 			sh->partial = part;
 		}

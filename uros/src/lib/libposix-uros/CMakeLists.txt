@@ -263,6 +263,7 @@ target_include_directories(libposix-uros PRIVATE
   ${CMAKE_SOURCE_DIR}/src/servers/proc_server
   ${CMAKE_SOURCE_DIR}/src/servers/exec_server
   ${CMAKE_SOURCE_DIR}/src/servers/char_server
+  ${CMAKE_SOURCE_DIR}/src/servers/pipe_server   # pipe_types.h (#904)
   ${CMAKE_SOURCE_DIR}/src/lib/libvfs   # libvfs.h, vfs_types.h (#262)
 )
 
