@@ -62,3 +62,13 @@ routine pipe_token(
 routine pipe_entry(
 		pipe		: mach_port_t;
 	out	entry		: mach_port_copy_send_t);
+
+/*
+ * The holder of this token leaves its end, now: sent to the token itself by
+ * a task that closes its last description of the end.  The no-senders
+ * notification would say the same, but later than close() returns, and a
+ * read with O_NONBLOCK right after the last writer's close() must answer end
+ * of file, not EAGAIN.  The token is gone when this returns.
+ */
+routine pipe_leave(
+		token		: mach_port_t);

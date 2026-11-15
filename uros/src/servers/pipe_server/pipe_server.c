@@ -334,6 +334,22 @@ pipe_S_entry(mach_port_t pipe, mach_port_t *entry)
 	return KERN_SUCCESS;
 }
 
+/*
+ * A holder leaving its end while it lives: what the token's no-senders
+ * notification would say, said before its close() returns.  The token's
+ * receive right goes, and the notification with it.
+ */
+kern_return_t
+pipe_S_leave(mach_port_t token)
+{
+	struct token_rec	*t = token_find(token);
+
+	if (t == NULL)
+		return KERN_INVALID_ARGUMENT;
+	token_gone(t);
+	return KERN_SUCCESS;
+}
+
 /* ------------------------------------------------------------------ */
 /*  notify.defs                                                        */
 /* ------------------------------------------------------------------ */
