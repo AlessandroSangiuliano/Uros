@@ -37,9 +37,11 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <mach_init.h>          /* mach_task_self */
+#include <mach_init.h>          /* mach_task_self, name_server_port */
 #include <mach/vm_inherit.h>
+#include <servers/netname.h>    /* netname_look_up: pipe_server's port */
 #include "mach.h"               /* MIG: vm_inherit */
+#include "pipe.h"               /* MIG: pipe.defs, pipe_server (#904) */
 
 /*
  * flipc2.h's flipc2_ring_count() never reads its `hdr', and this library is
@@ -460,6 +462,188 @@ __uros_pipe_read(struct uros_pipe *p, const struct uros_pipe_iov *iov,
 }
 
 /* ------------------------------------------------------------------ */
+/*  pipe_server                                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * pipe_server's service port, asked of the name server once per task.  One
+ * try, not proc_server's patient ones: where there is no pipe_server -- i386,
+ * or a bundle without it -- a pipe works as it did before it, never saying
+ * that an end has gone, and pipe() must not wait for a server that will not
+ * come.  MACH_PORT_DEAD keeps "there is none".  A forked child holds the same
+ * right under the same name: posix_fork.c gives it, with the pipes.
+ */
+static mach_port_t	pipe_service_port = MACH_PORT_NULL;
+
+static mach_port_t
+pipe_service(void)
+{
+	char		host[80] = "";
+	char		serv[80] = "pipe_server";
+	mach_port_t	port = MACH_PORT_NULL;
+
+	pthread_mutex_lock(&pipes_lock);
+	if (pipe_service_port == MACH_PORT_NULL) {
+		if (name_server_port == MACH_PORT_NULL ||
+		    netname_look_up(name_server_port, host, serv, &port)
+		    != NETNAME_SUCCESS || port == MACH_PORT_NULL)
+			port = MACH_PORT_DEAD;
+		pipe_service_port = port;
+	}
+	port = pipe_service_port;
+	pthread_mutex_unlock(&pipes_lock);
+	return port == MACH_PORT_DEAD ? MACH_PORT_NULL : port;
+}
+
+/* A send that failed before it left: MIG gives back an error of message.h's
+ * MACH_SEND_* range, and the rights the message was to move are the
+ * caller's still.  Any later error means they went with the message. */
+#define PIPE_SEND_FAILED(kr)	(((unsigned int)(kr) & ~0x3fffu) == 0x10000000u)
+
+/*
+ * The pipe registered with pipe_server, and a token for each end: 0, or a
+ * negative errno with nothing kept.  No pipe_server: 0, and none of it.
+ */
+static int
+pipe_witness(struct uros_pipe *p)
+{
+	mach_port_t	service = pipe_service();
+	mach_port_t	entry = MACH_PORT_NULL, port = MACH_PORT_NULL;
+	mach_port_t	tok[2] = { MACH_PORT_NULL, MACH_PORT_NULL };
+	int		me = (int)pipe_owner();
+	kern_return_t	kr;
+
+	p->port = MACH_PORT_NULL;
+	p->token[PIPE_END_READ] = p->token[PIPE_END_WRITE] = MACH_PORT_NULL;
+	p->ends[PIPE_END_READ] = p->ends[PIPE_END_WRITE] = 0;
+	if (service == MACH_PORT_NULL)
+		return 0;
+	if (flipc2_channel_make_entry(p->ch, PIPE_CHANNEL_SIZE,
+				      FLIPC2_ROLE_PRODUCER, &entry)
+	    != FLIPC2_SUCCESS)
+		return -ENFILE;
+	kr = pipe_register(service, entry, PIPE_CHANNEL_SIZE, &port);
+	if (kr != KERN_SUCCESS) {
+		if (PIPE_SEND_FAILED(kr))
+			(void)mach_port_deallocate(mach_task_self(), entry);
+		return -ENFILE;
+	}
+	kr = pipe_token(port, PIPE_END_READ, me, &tok[PIPE_END_READ]);
+	if (kr == KERN_SUCCESS)
+		kr = pipe_token(port, PIPE_END_WRITE, me, &tok[PIPE_END_WRITE]);
+	if (kr != KERN_SUCCESS) {
+		/* pipe_server lets the pipe go with these, its tokens' and its
+		 * port's last senders. */
+		if (tok[PIPE_END_READ] != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(),
+						   tok[PIPE_END_READ]);
+		(void)mach_port_deallocate(mach_task_self(), port);
+		return -ENFILE;
+	}
+	p->port = port;
+	p->token[PIPE_END_READ] = tok[PIPE_END_READ];
+	p->token[PIPE_END_WRITE] = tok[PIPE_END_WRITE];
+	return 0;
+}
+
+void
+__uros_pipe_end_get(struct uros_pipe *p, int end)
+{
+	p->ends[end]++;
+}
+
+unsigned int
+__uros_pipe_end_put(struct uros_pipe *p, int end)
+{
+	unsigned int	t = MACH_PORT_NULL;
+
+	if (p->ends[end] > 0 && --p->ends[end] == 0) {
+		t = p->token[end];
+		p->token[end] = MACH_PORT_NULL;
+	}
+	return t;
+}
+
+/*
+ * This task leaves an end: said to pipe_server before close() returns, so
+ * that a read with O_NONBLOCK right after the last writer's close() answers
+ * end of file and not EAGAIN -- the token's no-senders notification says the
+ * same, but later.  The name is then a dead one, or still the right if
+ * pipe_server could not be told, and goes either way.
+ */
+void
+__uros_pipe_token_put(unsigned int token)
+{
+	if (token == MACH_PORT_NULL)
+		return;
+	(void)pipe_leave((mach_port_t)token);
+	(void)mach_port_deallocate(mach_task_self(), (mach_port_t)token);
+}
+
+/* A copy of this task's send right `name' into `child', under that name. */
+static void
+copy_send(mach_port_t child, mach_port_t name)
+{
+	mach_port_t		right = MACH_PORT_NULL;
+	mach_msg_type_name_t	got = 0;
+
+	if (mach_port_extract_right(mach_task_self(), name,
+				    MACH_MSG_TYPE_COPY_SEND, &right, &got)
+	    != KERN_SUCCESS)
+		return;
+	if (mach_port_insert_right(child, name, right, got) != KERN_SUCCESS)
+		(void)mach_port_deallocate(mach_task_self(), right);
+}
+
+/*
+ * fork(): the child's hold on this task's pipes, given by posix_fork.c before
+ * the child's first instruction.  Its memory is a copy of this task's, the
+ * pipe table and every name in it included, and its IPC space is empty.  So
+ * it is given pipe_server's service port and each pipe's port under the names
+ * it knows them by, and for each end this task holds a token of its own,
+ * asked for its own pid, under the name of this task's.  Its locks are then
+ * its pid's, and its going is its own tokens' no-senders.  A token refused
+ * leaves the child without that end's, its copy of the name cleared, so that
+ * its close() gives back nothing: pipe_server sees the end go with this task,
+ * as if the child had closed it.
+ */
+void
+__uros_pipe_fork(mach_port_t child, unsigned int child_pid)
+{
+	unsigned int	none = MACH_PORT_NULL;
+	int		i, e;
+
+	pthread_mutex_lock(&pipes_lock);
+	if (pipe_service_port != MACH_PORT_NULL &&
+	    pipe_service_port != MACH_PORT_DEAD)
+		copy_send(child, pipe_service_port);
+	for (i = 0; i < PIPES_MAX; i++) {
+		struct uros_pipe	*p = &pipes[i];
+
+		if (!p->in_use || p->port == MACH_PORT_NULL)
+			continue;
+		copy_send(child, p->port);
+		for (e = PIPE_END_READ; e <= PIPE_END_WRITE; e++) {
+			mach_port_t	t = MACH_PORT_NULL;
+
+			if (p->token[e] == MACH_PORT_NULL)
+				continue;
+			if (pipe_token(p->port, e, (int)child_pid, &t)
+			    == KERN_SUCCESS &&
+			    mach_port_insert_right(child, p->token[e], t,
+						   MACH_MSG_TYPE_MOVE_SEND)
+			    == KERN_SUCCESS)
+				continue;
+			if (t != MACH_PORT_NULL)
+				(void)mach_port_deallocate(mach_task_self(), t);
+			(void)vm_write(child, (vm_address_t)&p->token[e],
+				       (vm_offset_t)&none, sizeof none);
+		}
+	}
+	pthread_mutex_unlock(&pipes_lock);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Making and letting go                                              */
 /* ------------------------------------------------------------------ */
 
@@ -470,7 +654,7 @@ __uros_pipe_new(struct uros_pipe **out)
 	mach_port_t		sem = MACH_PORT_NULL;
 	struct uros_pipe	*p = NULL;
 	struct uros_pipe_shared	*sh;
-	int			i;
+	int			i, rc;
 
 	if (flipc2_channel_create_ex(PIPE_CHANNEL_SIZE, PIPE_SLOTS,
 				     FLIPC2_CREATE_FLAT, &ch, &sem)
@@ -490,6 +674,11 @@ __uros_pipe_new(struct uros_pipe **out)
 		return -ENOMEM;
 	}
 	sh = (struct uros_pipe_shared *)flipc2_data_ptr(ch, 0);
+	/* Where pipe_server will look for it, by pipe_types.h's constants. */
+	if ((uint8_t *)sh != (uint8_t *)ch->hdr + PIPE_DATA_OFFSET) {
+		(void)flipc2_channel_detach(ch);
+		return -EIO;
+	}
 	memset(sh, 0, sizeof *sh);
 	sh->magic = UROS_PIPE_MAGIC;
 	sh->ring_bytes = PIPE_RING;
@@ -509,6 +698,16 @@ __uros_pipe_new(struct uros_pipe **out)
 	p->refs = 0;
 	p->ch = ch;
 	p->sh = sh;
+	rc = pipe_witness(p);
+	if (rc != 0) {
+		(void)flipc2_channel_detach(ch);
+		pthread_mutex_lock(&pipes_lock);
+		p->ch = NULL;
+		p->sh = NULL;
+		p->in_use = 0;
+		pthread_mutex_unlock(&pipes_lock);
+		return rc;
+	}
 	*out = p;
 	return 0;
 }
@@ -516,10 +715,20 @@ __uros_pipe_new(struct uros_pipe **out)
 void
 __uros_pipe_free(struct uros_pipe *p)
 {
+	/* A token left is a description never made, on a pipe2() that failed;
+	 * the last holder's going is pipe_server's to see, by these rights. */
+	__uros_pipe_token_put(p->token[PIPE_END_READ]);
+	__uros_pipe_token_put(p->token[PIPE_END_WRITE]);
+	if (p->port != MACH_PORT_NULL)
+		(void)mach_port_deallocate(mach_task_self(),
+					   (mach_port_t)p->port);
 	(void)flipc2_channel_detach(p->ch);
 	pthread_mutex_lock(&pipes_lock);
 	p->ch = NULL;
 	p->sh = NULL;
+	p->port = MACH_PORT_NULL;
+	p->token[PIPE_END_READ] = p->token[PIPE_END_WRITE] = MACH_PORT_NULL;
+	p->ends[PIPE_END_READ] = p->ends[PIPE_END_WRITE] = 0;
 	p->refs = 0;
 	p->in_use = 0;
 	pthread_mutex_unlock(&pipes_lock);

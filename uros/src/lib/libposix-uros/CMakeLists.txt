@@ -43,6 +43,33 @@ add_custom_command(
 )
 set_source_files_properties(${PROC_USER_C} ${PROC_USER_H} PROPERTIES GENERATED TRUE)
 
+# #904: pipe_server's client stubs, for posix_pipe.c: the registration of a
+# pipe, and its tokens, whose deaths pipe_server reads as an end gone.
+set(PIPE_DEFS   ${CMAKE_SOURCE_DIR}/src/servers/pipe_server/pipe.defs)
+set(PIPE_USER_C ${CMAKE_CURRENT_BINARY_DIR}/pipe_user.c)
+set(PIPE_USER_H ${CMAKE_CURRENT_BINARY_DIR}/pipe.h)
+
+add_custom_command(
+  OUTPUT ${PIPE_USER_C} ${PIPE_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    ${UROS_MIG_TARGET_ARGS}
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/servers/pipe_server
+    -header ${PIPE_USER_H}
+    -sheader /dev/null
+    -user ${PIPE_USER_C}
+    -server /dev/null
+    ${PIPE_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${PIPE_DEFS}
+  COMMENT "MIG: pipe.defs (libposix-uros)"
+  VERBATIM
+)
+set_source_files_properties(${PIPE_USER_C} ${PIPE_USER_H} PROPERTIES GENERATED TRUE)
+
 # #931: the server half of exc.defs, for exceptions.c -- the demultiplexer and
 # the three catch_ routines it calls, which exceptions.c writes.  It used to
 # come from libmach_core, which keeps user halves only now: a server half calls
@@ -173,6 +200,7 @@ set(LIBPOSIX_UROS_SRCS
   ${PROC_USER_C}
   ${EXEC_USER_C}
   ${CHAR_USER_C}
+  ${PIPE_USER_C}
   ${PU_EXC_GENERATED}
   ${UROS_TARGET_ARCH}/posix_tls.c
   ${UROS_TARGET_ARCH}/fork_capture.S

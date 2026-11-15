@@ -35,6 +35,7 @@
 #include <mach/mach_syscalls.h>	/* syscall_thread_switch (#583) */
 
 #include "posix_pipe.h"         /* pipes (#904) */
+#include "pipe_types.h"         /* PIPE_END_READ, PIPE_END_WRITE (#904) */
 
 /* From signals.c: proc_server send right + caller's pid. */
 extern mach_port_t  __uros_proc_port;
@@ -128,6 +129,8 @@ enum ofd_kind {
 };
 
 #define OFD_IS_PIPE(k)  ((k) == OFD_PIPE_READ || (k) == OFD_PIPE_WRITE)
+/* The end a pipe description is, as pipe_server names it (pipe_types.h). */
+#define OFD_PIPE_END(k) ((k) == OFD_PIPE_WRITE ? PIPE_END_WRITE : PIPE_END_READ)
 
 struct posix_ofd {
     int       refs;         /* descriptors of this task naming it; 0 = free */
@@ -137,6 +140,9 @@ struct posix_ofd {
     vfs_fd_t  vfd;          /* OFD_VFS; VFS_FD_INVALID otherwise */
     unsigned  tty_dev_id;   /* OFD_TTY: char_server's dev_id */
     struct uros_pipe *pipe; /* OFD_PIPE_*: holds one of the pipe's refs */
+    unsigned  token;        /* a freed description's copy only: the token of
+                               its end, to give back when it was the end's
+                               last (#904), or 0 */
 };
 
 struct posix_fd {
@@ -188,6 +194,7 @@ static struct posix_ofd *ofd_alloc_locked(int kind, vfs_fd_t vfd,
         o->vfd        = vfd;
         o->tty_dev_id = tty_dev_id;
         o->pipe       = NULL;
+        o->token      = 0;
         return o;
     }
     return NULL;
@@ -216,8 +223,12 @@ static int pfd_unbind_locked(int fd, struct posix_ofd *gone)
     if (--o->refs > 0)
         return 0;
     *gone = *o;
-    /* #904: a pipe end gives back its hold on the pipe; *gone keeps the pipe
-     * only when that was the last, for ofd_release() to let it go. */
+    /* #904: the end's token goes back when this was the task's last
+     * description of the end, so that pipe_server counts one holder of it
+     * fewer.  And a pipe end gives back its hold on the pipe; *gone keeps the
+     * pipe only when that was the last, for ofd_release() to let it go. */
+    if (OFD_IS_PIPE(o->kind))
+        gone->token = __uros_pipe_end_put(o->pipe, OFD_PIPE_END(o->kind));
     if (OFD_IS_PIPE(o->kind) && --o->pipe->refs > 0)
         gone->pipe = NULL;
     o->kind       = OFD_FREE;
@@ -234,7 +245,9 @@ static void ofd_release(const struct posix_ofd *gone)
 {
     if (gone->kind == OFD_VFS)
         vfs_close(gone->vfd);
-    else if (OFD_IS_PIPE(gone->kind) && gone->pipe != NULL)
+    if (OFD_IS_PIPE(gone->kind))
+        __uros_pipe_token_put(gone->token);     /* 0: not the end's last */
+    if (OFD_IS_PIPE(gone->kind) && gone->pipe != NULL)
         __uros_pipe_free(gone->pipe);   /* this task's last hold on it */
     /* A console has nothing to close, and a tty has no per-open state at
      * char_server: it tracks subscriptions, not descriptors. */
@@ -1058,6 +1071,7 @@ long __uros_pipe2(int *fds, int flags)
         r->pipe = p;
         r->nonblock = nonblock;
         p->refs++;
+        __uros_pipe_end_get(p, PIPE_END_READ);
         pfd_bind_locked(fr, r, cloexec);
         fw = pfd_alloc_locked(0);
         w = fw < 0 ? NULL : ofd_alloc_locked(OFD_PIPE_WRITE, VFS_FD_INVALID,
@@ -1066,6 +1080,7 @@ long __uros_pipe2(int *fds, int flags)
             w->pipe = p;
             w->nonblock = nonblock;
             p->refs++;
+            __uros_pipe_end_get(p, PIPE_END_WRITE);
             pfd_bind_locked(fw, w, cloexec);
         } else {
             freed = pfd_unbind_locked(fr, &gone);   /* takes the pipe along */
