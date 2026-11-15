@@ -37,8 +37,10 @@
  */
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <mach.h>
@@ -48,6 +50,7 @@
 #include <mach/mach_syscalls.h>
 #include <mach/message.h>
 #include <mach/thread_status.h>
+#include <mach_error.h>    /* mach_error_string */
 #include <mach_init.h>
 
 #include "proc.h"
@@ -109,6 +112,46 @@ extern int  __uros_set_thread_area_tp(void *tp);
  */
 static unsigned int __uros_fork_saved_tp;
 #endif
+
+/* ------------------------------------------------------------------ */
+/* A refused fork says why                                             */
+/* ------------------------------------------------------------------ */
+
+extern void mach_print(const char *);
+
+/*
+ * #936: every step that can refuse a fork answers EAGAIN, so errno cannot
+ * tell them apart, and a fork refused once in thousands of boots leaves
+ * nothing else to go on.  So the step that refused says so, with what it
+ * answered, on a line of its own.  mach_print reaches the log whatever state
+ * stdio is in, and needs no port.  The format attribute has -Wall check each
+ * call's arguments against its format.
+ */
+static void fork_refused(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
+
+static void
+fork_refused(const char *fmt, ...)
+{
+    static const char prefix[] = "libposix: fork() refused: ";
+    char    line[MACH_PRINT_MAX];
+    va_list ap;
+    int     n;
+
+    memcpy(line, prefix, sizeof prefix - 1);
+    va_start(ap, fmt);
+    n = vsnprintf(line + sizeof prefix - 1,
+                  sizeof line - (sizeof prefix - 1) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        n = 0;
+    n += (int)(sizeof prefix - 1);
+    if (n > (int)sizeof line - 2)
+        n = (int)sizeof line - 2;
+    line[n] = '\n';
+    line[n + 1] = '\0';
+    mach_print(line);
+}
 
 /* ------------------------------------------------------------------ */
 /* Port inheritance                                                    */
@@ -226,8 +269,11 @@ __uros_fork(void)
                              0 /* ledgers */, 0 /* num_ledgers */,
                              TRUE /* inherit_memory */,
                              &child_task);
-    if (kr != KERN_SUCCESS)
+    if (kr != KERN_SUCCESS) {
+        fork_refused("task_create() answered %s (0x%08x)",
+                     mach_error_string(kr), (unsigned)kr);
         return -EAGAIN;
+    }
 
     /*
      * 2. Inherit the send rights that musl-linked code reaches for.
@@ -268,14 +314,34 @@ __uros_fork(void)
      */
     proc_pid_t  new_pid = 0;
     int         prc     = PROC_ERR_INVAL;
-    if (__uros_proc_port != MACH_PORT_NULL) {
+    if (__uros_proc_port == MACH_PORT_NULL) {
+        fork_refused("this process has no port to proc_server");
+    } else {
         char cmd[128] = "forked";
         mach_port_t proc_task = MACH_PORT_NULL;
         /* #927: by the child's reduced port, never its task port. */
-        if (__uros_process_port(child_task, &proc_task) == KERN_SUCCESS) {
-            (void)proc_register(__uros_proc_port, __uros_my_pid,
-                                proc_task, cmd, &new_pid, &prc);
+        kr = __uros_process_port(child_task, &proc_task);
+        if (kr != KERN_SUCCESS) {
+            fork_refused("the child's process port answered %s (0x%08x)",
+                         mach_error_string(kr), (unsigned)kr);
+        } else {
+            /*
+             * #936: the message's own answer too.  When it is not
+             * KERN_SUCCESS, MIG wrote neither new_pid nor prc, and
+             * proc_server may have registered the child all the same.
+             */
+            kr = proc_register(__uros_proc_port, __uros_my_pid,
+                               proc_task, cmd, &new_pid, &prc);
             (void)mach_port_deallocate(mach_task_self(), proc_task);
+            if (kr != KERN_SUCCESS) {
+                fork_refused("proc_register() answered %s (0x%08x)",
+                             mach_error_string(kr), (unsigned)kr);
+                prc = PROC_ERR_INVAL;
+                new_pid = 0;
+            } else if (prc != PROC_OK || new_pid == 0) {
+                fork_refused("proc_register() answered result %d and "
+                             "pid %u", prc, (unsigned)new_pid);
+            }
         }
     }
 
@@ -326,6 +392,9 @@ __uros_fork(void)
                                UROS_FORK_FLAVOR_COUNT,
                                &child_thread);
     if (kr != KERN_SUCCESS) {
+        fork_refused("thread_create_running() answered %s (0x%08x) for "
+                     "pid %u, whose task is terminated",
+                     mach_error_string(kr), (unsigned)kr, (unsigned)new_pid);
         (void)task_terminate(child_task);
         (void)mach_port_deallocate(mach_task_self(), child_task);
         return -EAGAIN;

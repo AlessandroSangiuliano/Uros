@@ -1,0 +1,66 @@
+Kind: ablation
+Issue: #936
+Takes out: nothing -- a probe: fork 5 of musl_test [21] is refused at thread_create_running(), given a state of no words, and posix_fork() must say that step refused it, with what it answered
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: libposix: fork\(\) refused: thread_create_running\(\) answered .*\(0x[0-9a-f]{8}\) for pid [0-9]+, whose task is terminated
+
+diff --git a/uros/src/lib/libposix-uros/posix_fork.c b/uros/src/lib/libposix-uros/posix_fork.c
+index afb5d770..07196142 100644
+--- a/uros/src/lib/libposix-uros/posix_fork.c
++++ b/uros/src/lib/libposix-uros/posix_fork.c
+@@ -118,6 +118,9 @@ static unsigned int __uros_fork_saved_tp;
+ 
+ extern void mach_print(const char *);
+ 
++/* #936's probes: musl_test [21] asks for one fork to be refused at one step. */
++int __uros_fork_probe;
++
+ /*
+  * #936: every step that can refuse a fork answers EAGAIN, so errno cannot
+  * tell them apart, and a fork refused once in thousands of boots leaves
+@@ -239,6 +242,10 @@ __uros_fork(void)
+ 
+     /* ===== Parent path =========================================== */
+ 
++    int probe = __uros_fork_probe;
++
++    __uros_fork_probe = 0;
++
+ #if defined(__x86_64__)
+     /*
+      * 0. The FS base is a field of the state, and the TCB is at the same
+@@ -381,7 +388,7 @@ __uros_fork(void)
+     kr = thread_create_running(child_task,
+                                UROS_FORK_FLAVOR,
+                                (thread_state_t)&state,
+-                               UROS_FORK_FLAVOR_COUNT,
++                               probe ? 0 : UROS_FORK_FLAVOR_COUNT,
+                                &child_thread);
+     if (kr != KERN_SUCCESS) {
+         fork_refused("thread_create_running() answered %s (0x%08x) for "
+diff --git a/uros/src/tests/musl_test/musl_test.c b/uros/src/tests/musl_test/musl_test.c
+index 85878f4a..8759fa94 100644
+--- a/uros/src/tests/musl_test/musl_test.c
++++ b/uros/src/tests/musl_test/musl_test.c
+@@ -1155,6 +1155,8 @@ arm_null_signal(void)
+  */
+ #define FORKS		200
+ 
++extern int __uros_fork_probe;	/* #936's probes */
++
+ static void
+ arm_many_forks(void)
+ {
+@@ -1162,7 +1164,10 @@ arm_many_forks(void)
+ 
+ 	for (i = 0; i < FORKS; i++) {
+ 		int	status = 0;
+-		pid_t	pid = fork();
++		pid_t	pid;
++
++		__uros_fork_probe = (i == 5);
++		pid = fork();
+ 
+ 		if (pid < 0) {
+ 			verdict(21, 0, "fork %d failed, errno %d", i, errno);
