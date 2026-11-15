@@ -66,7 +66,7 @@ add_custom_command(
             --set-section-flags .uros_manifest=noload,readonly,contents
             ${CPUSTAT}
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cpustat.c ${CPUSTAT_MANIFEST}
-          mkmanifest musl_umbrella
+          mkmanifest musl_umbrella ${UROS_MUSL_UMBRELLA_STAMP}  # #930: libc.so's file, not only its target
           mig_mach_public_headers
   COMMENT "Linking cpustat (dynamic PIE against umbrella libc.so + libmach_core-pic)"
   VERBATIM

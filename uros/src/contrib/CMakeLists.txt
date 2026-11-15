@@ -69,7 +69,13 @@ if(UROS_BUILD_MUSL)
                 # The shared libc.so keeps the stubs (built from libc.a, not
                 # this copy), so the standalone ldso link is unaffected.
                 COMMAND ar d ${MUSL_OUT} uros_syscall_stub.lo
-    BUILD_BYPRODUCTS  ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
+    # #930: written by the INSTALL step, and declared as its.  They were
+    # BUILD_BYPRODUCTS: ninja looked at them right after the build step,
+    # found them unchanged, and what is made from them was not made again
+    # in that build -- measured, a changed musl source left libc.so as
+    # musl's own install wrote it, without the dispatcher, and libc-uros.a
+    # with the musl from before.
+    INSTALL_BYPRODUCTS ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
     LOG_CONFIGURE     ON
     LOG_BUILD         ON
     LOG_INSTALL       ON
@@ -145,25 +151,46 @@ if(UROS_BUILD_MUSL)
   # (mach_host_self), and mach_error()'s and mach_error_string()'s (#917) —
   # to the link as loose objects.  Their globals stay exported, letting
   # cpustat run the umbrella's single, initialised Mach runtime instead of a
-  # static duplicate.  This, and not uros_umbrella_mach.list, is what exports
-  # them: #917 measured it both ways.  The objects come from the
+  # static duplicate.  This is what exports them -- #917 measured it both
+  # ways -- and uros_umbrella_exports.list says which, checked after the link
+  # (#930).  The objects come from the
   # dedicated libmach_export_objs OBJECT library (#396) — named through
   # $<TARGET_OBJECTS>, not guessed from another target's CMakeFiles layout.
   set(MACH_EXPORT_OBJS "$<JOIN:$<TARGET_OBJECTS:libmach_export_objs>, >")
 
-  set(MUSL_UMBRELLA_STAMP ${CMAKE_CURRENT_BINARY_DIR}/musl-umbrella.stamp)
+  # #930: what it must export of ours, one name a line, checked after each
+  # link: a name whose object stopped reaching the link loose was in libc.so
+  # and exported by nobody, and only a program that happened to be relinked
+  # said so.  The check first asks for a name made up to be missing, so that a
+  # check that has stopped reading the table stops the build too.  It replaces
+  # uros_umbrella_mach.list, a dynamic list taken for the export list (#375):
+  # for a shared library GNU ld reads one as the globals that stay
+  # preemptible, and nothing needed its three names preemptible.
+  set(UROS_UMBRELLA_EXPORTS ${CMAKE_CURRENT_SOURCE_DIR}/uros_umbrella_exports.list)
+  set(UROS_UMBRELLA_CHECK   ${CMAKE_CURRENT_SOURCE_DIR}/uros_umbrella_exports_check.sh)
+
+  # #930: the stamp's path is set at the top level, where the programs that
+  # link against libc.so read it before this directory is.  And every input
+  # is a FILE here: musl_extproj and libmach_export_objs are targets that
+  # order the build and give no file to depend on -- musl's own build relinks
+  # lib/libc.so without our backend and installs it over ${MUSL_SO}, so a
+  # change to a musl source left libc.so without the dispatcher until this
+  # ran again.  ${MUSL_OUT} is written by every musl install, and declared so.
+  set(MUSL_UMBRELLA_STAMP ${UROS_MUSL_UMBRELLA_STAMP})
   add_custom_command(
     OUTPUT ${MUSL_UMBRELLA_STAMP}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${MUSL_BUILD}/lib/libc.so
     COMMAND ${CMAKE_COMMAND} -E env make -C ${MUSL_BUILD} lib/libc.so
-            "EXTRA_OBJS=${MACH_EXPORT_OBJS} -Wl,--dynamic-list=${CMAKE_CURRENT_SOURCE_DIR}/uros_umbrella_mach.list -Wl,--whole-archive $<TARGET_FILE:libposix-uros-pic> -Wl,--no-whole-archive -Wl,--start-group $<TARGET_FILE:libvfs-pic> $<TARGET_FILE:libmach_core-pic> $<TARGET_FILE:libnetname-pic> $<TARGET_FILE:libcap-pic> -Wl,--end-group"
+            "EXTRA_OBJS=${MACH_EXPORT_OBJS} -Wl,--whole-archive $<TARGET_FILE:libposix-uros-pic> -Wl,--no-whole-archive -Wl,--start-group $<TARGET_FILE:libvfs-pic> $<TARGET_FILE:libmach_core-pic> $<TARGET_FILE:libnetname-pic> $<TARGET_FILE:libcap-pic> -Wl,--end-group"
+    COMMAND sh ${UROS_UMBRELLA_CHECK} --must-refuse ${CMAKE_NM} ${MUSL_BUILD}/lib/libc.so
+    COMMAND sh ${UROS_UMBRELLA_CHECK} ${CMAKE_NM} ${MUSL_BUILD}/lib/libc.so ${UROS_UMBRELLA_EXPORTS}
     COMMAND ${CMAKE_COMMAND} -E copy ${MUSL_BUILD}/lib/libc.so ${MUSL_SO}
     COMMAND ${CMAKE_COMMAND} -E touch ${MUSL_UMBRELLA_STAMP}
-    DEPENDS musl_extproj
+    DEPENDS musl_extproj ${MUSL_OUT}
             libposix-uros-pic libvfs-pic libmach_core-pic
-            libmach_export_objs
+            libmach_export_objs $<TARGET_OBJECTS:libmach_export_objs>
             libnetname-pic libcap-pic
-            ${CMAKE_CURRENT_SOURCE_DIR}/uros_umbrella_mach.list
+            ${UROS_UMBRELLA_EXPORTS} ${UROS_UMBRELLA_CHECK}
     COMMENT "Linking umbrella libc.so (musl + Uros PIC backend: posix-uros/vfs/mach/netname/cap)"
     VERBATIM
   )

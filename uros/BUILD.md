@@ -4,7 +4,7 @@ This document describes how to build the OSFMK project using CMake presets.
 
 ## Requirements
 
-- **CMake** 3.21 or later
+- **CMake** 3.26 or later
 - **Ninja** build system (recommended) or Make
 - **GCC** or **Clang** compiler
 - **Flex** and **Bison** for lexer/parser generation
@@ -250,7 +250,7 @@ You can create a `CMakeUserPresets.json` file (git-ignored) for personal overrid
 ### CMake version too old
 
 ```
-CMake Error: CMake 3.21 or higher is required.
+CMake Error: CMake 3.26 or higher is required.
 ```
 
 Update CMake:

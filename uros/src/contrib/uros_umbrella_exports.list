@@ -1,0 +1,14 @@
+# The names of ours the umbrella libc.so exports (#930), one a line, checked
+# after each of its links by uros_umbrella_exports_check.sh.  Each is defined
+# in an object that reaches that link loose -- libmach_export_objs, in
+# lib/libmach/CMakeLists.txt -- because --exclude-libs=ALL makes every archive
+# member's symbols local.  A name here whose object is not loose fails the
+# build, naming it.  musl's own names are musl's business and are not listed.
+#
+# What the programs linked against libc.so call of ours: cpustat the first
+# three (#375), mach_error_dyn the last two (#917).
+mach_host_self
+host_processors
+processor_info
+mach_error
+mach_error_string
