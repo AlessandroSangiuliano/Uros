@@ -2249,6 +2249,103 @@ arm_pipe_holder_killed(void)
 }
 
 /*
+ * ── [45] a | b, across fork() and execve() (#904) ────────────────────────
+ *
+ * What a shell does for a pipeline: two children, the first with the pipe's
+ * write end on its stdout and the second with its read end on its stdin,
+ * each exec'ing musl_test again in a mode of its own.  The writer writes
+ * PX_COUNT lines and exits; the reader reads its stdin to end of file and
+ * answers whether it got exactly those bytes.  Both ends cross the exec on
+ * fd 1 and fd 0, mapped in the new images from pipe_server, and the end of
+ * file comes when the exec'd writer exits.
+ */
+#define PX_LINE		"a line through a pipe across an exec\n"
+#define PX_COUNT	200
+
+static int
+as_pipe_writer(void)
+{
+	int	i;
+
+	for (i = 0; i < PX_COUNT; i++)
+		if (write(1, PX_LINE, sizeof PX_LINE - 1) !=
+		    (ssize_t)(sizeof PX_LINE - 1))
+			return 1;
+	return 0;
+}
+
+static int
+as_pipe_reader(void)
+{
+	static char	buf[4 * sizeof PX_LINE];
+	long		have = 0;
+	ssize_t		got, k;
+
+	while ((got = read(0, buf, sizeof buf)) > 0) {
+		for (k = 0; k < got; k++)
+			if (buf[k] != PX_LINE[(have + k) %
+					      (long)(sizeof PX_LINE - 1)])
+				return 2;
+		have += got;
+	}
+	if (got < 0)
+		return 1;
+	return have == PX_COUNT * (long)(sizeof PX_LINE - 1) ? 0 : 3;
+}
+
+static void
+arm_pipe_exec(void)
+{
+	char	*argv[3], *envp[1];
+	pid_t	pid[2];
+	int	fds[2], status[2], killed, others, i, ws, rs;
+
+	if (pipe(fds) != 0) {
+		verdict(45, 0, "pipe failed, errno %d", errno);
+		return;
+	}
+	envp[0] = NULL;
+	for (i = 0; i < 2; i++) {
+		pid[i] = fork();
+		if (pid[i] < 0) {
+			while (--i >= 0) {
+				(void)kill(pid[i], SIGKILL);
+				(void)waitpid(pid[i], NULL, 0);
+			}
+			(void)close(fds[0]);
+			(void)close(fds[1]);
+			not_asked(45, "fork refused: no process server on "
+				  "this boot");
+			return;
+		}
+		if (pid[i] == 0) {
+			argv[0] = (char *)"/musl_test";
+			argv[1] = (char *)(i == 0 ? "pipe-out" : "pipe-in");
+			argv[2] = NULL;
+			if (dup2(fds[i == 0 ? 1 : 0], i == 0 ? 1 : 0) < 0)
+				_exit(126);
+			(void)close(fds[0]);
+			(void)close(fds[1]);
+			(void)execve(argv[0], argv, envp);
+			_exit(127);
+		}
+	}
+	(void)close(fds[0]);
+	(void)close(fds[1]);
+	killed = watch_children(pid, 2, 60, status, &others);
+	ws = WIFEXITED(status[0]) ? WEXITSTATUS(status[0]) : -1;
+	rs = WIFEXITED(status[1]) ? WEXITSTATUS(status[1]) : -1;
+	verdict(45, killed == 0 && others == 0 && ws == 0 && rs == 0,
+		"a writer exec'd with the pipe on its stdout ended %d, and a "
+		"reader exec'd with it on its stdin ended %d (%s); %d of 2 still "
+		"there after 60 s, %d other children collected", ws, rs,
+		rs == 0 ? "every byte, then end of file"
+		: rs == 2 ? "a WRONG byte" : rs == 3 ? "a WRONG count"
+		: rs == 1 ? "a read FAILED" : rs == 126 ? "dup2 FAILED"
+		: rs == 127 ? "the exec FAILED" : "no answer", killed, others);
+}
+
+/*
  * ── [34] A pipe from one process to another, in a stream (#904) ──────────
  *
  * One child writes 256 KiB in writes of 1000 bytes, which fit the ring's
@@ -2345,6 +2442,11 @@ arm_pipe_stream(void)
 int
 main(int argc, char **argv)
 {
+	/* #904, [45]: the two ends of a pipeline, exec'd. */
+	if (argc > 1 && strcmp(argv[1], "pipe-out") == 0)
+		return as_pipe_writer();
+	if (argc > 1 && strcmp(argv[1], "pipe-in") == 0)
+		return as_pipe_reader();
 	if (argc > 1 && strcmp(argv[1], "child") == 0)
 		return as_exec_child();
 	if (argc > 1 && strcmp(argv[1], "env") == 0)
@@ -2407,6 +2509,7 @@ main(int argc, char **argv)
 	arm_pipe_eof();
 	arm_pipe_epipe();
 	arm_pipe_holder_killed();
+	arm_pipe_exec();
 	arm_pipe_stream();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
