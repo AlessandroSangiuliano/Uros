@@ -37,7 +37,8 @@ PROMPT = "ush$ "
 # command typed at the first prompt is answered ENOENT, correctly.
 ROOT_MOUNTED = "ext2: ready, entering message loop"
 
-# What is typed, and the line each command must print before the next prompt.
+# What is typed, and the lines each command must print, in order, before the
+# next prompt.
 # ⚠️ A whole line: `hello' alone is found in the shell's own
 # "execve(/hello_world) failed", and a test passed on that.  The line ends as
 # this line discipline ends it, with a bare newline.
@@ -49,8 +50,12 @@ COMMANDS = (
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--build", default=os.path.join(REPO, "uros/build-x86_64-ush"),
-                    help="a build configured with UROS_BUNDLE_USH")
+    # ablate.sh runs a Script: with the arm's build in UROS_BUILD_DIR (#948).
+    ap.add_argument("--build",
+                    default=os.environ.get("UROS_BUILD_DIR")
+                    or os.path.join(REPO, "uros/build-x86_64-ush"),
+                    help="a build configured with UROS_BUNDLE_USH (default "
+                         "UROS_BUILD_DIR, else uros/build-x86_64-ush)")
     ap.add_argument("--entry", type=int, default=14,
                     help="GRUB entry to boot (default 14)")
     ap.add_argument("--kvm", action="store_true", help="boot under KVM")
@@ -159,17 +164,26 @@ def session(a, build):
             return 2
 
         rc = 0
-        for command, want in COMMANDS:
+        for command, *wants in COMMANDS:
+            typed_at = seen
             os.write(fd_in, (command + "\r").encode("latin-1"))
             # Not the echo.  It comes a character at a time and the kernel's
             # own lines can land in the middle of it: "/hello_", a census,
             # "dyn_world", and the command read as one that never answered
-            # when it had.  `want' is a whole line, so the echo cannot pass
-            # for it.
-            if not wait_for(want, 60.0):
-                print(f"ush-x86_64: {command!r} never said {want!r}",
-                      file=sys.stderr)
-                rc = 1
+            # when it had.  Each `want' is a whole line, so the echo cannot
+            # pass for it.
+            for want in wants:
+                if not wait_for(want, 60.0):
+                    print(f"ush-x86_64: {command!r} never said {want!r}",
+                          file=sys.stderr)
+                    rc = 1
+                    break
+            if rc:
+                # What it said instead, so that a verdict the program printed
+                # is read where this script's output is: ablate.sh matches an
+                # Expect against it (#948).
+                for line in pump()[typed_at:].replace("\r", "").splitlines():
+                    print(f"ush-x86_64: | {line}", file=sys.stderr)
                 break
             if not wait_for(PROMPT, 60.0):
                 print(f"ush-x86_64: {command!r} ran and the prompt did not "
