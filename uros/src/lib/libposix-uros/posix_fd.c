@@ -40,6 +40,7 @@
 /* From signals.c: proc_server send right + caller's pid. */
 extern mach_port_t  __uros_proc_port;
 extern unsigned int __uros_my_pid;
+extern int          __uros_kill(unsigned int pid, int signo);  /* SIGPIPE (#904) */
 
 /* char_server send right — resolved lazily via netname on first /dev/tty
  * open.  Shared with the tty fd I/O path below. */
@@ -576,6 +577,11 @@ static vfs_fd_t resolve_fd(int fd, int *err, struct pipe_hold *hold)
  * down whole, so that a writev() of up to PIPE_BUF bytes is one write, as
  * musl's stdio makes every line it flushes.  The wrong end answers EBADF, as
  * on Linux.
+ *
+ * A write on a pipe whose readers have all gone answers EPIPE and raises
+ * SIGPIPE, as POSIX asks: a program that has not caught or ignored it ends,
+ * which is how `yes | head -1' stops.  The signal goes the way kill() does,
+ * through proc_server, so it may come a little after the write returns.
  */
 static long pipe_io(struct pipe_hold *h, const struct uros_iovec *iov,
                     int iovcnt, int writing)
@@ -584,10 +590,12 @@ static long pipe_io(struct pipe_hold *h, const struct uros_iovec *iov,
 
     if (h->kind != (writing ? OFD_PIPE_WRITE : OFD_PIPE_READ))
         r = -EBADF;
-    else if (writing)
+    else if (writing) {
         r = __uros_pipe_write(h->pipe, (const struct uros_pipe_iov *)iov,
                               iovcnt, h->nonblock);
-    else
+        if (r == -EPIPE && __uros_my_pid != 0)
+            (void)__uros_kill(__uros_my_pid, PROC_SIGPIPE);
+    } else
         r = __uros_pipe_read(h->pipe, (const struct uros_pipe_iov *)iov,
                              iovcnt, h->nonblock);
     pipe_put(h->pipe);
