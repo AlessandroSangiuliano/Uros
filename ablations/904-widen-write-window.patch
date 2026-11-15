@@ -4,24 +4,24 @@ Holds open: the window between a writer taking the slot at prod_tail and publish
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
-index ccc83588..f21df38b 100644
+index fc47e263..08e180a0 100644
 --- a/uros/src/lib/libposix-uros/posix_pipe.c
 +++ b/uros/src/lib/libposix-uros/posix_pipe.c
-@@ -40,6 +40,8 @@
- #include <mach_init.h>          /* mach_task_self */
- #include <mach/vm_inherit.h>
+@@ -42,6 +42,8 @@
+ #include <servers/netname.h>    /* netname_look_up: pipe_server's port */
  #include "mach.h"               /* MIG: vm_inherit */
+ #include "pipe.h"               /* MIG: pipe.defs, pipe_server (#904) */
 +#include <mach/thread_switch.h>	/* 904-widen-write-window */
 +#include <mach/mach_syscalls.h>	/* 904-widen-write-window */
  
  /*
   * flipc2.h's flipc2_ring_count() never reads its `hdr', and this library is
-@@ -381,6 +383,8 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
+@@ -378,6 +380,8 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
  		d->param[1] = 0;
  		d->param[2] = 0;
  		d->status = 0;
 +		/* 904-widen-write-window: the slot held 1 ms before it is published */
 +		(void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
  		flipc2_produce_commit(ch);
+ 		data_made(sh);
  		done += chunk;
- 	}

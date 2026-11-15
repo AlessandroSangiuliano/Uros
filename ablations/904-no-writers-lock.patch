@@ -6,10 +6,10 @@ Run: --entry 14 600 -smp 4
 Expect: musl_test: \[33\] WRONG -- 
 
 diff --git a/uros/src/lib/libposix-uros/posix_pipe.c b/uros/src/lib/libposix-uros/posix_pipe.c
-index f21df38b..d36a5d7d 100644
+index 08e180a0..ebe9b120 100644
 --- a/uros/src/lib/libposix-uros/posix_pipe.c
 +++ b/uros/src/lib/libposix-uros/posix_pipe.c
-@@ -325,7 +325,7 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
+@@ -319,7 +319,7 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
  	if (total == 0)
  		return 0;
  
@@ -18,8 +18,8 @@ index f21df38b..d36a5d7d 100644
  	/* Another task's writer moved cons_head on since this handle looked. */
  	ch->cached_cons_head = *ch->cons_head;
  	while (done < total) {
-@@ -388,7 +388,6 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
- 		flipc2_produce_commit(ch);
+@@ -386,7 +386,6 @@ __uros_pipe_write(struct uros_pipe *p, const struct uros_pipe_iov *iov,
+ 		data_made(sh);
  		done += chunk;
  	}
 -	pipe_unlock(&sh->wlock);

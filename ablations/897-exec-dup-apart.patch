@@ -6,10 +6,10 @@ Expect: musl_test: \[31\] WRONG -- .*a read on 20 left 21 where it was
 Note: 4 of 4 caught and 4 of 4 passed at 0881d372 on OMEGA, TCG and KVM: in every ablated boot the exec'd child's read of 16 bytes on 20 answered 16 and left 21 at 16, where the fixed tree's moved it to 32
 
 diff --git a/uros/src/lib/libposix-uros/posix_exec_fds.c b/uros/src/lib/libposix-uros/posix_exec_fds.c
-index cf073550..84c744af 100644
+index a3eb8113..dded81bb 100644
 --- a/uros/src/lib/libposix-uros/posix_exec_fds.c
 +++ b/uros/src/lib/libposix-uros/posix_exec_fds.c
-@@ -131,15 +131,7 @@ __uros_absorb_inherited_fds(void)
+@@ -183,15 +183,7 @@ __uros_absorb_inherited_fds(void)
      for (i = 0; i < h->count && i < UROS_FD_HANDOFF_MAX; i++) {
          const struct uros_fd_handoff_rec *r = &h->recs[i];
  
@@ -23,6 +23,6 @@ index cf073550..84c744af 100644
 -        if (r->same_as != 0)
 -            continue;               /* names a record at or after itself */
 +        /* 897-exec-dup-apart: every record opened again, same_as or not */
-         vfs_fd_t vfd = vfs_import_fd((mach_port_t)r->fs_port, r->handle,
-                                      r->offset, r->flags, r->type);
-         if (vfd != VFS_FD_INVALID)
+         /* #904: a pipe end, mapped from pipe_server, its token kept. */
+         if (r->type == UROS_FD_HANDOFF_FIFO) {
+             int end = (r->flags & UROS_FD_HANDOFF_PIPE_WRITE) ?
