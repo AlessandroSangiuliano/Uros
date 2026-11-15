@@ -45,6 +45,13 @@ ROOT_MOUNTED = "ext2: ready, entering message loop"
 COMMANDS = (
     ("/hello_world", "\nhello\n"),
     ("/hello_dyn_world", "\nhello\n"),
+    # #948: a forked child's write on the terminal it inherited.  The child's
+    # own line first, then its parent's verdict: a write that says it took the
+    # line is not the line arriving.  Both texts are the program's own, which
+    # the echo of the command cannot pass for.
+    ("/fork_tty_test",
+     "fork_tty_test: the child's line, on the terminal it inherited (#948)",
+     "fork_tty_test: 1 of 1 arms passed"),
 )
 
 
