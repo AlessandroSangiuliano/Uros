@@ -379,18 +379,21 @@ test_default_on_bare_child(void)
     EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
     EXPECT_RC(rc, PROC_OK, "proc_register child rc");
 
+    /* An end's SIGCHLD comes well within 2 s (test_child_kill_sigchld).
+     * Each signal waits for its own: SIGWINCH sent to a child that SIGURG
+     * ended finds it gone, and would say only that. */
     rc = 0;
     kr = proc_kill(proc_port, child_pid, PROC_SIGURG, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_kill SIGURG kr");
     EXPECT_RC(rc, PROC_OK, "SIGURG rc");
+    EXPECT(recv_signal(2000, &signo, &sender) != 0,
+           "SIGURG ended a task with no signal port");
     rc = 0;
     kr = proc_kill(proc_port, child_pid, PROC_SIGWINCH, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_kill SIGWINCH kr");
     EXPECT_RC(rc, PROC_OK, "SIGWINCH rc");
-
-    /* An end's SIGCHLD comes well within 2 s (test_child_kill_sigchld). */
     EXPECT(recv_signal(2000, &signo, &sender) != 0,
-           "SIGURG or SIGWINCH ended a task with no signal port");
+           "SIGWINCH ended a task with no signal port");
     rc = 0;
     kr = proc_kill(proc_port, child_pid, PROC_SIGXCPU, &rc);
     EXPECT_KR(kr, KERN_SUCCESS, "proc_kill SIGXCPU kr");
