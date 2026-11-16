@@ -52,6 +52,18 @@ COMMANDS = (
     ("/fork_tty_test",
      "fork_tty_test: the child's line, on the terminal it inherited (#948)",
      "fork_tty_test: 1 of 1 arms passed"),
+    # #904: a | b, the shell's pipe between two programs it exec'd.  The
+    # reader's own count, of the writer's 200 lines, and end of file once the
+    # writer and the shell have both let the write end go.
+    ("/musl_test pipe-out | /musl_test pipe-count",
+     "musl_test (pipe-count): 7400 bytes, 200 lines as written, "
+     "then end of file"),
+    # #904: EPIPE when the reader has gone.  The reader's line first, then
+    # the writer's, on stderr, once nothing holds the read end: not the
+    # reader, which went, nor the shell.
+    ("/musl_test pipe-yes | /musl_test pipe-head",
+     "musl_test (pipe-head): one line read, and gone",
+     "musl_test (pipe-yes): write answered EPIPE once the reader had gone"),
 )
 
 
