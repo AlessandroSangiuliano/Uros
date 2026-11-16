@@ -2294,6 +2294,77 @@ as_pipe_reader(void)
 	return have == PX_COUNT * (long)(sizeof PX_LINE - 1) ? 0 : 3;
 }
 
+/*
+ * #904: the pipelines scripts/ush-x86_64.py types at ush, which waits for the
+ * lines these print, as a shell's user would read them: ush's own word on
+ * its children is not their output.  `pipe-out | pipe-count': pipe-count
+ * reads its stdin to end of file and says whether it got all pipe-out wrote,
+ * [45]'s 200 lines.  `pipe-yes | pipe-head': pipe-head reads one line and
+ * goes; pipe-yes, SIGPIPE ignored, writes until a write fails, and says how.
+ */
+static int
+as_pipe_counter(void)
+{
+	static char	buf[4 * sizeof PX_LINE];
+	const long	want = PX_COUNT * (long)(sizeof PX_LINE - 1);
+	long		have = 0, wrong = 0;
+	ssize_t		got, k;
+
+	while ((got = read(0, buf, sizeof buf)) > 0) {
+		for (k = 0; k < got; k++)
+			if (buf[k] != PX_LINE[(have + k) %
+					      (long)(sizeof PX_LINE - 1)])
+				wrong++;
+		have += got;
+	}
+	if (got < 0)
+		printf("musl_test (pipe-count): read answered errno %d after %ld "
+		       "bytes\n", errno, have);
+	else if (have == want && wrong == 0)
+		printf("musl_test (pipe-count): %ld bytes, %d lines as written, "
+		       "then end of file\n", have, PX_COUNT);
+	else
+		printf("musl_test (pipe-count): %ld bytes of %ld, %ld of them NOT "
+		       "as written, then end of file\n", have, want, wrong);
+	return 0;
+}
+
+static int
+as_pipe_yes(void)
+{
+	long	lines = 0;
+
+	(void)signal(SIGPIPE, SIG_IGN);
+	while (write(1, PX_LINE, sizeof PX_LINE - 1) ==
+	       (ssize_t)(sizeof PX_LINE - 1))
+		lines++;
+	if (errno == EPIPE)
+		fprintf(stderr, "musl_test (pipe-yes): write answered EPIPE once "
+			"the reader had gone\n");
+	else
+		fprintf(stderr, "musl_test (pipe-yes): write answered errno %d, "
+			"NOT EPIPE, after %ld lines\n", errno, lines);
+	return errno == EPIPE ? 0 : 1;
+}
+
+static int
+as_pipe_head(void)
+{
+	char	line[sizeof PX_LINE], c;
+	size_t	n = 0;
+
+	while (n < sizeof line - 1 && read(0, &c, 1) == 1) {
+		line[n++] = c;
+		if (c == '\n')
+			break;
+	}
+	line[n] = '\0';
+	printf("musl_test (pipe-head): %s, and gone\n",
+	       strcmp(line, PX_LINE) == 0 ? "one line read"
+	       : "NOT the line written read");
+	return 0;
+}
+
 static void
 arm_pipe_exec(void)
 {
@@ -3406,6 +3477,13 @@ main(int argc, char **argv)
 		return as_pipe_writer();
 	if (argc > 1 && strcmp(argv[1], "pipe-in") == 0)
 		return as_pipe_reader();
+	/* #904: the pipelines typed at ush (scripts/ush-x86_64.py). */
+	if (argc > 1 && strcmp(argv[1], "pipe-count") == 0)
+		return as_pipe_counter();
+	if (argc > 1 && strcmp(argv[1], "pipe-yes") == 0)
+		return as_pipe_yes();
+	if (argc > 1 && strcmp(argv[1], "pipe-head") == 0)
+		return as_pipe_head();
 	if (argc > 1 && strcmp(argv[1], "child") == 0)
 		return as_exec_child();
 	if (argc > 1 && strcmp(argv[1], "env") == 0)
