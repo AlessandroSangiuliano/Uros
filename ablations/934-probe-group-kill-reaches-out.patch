@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #934
+Takes out: nothing -- a probe: proc_server's killpg() sends SIGTERM to the other children of the group leader's parent too, so that kill(-group, SIGTERM) in musl_test's [47] reaches the fourth child, outside the group: [47] must say the child outside it was reached
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[47\] WRONG -- .*the child outside it WAS reached
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index e0f08e1d..556e03d8 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -1487,11 +1487,20 @@ proc_S_killpg(
+     is_uncatch = (signo == PROC_SIGKILL || signo == PROC_SIGSTOP ||
+                   signo == PROC_SIGCONT);
+ 
++    /* 934-probe-group-kill-reaches-out: SIGTERM to a group reaches the
++     * other children of its leader's parent too, in the group or not. */
++    proc_pid_t probe_ppid = 0;
++
+     pthread_mutex_lock(&pid_lock);
++    for (i = 0; i < PROC_MAX_TASKS; i++)
++        if (signo == PROC_SIGTERM && pid_table[i].in_use &&
++            pid_table[i].pid == pgrp)
++            probe_ppid = pid_table[i].ppid;
+     for (i = 0; i < PROC_MAX_TASKS; i++) {
+         if (!pid_table[i].in_use) continue;
+         if (pid_table[i].state == PROC_STATE_ZOMBIE) continue;
+-        if (pid_table[i].pgrp_id != pgrp) continue;
++        if (pid_table[i].pgrp_id != pgrp &&
++            (probe_ppid <= 1 || pid_table[i].ppid != probe_ppid)) continue;
+         if (is_uncatch) {
+             uncatch[n_uncatch].port = pid_table[i].task_port;
+             uncatch[n_uncatch].pid  = pid_table[i].pid;
