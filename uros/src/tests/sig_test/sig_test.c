@@ -350,6 +350,58 @@ test_child_kill_sigchld(void)
     PASS();
 }
 
+/*
+ * #953: proc_server takes a signal's default action itself for a task that
+ * registered no signal port, as a bare child is, and the action is
+ * proc_sig_default()'s, the one libposix-uros's signal thread takes for a
+ * program of musl.  proc_server's own list ended the task for SIGURG and
+ * SIGWINCH, whose default is to ignore them: the child must outlive both,
+ * and no SIGCHLD come.  Then SIGXCPU, whose default ends it, must, which says
+ * this test sees an end when there is one.
+ */
+static void
+test_default_on_bare_child(void)
+{
+    mach_port_t child = MACH_PORT_NULL;
+    proc_pid_t child_pid = 0;
+    int rc = 0;
+    int signo = 0;
+    proc_pid_t sender = 0;
+    kern_return_t kr;
+
+    BEGIN_TEST("SIGURG + SIGWINCH ignored, SIGXCPU ends, on a bare child (#953)");
+    kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
+                     FALSE, &child);
+    EXPECT_KR(kr, KERN_SUCCESS, "task_create");
+
+    kr = register_task(my_pid, child, (char *)"dflchild",
+                       &child_pid, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
+    EXPECT_RC(rc, PROC_OK, "proc_register child rc");
+
+    rc = 0;
+    kr = proc_kill(proc_port, child_pid, PROC_SIGURG, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_kill SIGURG kr");
+    EXPECT_RC(rc, PROC_OK, "SIGURG rc");
+    rc = 0;
+    kr = proc_kill(proc_port, child_pid, PROC_SIGWINCH, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_kill SIGWINCH kr");
+    EXPECT_RC(rc, PROC_OK, "SIGWINCH rc");
+
+    /* An end's SIGCHLD comes well within 2 s (test_child_kill_sigchld). */
+    EXPECT(recv_signal(2000, &signo, &sender) != 0,
+           "SIGURG or SIGWINCH ended a task with no signal port");
+    rc = 0;
+    kr = proc_kill(proc_port, child_pid, PROC_SIGXCPU, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_kill SIGXCPU kr");
+    EXPECT_RC(rc, PROC_OK, "SIGXCPU rc (the child was gone before it)");
+    EXPECT(recv_signal(2000, &signo, &sender) == 0,
+           "SIGXCPU did not end a task with no signal port");
+    EXPECT(signo == PROC_SIGCHLD, "after SIGXCPU, wrong signo (want SIGCHLD)");
+    EXPECT(sender == child_pid, "after SIGXCPU, SIGCHLD.sender_pid mismatch");
+    PASS();
+}
+
 /* ==================================================================
  *  Resource accounting (v0.4.0 / #240)
  * ================================================================== */
@@ -765,6 +817,7 @@ main(int argc, char **argv)
         test_bad_pid();
         test_child_stop_cont();
         test_child_kill_sigchld();
+        test_default_on_bare_child();
 
         /* v0.3.0 / #239 — process groups + sessions */
         test_pgrp_inherit();
