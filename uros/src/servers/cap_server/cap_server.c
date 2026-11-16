@@ -30,8 +30,8 @@
  *     a later issue with manifest / user / runtime layers)
  *   - single-shard cap_table protected by a single implicit mutex
  *     (Issue A is single-threaded)
- *   - revocation is cascaded via explicit stack walk over the
- *     delegation tree (CAP_MAX_DEPTH)
+ *   - revocation is cascaded over the whole delegation tree, walked by
+ *     its own links with no stack and no bound (#745)
  */
 
 #include <stddef.h>
@@ -497,9 +497,9 @@ cap_derive(mach_port_t             server,
 }
 
 /*
- * Cascade revocation with an explicit stack (no recursion).  The
- * delegation tree is left-child right-sibling so we walk via
- * first_child_cap_id then next_sibling_cap_id.
+ * Cascade revocation.  The delegation tree is left-child right-sibling, so it
+ * is walked by first_child_cap_id, next_sibling_cap_id and, on the way back
+ * up, parent_cap_id (cap_subtree_next() below).
  */
 /*
  * #599: may the task asking revoke this capability?  Only the task it was
@@ -524,6 +524,30 @@ cap_revoke_authorised(const struct cap_entry *e)
     return 0;
 }
 
+/*
+ * The capability after `e' in a pre-order walk of the tree rooted at `root',
+ * or NULL once `e' was the last (#745).  The tree's own links are the walk:
+ * down to the first child unless told not to, else across to the next sibling,
+ * else up to the parent and across from there, never past the root.  So the
+ * walk needs no stack and has no bound but the tree's size.  It ran on a stack
+ * of CAP_MAX_DEPTH + 1, seventeen entries, and a capability with more than
+ * seventeen children waiting lost the rest of them, with their subtrees: their
+ * holders kept their authority after a revocation that said it succeeded.
+ * CAP_MAX_DEPTH bounds how deep a tree goes, not how wide.
+ */
+static struct cap_entry *
+cap_subtree_next(uint64_t root, struct cap_entry *e, int descend)
+{
+    if (descend && e->token.first_child_cap_id != 0)
+        return cap_table_find_by_id(e->token.first_child_cap_id);
+    while (e != NULL && e->token.cap_id != root) {
+        if (e->token.next_sibling_cap_id != 0)
+            return cap_table_find_by_id(e->token.next_sibling_cap_id);
+        e = cap_table_find_by_id(e->token.parent_cap_id);
+    }
+    return NULL;
+}
+
 kern_return_t
 cap_revoke(mach_port_t server, uint64_t cap_id)
 {
@@ -544,15 +568,19 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
         return CAP_ERR_UNAUTHORIZED;
     }
 
-    uint64_t stack[CAP_MAX_DEPTH + 1];
-    int top = 0;
-    stack[top++] = cap_id;
+    struct cap_entry *e;
+    int revoked = 0, descend = 1;
 
-    int revoked = 0;
-    while (top > 0) {
-        uint64_t id = stack[--top];
-        struct cap_entry *e = cap_table_find_by_id(id);
-        if (!e || e->token.revoked) continue;
+    for (e = root; e != NULL; e = cap_subtree_next(cap_id, e, descend)) {
+        uint64_t id = e->token.cap_id;
+
+        /*
+         * One revoked before took its own subtree with it, so the walk goes
+         * past it and not into it.
+         */
+        descend = !e->token.revoked;
+        if (!descend)
+            continue;
 
         cap_table_mark_revoked(e);
         revoked++;
@@ -575,16 +603,6 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
          * moment the device stops reaching (#432).
          */
         (void)urmach_cap_revoke(id);
-
-        /* Enqueue every child via the sibling chain.  Siblings are
-         * distinct cap_ids so they fit linearly in the stack budget. */
-        uint64_t child = e->token.first_child_cap_id;
-        while (child != 0 && top <= CAP_MAX_DEPTH) {
-            stack[top++] = child;
-            struct cap_entry *c = cap_table_find_by_id(child);
-            if (!c) break;
-            child = c->token.next_sibling_cap_id;
-        }
     }
 
     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
@@ -598,25 +616,10 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
      * only knows about a specific child can still react.
      */
     if (n_revoke_subscribers > 0 && revoked > 0) {
-        /* Re-walk the cascade to collect every revoked id.  Cheap:
-         * the set is already marked, so we just enumerate it once. */
-        uint64_t stack2[CAP_MAX_DEPTH + 1];
-        int top2 = 0;
-        stack2[top2++] = cap_id;
-        while (top2 > 0) {
-            uint64_t id = stack2[--top2];
-            struct cap_entry *e = cap_table_find_by_id(id);
-            if (!e) continue;
-            fanout_revoke_notify(id);
-
-            uint64_t child = e->token.first_child_cap_id;
-            while (child != 0 && top2 <= CAP_MAX_DEPTH) {
-                stack2[top2++] = child;
-                struct cap_entry *c = cap_table_find_by_id(child);
-                if (!c) break;
-                child = c->token.next_sibling_cap_id;
-            }
-        }
+        /* The same walk again, every node of the tree now revoked: a
+         * notice for each, as there was for each before (#745). */
+        for (e = root; e != NULL; e = cap_subtree_next(cap_id, e, 1))
+            fanout_revoke_notify(e->token.cap_id);
     }
 
     return KERN_SUCCESS;
