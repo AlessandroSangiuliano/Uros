@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #904
+Takes out: the shell's close of its copy of each pipe's write end -- ush keeps it, so that the reader of "/musl_test pipe-out | /musl_test pipe-count" waits at end of file for a writer that never writes, and its line never comes
+Script: scripts/ush-x86_64.py
+Expect: ush-x86_64: '/musl_test pipe-out \| /musl_test pipe-count' never said
+
+diff --git a/uros/src/cmds/ush/ush.c b/uros/src/cmds/ush/ush.c
+index 7f64e84c..6a398299 100644
+--- a/uros/src/cmds/ush/ush.c
++++ b/uros/src/cmds/ush/ush.c
+@@ -454,8 +454,7 @@ run_pipeline(char **stage[], int n, int bg)
+         (void)setpgid(pid[i], pgid);
+         if (in >= 0)
+             (void)close(in);
+-        if (fds[1] >= 0)
+-            (void)close(fds[1]);
++        /* 904-ush-write-end-kept: the shell keeps its copy of the write end */
+         in = fds[0];
+     }
+     if (in >= 0)                   /* the stage after it was never started */

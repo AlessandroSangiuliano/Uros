@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #904
+Takes out: the dup2() of a pipe's write end onto the stdout of the command before it -- the writer of "/musl_test pipe-out | /musl_test pipe-count" writes its 200 lines on the terminal, and the reader, whose pipe nobody writes, reads none of them to end of file
+Script: scripts/ush-x86_64.py
+Expect: ush-x86_64: \| musl_test \(pipe-count\): 0 bytes of 7400
+
+diff --git a/uros/src/cmds/ush/ush.c b/uros/src/cmds/ush/ush.c
+index 7f64e84c..80536aaa 100644
+--- a/uros/src/cmds/ush/ush.c
++++ b/uros/src/cmds/ush/ush.c
+@@ -434,7 +434,7 @@ run_pipeline(char **stage[], int n, int bg)
+                 (void)close(in);
+             }
+             if (fds[1] >= 0) {
+-                (void)dup2(fds[1], 1);
++                /* 904-ush-stdout-not-piped: stdout stays the terminal */
+                 (void)close(fds[1]);
+                 (void)close(fds[0]);
+             }
