@@ -1,31 +1,25 @@
 Kind: ablation
 Issue: #934
-Takes out: SIGTTIN and SIGTTOU from the stops of SIG_DFL -- the signal thread drops them again, as before 92d417b6: musl_test's [46] must see the child that raises them not stop, its first wait answered with its exit
+Takes out: SIGTTIN and SIGTTOU from the stops of SIG_DFL -- proc_sig_default() ignores them, as the signal thread dropped them before 92d417b6: musl_test's [46] must see the child that raises them not stop, its first wait answered with its exit
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[46\] WRONG -- .*SIGTTIN's stop NOT reported as one
+Note: regenerated for #953, where the signal thread's list of default actions became proc_sig_default() in proc_types.h, which proc_server takes for a task with no signal port too; it was the reverse of 92d417b6 in signals.c.
 
-diff --git a/uros/src/lib/libposix-uros/signals.c b/uros/src/lib/libposix-uros/signals.c
-index 99d5dcb2..9cfeba4a 100644
---- a/uros/src/lib/libposix-uros/signals.c
-+++ b/uros/src/lib/libposix-uros/signals.c
-@@ -95,11 +95,7 @@ static mach_port_t       __sig_port          = MACH_PORT_NULL;
- /* POSIX default actions                                              */
- /* ------------------------------------------------------------------ */
- 
--/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S).
-- * A signo with no entry is dropped, as 'I' drops it.  The job-control
-- * stops are the three proc_stop() takes (proc.defs): SIGTSTP, and SIGTTIN
-- * and SIGTTOU, which char_server sends a background group that reads the
-- * terminal, or writes it under TOSTOP (#934). */
-+/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S). */
- static const char __sig_default[PROC_NSIG] = {
-     [PROC_SIGHUP]  = 'T', [PROC_SIGINT]  = 'T', [PROC_SIGQUIT] = 'T',
-     [PROC_SIGILL]  = 'T', [PROC_SIGTRAP] = 'T', [PROC_SIGABRT] = 'T',
-@@ -108,7 +104,6 @@ static const char __sig_default[PROC_NSIG] = {
-     [PROC_SIGPIPE] = 'T', [PROC_SIGALRM] = 'T', [PROC_SIGTERM] = 'T',
-     [PROC_SIGCHLD] = 'I', [PROC_SIGCONT] = 'I',
-     [PROC_SIGSTOP] = 'S', [PROC_SIGTSTP] = 'S',
--    [PROC_SIGTTIN] = 'S', [PROC_SIGTTOU] = 'S',
- };
- 
- /* ------------------------------------------------------------------ */
+diff --git a/uros/src/servers/proc_server/proc_types.h b/uros/src/servers/proc_server/proc_types.h
+index 7e96353c..246cba00 100644
+--- a/uros/src/servers/proc_server/proc_types.h
++++ b/uros/src/servers/proc_server/proc_types.h
+@@ -179,11 +179,11 @@ proc_sig_default(int signo)
+     case PROC_SIGCONT:          /* the continue itself is proc_server's */
+     case PROC_SIGURG:
+     case PROC_SIGWINCH:
++    case PROC_SIGTTIN:          /* 934-ttin-ttou-dropped: ignored, as dropped */
++    case PROC_SIGTTOU:
+         return PROC_SIG_DFL_IGN;
+     case PROC_SIGSTOP:
+     case PROC_SIGTSTP:
+-    case PROC_SIGTTIN:
+-    case PROC_SIGTTOU:
+         return PROC_SIG_DFL_STOP;
+     default:
+         return PROC_SIG_DFL_TERM;
