@@ -69,6 +69,11 @@ def main():
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--budget", type=float, default=300.0,
                     help="seconds to wait for the prompt")
+    # #952: the merge test runs this under TCG on slower hosts as well, where
+    # a fixed minute for a line would be a WRONG about the host.
+    ap.add_argument("--wait", type=float, default=60.0,
+                    help="seconds to wait for each line a command prints, "
+                         "and for the prompt after it (default 60)")
     ap.add_argument("--log", help="where to keep what the line carried")
     a = ap.parse_args()
 
@@ -171,6 +176,7 @@ def session(a, build):
             return 2
 
         rc = 0
+        answered = 0
         for command, *wants in COMMANDS:
             typed_at = seen
             os.write(fd_in, (command + "\r").encode("latin-1"))
@@ -180,7 +186,7 @@ def session(a, build):
             # when it had.  Each `want' is a whole line, so the echo cannot
             # pass for it.
             for want in wants:
-                if not wait_for(want, 60.0):
+                if not wait_for(want, a.wait):
                     print(f"ush-x86_64: {command!r} never said {want!r}",
                           file=sys.stderr)
                     rc = 1
@@ -192,13 +198,18 @@ def session(a, build):
                 for line in pump()[typed_at:].replace("\r", "").splitlines():
                     print(f"ush-x86_64: | {line}", file=sys.stderr)
                 break
-            if not wait_for(PROMPT, 60.0):
+            if not wait_for(PROMPT, a.wait):
                 print(f"ush-x86_64: {command!r} ran and the prompt did not "
                       f"come back", file=sys.stderr)
                 rc = 1
                 break
+            answered += 1
             print(f"ush-x86_64: {command} printed its line, and the prompt "
                   f"came back")
+        # #952: one line that says the whole of it, which the merge test's
+        # judge asks for: how many commands answered, of all of them, so that
+        # a session that stopped at one is never read as one that passed.
+        print(f"ush-x86_64: {answered} of {len(COMMANDS)} commands answered")
         print(f"ush-x86_64: log: {log}")
     finally:
         try:
