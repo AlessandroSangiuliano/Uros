@@ -3101,9 +3101,10 @@ arm_wait_tty_stops(void)
 #define WK_ZERO		4	/* kill(0) did not end the two by SIGTERM */
 #define WK_SELF		8	/* kill(0)'s caller did not come back from it */
 #define WK_LOST		16	/* the child outside: its wait did not say how */
+#define WK_SETUP	32	/* kill(0)'s group not made: a pipe or fork refused */
 
 /* [47]'s second group, led by the caller of kill(0): 0 if its two ended by
- * SIGTERM and it did not. */
+ * SIGTERM and it did not, 2 if its pipe or a fork was refused. */
 static int
 kill_zero_leader(void)
 {
@@ -3189,8 +3190,10 @@ kill_groups_run(void)
 	if (z == 0)
 		_exit(kill_zero_leader());
 	got = waitpid(z, &zst, 0);
-	if (got != z || !WIFEXITED(zst) || WEXITSTATUS(zst) == 2)
+	if (got != z || !WIFEXITED(zst))
 		wrong |= WK_SELF;
+	else if (WEXITSTATUS(zst) == 2)
+		wrong |= WK_SETUP;
 	else if (WEXITSTATUS(zst) != 0)
 		wrong |= WK_ZERO;
 	printf("musl_test (group kills): kill(-%d, SIGTERM) answered %d and ended "
@@ -3218,6 +3221,7 @@ arm_kill_groups(void)
 		: (r & WK_LOST) ? "the child outside it NOT found by its wait"
 		: "the child outside it was not",
 		r < 0 ? "-" : (r & WK_SELF) ? "kill(0)'s caller did NOT come back"
+		: (r & WK_SETUP) ? "kill(0)'s group NOT made, a pipe or fork refused"
 		: (r & WK_ZERO) ? "kill(0) did NOT end the two"
 		: "kill(0) ended the two and not its caller");
 }
