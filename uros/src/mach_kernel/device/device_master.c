@@ -332,6 +332,7 @@ device_master_init(void)
 		irq_forward_table[i].notify_port = IP_NULL;
 		irq_forward_table[i].active = 0;
 		irq_forward_table[i].owner = TASK_NULL;
+		irq_forward_table[i].bdf = DEVICE_DMA_NO_BDF;	/* #745 */
 	}
 }
 
@@ -1082,7 +1083,7 @@ measure_regions(struct device_claim_entry *e, natural_t bdf)
  * two answers are not treated as owning line 0 or line 255.
  */
 static kern_return_t
-check_irq_owner(unsigned int irq)
+check_irq_owner(unsigned int irq, natural_t *bdf_out)
 {
 	task_t		me = current_task();
 	unsigned	i, n;
@@ -1133,8 +1134,14 @@ check_irq_owner(unsigned int irq)
 		return KERN_NO_ACCESS;
 	}
 
-	if (mine || other_bdf == DEVICE_DMA_NO_BDF)
+	/*
+	 * #745: and which device the line rests on, for a revocation of its
+	 * claim to find it -- none, for a line no claimed device raises.
+	 */
+	if (mine || other_bdf == DEVICE_DMA_NO_BDF) {
+		*bdf_out = mine ? my_bdf : DEVICE_DMA_NO_BDF;
 		return KERN_SUCCESS;
+	}
 
 	printf("device_intr_register: irq %u is raised by %u:%u.%u, "
 	       "which another task holds\n", irq,
@@ -1152,6 +1159,7 @@ ds_master_device_intr_register(
 	task_t me = current_task();
 	kern_return_t kr;
 	spl_t s;
+	natural_t bdf = DEVICE_DMA_NO_BDF;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -1169,7 +1177,7 @@ ds_master_device_intr_register(
 	if (irq >= IRQ_FORWARD_LINES)
 		return KERN_INVALID_ARGUMENT;
 
-	kr = check_irq_owner(irq);
+	kr = check_irq_owner(irq, &bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1202,6 +1210,7 @@ ds_master_device_intr_register(
 	irq_forward_table[irq].notify_port = notify_port;
 	irq_forward_table[irq].active = 1;
 	irq_forward_table[irq].owner = me;
+	irq_forward_table[irq].bdf = bdf;		/* #745 */
 	task_reference(me);
 
 	if (!device_md_irq_register(irq, irq_forward_handler)) {
@@ -1214,6 +1223,7 @@ ds_master_device_intr_register(
 		irq_forward_table[irq].notify_port = IP_NULL;
 		irq_forward_table[irq].active = 0;
 		irq_forward_table[irq].owner = TASK_NULL;
+		irq_forward_table[irq].bdf = DEVICE_DMA_NO_BDF;
 		simple_unlock(&irq_forward_lock);
 		splx(s);
 		task_deallocate(me);	/* outside the spin lock */
@@ -1330,6 +1340,8 @@ ds_master_device_msi_register(
 	 * the shape #531 spent a day on.  Both fill it now.
 	 */
 	irq_forward_table[slot].owner = me;
+	irq_forward_table[slot].bdf =			/* #745 */
+	    (natural_t)((bus << 8) | (dev << 3) | func);
 	task_reference(me);
 
 	simple_unlock(&irq_forward_lock);
