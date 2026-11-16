@@ -641,6 +641,8 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
   # #929: a program linked -static with a plain -lc, as a foreign build would.
   add_subdirectory(tests/static_lc_test)
   add_subdirectory(tests/musl_test)
+  # #945: what a forked child holds of its parent's per-task port.
+  add_subdirectory(tests/fork_cap_test)
   add_subdirectory(cmds/ush)
 endif()
 

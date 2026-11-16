@@ -261,6 +261,17 @@ holds a slot (#937). Until #743 exec_server
 provisioned the file's manifest as it stood: whoever wrote a binary that
 something exec'd wrote its policy.
 
+**Not inherited, by a child made with `fork()`.** A per-task port is its task's
+identity to cap_server, and a child holding its parent's would be its parent.
+The kernel does not hand it on: `task_create()` leaves the child's
+`TASK_CAP_PORT` null. libmach forgets the name the child's memory kept for its
+parent's port before the child's first RPC (`mach_task_self_init()`), and
+`fork()` copies the registered ports into the child, cap_server's well-known
+port among them. So a forked child asks that port, which issues no capability,
+and its exec hands exec_server no port (#945). Before #945 the child kept its
+parent's name, which named something else in its space: hello_server's child
+handed it to exec_server on exec and was answered `MIG_BAD_ID`.
+
 🔑 A per-task port has no senders once its task and everyone it was handed to
 have let it go: cap_server keeps none, and the provisioner gives its own back.
 The no-senders notification frees the table slot and the task port kept for
@@ -669,7 +680,7 @@ Stated so nobody reads this document as a description of a finished system.
   fill the table (#937):
   - a derivation that keeps nothing takes no slot (`CAP_ERR_NOTHING_TO_DERIVE`);
   - derived ports hold at most 32 slots (`CAP_ERR_DERIVED_QUOTA`), so the other
-    32 are bootstrap's for the tasks it starts: 11 on x86-64, 18 on i386;
+    32 are bootstrap's for the tasks it starts: 12 on x86-64, 18 on i386;
   - one family -- a task bootstrap provisioned and every task derived from it,
     down any chain of execs -- holds at most 16 (`CAP_ERR_LINEAGE_FULL`). A
     family is a number given at provisioning and never given again.
@@ -684,6 +695,11 @@ Stated so nobody reads this document as a description of a finished system.
 - **Only `cap_test`'s manifest delegates anything.** It hands on block devices
   READ, to show a derivation cut; every other task's programs get nothing,
   whatever their files ask for.
+- **A forked child holds no per-task port, and nothing gives it one (#945).**
+  A port derived for it at `fork()`, cut by its parent's `delegatable[]` as an
+  exec's is, would let a forking server's children hold capabilities. It waits
+  for a forking task that needs one: today no task that forks delegates
+  anything, so the derivation would be refused for every child.
 - **Most resource types have no server checking them.** Only
   `RESOURCE_BLK_DEVICE`, `RESOURCE_PCI_DEVICE`, `RESOURCE_DMA_BUFFER` and
   `RESOURCE_MOUNT_POINT` are verified anywhere today, and
@@ -692,12 +708,13 @@ Stated so nobody reads this document as a description of a finished system.
   with no enforcement behind them — the browser example above is therefore
   *architecture*, not a transcript.
 - **A manifest decides every capability.** A task that ships none is refused
-  all of them (`cap_manifest_allows()`, #511). In the x86-64 build fourteen
-  programs ship one: ten in the bundle, for the tasks bootstrap starts
+  all of them (`cap_manifest_allows()`, #511). In the x86-64 build fifteen
+  programs ship one: eleven in the bundle, for the tasks bootstrap starts
   (block_device_server, hal_server, ext_server, proc_server, `cap_test`,
-  mount_test, dma_reclaim_test, irq_claim_test, ipc_bench when it is bundled,
-  and bootstrap's own stage 2), and four in the binary itself as
-  `.uros_manifest` (`hello_exec`, `ush`, `hello_dyn_world`, `mach_error_dyn`).
+  mount_test, dma_reclaim_test, irq_claim_test, `fork_cap_test`, ipc_bench
+  when it is bundled, and bootstrap's own stage 2), and four in the binary
+  itself as `.uros_manifest` (`hello_exec`, `ush`, `hello_dyn_world`,
+  `mach_error_dyn`).
   For those four and every other program exec'd rather than started by
   bootstrap, the file says only what they ask for: what they get is cut by
   their caller's `delegatable[]` (#743).
@@ -741,6 +758,7 @@ this is where to look, and what to break to confirm it still works.
 | a reduced port takes the traps itself, not through MIG | `cap_test [45]` | `ablations/927-traps-refuse-a-reduced-port` |
 | a derivation that keeps nothing takes no slot, and derived ports meet a family's bound and a quota | `cap_test [46]` | `ablations/937-empty-derivation-takes-a-slot`, `937-family-unbounded`, `937-quota-unbounded` (over the widen `937-widen-family-to-the-quota`) |
 | cap_server keeps a task's identity port and no task port, and the kernel's DMA owner check takes the identity port | `cap_test [47]`, `[12]` | `ablations/938-cap-server-takes-full-ports`, `938-cap-server-keeps-task-ports`, `938-dma-owner-wants-the-task-port` |
+| a forked child holds no per-task port, and cap_server answers its requests | `fork_cap_test [2]`, `[3]` | `ablations/945-child-keeps-the-parents-name`, `945-cap-server-port-not-copied` |
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers

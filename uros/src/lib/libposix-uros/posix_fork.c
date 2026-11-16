@@ -28,6 +28,13 @@
  * refer to nothing unless we re-insert the right at that name.  Hence
  * the extract+insert dance for {bootstrap, name_server, proc, exec}.
  *
+ * Which names are re-inserted is what the kernel decides the child holds
+ * (#945).  It copies the bootstrap port and every registered port at
+ * task_create, so the child gets each of them under the parent's name.  It
+ * does not copy the per-task capability port, which is the parent's identity
+ * to cap_server, so that name is not re-inserted but forgotten, in
+ * mach_task_self_init().
+ *
  * Out of scope for Phase 5b: vfork (musl maps it to fork; that's
  * fine), pthread_atfork hooks, FP/SSE state across fork, stdio
  * buffer reset in the child.
@@ -283,6 +290,15 @@ __uros_fork(void)
      */
     inherit_send_right(mach_task_self(), child_task, bootstrap_port);
     inherit_send_right(mach_task_self(), child_task, name_server_port);
+    /*
+     * #945: and the other registered ports mach_init_ports() read, which
+     * the kernel hands the child as well.  cap_server's is where libcap
+     * asks when there is no per-task port, and the child never has one:
+     * without it the child's requests went to whatever its name named.
+     */
+    inherit_send_right(mach_task_self(), child_task, urmach_cap_server_port);
+    inherit_send_right(mach_task_self(), child_task, environment_port);
+    inherit_send_right(mach_task_self(), child_task, service_port);
     inherit_send_right(mach_task_self(), child_task, __uros_proc_port);
     inherit_send_right(mach_task_self(), child_task, __uros_get_exec_port());
     /* #923: and the clocks, whose names the child's memory keeps too. */

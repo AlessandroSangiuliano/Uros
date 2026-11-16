@@ -155,14 +155,27 @@ mig_put_reply_port(
  * the child of a fork(), and a raw thread started in a task that inherited its
  * parent's memory.  The cached task port still names the parent's, and the
  * reply port and the per-thread hand-over are the parent's; both are reset.
- * Port registration, the page size and the RPC glue are inherited and left
- * alone.
+ * The page size and the RPC glue are inherited and left alone.  The registered
+ * ports and the bootstrap port are the child's too, as rights the kernel copies
+ * at task_create, but the names the globals hold are the parent's: they name
+ * the child's rights only where its maker copied each one under its name, as
+ * fork() does (posix_fork.c).
  *
  * ⚠️ So is the parent's name signature, which is NOT inherited and is forgotten
  * here (#744): its receive right stayed in the parent, and the name the child
  * inherited names nothing in the child's space, or names one of the child's own
  * rights -- which the child would then sign with, and whoever can send to that
  * right could take the child's names.
+ *
+ * ⚠️ And so is the parent's per-task capability port, mach_cap_port (#945).
+ * The kernel does not hand a new task its parent's TASK_CAP_PORT: it is the
+ * task's identity to cap_server, and a child holding it would be its parent.
+ * The name the child inherited named nothing in its space, or a right it got
+ * for something else, and its requests went there: an exec of hello_server's
+ * child handed it to exec_server as its caller's port, and was answered
+ * MIG_BAD_ID.  Forgotten, the child asks cap_server's well-known port, which
+ * issues no capability (#511), and an exec hands exec_server no port, as one
+ * from a task without a manifest does.
  *
  * It lives here and not in mach_init.c, where it was.  A caller outside libmach
  * that named a function in mach_init.c pulled that file into libc.so beside
@@ -185,4 +198,5 @@ mach_task_self_init(void)
 	mig_init(0);
 	urmach_netname_signature_forget();
 	urmach_lifetime_port_forget();		/* #911, for the same reason */
+	mach_cap_port = MACH_PORT_NULL;		/* #945 */
 }

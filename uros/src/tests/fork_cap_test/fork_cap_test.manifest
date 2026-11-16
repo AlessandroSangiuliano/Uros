@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# fork_cap_test manifest -- what a task forks away from (#945).
+#
+# 🔑 The grant exists to be withheld.  This task is granted the one capability
+# below on its own per-task port, and a child it forks asks for the same and
+# must be refused it by cap_server: the child holds no per-task port.  The id
+# names no device, so the grant reaches nothing even where it is made.
+
+name fork_cap_test
+
+# RESOURCE_BLK_DEVICE (4), id 0x945 alone, READ (0x1).
+required 4 0x945 0x1

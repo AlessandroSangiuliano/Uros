@@ -1,0 +1,15 @@
+Kind: ablation
+Issue: #945
+Takes out: mach_task_self_init()'s forgetting of the parent's per-task port (1e06186b) -- a forked child keeps its parent's name for it
+Run: --entry 14 600 -smp 4
+Expect: fork_cap_test: \[3\] WRONG -- the forked child's mach_cap_port is 0x[0-9a-f]+, and the TASK_CAP_PORT the kernel gave it 0 \(kr
+
+diff --git a/uros/src/lib/libmach/mig_support.c b/uros/src/lib/libmach/mig_support.c
+--- a/uros/src/lib/libmach/mig_support.c
++++ b/uros/src/lib/libmach/mig_support.c
+@@ -198,5 +198,4 @@
+ 	mig_init(0);
+ 	urmach_netname_signature_forget();
+ 	urmach_lifetime_port_forget();		/* #911, for the same reason */
+-	mach_cap_port = MACH_PORT_NULL;		/* #945 */
+ }
