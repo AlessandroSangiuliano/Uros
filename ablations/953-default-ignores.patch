@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #953
+Takes out: proc_sig_default()'s answer for each signal it does not name, that it ends the process -- ignored, the signal thread drops the eight again and proc_server ignores SIGXCPU for a task with no signal port: sig_test must see SIGXCPU leave a bare child, the end its arm asks to see, as musl_test's [50] sees the eight leave their children
+Run: --entry 14 600 -smp 4
+Expect: FAIL: SIGXCPU did not end a task with no signal port
+
+diff --git a/uros/src/servers/proc_server/proc_types.h b/uros/src/servers/proc_server/proc_types.h
+index 7e96353c..7763fbaf 100644
+--- a/uros/src/servers/proc_server/proc_types.h
++++ b/uros/src/servers/proc_server/proc_types.h
+@@ -186,7 +186,7 @@ proc_sig_default(int signo)
+     case PROC_SIGTTOU:
+         return PROC_SIG_DFL_STOP;
+     default:
+-        return PROC_SIG_DFL_TERM;
++        return PROC_SIG_DFL_IGN;    /* 953-default-ignores: what is not named is ignored */
+     }
+ }
+ 
