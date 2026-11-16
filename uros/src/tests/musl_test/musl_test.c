@@ -3090,15 +3090,17 @@ arm_wait_tty_stops(void)
  * kill(-group, sig) and kill(0, sig) went to proc_kill() as a pid, which none
  * is; [37] asks killpg(), musl's kill(-group), of a group with one process in
  * it.  Here three children make a group and a fourth stays out of it:
- * kill(-group, SIGTERM) must end the three and not the fourth.  Then a child
- * leads a group of its own with SIGTERM ignored and makes two more in it,
- * which put SIGTERM back to SIG_DFL: its kill(0, SIGTERM) must end the two
- * and not itself.
+ * kill(-group, SIGTERM) must end the three and not the fourth, which is
+ * asked how it ended: an exit 9 is its own 10 s run out, no kill.  Then a
+ * child leads a group of its own with SIGTERM ignored and makes two more in
+ * it, which put SIGTERM back to SIG_DFL: its kill(0, SIGTERM) must end the
+ * two and not itself.
  */
 #define WK_GROUP	1	/* kill(-group) did not end the three by SIGTERM */
-#define WK_OUT		2	/* it reached the child outside the group */
+#define WK_OUT		2	/* a signal ended the child outside the group */
 #define WK_ZERO		4	/* kill(0) did not end the two by SIGTERM */
 #define WK_SELF		8	/* kill(0)'s caller did not come back from it */
+#define WK_LOST		16	/* the child outside: its wait did not say how */
 
 /* [47]'s second group, led by the caller of kill(0): 0 if its two ended by
  * SIGTERM and it did not. */
@@ -3143,7 +3145,7 @@ static int
 kill_groups_run(void)
 {
 	pid_t	c[3], out, z, got, alive;
-	int	st, i, ended = 0, rk, zst = 0, wrong = 0;
+	int	st, i, ended = 0, rk, ost = 0, zst = 0, wrong = 0;
 
 	for (i = 0; i < 3; i++) {
 		c[i] = fork();
@@ -3169,11 +3171,18 @@ kill_groups_run(void)
 	}
 	if (rk != 0 || ended != 3)
 		wrong |= WK_GROUP;
-	alive = waitpid(out, &st, WNOHANG);	/* 0: still there, not reached */
-	if (alive != 0)
+	/* 0: still there.  When the group's kill went nowhere, the waits for
+	 * the three outlast its 10 s too, and it is gone with its exit 9. */
+	alive = waitpid(out, &ost, WNOHANG);
+	if (alive == out && WIFSIGNALED(ost))
 		wrong |= WK_OUT;
-	(void)kill(out, SIGKILL);
-	(void)waitpid(out, &st, 0);
+	else if (alive != 0 &&
+	    !(alive == out && WIFEXITED(ost) && WEXITSTATUS(ost) == 9))
+		wrong |= WK_LOST;
+	if (alive == 0) {
+		(void)kill(out, SIGKILL);
+		(void)waitpid(out, &st, 0);
+	}
 	z = fork();
 	if (z < 0)
 		return 64;
@@ -3185,9 +3194,9 @@ kill_groups_run(void)
 	else if (WEXITSTATUS(zst) != 0)
 		wrong |= WK_ZERO;
 	printf("musl_test (group kills): kill(-%d, SIGTERM) answered %d and ended "
-	       "%d of 3, the one outside %s; kill(0)'s caller %d status %#x\n",
-	       (int)c[0], rk, ended, alive == 0 ? "still there" : "GONE",
-	       (int)got, (unsigned)zst);
+	       "%d of 3; the one outside, %d, WNOHANG %d status %#x; kill(0)'s "
+	       "caller %d status %#x\n", (int)c[0], rk, ended, (int)out,
+	       (int)alive, (unsigned)ost, (int)got, (unsigned)zst);
 	return wrong;
 }
 
@@ -3206,6 +3215,7 @@ arm_kill_groups(void)
 		? "the three NOT all ended by SIGTERM"
 		: "the three ended by SIGTERM",
 		r < 0 ? "-" : (r & WK_OUT) ? "the child outside it WAS reached"
+		: (r & WK_LOST) ? "the child outside it NOT found by its wait"
 		: "the child outside it was not",
 		r < 0 ? "-" : (r & WK_SELF) ? "kill(0)'s caller did NOT come back"
 		: (r & WK_ZERO) ? "kill(0) did NOT end the two"
