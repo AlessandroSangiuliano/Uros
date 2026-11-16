@@ -1034,34 +1034,6 @@ signo_valid(int signo)
 }
 
 /*
- * Default disposition of a signal for a target that has registered no
- * signal_port (no libposix signal handler thread).  POSIX still requires
- * the signal's default action to take effect: an unhandled SIGTERM/SIGINT
- * terminates the process, an unhandled job-control stop signal stops it,
- * SIGCHLD is discarded.  proc_server applies these itself on the task port,
- * exactly as it already does for the uncatchable SIGKILL/SIGSTOP (#398).
- *
- * SIGKILL/SIGSTOP/SIGCONT never reach this helper — they are handled
- * before the signal_port lookup.
- */
-enum sig_dfl { SIG_DFL_TERM, SIG_DFL_STOP, SIG_DFL_IGN };
-
-static enum sig_dfl
-sig_default_action(int signo)
-{
-    switch (signo) {
-    case PROC_SIGCHLD:
-        return SIG_DFL_IGN;                     /* discarded by default */
-    case PROC_SIGTSTP:
-    case PROC_SIGTTIN:
-    case PROC_SIGTTOU:
-        return SIG_DFL_STOP;                    /* stop the process */
-    default:
-        return SIG_DFL_TERM;                    /* HUP/INT/QUIT/TERM/USR/PIPE/ALRM/... */
-    }
-}
-
-/*
  * Terminate `task' because signal `signo' ended it, and say so where waitpid
  * will read it (#580).
  *
@@ -1098,7 +1070,15 @@ terminate_for_signal(proc_pid_t pid, int signo, mach_port_t task)
 
 /*
  * Carry out a signal's default disposition on the target's task port, for
- * a pid that has no usable signal_port.  Returns the PROC_* result code.
+ * a pid that has no usable signal_port (no libposix signal thread).  POSIX
+ * still has the default action take effect, and proc_server takes it here,
+ * as it does for the uncatchable SIGKILL and SIGSTOP (#398).  SIGKILL,
+ * SIGSTOP and SIGCONT never come here: they are handled before the
+ * signal_port lookup.  Returns the PROC_* result code.
+ *
+ * #953: the default is proc_sig_default()'s, libposix-uros's answer for a
+ * program that has a signal thread too.  The list that was here ended the
+ * process for SIGURG and SIGWINCH, whose default is to ignore them.
  */
 static int
 apply_default_disposition(proc_pid_t pid, int signo, mach_port_t task)
@@ -1108,14 +1088,14 @@ apply_default_disposition(proc_pid_t pid, int signo, mach_port_t task)
     if (task == MACH_PORT_NULL)
         return PROC_ERR_KERNEL;
 
-    switch (sig_default_action(signo)) {
-    case SIG_DFL_TERM:
+    switch (proc_sig_default(signo)) {
+    case PROC_SIG_DFL_TERM:
         kr = terminate_for_signal(pid, signo, task);
         return (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
-    case SIG_DFL_STOP:
+    case PROC_SIG_DFL_STOP:
         /* Once, marked, and reported to the parent's WUNTRACED (#934). */
         return stop_task(pid, signo);
-    case SIG_DFL_IGN:
+    case PROC_SIG_DFL_IGN:
     default:
         return PROC_OK;                 /* delivered to a process that ignores it */
     }
