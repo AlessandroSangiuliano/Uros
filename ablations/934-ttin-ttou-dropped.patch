@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #934
+Takes out: SIGTTIN and SIGTTOU from the stops of SIG_DFL -- the signal thread drops them again, as before 92d417b6: musl_test's [46] must see the child that raises them not stop, its first wait answered with its exit
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[46\] WRONG -- .*SIGTTIN's stop NOT reported as one
+
+diff --git a/uros/src/lib/libposix-uros/signals.c b/uros/src/lib/libposix-uros/signals.c
+index 99d5dcb2..9cfeba4a 100644
+--- a/uros/src/lib/libposix-uros/signals.c
++++ b/uros/src/lib/libposix-uros/signals.c
+@@ -95,11 +95,7 @@ static mach_port_t       __sig_port          = MACH_PORT_NULL;
+ /* POSIX default actions                                              */
+ /* ------------------------------------------------------------------ */
+ 
+-/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S).
+- * A signo with no entry is dropped, as 'I' drops it.  The job-control
+- * stops are the three proc_stop() takes (proc.defs): SIGTSTP, and SIGTTIN
+- * and SIGTTOU, which char_server sends a background group that reads the
+- * terminal, or writes it under TOSTOP (#934). */
++/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S). */
+ static const char __sig_default[PROC_NSIG] = {
+     [PROC_SIGHUP]  = 'T', [PROC_SIGINT]  = 'T', [PROC_SIGQUIT] = 'T',
+     [PROC_SIGILL]  = 'T', [PROC_SIGTRAP] = 'T', [PROC_SIGABRT] = 'T',
+@@ -108,7 +104,6 @@ static const char __sig_default[PROC_NSIG] = {
+     [PROC_SIGPIPE] = 'T', [PROC_SIGALRM] = 'T', [PROC_SIGTERM] = 'T',
+     [PROC_SIGCHLD] = 'I', [PROC_SIGCONT] = 'I',
+     [PROC_SIGSTOP] = 'S', [PROC_SIGTSTP] = 'S',
+-    [PROC_SIGTTIN] = 'S', [PROC_SIGTTOU] = 'S',
+ };
+ 
+ /* ------------------------------------------------------------------ */

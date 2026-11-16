@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #934
+Takes out: the read of a task's usage before proc_server ends it for a signal -- terminate_for_signal() calls task_terminate() with the usage unread, and once the task is gone it cannot be asked: musl_test's [49] must see wait4() give a child killed by SIGKILL after 600 ms of spinning no time
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[49\] WRONG -- .*its time NOT there
+
+diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
+index e0f08e1d..89498010 100644
+--- a/uros/src/servers/proc_server/proc_main.c
++++ b/uros/src/servers/proc_server/proc_main.c
+@@ -1091,8 +1091,7 @@ terminate_for_signal(proc_pid_t pid, int signo, mach_port_t task)
+         e->exit_declared = 1;
+     }
+     pthread_mutex_unlock(&pid_lock);
+-    /* #934: its usage while it can still be asked, for wait4()'s rusage. */
+-    refresh_rusage_for_pid(pid);
++    /* 934-kill-time-unread: the task goes with its usage unread */
+     return task_terminate(task);
+ }
+ 

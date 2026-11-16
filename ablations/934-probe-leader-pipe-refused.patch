@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #934
+Takes out: nothing -- a probe: the leader of kill(0)'s group in musl_test's [47] takes its pipe as refused, and exits 2 before it makes its group: [47] must say that group was not made, not that kill(0)'s caller did not come back
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[47\] WRONG -- .*kill\(0\)'s group NOT made, a pipe or fork refused
+
+diff --git a/uros/src/tests/musl_test/musl_test.c b/uros/src/tests/musl_test/musl_test.c
+index c4944934..e0d425e5 100644
+--- a/uros/src/tests/musl_test/musl_test.c
++++ b/uros/src/tests/musl_test/musl_test.c
+@@ -3114,7 +3114,7 @@ kill_zero_leader(void)
+ 
+ 	(void)setpgid(0, 0);
+ 	(void)signal(SIGTERM, SIG_IGN);
+-	if (pipe(fds) != 0)
++	if (pipe(fds) != 0 || 1)	/* 934-probe-leader-pipe-refused: as if */
+ 		return 2;
+ 	for (i = 0; i < 2; i++) {
+ 		q[i] = fork();

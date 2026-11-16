@@ -95,7 +95,11 @@ static mach_port_t       __sig_port          = MACH_PORT_NULL;
 /* POSIX default actions                                              */
 /* ------------------------------------------------------------------ */
 
-/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S). */
+/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S).
+ * A signo with no entry is dropped, as 'I' drops it.  The job-control
+ * stops are the three proc_stop() takes (proc.defs): SIGTSTP, and SIGTTIN
+ * and SIGTTOU, which char_server sends a background group that reads the
+ * terminal, or writes it under TOSTOP (#934). */
 static const char __sig_default[PROC_NSIG] = {
     [PROC_SIGHUP]  = 'T', [PROC_SIGINT]  = 'T', [PROC_SIGQUIT] = 'T',
     [PROC_SIGILL]  = 'T', [PROC_SIGTRAP] = 'T', [PROC_SIGABRT] = 'T',
@@ -104,6 +108,7 @@ static const char __sig_default[PROC_NSIG] = {
     [PROC_SIGPIPE] = 'T', [PROC_SIGALRM] = 'T', [PROC_SIGTERM] = 'T',
     [PROC_SIGCHLD] = 'I', [PROC_SIGCONT] = 'I',
     [PROC_SIGSTOP] = 'S', [PROC_SIGTSTP] = 'S',
+    [PROC_SIGTTIN] = 'S', [PROC_SIGTTOU] = 'S',
 };
 
 /* ------------------------------------------------------------------ */
