@@ -570,6 +570,7 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
 
     struct cap_entry *e;
     int revoked = 0, descend = 1;
+    kern_return_t kr, refused = KERN_SUCCESS;
 
     for (e = root; e != NULL; e = cap_subtree_next(cap_id, e, descend)) {
         uint64_t id = e->token.cap_id;
@@ -602,7 +603,21 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
          * the kernel tearing that domain down inside this trap is the only
          * moment the device stops reaching (#432).
          */
-        (void)urmach_cap_revoke(id);
+        /*
+         * #745: and its answer heard.  It was thrown away, so a revocation
+         * the kernel refused -- a key not set, or no room in its table --
+         * was counted and answered as done, while the trap went on
+         * verifying the token.  The rest of the tree is still revoked, and
+         * the request is answered with the first refusal.
+         */
+        kr = urmach_cap_revoke(id);
+        if (kr != KERN_SUCCESS) {
+            printf("cap: the kernel refused the revocation of cap %llu "
+                   "(kr=%d) -- the trap still verifies it (#745)\n",
+                   (unsigned long long)id, (int)kr);
+            if (refused == KERN_SUCCESS)
+                refused = kr;
+        }
     }
 
     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
@@ -622,7 +637,7 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
             fanout_revoke_notify(e->token.cap_id);
     }
 
-    return KERN_SUCCESS;
+    return refused;
 }
 
 /*
