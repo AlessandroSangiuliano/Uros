@@ -2968,6 +2968,44 @@ mmio_mapping_forget(task_t task, vm_offset_t start, vm_offset_t end)
 }
 
 /*
+ * Take back every mapping of device `bdf', from whichever task it was made in,
+ * except `dying', whose map is going anyway: its claim has ended.  Returns how
+ * many were taken back.
+ */
+static unsigned int
+mmio_mappings_withdraw(natural_t bdf, task_t dying)
+{
+	unsigned int i, taken = 0;
+
+	for (i = 0; i < MMIO_MAPPINGS_MAX; i++) {
+		struct mmio_mapping m;
+
+		mutex_lock(&device_table_lock);
+		if (mmio_mapping[i].bdf != bdf) {
+			mutex_unlock(&device_table_lock);
+			continue;
+		}
+		m = mmio_mapping[i];
+		mmio_mapping[i].bdf = DEVICE_DMA_NO_BDF;
+		mmio_mapping[i].task = TASK_NULL;
+		mutex_unlock(&device_table_lock);
+
+		if (m.task != dying) {
+			mmio_mapping_take_back(m.task, m.uva, m.size, m.phys);
+			printf("device: the mapping of %02x:%02x.%u at 0x%lx (%lu "
+			       "bytes) in task 0x%lx is taken back with its "
+			       "claim (#745)\n", (unsigned)(bdf >> 8),
+			       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7),
+			       (unsigned long)m.uva, (unsigned long)m.size,
+			       (unsigned long)m.task);
+			taken++;
+		}
+		task_deallocate(m.task);
+	}
+	return taken;
+}
+
+/*
  * The records of a task that is dying, given up with their references: its map
  * goes with it, and a reference kept here would pin its task struct (#513).
  */
@@ -5098,6 +5136,12 @@ device_master_cap_revoked(uint64_t cap_id)
 		 * memory is taken from under it.
 		 */
 		(void) irq_forward_release_for(holder, bdf);
+		/*
+		 * #745: and the mappings of its regions, from every task they
+		 * were made in: a driver that keeps its BARs keeps programming
+		 * the device.
+		 */
+		(void) mmio_mappings_withdraw(bdf, TASK_NULL);
 
 		(void) device_md_dma_release(bdf);
 		task_deallocate(holder);
@@ -5316,6 +5360,9 @@ device_master_task_terminating(task_t task)
 		       "nothing\n", (unsigned long)task,
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 7));
+
+		/* #745: and what its claim mapped in other tasks. */
+		(void) mmio_mappings_withdraw(bdf, task);
 
 		(void) device_md_dma_release(bdf);
 		task_deallocate(task);
