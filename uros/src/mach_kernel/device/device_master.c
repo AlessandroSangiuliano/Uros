@@ -714,7 +714,7 @@ device_owns_phys(unsigned int claim, vm_offset_t phys, uint64_t *end)
  * page the region's last byte is on.
  */
 static kern_return_t
-check_mmio_phys(vm_offset_t phys, vm_size_t len)
+check_mmio_phys(vm_offset_t phys, vm_size_t len, natural_t *bdf_out)
 {
 	task_t me = current_task();
 	unsigned i, n;
@@ -752,8 +752,10 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 		return KERN_NO_ACCESS;
 	}
 
-	if (mine && (uint64_t)phys + len <= end)
+	if (mine && (uint64_t)phys + len <= end) {
+		*bdf_out = my_bdf;		/* #745: whose mapping it is */
 		return KERN_SUCCESS;
+	}
 
 	if (mine) {
 		printf("device_mmio_map: 0x%lx..0x%lx runs past the end of the "
@@ -2832,6 +2834,165 @@ ds_master_device_dma_map_user(
 }
 
 /*
+ * ── The mappings a claim made of its device's memory (#745) ──────────
+ *
+ * 🔴 A REVOCATION LEFT THE DRIVER ITS REGISTERS.  device_master_cap_revoked()
+ * dropped the claim and its IOMMU domain, so the device stopped reaching
+ * memory -- and the BARs the driver had mapped stayed in its address space, so
+ * it went on programming the device.  Nothing recorded those mappings: the
+ * kernel could not take back what it had never written down.
+ *
+ * 🔑 So every mapping of a claimed device's memory is written down here when it
+ * is made -- the device, the task it was made in, where, how much, and the
+ * frames -- and a mapping that cannot be written down is not made: one the
+ * kernel could not take back is not one it may give.  It is written down under
+ * device_table_lock with the claim looked for again, so a revocation that ran
+ * between the check and the mapping finds the record, or the record finds the
+ * claim gone and the mapping is undone.
+ *
+ * ⚠️ Taken back by its frames and not by its address (vm_map_remove_frames(),
+ * #599): the task may have unmapped the range and mapped something else there.
+ * A task holds a reference while it is in the table, given back when its record
+ * goes: when it unmaps, when the claim ends, when it dies.
+ */
+#define MMIO_MAPPINGS_MAX	64
+
+struct mmio_mapping {
+	natural_t	bdf;		/* DEVICE_DMA_NO_BDF: the slot is free */
+	task_t		task;		/* where it was made, referenced */
+	vm_offset_t	uva;		/* page-aligned */
+	vm_size_t	size;		/* a whole number of pages */
+	vm_offset_t	phys;		/* page-aligned, contiguous */
+};
+
+static struct mmio_mapping mmio_mapping[MMIO_MAPPINGS_MAX] = {
+	[0 ... MMIO_MAPPINGS_MAX - 1] = { .bdf = DEVICE_DMA_NO_BDF }
+};
+
+/*
+ * Take back from `task' the pages of [uva, uva + size) that still map the
+ * device's frames from `phys' on, and leave the rest.
+ */
+static void
+mmio_mapping_take_back(task_t task, vm_offset_t uva, vm_size_t size,
+		       vm_offset_t phys)
+{
+	vm_offset_t	pa[64];
+	unsigned int	npages = (unsigned int)(size / PAGE_SIZE), done = 0;
+	unsigned int	i, n;
+
+	while (done < npages) {
+		n = npages - done < 64 ? npages - done : 64;
+		for (i = 0; i < n; i++)
+			pa[i] = phys + (vm_offset_t)(done + i) * PAGE_SIZE;
+		(void) vm_map_remove_frames(task->map,
+					    uva + (vm_offset_t)done * PAGE_SIZE,
+					    pa, n, VM_MAP_NO_FLAGS);
+		done += n;
+	}
+}
+
+/*
+ * Write down a mapping just made of claimed device `bdf' in `task', for the
+ * caller's claim.  If the claim is gone or the table is full, the mapping is
+ * taken back and the answer says why.
+ */
+static kern_return_t
+mmio_mapping_keep(natural_t bdf, task_t task, vm_offset_t uva, vm_size_t size,
+		  vm_offset_t phys)
+{
+	task_t		me = current_task();
+	unsigned	i, n;
+	kern_return_t	kr = KERN_RESOURCE_SHORTAGE;
+
+	mutex_lock(&device_table_lock);
+	n = device_nclaims;
+	for (i = 0; i < n; i++)
+		if (device_claim[i].bdf == bdf && device_claim[i].task == me)
+			break;
+	if (i == n) {
+		kr = KERN_NO_ACCESS;
+	} else {
+		for (i = 0; i < MMIO_MAPPINGS_MAX; i++)
+			if (mmio_mapping[i].bdf == DEVICE_DMA_NO_BDF)
+				break;
+		if (i < MMIO_MAPPINGS_MAX) {
+			task_reference(task);
+			mmio_mapping[i].task = task;
+			mmio_mapping[i].uva  = uva;
+			mmio_mapping[i].size = size;
+			mmio_mapping[i].phys = phys;
+			mmio_mapping[i].bdf  = bdf;
+			kr = KERN_SUCCESS;
+		}
+	}
+	mutex_unlock(&device_table_lock);
+
+	if (kr != KERN_SUCCESS) {
+		printf("device: a mapping of %02x:%02x.%u is not given: %s "
+		       "(#745)\n", (unsigned)(bdf >> 8),
+		       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7),
+		       kr == KERN_NO_ACCESS ? "its claim ended while it was made"
+		       : "the kernel has no room to record it, so it could "
+		       "not be taken back");
+		mmio_mapping_take_back(task, uva, size, phys);
+	}
+	return kr;
+}
+
+/*
+ * Forget the records of `task' that lie wholly in [start, end): the task
+ * unmapped them.  A record it unmapped part of stays, for what is left.
+ */
+static void
+mmio_mapping_forget(task_t task, vm_offset_t start, vm_offset_t end)
+{
+	unsigned int i;
+
+	for (i = 0; i < MMIO_MAPPINGS_MAX; i++) {
+		task_t gone = TASK_NULL;
+
+		mutex_lock(&device_table_lock);
+		if (mmio_mapping[i].bdf != DEVICE_DMA_NO_BDF &&
+		    mmio_mapping[i].task == task &&
+		    mmio_mapping[i].uva >= start &&
+		    mmio_mapping[i].uva + mmio_mapping[i].size <= end) {
+			gone = mmio_mapping[i].task;
+			mmio_mapping[i].bdf = DEVICE_DMA_NO_BDF;
+			mmio_mapping[i].task = TASK_NULL;
+		}
+		mutex_unlock(&device_table_lock);
+		if (gone != TASK_NULL)
+			task_deallocate(gone);
+	}
+}
+
+/*
+ * The records of a task that is dying, given up with their references: its map
+ * goes with it, and a reference kept here would pin its task struct (#513).
+ */
+static void
+mmio_mappings_task_died(task_t task)
+{
+	unsigned int i;
+
+	for (i = 0; i < MMIO_MAPPINGS_MAX; i++) {
+		task_t gone = TASK_NULL;
+
+		mutex_lock(&device_table_lock);
+		if (mmio_mapping[i].bdf != DEVICE_DMA_NO_BDF &&
+		    mmio_mapping[i].task == task) {
+			gone = mmio_mapping[i].task;
+			mmio_mapping[i].bdf = DEVICE_DMA_NO_BDF;
+			mmio_mapping[i].task = TASK_NULL;
+		}
+		mutex_unlock(&device_table_lock);
+		if (gone != TASK_NULL)
+			task_deallocate(gone);
+	}
+}
+
+/*
  * device_mmio_map — map a physical MMIO range (PCI BAR) into a user task.
  * phys_addr need not be page-aligned; the returned uva has the same
  * page offset as phys_addr.
@@ -2850,6 +3011,7 @@ ds_master_device_mmio_map(
 	vm_offset_t	uva;
 	vm_size_t	round_sz;
 	kern_return_t	kr;
+	natural_t	bdf = DEVICE_DMA_NO_BDF;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -2866,7 +3028,7 @@ ds_master_device_mmio_map(
 	page_offset = (vm_offset_t)phys_addr - phys_base;
 	round_sz    = round_page(page_offset + size);
 
-	kr = check_mmio_phys(phys_base, round_sz);
+	kr = check_mmio_phys(phys_base, round_sz, &bdf);
 	if (kr != KERN_SUCCESS) {
 		task_deallocate(task);
 		return kr;
@@ -2874,6 +3036,8 @@ ds_master_device_mmio_map(
 
 	kr = map_pages_into_task(task, phys_base, 0,
 				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
+	if (kr == KERN_SUCCESS)				/* #745 */
+		kr = mmio_mapping_keep(bdf, task, uva, round_sz, phys_base);
 	task_deallocate(task);
 	if (kr != KERN_SUCCESS)
 		return kr;
@@ -2969,6 +3133,8 @@ ds_master_device_region_map(
 
 	kr = map_pages_into_task(task, phys_base, 0,
 				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
+	if (kr == KERN_SUCCESS)				/* #745 */
+		kr = mmio_mapping_keep(bdf, task, uva, round_sz, phys_base);
 	task_deallocate(task);
 	if (kr != KERN_SUCCESS)
 		return kr;
@@ -3003,6 +3169,10 @@ ds_master_device_mmio_unmap(
 			   trunc_page((vm_offset_t)uva),
 			   round_page((vm_offset_t)uva + size),
 			   FALSE);
+	/* #745: and its record, which a revocation would otherwise take back */
+	if (kr == KERN_SUCCESS)
+		mmio_mapping_forget(task, trunc_page((vm_offset_t)uva),
+				    round_page((vm_offset_t)uva + size));
 	task_deallocate(task);
 	return kr;
 }
@@ -5109,6 +5279,12 @@ device_master_task_terminating(task_t task)
 		kmem_free(kernel_map, kva, size);
 		dma_regions_reclaimed++;
 	}
+
+	/*
+	 * #745: the records of mappings made in this task go with it -- its
+	 * map goes, and a reference kept there would pin its task struct.
+	 */
+	mmio_mappings_task_died(task);
 
 	for (i = 0; i < device_nclaims; i++) {
 		natural_t	bdf;
