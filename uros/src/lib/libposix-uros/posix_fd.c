@@ -62,6 +62,25 @@ static mach_port_t char_port_resolve(void)
     return got;
 }
 
+/*
+ * #948: the name the tty fds' I/O goes through, for fork() to copy into the
+ * child under it.  The child's pfds[] still say which fds are ttys, and the
+ * name is the child's only where its right was put in the child's space: a
+ * child's write on its terminal before it execs went to whatever the name
+ * named there, and was answered EIO.  MACH_PORT_NULL when this task has not
+ * used a tty yet, which fork() then copies nothing for.
+ */
+mach_port_t
+__uros_get_char_port(void)
+{
+    mach_port_t got;
+
+    pthread_mutex_lock(&char_port_lock);
+    got = uros_char_port;
+    pthread_mutex_unlock(&char_port_lock);
+    return got;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Linux i386 O_* flags (musl passes these straight through)          */
 /* ------------------------------------------------------------------ */

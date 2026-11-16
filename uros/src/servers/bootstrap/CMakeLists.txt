@@ -637,15 +637,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
                     "fork_cap_test.cmf:${_FORKCAP_CMF}"
                     "ush:${_SBIN}/ush")
     # hello_exec, hello_dyn_world, the two mach_error programs (#917),
-    # static_lc_test (#929) and the
-    # umbrella go on the disk and not in the bundle, and they are here because
-    # make-disk-x86_64.sh refuses a disk without them and run-x86_64.sh builds
-    # the bundle, not ALL.
+    # static_lc_test (#929), fork_tty_test (#948) and the umbrella go on the
+    # disk and not in the bundle, and they are here because make-disk-x86_64.sh
+    # refuses a disk without them and run-x86_64.sh builds the bundle, not ALL.
     set(_MUSL_DEP   hello_world_bin musl_test_bin ush_bin
                     fork_cap_test_bin ${_FORKCAP_CMF}
                     hello_exec_bin hello_dyn_world musl_umbrella
                     mach_error_test_bin mach_error_dyn
-                    static_lc_test)
+                    static_lc_test fork_tty_test_bin)
   else()
     set(_MUSL_LINE  "")
     set(_MUSL_FILES "")

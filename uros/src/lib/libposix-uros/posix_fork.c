@@ -26,14 +26,16 @@
  * space is not cloned by task_create — the child starts with an
  * empty one — so a port name like 0x803 in the child's BSS would
  * refer to nothing unless we re-insert the right at that name.  Hence
- * the extract+insert dance for {bootstrap, name_server, proc, exec}.
+ * the extract+insert dance for the bootstrap and registered ports, proc,
+ * exec, the clocks (#923), the libvfs fds' servers (#262) and char_server,
+ * which the tty fds go through (#948).
  *
- * Which names are re-inserted is what the kernel decides the child holds
- * (#945).  It copies the bootstrap port and every registered port at
- * task_create, so the child gets each of them under the parent's name.  It
- * does not copy the per-task capability port, which is the parent's identity
- * to cap_server, so that name is not re-inserted but forgotten, in
- * mach_task_self_init().
+ * Of the ports libmach reads at start, which names are re-inserted is what
+ * the kernel decides the child holds (#945).  It copies the bootstrap port
+ * and every registered port at task_create, so the child gets each of them
+ * under the parent's name.  It does not copy the per-task capability port,
+ * which is the parent's identity to cap_server, so that name is not
+ * re-inserted but forgotten, in mach_task_self_init().
  *
  * Out of scope for Phase 5b: vfork (musl maps it to fork; that's
  * fine), pthread_atfork hooks, FP/SSE state across fork, stdio
@@ -101,6 +103,8 @@ mach_port_t __uros_get_exec_port(void);
 void        __uros_set_exec_port(mach_port_t p);
 /* #923: the clock ports clock_gettime() keeps (posix_time.c), by index. */
 mach_port_t __uros_get_clock_port(int which);
+/* #948: the char_server port the tty fds' I/O goes through (posix_fd.c). */
+mach_port_t __uros_get_char_port(void);
 
 #if defined(__i386__)
 /* posix_tls.c: install the per-thread LDT TLS descriptor for the
@@ -304,6 +308,9 @@ __uros_fork(void)
     /* #923: and the clocks, whose names the child's memory keeps too. */
     inherit_send_right(mach_task_self(), child_task, __uros_get_clock_port(0));
     inherit_send_right(mach_task_self(), child_task, __uros_get_clock_port(1));
+    /* #948: and char_server's, which the tty fds' I/O goes through: the
+     * child's fd table still says which fds are ttys. */
+    inherit_send_right(mach_task_self(), child_task, __uros_get_char_port());
 
     /*
      * 2b. Inherit the fs_server send rights behind every open libvfs fd

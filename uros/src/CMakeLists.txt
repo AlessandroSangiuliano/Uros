@@ -643,6 +643,8 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND UROS_BUILD_MUSL)
   add_subdirectory(tests/musl_test)
   # #945: what a forked child holds of its parent's per-task port.
   add_subdirectory(tests/fork_cap_test)
+  # #948: a forked child's write on the terminal it inherited; typed at ush.
+  add_subdirectory(tests/fork_tty_test)
   add_subdirectory(cmds/ush)
 endif()
 
