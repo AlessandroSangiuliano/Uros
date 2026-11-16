@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #953
-Takes out: proc_server's use of proc_sig_default() -- apply_default_disposition() takes the default action from its own list again, which ends a task with no signal port for SIGURG and SIGWINCH: sig_test must see a bare child ended by them
+Takes out: proc_server's use of proc_sig_default() -- apply_default_disposition() takes the default action from its own list again, which ends a task with no signal port for SIGURG and SIGWINCH: sig_test must see a bare child ended by SIGURG, the first it sends
 Run: --entry 14 600 -smp 4
-Expect: FAIL: SIGURG or SIGWINCH ended a task with no signal port
+Expect: FAIL: SIGURG ended a task with no signal port
 
 diff --git a/uros/src/servers/proc_server/proc_main.c b/uros/src/servers/proc_server/proc_main.c
 index 1fe04fd5..e0f08e1d 100644
