@@ -4799,6 +4799,51 @@ purge_grants_for_locked(natural_t bdf)
  * started in would have widened its reach, which is worse than not revoking
  * because somebody trusted it.
  */
+/*
+ * The interrupts of a claimed device, given back from its holder when the
+ * capability behind the claim is revoked (#745): the lines its device raises
+ * and the message-signalled slots in its table, and only those -- a driver
+ * holds the interrupts of every device it claimed, and one claim's end is not
+ * the others'.  A line no claimed device raises rests on no claim and stays.
+ * Returns how many were given back.
+ */
+static unsigned int
+irq_forward_release_for(task_t holder, natural_t bdf)
+{
+	unsigned int i, n = 0;
+
+	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
+		spl_t	s;
+		task_t	owner;
+		int	msi;
+
+		if (irq_forward_table[i].owner != holder ||
+		    irq_forward_table[i].bdf != bdf)
+			continue;
+		s = splhigh();
+		simple_lock(&irq_forward_lock);
+		if (irq_forward_table[i].owner != holder ||
+		    irq_forward_table[i].bdf != bdf) {
+			simple_unlock(&irq_forward_lock);
+			splx(s);
+			continue;
+		}
+		msi = irq_forward_table[i].msi;	/* the release clears it */
+		owner = irq_forward_release_locked(i);
+		simple_unlock(&irq_forward_lock);
+		splx(s);
+
+		printf("device: %s %u of %02x:%02x.%u taken from task 0x%lx with "
+		       "its claim (#745)\n", msi ? "message-signalled slot" :
+		       "irq", i, (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)holder);
+		n++;
+		if (owner != TASK_NULL)
+			task_deallocate(owner);
+	}
+	return n;
+}
+
 void
 device_master_cap_revoked(uint64_t cap_id)
 {
@@ -4875,6 +4920,14 @@ device_master_cap_revoked(uint64_t cap_id)
 		       "nothing\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 7));
+
+		/*
+		 * #745: and the device's interrupts, which the holder no longer
+		 * has the right to hear -- before the domain, as a dying
+		 * driver's are, so that the device stops being heard before its
+		 * memory is taken from under it.
+		 */
+		(void) irq_forward_release_for(holder, bdf);
 
 		(void) device_md_dma_release(bdf);
 		task_deallocate(holder);
