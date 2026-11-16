@@ -13,15 +13,16 @@
  *   2. netname_look_up("char") + query_devices                 # find a TTY device
  *   3. char_tty_acquire_ctty(dev_id, sid)                      # bind it as ctty
  *   4. open("/dev/tty", O_RDWR)                                # routed to char_server
- *   5. read line, parse "cmd args [&]", fork+execve            # job-control loop
- *      - foreground: setpgid(child,child), tcsetpgrp(fd,child),
- *                    waitpid(child), tcsetpgrp(fd, getpid())
- *      - background: setpgid(child,child), no tcsetpgrp
+ *   5. read line, parse "cmd args [| cmd args ...] [&]",       # job-control loop
+ *      fork+execve each command of the pipeline
+ *      - foreground: setpgid(child,first), tcsetpgrp(fd,first),
+ *                    waitpid(each), tcsetpgrp(fd, getpid())
+ *      - background: setpgid(child,first), no tcsetpgrp
  *
  * v0.1.0 scope: absolute-path commands only ("/hello_exec"), single
- * "exit" builtin, no quoting, no globbing, no pipes/redirections.
- * Everything else is a future iteration once a real terminfo / line-
- * editing layer arrives.
+ * "exit" builtin, no quoting, no globbing, no redirections.  Pipelines
+ * (#904): "a | b", the bar a word of its own.  Everything else is a future
+ * iteration once a real terminfo / line-editing layer arrives.
  */
 
 #include <errno.h>
@@ -360,43 +361,118 @@ parse_line(char *line, char *argv[USH_MAX_ARGS + 1], int *bg)
 /*  Job-control spawn                                                  */
 /* ------------------------------------------------------------------ */
 
-static void
-run_command(char *argv[], int bg)
+#define USH_MAX_STAGES 8
+
+/*
+ * #904: cut argv at each "|" into the commands of a pipeline, each ending
+ * with the NULL that takes its bar's place.  Returns how many, or -1 for an
+ * empty one ("| b", "a |", "a | | b") or more than USH_MAX_STAGES.
+ */
+static int
+split_pipeline(char *argv[], char **stage[USH_MAX_STAGES])
 {
-    pid_t pid;
+    int n = 0, i;
+
+    stage[n++] = argv;
+    for (i = 0; argv[i] != NULL; i++) {
+        if (strcmp(argv[i], "|") != 0)
+            continue;
+        argv[i] = NULL;
+        if (n == USH_MAX_STAGES)
+            return -1;
+        stage[n++] = &argv[i + 1];
+    }
+    for (i = 0; i < n; i++)
+        if (stage[i][0] == NULL)
+            return -1;
+    return n;
+}
+
+/*
+ * Run the commands of a pipeline, a child each, in one process group, the
+ * first child's: the stdin of each but the first on the read end of the
+ * pipe before it, the stdout of each but the last on the write end of the
+ * pipe after it, and the group the terminal's foreground while it runs.  A
+ * command alone is a pipeline of one.
+ *
+ * #904: the shell closes its copy of each pipe end as soon as the children
+ * that use it have theirs.  A write end left open here is a writer that the
+ * reader waits for, at end of file, for ever; a read end left open is a
+ * reader that keeps the writer from EPIPE once the last command has gone.
+ */
+static void
+run_pipeline(char **stage[], int n, int bg)
+{
+    pid_t pid[USH_MAX_STAGES];
+    pid_t pgid      = 0;
     pid_t pgid_self = getpid();
-    int status      = 0;
+    int   in        = -1;          /* the read end of the pipe before stage i */
+    int   fds[2], i, k, status;
 
-    pid = fork();
-    if (pid < 0) {
-        printf("ush: fork failed errno=%d\n", errno);
+    for (i = 0; i < n; i++) {
+        fds[0] = fds[1] = -1;
+        if (i < n - 1 && pipe(fds) != 0) {
+            printf("ush: pipe failed errno=%d\n", errno);
+            break;
+        }
+        pid[i] = fork();
+        if (pid[i] < 0) {
+            printf("ush: fork failed errno=%d\n", errno);
+            if (fds[0] >= 0) {
+                (void)close(fds[0]);
+                (void)close(fds[1]);
+            }
+            break;
+        }
+        if (pid[i] == 0) {
+            /* Child: the pipeline's pgrp, foreground if requested. */
+            (void)setpgid(0, pgid);
+            if (!bg && i == 0)
+                (void)tcsetpgrp(tty_fd, getpid());
+            if (in >= 0) {
+                (void)dup2(in, 0);
+                (void)close(in);
+            }
+            if (fds[1] >= 0) {
+                (void)dup2(fds[1], 1);
+                (void)close(fds[1]);
+                (void)close(fds[0]);
+            }
+            /* Undo the shell's own guard (#397): a job must be interruptible
+             * even though the shell that spawned it ignores these. */
+            (void)signal(SIGINT,  SIG_DFL);
+            (void)signal(SIGQUIT, SIG_DFL);
+            (void)signal(SIGTSTP, SIG_DFL);
+            execve(stage[i][0], stage[i], (char *const[]){ NULL });
+            printf("ush: execve(%s) failed errno=%d\n", stage[i][0], errno);
+            _exit(127);
+        }
+
+        /* Parent: race-safe duplicate of setpgid, then its copies go. */
+        if (i == 0)
+            pgid = pid[0];
+        (void)setpgid(pid[i], pgid);
+        if (in >= 0)
+            (void)close(in);
+        if (fds[1] >= 0)
+            (void)close(fds[1]);
+        in = fds[0];
+    }
+    if (in >= 0)                   /* the stage after it was never started */
+        (void)close(in);
+    if (i == 0)
         return;
-    }
-    if (pid == 0) {
-        /* Child: own pgrp, foreground if requested, then exec. */
-        (void)setpgid(0, 0);
-        if (!bg)
-            (void)tcsetpgrp(tty_fd, getpid());
-        /* Undo the shell's own guard (#397): a job must be interruptible
-         * even though the shell that spawned it ignores these. */
-        (void)signal(SIGINT,  SIG_DFL);
-        (void)signal(SIGQUIT, SIG_DFL);
-        (void)signal(SIGTSTP, SIG_DFL);
-        execve(argv[0], argv, (char *const[]){ NULL });
-        printf("ush: execve(%s) failed errno=%d\n", argv[0], errno);
-        _exit(127);
-    }
-
-    /* Parent: race-safe duplicate of setpgid; tcsetpgrp before wait. */
-    (void)setpgid(pid, pid);
     if (bg) {
-        tty_msg("[bg] pid=%d\r\n", (int)pid);
+        tty_msg("[bg] pid=%d\r\n", (int)pgid);
         return;
     }
-    (void)tcsetpgrp(tty_fd, pid);
-    (void)waitpid(pid, &status, 0);
+    (void)tcsetpgrp(tty_fd, pgid);
+    for (k = 0; k < i; k++) {
+        status = 0;
+        (void)waitpid(pid[k], &status, 0);
+        tty_msg("ush: pid=%d exit=0x%x\r\n", (int)pid[k], status);
+    }
     (void)tcsetpgrp(tty_fd, pgid_self);
-    tty_msg("ush: pid=%d exit=0x%x\r\n", (int)pid, status);
 }
 
 /* ------------------------------------------------------------------ */
@@ -497,12 +573,24 @@ main(int argc, char **argv)
             continue;
         }
 
-        if (parts[0][0] != '/') {
-            printf("ush: only absolute paths supported (got \"%s\")\n",
-                   parts[0]);
+        char **stage[USH_MAX_STAGES];
+        int    nstages = split_pipeline(parts, stage);
+        int    s;
+
+        if (nstages < 0) {
+            printf("ush: an empty command, or more than %d, in a pipeline\n",
+                   USH_MAX_STAGES);
             continue;
         }
-        run_command(parts, bg);
+        for (s = 0; s < nstages; s++)
+            if (stage[s][0][0] != '/')
+                break;
+        if (s < nstages) {
+            printf("ush: only absolute paths supported (got \"%s\")\n",
+                   stage[s][0]);
+            continue;
+        }
+        run_pipeline(stage, nstages, bg);
     }
 
     printf("ush: bye\n");
