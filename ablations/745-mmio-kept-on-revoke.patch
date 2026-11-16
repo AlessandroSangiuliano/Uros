@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #745
+Takes out: the mappings on revocation -- device_master_cap_revoked() drops the claim and leaves the device's registers mapped in every task that mapped them, as it did; irq_claim_test's [20] must say WRONG when the card's first page is still in this task's map after its claim's capability was revoked
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[20\] WRONG — the card.s first page was still mapped at 0x[0-9a-f]+ after its claim.s capability was revoked
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 04d9451e..9aadb83f 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -5141,7 +5141,6 @@ device_master_cap_revoked(uint64_t cap_id)
+ 		 * were made in: a driver that keeps its BARs keeps programming
+ 		 * the device.
+ 		 */
+-		(void) mmio_mappings_withdraw(bdf, TASK_NULL);
+ 
+ 		(void) device_md_dma_release(bdf);
+ 		task_deallocate(holder);

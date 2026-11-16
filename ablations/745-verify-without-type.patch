@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #745
+Takes out: the type in cap_server's cap_verify -- the RPC takes the resource type and does not compare it, so a capability is verified by its id alone, as it was before the type was passed; cap_test's [49] must say WRONG when a block-device capability is asked for as a DMA buffer of the same id
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[49\] WRONG — a block-device capability asked as one
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 7b0c681b..57f976a0 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1028,8 +1028,7 @@ cap_verify(mach_port_t             server,
+ 
+     if (!cap_verify_hmac(&token))           return CAP_ERR_INVALID_TOKEN;
+     if (token.revoked)                      return CAP_ERR_REVOKED;
+-    /* #745: the kind as well as the id, as the trap has since #599. */
+-    if (token.resource_type != resource_type) return CAP_ERR_RESOURCE_MISMATCH;
++    (void)resource_type;
+     if (token.resource_id != resource_id)   return CAP_ERR_RESOURCE_MISMATCH;
+     if ((op & ~token.allowed_ops) != 0)     return CAP_ERR_OP_NOT_ALLOWED;
+ 
