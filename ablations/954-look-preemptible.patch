@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #954
+Over: 954-widen-high-in-window.patch
+Takes out: the preemption off around the wakeups and the looks -- a tick in the window lets the high thread take the waker's processor, the bet is lost and undone as the waker leaves, handoff_wakee is cleared, and the look finds no hand-off where one was taken
+Run: --entry 67 300 -smp 4
+Expect: wakee_test: WRONG . the thread named was not handed off
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+index 5d13982f..1c74beb4 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
++++ b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+@@ -192,7 +192,7 @@ wakee_test(void)
+ 
+ 	/* What ipc_mqueue_deliver() does, around another thread's wakeup:
+ 	 * asked where this thread cannot leave its processor (#954). */
+-	mp_disable_preemption();
++	/* 954-look-preemptible: asked where the waker may leave */
+ 	self->handoff_hint = TRUE;
+ 	self->handoff_target = wakee;
+ 	thread_wakeup((event_t) &wakee_test_other_event);
+@@ -201,7 +201,6 @@ wakee_test(void)
+ 	took_named = self->handoff_wakee;
+ 	self->handoff_target = THREAD_NULL;
+ 	self->handoff_hint = FALSE;
+-	mp_enable_preemption();
+ 
+ 	/* And this thread leaves, with something better than the wakee here. */
+ 	thread_wakeup((event_t) &wakee_test_high_event);
