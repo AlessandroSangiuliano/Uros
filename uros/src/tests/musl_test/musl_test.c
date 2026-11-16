@@ -3398,6 +3398,102 @@ arm_wait_killed_rusage(void)
 		r < 0 ? "-" : (r & 2) ? "its time NOT there" : "its time there");
 }
 
+/*
+ * ── [50] Ten signals at SIG_DFL that no arm sent (#953) ────────────────────
+ *
+ * libposix-uros's signal thread took a signal's default action from a list
+ * of its own, and dropped the eight it left out whose default ends the
+ * process: SIGSTKFLT, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGIO, SIGPWR and
+ * SIGSYS.  Ten children each raise one signal at SIG_DFL, then SIGUSR1, whose
+ * handler they have: the signal thread takes the two in that order, so a
+ * child whose handler ran went on through the first.  Each of the eight must
+ * end its child by that signal; SIGURG and SIGWINCH, whose default is to
+ * ignore them, must leave theirs to exit 0 once its handler ran.
+ */
+static volatile sig_atomic_t	dfl_marked;
+
+static void
+dfl_mark(int s)
+{
+	(void)s;
+	dfl_marked = 1;
+}
+
+/* [50]'s child: exits 0 once SIGUSR1's handler ran after `sig', 9 if it had
+ * not run in 10 s. */
+static void dfl_child(int sig) __attribute__((noreturn));
+static void
+dfl_child(int sig)
+{
+	int	i;
+
+	(void)signal(sig, SIG_DFL);
+	(void)signal(SIGUSR1, dfl_mark);
+	(void)raise(sig);
+	(void)raise(SIGUSR1);
+	for (i = 0; i < 1000 && !dfl_marked; i++)
+		nap_ms(10);
+	_exit(dfl_marked ? 0 : 9);
+}
+
+static const int	dfl_sig[10] = {
+	SIGSTKFLT, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGIO, SIGPWR, SIGSYS,
+	SIGURG, SIGWINCH			/* the two ignored */
+};
+
+/* How many of the eight did not end their child by their signal, plus 16
+ * for each of SIGURG and SIGWINCH that did not leave its child to exit 0. */
+static int
+default_actions_run(void)
+{
+	pid_t	c[10];
+	int	st[10], i, ends = 0, ignored = 0;
+
+	for (i = 0; i < 10; i++) {
+		c[i] = fork();
+		if (c[i] < 0)
+			return 64;
+		if (c[i] == 0)
+			dfl_child(dfl_sig[i]);
+	}
+	for (i = 0; i < 10; i++) {
+		st[i] = 0;
+		if (waitpid(c[i], &st[i], 0) != c[i])
+			st[i] = -1;
+		if (i < 8 && !(st[i] != -1 && WIFSIGNALED(st[i]) &&
+		    WTERMSIG(st[i]) == dfl_sig[i]))
+			ends++;
+		if (i >= 8 && !(st[i] != -1 && WIFEXITED(st[i]) &&
+		    WEXITSTATUS(st[i]) == 0))
+			ignored++;
+	}
+	printf("musl_test (default actions): SIGSTKFLT %#x, SIGXCPU %#x, SIGXFSZ "
+	       "%#x, SIGVTALRM %#x, SIGPROF %#x, SIGIO %#x, SIGPWR %#x, SIGSYS "
+	       "%#x; SIGURG %#x, SIGWINCH %#x\n", (unsigned)st[0], (unsigned)st[1],
+	       (unsigned)st[2], (unsigned)st[3], (unsigned)st[4], (unsigned)st[5],
+	       (unsigned)st[6], (unsigned)st[7], (unsigned)st[8], (unsigned)st[9]);
+	return ends + 16 * ignored;
+}
+
+static void
+arm_default_actions(void)
+{
+	int	r = run_bounded(default_actions_run, 30);
+
+	if (r == -2 || r == 64) {
+		not_asked(50, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(50, r == 0, "eight signals whose default ends a process, and "
+		"SIGURG and SIGWINCH, each raised at SIG_DFL in a child of its own, "
+		"answered %d: %s, %s", r,
+		r < 0 ? "they did not end in 30 s" : (r & 15)
+		? "of the eight, one or more did NOT end its child by that signal"
+		: "each of the eight ended its child by that signal",
+		r < 0 ? "-" : (r & 48) ? "SIGURG or SIGWINCH did NOT leave its child "
+		"to go on" : "SIGURG and SIGWINCH left theirs to go on");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3484,6 +3580,8 @@ main(int argc, char **argv)
 	arm_kill_groups();
 	arm_wait_group_nohang();
 	arm_wait_killed_rusage();
+	/* #953: the default action of the signals no arm above sends. */
+	arm_default_actions();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
