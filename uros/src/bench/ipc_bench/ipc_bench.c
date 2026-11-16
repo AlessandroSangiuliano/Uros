@@ -2797,7 +2797,7 @@ bench_cap_verify(int iters)
      * refused at once in a bundle with no cap_server, which leaves the trap
      * below to say so.
      */
-    (void)cap_verify(&bogus, 1, 0);
+    (void)cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
     kr = urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
     if (kr != CAP_ERR_INVALID_TOKEN) {
 	printf("  urmach_cap_verify (#744): NOT ASKED -- a garbage token came "

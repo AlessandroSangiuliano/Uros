@@ -183,7 +183,7 @@ wait_for_cap_server(void)
         return MACH_PORT_NULL;
     }
     memset(&bogus, 0x5A, sizeof(bogus));
-    kr = cap_verify(&bogus, 1, 0);
+    kr = cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
     /*
      * ⚠️ An answer FROM cap_server, which is one of its own codes.  A request
      * destroyed unanswered comes back MIG_SERVER_DIED, and a send that could

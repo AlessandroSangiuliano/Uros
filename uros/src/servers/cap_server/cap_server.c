@@ -1015,6 +1015,7 @@ kern_return_t
 cap_verify(mach_port_t             server,
            cap_token_t            token_buf,
            mach_msg_type_number_t  token_len,
+           uint32_t                resource_type,
            uint64_t                op,
            uint64_t                resource_id)
 {
@@ -1027,6 +1028,8 @@ cap_verify(mach_port_t             server,
 
     if (!cap_verify_hmac(&token))           return CAP_ERR_INVALID_TOKEN;
     if (token.revoked)                      return CAP_ERR_REVOKED;
+    /* #745: the kind as well as the id, as the trap has since #599. */
+    if (token.resource_type != resource_type) return CAP_ERR_RESOURCE_MISMATCH;
     if (token.resource_id != resource_id)   return CAP_ERR_RESOURCE_MISMATCH;
     if ((op & ~token.allowed_ops) != 0)     return CAP_ERR_OP_NOT_ALLOWED;
 
