@@ -336,6 +336,68 @@ device_master_init(void)
 	}
 }
 
+/*
+ * Give back slot `i' of the forwarding table (#745), irq_forward_lock held at
+ * splhigh: the one way a registration ends, whoever ends it -- its owner
+ * unregistering, a revocation of the claim its device rests on, its owner's
+ * death.  A message-signalled slot is disarmed in its device and a line given
+ * back at its pin, the handler with it (#520); the pending count goes with the
+ * entry (#457).  The owner's reference is handed to the caller, which drops it
+ * outside the lock.
+ *
+ * ⚠️ The death of a driver used to mask its slots and nothing more:
+ * device_md_irq_mask() returns at once for a message-signalled slot, so a dead
+ * driver's MSI slots stayed armed in its device with their handler, and its
+ * lines stayed held at their pins.  It takes this path now, as the other two.
+ */
+static task_t
+irq_forward_release_locked(unsigned int i)
+{
+	task_t owner = irq_forward_table[i].owner;
+
+	if (irq_forward_table[i].active) {
+		/*
+		 * 🔴 The right one of the two (#520).  A message-signalled
+		 * slot has to be disarmed in the DEVICE; a line is masked at
+		 * the pin.  This used to call the line's release for both, and
+		 * the line's release returns without acting on anything above
+		 * the sixteen lines -- so every MSI slot ever given back was
+		 * left armed at a vector whose handler had just been released.
+		 */
+		if (irq_forward_table[i].msi)
+			device_md_msi_unregister(i);
+		else
+			device_md_irq_unregister(i);
+	}
+	irq_forward_table[i].notify_port = IP_NULL;
+	irq_forward_table[i].active = 0;
+	irq_forward_table[i].msi = 0;
+	irq_forward_table[i].bdf = DEVICE_DMA_NO_BDF;
+	/*
+	 * 🔴 AND THE COUNT, or the bottom half spins for ever (#457).
+	 *
+	 * A front can arrive between the top half's increment and this
+	 * unregister, leaving irq_pending[i] non-zero on a line that is no
+	 * longer active.  irq_forward_thread() then cannot make progress and
+	 * cannot stop: its drain loop skips the entry -- `pending == 0 ||
+	 * !active' -- without clearing it, so nothing is sent and `any' stays
+	 * FALSE; and the block below that loop refuses to sleep precisely
+	 * because some irq_pending[] is non-zero.  It cancels its own wait and
+	 * rescans, at full speed, with nothing left that could ever clear the
+	 * count.
+	 *
+	 * 🔑 Cleared HERE rather than tolerated in the loop, because a line
+	 * nobody is registered for has no pending notifications by definition:
+	 * this is where the state stops being true, so this is where it is not
+	 * allowed to become false.  Teaching the drain loop to skip it more
+	 * gracefully would have left the stranded count in existence and made
+	 * the spin depend on the shape of a `continue'.
+	 */
+	irq_pending[i] = 0;
+	irq_forward_table[i].owner = TASK_NULL;
+	return owner;
+}
+
 /* ================================================================
  * MIG server routines (ds_master_ prefix from device_master.defs)
  * ================================================================ */
@@ -1400,59 +1462,15 @@ ds_master_device_intr_unregister(
 	 * the mirror reason: until the line is given up an interrupt can still
 	 * arrive, and it must find an entry that still says where to send it.
 	 */
-	/*
-	 * 🔴 The right one of the two (#520).  A message-signalled slot has to
-	 * be disarmed in the DEVICE; a line is masked at the pin.  This used to
-	 * call the line's release for both, and the line's release returns
-	 * without acting on anything above the sixteen lines -- so every MSI
-	 * slot ever given back was left armed at a vector whose handler had
-	 * just been released.
-	 */
-	if (irq_forward_table[irq].msi)
-		device_md_msi_unregister(irq);
-	else
-		device_md_irq_unregister(irq);
+	{
+		task_t owner = irq_forward_release_locked(irq);	/* #745 */
 
-	irq_forward_table[irq].notify_port = IP_NULL;
-	irq_forward_table[irq].active = 0;
-	irq_forward_table[irq].msi = 0;
-
-	/*
-	 * 🔴 AND THE COUNT, or the bottom half spins for ever (#457).
-	 *
-	 * A front can arrive between the top half's increment and this
-	 * unregister, leaving irq_pending[irq] non-zero on a line that is no
-	 * longer active.  irq_forward_thread() then cannot make progress and
-	 * cannot stop: its drain loop skips the entry -- `pending == 0 ||
-	 * !active' -- without clearing it, so nothing is sent and `any' stays
-	 * FALSE; and the block below that loop refuses to sleep precisely
-	 * because some irq_pending[] is non-zero.  It cancels its own wait and
-	 * rescans, at full speed, with nothing left that could ever clear the
-	 * count.
-	 *
-	 * 🔑 Cleared HERE rather than tolerated in the loop, because a line
-	 * nobody is registered for has no pending notifications by definition:
-	 * this is where the state stops being true, so this is where it is not
-	 * allowed to become false.  Teaching the drain loop to skip it more
-	 * gracefully would have left the stranded count in existence and made
-	 * the spin depend on the shape of a `continue'.
-	 */
-	irq_pending[irq] = 0;
-
-	/* The reference this line held on its owner goes back with it. */
-	if (irq_forward_table[irq].owner != TASK_NULL) {
-		task_t owner = irq_forward_table[irq].owner;
-
-		irq_forward_table[irq].owner = TASK_NULL;
 		simple_unlock(&irq_forward_lock);
 		splx(s);
-		task_deallocate(owner);
-		return KERN_SUCCESS;
+		/* The reference this line held on its owner goes back with it. */
+		if (owner != TASK_NULL)
+			task_deallocate(owner);
 	}
-
-	simple_unlock(&irq_forward_lock);
-	splx(s);
-
 	return KERN_SUCCESS;
 }
 
@@ -4973,14 +4991,13 @@ device_master_task_terminating(task_t task)
 			splx(s);
 			continue;
 		}
-		if (irq_forward_table[i].active) {
-			device_md_irq_mask(i);
-			irq_forward_table[i].active = 0;
-			irq_forward_table[i].notify_port = IP_NULL;
-			irq_pending[i] = 0;
-		}
-		owner = irq_forward_table[i].owner;
-		irq_forward_table[i].owner = TASK_NULL;
+		/*
+		 * #745: given back as an unregister gives it back.  It was
+		 * masked and nothing more, so a message-signalled slot stayed
+		 * armed in the dead driver's device and a line stayed held at
+		 * its pin (see irq_forward_release_locked()).
+		 */
+		owner = irq_forward_release_locked(i);
 		simple_unlock(&irq_forward_lock);
 		splx(s);
 
