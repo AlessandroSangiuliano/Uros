@@ -15,8 +15,9 @@ back.  So this waits for the prompt, types, and reads what comes back.
 It drives QEMU directly for the reason scripts/char-roundtrip.py does, and takes
 the same lock: nothing in run-x86_64.sh can write to the serial line.
 
-Exit status: 0 every command did what it should · 1 the machine answered wrongly
-· 2 this script refused to start, or the boot never reached the prompt.
+Exit status: 0 every command did what it should · 1 the machine answered wrongly,
+or at its prompt never said its root disk was ready · 2 this script refused to
+start, or the boot never reached the prompt.
 """
 
 import argparse
@@ -33,8 +34,11 @@ REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 
 PROMPT = "ush$ "
 
-# ush starts from the bundle, and the root disk is mounted a moment later: a
-# command typed at the first prompt is answered ENOENT, correctly.
+# ext2 says this once, when the root disk and the one beside it are mounted.
+# ush starts from the bundle at the same time, and either may print first: on
+# GitHub's runners ext2 did in 8 of 36 KVM boots of 16/11.  So the line is
+# looked for in all the boot printed (#958).  A command typed before it is
+# answered ENOENT, correctly.
 ROOT_MOUNTED = "ext2: ready, entering message loop"
 
 # What is typed, and the lines each command must print, in order, before the
@@ -68,6 +72,11 @@ COMMANDS = (
 
 
 def main():
+    # #958: a line at a time, as stderr goes.  Written to a file, stdout was
+    # held until the exit: "the prompt is there", printed first, came after
+    # the reason printed on stderr once the wait gave up, and the merge test,
+    # which quotes the last line here, quoted it as the reason.
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser()
     # ablate.sh runs a Script: with the arm's build in UROS_BUILD_DIR (#948).
     ap.add_argument("--build",
@@ -86,7 +95,9 @@ def main():
     ap.add_argument("--wait", type=float, default=60.0,
                     help="seconds to wait for each line a command prints, "
                          "and for the prompt after it (default 60)")
-    ap.add_argument("--log", help="where to keep what the line carried")
+    ap.add_argument("--log", help="where to keep what the line carried "
+                                  "(default UROS_X86_64_LOG, else "
+                                  "ush-x86_64.log in the build)")
     a = ap.parse_args()
 
     build = os.path.realpath(a.build)
@@ -120,7 +131,11 @@ def session(a, build):
             pass
         os.mkfifo(fifo + end)
 
-    log = a.log or os.path.join(build, "ush-x86_64.log")
+    # ablate.sh names each boot's log in UROS_X86_64_LOG (#591).  Without it
+    # every boot of an arm wrote the one file in its build, and only the last
+    # was left to read (#958).
+    log = (a.log or os.environ.get("UROS_X86_64_LOG")
+           or os.path.join(build, "ush-x86_64.log"))
 
     argv = ["qemu-system-x86_64", "-cpu", "max", "-m", "512M",
             "-smp", str(a.smp),
@@ -160,14 +175,17 @@ def session(a, build):
             pass
         return raw.decode(errors="replace")
 
-    def wait_for(text, budget):
-        """Wait for `text' after what has been read already, and move past it."""
+    def wait_for(text, budget, start=None):
+        """Wait for `text' from character `start' of what the boot printed,
+        or after what has been read already, and move past it if it lies
+        beyond that."""
         nonlocal seen
+        frm = seen if start is None else start
         end = time.time() + budget
         while time.time() < end:
-            at = pump().find(text, seen)
+            at = pump().find(text, frm)
             if at >= 0:
-                seen = at + len(text)
+                seen = max(seen, at + len(text))
                 return True
             if q.poll() is not None:
                 return False
@@ -181,11 +199,23 @@ def session(a, build):
                   f"{a.budget:.0f}s" + (f": {err}" if err else ""),
                   file=sys.stderr)
             return 2
+        prompt_at = seen - len(PROMPT)
         print("ush-x86_64: the prompt is there")
 
-        if not wait_for(ROOT_MOUNTED, a.budget):
-            print("ush-x86_64: the root disk was never mounted", file=sys.stderr)
-            return 2
+        # #958: from the boot's first character -- ext2's line may have come
+        # before the prompt.  Not finding it is the machine's answer, which
+        # is at its prompt, and no run this script could not make.
+        frm = 0
+        if not wait_for(ROOT_MOUNTED, a.budget, start=frm):
+            print(f"ush-x86_64: {ROOT_MOUNTED!r} is not in what the boot "
+                  f"printed from character {frm} on, {a.budget:.0f}s after "
+                  f"the prompt: the root disk is not known to be mounted, and "
+                  f"no command is typed", file=sys.stderr)
+            return 1
+        ready_at = pump().find(ROOT_MOUNTED, frm)
+        print(f"ush-x86_64: ext2 is ready, its line at character {ready_at} "
+              f"and the prompt at {prompt_at}: "
+              f"{'before' if ready_at < prompt_at else 'after'} it")
 
         rc = 0
         answered = 0

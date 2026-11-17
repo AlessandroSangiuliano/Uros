@@ -1,0 +1,31 @@
+Kind: widen
+Issue: #958
+Holds open: ush prints its first prompt only once the root disk answers -- it opens /hello_world every 100 ms, for two minutes at most, and waits a second more -- so that ext2's ready line, printed as it starts to answer, comes before the prompt every time, as it did on GitHub's runners in 8 of 36 KVM boots of entry 14 @ush
+
+diff --git a/uros/src/cmds/ush/ush.c b/uros/src/cmds/ush/ush.c
+index 7f64e84c..31ba2433 100644
+--- a/uros/src/cmds/ush/ush.c
++++ b/uros/src/cmds/ush/ush.c
+@@ -499,6 +499,22 @@ main(int argc, char **argv)
+         return 1;
+     }
+     (void)write(tty_fd, USH_BANNER, strlen(USH_BANNER));
++    {
++        /* 958-widen-ready-first: the first prompt only once the root disk
++         * answers, and a second after, so that ext2's ready line, printed as
++         * it starts to answer, comes before the prompt every time. */
++        int fd, tries;
++
++        for (tries = 0; tries < 1200; tries++) {
++            fd = open("/hello_world", O_RDONLY);
++            if (fd >= 0) {
++                (void)close(fd);
++                break;
++            }
++            usleep(100000);
++        }
++        sleep(1);
++    }
+ 
+     for (;;) {
+         /* Reap finished background jobs before prompting: without this
