@@ -157,6 +157,10 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #   refusedfault  -j: a fault from ring 0 on a task's present page that SMAP or
 #             SMEP refused is reported, not retried for ever; the probe's own
 #             PASS/WRONG/NOT ASKED verdict (refused_fault_test, #750)
+#   wakee     -w: wakee_test's PASS, and the harness's verdict -- the hand-off
+#             reached the thread it named, and that thread ran elsewhere when
+#             a thread above it took its waker's processor; NOT ASKED on one
+#             processor (#777, #954)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -261,8 +265,8 @@ ENTRIES="
 64 harness - 1
 65 harness
 65 harness - 1
-67 harness
-67 harness - 1
+67 wakee
+67 wakee - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -668,6 +672,23 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		*"refused_fault_test: PASS"*) ;;
 		"")	NOTE="no refused_fault_test verdict"; false ;;
 		*)	NOTE="${out#*refused_fault_test: }"; false ;;
+		esac ;;
+	# #954: -w, the hand-off's wakee.  Under "harness" a NOT ASKED passed
+	# and asked nothing, and since #954 wakee_test says NOT ASKED where its
+	# waker left with no bet open, the wakee having run first: what a waker
+	# above the wakee, with preemption off, cannot let happen, and what one
+	# below it did in each boot of 954-waker-outranked, all four of which
+	# the harness passed.  So its PASS is asked for, except on one
+	# processor, where the question does not arise and the verdict says
+	# NOT ASKED (#779).  The note is the verdict's word, not its line,
+	# whose parentheses would end the kind early (#742).
+	wakee)	out=$(grep -a 'wakee_test: \(PASS\|WRONG\|NOT ASKED\)' "$f" | head -n 1)
+		case $out in
+		*"wakee_test: PASS"*)
+			grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
+		"")	NOTE="no wakee_test verdict"; false ;;
+		*)	alone_ok "$n" "$h" "$f" 'wakee_test: NOT ASKED — 1 processor(s)' ||
+			{ out=${out#*wakee_test: }; NOTE="wakee_test said ${out%% —*}"; false; } ;;
 		esac ;;
 	esac
 }

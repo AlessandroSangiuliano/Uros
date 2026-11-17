@@ -18,6 +18,14 @@
  * runs until the wakee has run or two seconds are up, so a good kernel is out
  * of it as soon as the wakee runs and a bad one comes out saying so.  The wakee
  * has to run somewhere else meanwhile, which takes a second processor.
+ *
+ * #954: the hand-off is asked while this thread cannot leave its processor.
+ * It runs on the startup thread, at the kernel task's BASEPRI_USER, below the
+ * wakee and the other thread: once in thousands of boots under TCG, a tick
+ * between the wakeup and the look let the wakee preempt it, the bet won and
+ * settled, handoff_wakee cleared, and the look found no hand-off.  So it asks
+ * at a priority between the wakee's and the high thread's, with preemption
+ * off from the first wakeup to the last look.
  */
 
 #include <stdint.h>
@@ -40,6 +48,7 @@
 #define	WAKEE_TEST_HELD_S	2	/* how long the wakee may be held */
 #define	WAKEE_TEST_WAIT_S	10	/* a thread's start, or its end */
 #define	WAKEE_TEST_HIGH	(BASEPRI_KERNEL + 1)
+#define	WAKEE_TEST_WAKER (BASEPRI_KERNEL + 2)	/* #954: above all but HIGH */
 #define	WAKEE_TEST_LOW	(BASEPRI_SYSTEM + 2)
 
 /* The events: one thread waits on each, and each is woken once. */
@@ -134,7 +143,7 @@ wakee_test(void)
 	thread_t	self = current_thread();
 	thread_t	wakee, other, high, took_first, took_named;
 	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE], left;
-	int		me, i, ncpu = 0;
+	int		me, i, ncpu = 0, was_pri;
 
 	for (i = 0; i < NCPUS; i++) {
 		processor_t p = cpu_to_processor(i);
@@ -167,14 +176,23 @@ wakee_test(void)
 		return;
 	}
 
+	/* #954: above the wakee and the other thread, below the high one. */
+	was_pri = self->priority;
+	thread_set_own_priority(WAKEE_TEST_WAKER);
+
 	printf("wakee_test: starting: processor %d names a wakee, wakes another "
 	       "thread, wakes the wakee, and leaves for a thread of higher "
-	       "priority bound there (#777)\n", me);
+	       "priority bound there; its priority %d, raised from %d, the "
+	       "wakee's %d, the other's %d, the high one's %d to come (#777, "
+	       "#954)\n", me, self->sched_pri, was_pri, wakee->sched_pri,
+	       other->sched_pri, WAKEE_TEST_HIGH);
 
 	sched_rpc_handoff_undone(undone);
 	left = undone[URMACH_HANDOFF_UNDO_LEFT];
 
-	/* What ipc_mqueue_deliver() does, around another thread's wakeup. */
+	/* What ipc_mqueue_deliver() does, around another thread's wakeup:
+	 * asked where this thread cannot leave its processor (#954). */
+	mp_disable_preemption();
 	self->handoff_hint = TRUE;
 	self->handoff_target = wakee;
 	thread_wakeup((event_t) &wakee_test_other_event);
@@ -183,6 +201,7 @@ wakee_test(void)
 	took_named = self->handoff_wakee;
 	self->handoff_target = THREAD_NULL;
 	self->handoff_hint = FALSE;
+	mp_enable_preemption();
 
 	/* And this thread leaves, with something better than the wakee here. */
 	thread_wakeup((event_t) &wakee_test_high_event);
@@ -194,6 +213,7 @@ wakee_test(void)
 	(void) wakee_test_wait(&wakee_test_high_done, hz);
 	(void) wakee_test_wait(&wakee_test_wakee_ran, hz);
 	(void) wakee_test_wait(&wakee_test_other_ran, hz);
+	thread_set_own_priority(was_pri);
 	thread_bind(self, PROCESSOR_NULL);
 
 	sched_rpc_handoff_undone(undone);
@@ -211,6 +231,17 @@ wakee_test(void)
 		       "the other %d, the high one %d (#777)\n",
 		       wakee_test_wakee_ran, wakee_test_other_ran,
 		       wakee_test_high_done);
+	else if (left == 0)
+		/*
+		 * #954: no bet was settled as this thread left, so the wakee
+		 * had already run, here, and the high thread never stood in
+		 * its way: the second question was not asked, and a PASS would
+		 * say it had been.
+		 */
+		printf("wakee_test: NOT ASKED — the wakee ran on processor %d "
+		       "before its waker left it, so there was no bet to settle "
+		       "when it did; the hand-off itself was taken (#954)\n",
+		       wakee_test_wakee_on);
 	else if (wakee_test_high_held)
 		printf("wakee_test: WRONG — the wakee waited behind a thread "
 		       "of higher priority on processor %d for all of %u s, on a "
