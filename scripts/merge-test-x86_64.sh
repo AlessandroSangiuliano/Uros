@@ -507,11 +507,22 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# #952: the ush build, typed at by ush-x86_64.py.  Its count is the
 	# verdict, every command of its list answered and at least one: a
 	# session that stopped at a command says fewer, and one that never got
-	# to the prompt says none.
-	ush) out=$(grep -aoE '^ush-x86_64: [0-9]+ of [0-9]+ commands answered' "$h" | tail -n 1) &&
-		[ -n "$out" ] && out=${out#ush-x86_64: } &&
-		[ "${out%% *}" -gt 0 ] && [ "${out%% *}" = "$(echo "$out" | cut -d' ' -f3)" ] &&
-		NOTE=$out ;;
+	# to the prompt says none.  #958: and when it is not, the note says why:
+	# the count where the session got that far, or else the script's last
+	# line, which says what it read when it stopped before typing -- at its
+	# prompt, a root disk that ext2 never said was ready.  Without their
+	# parentheses (#742).
+	ush) out=$(grep -aoE '^ush-x86_64: [0-9]+ of [0-9]+ commands answered' "$h" | tail -n 1)
+		out=${out#ush-x86_64: }
+		if [ -n "$out" ] && [ "${out%% *}" -gt 0 ] &&
+		   [ "${out%% *}" = "$(echo "$out" | cut -d' ' -f3)" ]; then
+			NOTE=$out
+		else
+			[ -n "$out" ] ||
+				out=$(grep -av -e '^ *$' -e '^ush-x86_64: log: ' "$h" | tail -n 1 | sed 's/^ush-x86_64: //')
+			NOTE=${out//[()]/}
+			false
+		fi ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/mig) bad request message ID' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ||
 		alone_ok "$n" "$h" "$f" 'ioapic_race: NOT ASKED — alone' ;;
