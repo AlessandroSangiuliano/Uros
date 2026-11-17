@@ -68,6 +68,11 @@ COMMANDS = (
 
 
 def main():
+    # #958: a line at a time, as stderr goes.  Written to a file, stdout was
+    # held until the exit: "the prompt is there", printed first, came after
+    # the reason printed on stderr once the wait gave up, and the merge test,
+    # which quotes the last line here, quoted it as the reason.
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser()
     # ablate.sh runs a Script: with the arm's build in UROS_BUILD_DIR (#948).
     ap.add_argument("--build",
@@ -86,7 +91,9 @@ def main():
     ap.add_argument("--wait", type=float, default=60.0,
                     help="seconds to wait for each line a command prints, "
                          "and for the prompt after it (default 60)")
-    ap.add_argument("--log", help="where to keep what the line carried")
+    ap.add_argument("--log", help="where to keep what the line carried "
+                                  "(default UROS_X86_64_LOG, else "
+                                  "ush-x86_64.log in the build)")
     a = ap.parse_args()
 
     build = os.path.realpath(a.build)
@@ -120,7 +127,11 @@ def session(a, build):
             pass
         os.mkfifo(fifo + end)
 
-    log = a.log or os.path.join(build, "ush-x86_64.log")
+    # ablate.sh names each boot's log in UROS_X86_64_LOG (#591).  Without it
+    # every boot of an arm wrote the one file in its build, and only the last
+    # was left to read (#958).
+    log = (a.log or os.environ.get("UROS_X86_64_LOG")
+           or os.path.join(build, "ush-x86_64.log"))
 
     argv = ["qemu-system-x86_64", "-cpu", "max", "-m", "512M",
             "-smp", str(a.smp),
