@@ -244,14 +244,18 @@ jobs:
       # written, so the job's own test of /dev/kvm decides whether its boots
       # run under KVM as well.  --init makes job.sh a child of an init, which
       # passes on a signal docker sends the container; as PID 1 a shell would
-      # ignore it.  But nothing comes from GitHub's own limit: the runner sends
-      # SIGINT, then SIGTERM, to this step's shell alone, then kills that shell
-      # alone, and docker is left running.  In the push campaign of 35f10d00
-      # the container went on booting while the artifact was uploaded, and
-      # docker was killed at the job's end as an orphan (#951).  So the merge
-      # test's rounds stop by themselves five minutes before this step's limit:
-      # job.sh --stop-at, from the time read as this script starts, before the
-      # image is pulled.
+      # ignore it.  But nothing came from GitHub: at the step's limit, and
+      # when a run is cancelled, the runner sends SIGINT, then SIGTERM, to
+      # this step's shell alone, then kills that shell alone, and docker was
+      # left running.  In the push campaign of 35f10d00 the container went on
+      # booting while the artifact was uploaded, and docker was killed at the
+      # job's end as an orphan (#951).  So the job stops by itself five
+      # minutes before this step's limit -- job.sh --stop-at, from the time
+      # read as this script starts, before the image is pulled -- and docker
+      # runs as a job waited for, under a name, so that each of the runner's
+      # signals is passed on to the container as a SIGTERM, which job.sh
+      # stops at as it does at its time.  The last wait gives docker's own
+      # status, whatever signal ended the first.
       - name: Build and boot in an Arch Linux container
         if: matrix.mode == 'arch'
         timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
@@ -276,13 +280,23 @@ jobs:
           elif [ -n "$ABLATE" ]; then
             what=(--ablate "$ABLATE" --boots "$BOOTS")
           else
-            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --stop-at "$stop_at")
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
           fi
-          docker run --rm --init "${kvm[@]}" \
+          name=campaign-job
+          trap 'docker kill --signal=TERM "$name" > /dev/null 2>&1' INT TERM
+          docker run --rm --init --name "$name" "${kvm[@]}" \
             -v "$GITHUB_WORKSPACE:/work" -w /work \
             -e GITHUB_RUN_ID -e JOB_INDEX \
             archlinux:latest \
-            scripts/ci/job.sh "${what[@]}" --out ci-out
+            scripts/ci/job.sh "${what[@]}" --stop-at "$stop_at" --out ci-out &
+          pid=$!
+          wait "$pid" || true
+          while kill -0 "$pid" 2>/dev/null; do
+            wait "$pid" || true
+          done
+          rc=0
+          wait "$pid" || rc=$?
+          exit $rc
 
       # The same job on the runner itself, with Ubuntu's packages: the other
       # half of the comparison.  If its compiler cannot build the tree with no
@@ -301,8 +315,9 @@ jobs:
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
           MINUTES: ${{ needs.plan.outputs.minutes }}
         run: |
-          # #951: the rounds stop five minutes before this step's limit, as in
-          # the container's step above.
+          # #951: the job stops five minutes before this step's limit, as in
+          # the container's step above, and the runner's signals are passed on
+          # to it, here directly, as SIGTERM.
           stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           sudo apt-get update -q
           sudo apt-get install -y -q gcc binutils cmake ninja-build make bison flex \
@@ -313,9 +328,19 @@ jobs:
           elif [ -n "$ABLATE" ]; then
             what=(--ablate "$ABLATE" --boots "$BOOTS")
           else
-            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --stop-at "$stop_at")
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
           fi
-          scripts/ci/job.sh --no-install "${what[@]}" --out ci-out
+          pid=""
+          trap '[ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null' INT TERM
+          scripts/ci/job.sh --no-install "${what[@]}" --stop-at "$stop_at" --out ci-out &
+          pid=$!
+          wait "$pid" || true
+          while kill -0 "$pid" 2>/dev/null; do
+            wait "$pid" || true
+          done
+          rc=0
+          wait "$pid" || rc=$?
+          exit $rc
 
       - name: Say what the job found
         if: always()
