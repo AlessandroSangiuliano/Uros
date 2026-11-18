@@ -704,10 +704,18 @@ if wanted jobstop; then
 	JS=$(cat "$OUT/jobstop.ended.pid" 2>/dev/null)
 	STARTED+=(${JS:+"$JS"} "$JOB")
 	# Its merge test, whose command name the kernel cuts to fifteen
-	# characters, that one's run-x86_64.sh, and its qemu.
+	# characters, that one's run-x86_64.sh, and its qemu.  job.sh asks the
+	# merge test -L before it builds, a child of the same name that boots
+	# nothing and is gone within a second: one found is asked for a
+	# run-x86_64.sh child, and gone without one, looked for again.  Found
+	# once and taken for the merge test, it made the check NOT ASKED in 4
+	# boots of 4 of an A/B on omen.
 	m="" r="" q=""
-	[ -n "$JS" ] && m=$(child_named "$JS" merge-test-x86_ 600) &&
-		r=$(child_named "$m" run-x86_64.sh 300) && q=$(first_qemu_of "$r")
+	while [ -n "$JS" ] && kill -0 "$JS" 2>/dev/null; do
+		m=$(child_named "$JS" merge-test-x86_ 600) || break
+		r=$(child_named "$m" run-x86_64.sh 300) && break
+	done
+	[ -n "$r" ] && q=$(first_qemu_of "$r")
 	if [ -z "$q" ]; then
 		ended_within "$JOB" 300 || kill -KILL "$JS" 2>/dev/null
 		wait "$JOB" 2>/dev/null
