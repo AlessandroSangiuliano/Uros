@@ -80,9 +80,9 @@
 # a warning · 3 the job
 # could not boot, or could not read its boots: the packages, the configure or
 # the build failed, the build had a warning, a round or the A/B did not report
-# every boot it was meant to, the rounds were stopped at --stop-at's time, a
-# boot's log was not where the merge test puts it, or a boot's row had a comma
-# inside a field and was not written.
+# every boot it was meant to, the job was stopped, at --stop-at's time or by a
+# SIGTERM, a boot's log was not where the merge test puts it, or a boot's row
+# had a comma inside a field and was not written.
 set -u
 # The container has no locale but C, and a run outside it reads the same words:
 # under another locale the compilers translate the very `warning:' the build's
@@ -435,14 +435,129 @@ else
 		echo "job:   entry $e${opt:+ (${opt//_/ })}${cpus:+ -smp $cpus}, judged by '$v'"
 	done <<< "$PLAN"
 	echo "job: rows: $CSV; logs of WRONG boots: $OUT/failed/"
-	[ -z "$STOP_AT" ] ||
-		echo "job: the rounds stop at $(when "$STOP_AT") (--stop-at $STOP_AT): the merge test is sent SIGTERM, and the boot it is running is said to be stopped, its logs in $OUT/stopped/"
 	echo "job: and every patch of ablations/ asked whether it still applies to the tree (scripts/ablate.sh --check)"
 fi
+[ -z "$STOP_AT" ] ||
+	echo "job: it stops at $(when "$STOP_AT") (--stop-at $STOP_AT), or when it is sent SIGTERM: the merge test or ablate.sh is sent SIGTERM, and the boot it is running is said to be stopped"
 if [ $DRY = 1 ]; then
 	echo "job: dry run: nothing installed, built or booted"
 	exit 0
 fi
+
+# ------------------------------------------------------------------ stopping
+#
+# #951: the job stops itself, at --stop-at's time or when it is sent SIGTERM.
+# GitHub's own limit stops only the step's shell: the container, and this
+# script in it, went on booting while the artifact was uploaded, and the job's
+# summary was never written.  So the workflow gives the job a time, five
+# minutes before the step's limit, and passes on to the container the signal
+# the runner sends the step's shell when a run is cancelled; either way the job
+# stops what it is doing and writes its record, where it stopped included.
+#
+# TERMINATED says a SIGTERM came, and CHILD is the job under way -- a build
+# step, the merge test, ablate.sh -- to which the trap passes it on.  GRACE is
+# how long the merge test or ablate.sh has to end once sent SIGTERM: a boot
+# stops in seconds, but a side build or a check of the patches runs to its end
+# first.
+TERMINATED=""
+CHILD=""
+GRACE=180
+trap 'TERMINATED=TERM; [ -z "$CHILD" ] || kill -TERM "$CHILD" 2>/dev/null' TERM
+
+# A step of the job's own, run as a job waited for, so that the trap runs
+# during it (#801): its status, or that of its stop.
+step() {
+	local rc=0
+	"$@" <&0 &
+	CHILD=$!
+	[ -z "$TERMINATED" ] || kill -TERM "$CHILD" 2>/dev/null
+	wait "$CHILD" || rc=$?
+	if [ -n "$TERMINATED" ] && [ $rc -gt 128 ]; then
+		rc=0
+		wait "$CHILD" || rc=$?
+	fi
+	CHILD=""
+	return $rc
+}
+
+# A job sent SIGTERM before its first boot ends here, job.txt saying so.
+stopped_before() {	# what it was doing
+	local now
+	[ -z "$TERMINATED" ] && return 0
+	printf -v now '%(%s)T' -1
+	echo "stopped:  by SIG$TERMINATED from outside, $(when "$now"), while $1, before its first boot" >> "$OUT/job.txt"
+	echo "job: stopped by SIG$TERMINATED from outside, while $1, before its first boot"
+	exit 3
+}
+
+# A command the job's time or a SIGTERM may stop: a round of the merge test,
+# the A/B, a patch of the sweep.  Its output is read a line at a time, from a
+# descriptor with its own process behind it, copied to OUT, printed as well
+# unless quiet, and each line handed to HOOK.  At --stop-at's time it is sent
+# SIGTERM, which a SIGTERM to this script sends it at once; its lines are then
+# read to their end, for GRACE s at most before it is killed.  A trapped
+# signal does not end a read in bash, which takes the trap and reads on, so
+# the read wakes every five seconds: a SIGTERM starts the grace even when no
+# line comes.  Sets RC, its status; SENT, when it was sent SIGTERM; WHY, why;
+# KILLED, when it had to be killed.
+stoppable() {	# out print|quiet hook|"" command...
+	local out=$1 print=$2 hook=$3 fd ofd line pending="" rc now left
+	shift 3
+	SENT="" WHY="" KILLED=""
+	exec {fd}< <(exec "$@" 2>&1)
+	CHILD=$!
+	exec {ofd}> "$out"
+	while :; do
+		printf -v now '%(%s)T' -1
+		if [ -z "$SENT" ] && [ -n "$TERMINATED" ]; then
+			SENT=$now
+			WHY="by SIG$TERMINATED from outside, $(when "$now")"
+		elif [ -z "$SENT" ] && [ -n "$STOP_AT" ] && [ "$now" -ge "$STOP_AT" ]; then
+			kill -TERM "$CHILD" 2>/dev/null
+			SENT=$now
+			WHY="by its time limit, $(when "$STOP_AT")"
+		fi
+		if [ -n "$SENT" ]; then
+			left=$((SENT + GRACE - now))
+			if [ "$left" -le 0 ]; then
+				kill -KILL "$CHILD" 2>/dev/null
+				KILLED="had not ended $GRACE s after SIGTERM, and was killed"
+				break
+			fi
+		elif [ -n "$STOP_AT" ]; then
+			left=$((STOP_AT - now))
+		else
+			left=5
+		fi
+		[ "$left" -le 5 ] || left=5
+		rc=0
+		IFS= read -r -t "$left" -u "$fd" line || rc=$?
+		# A read that timed out keeps what it had of a line, and the rest
+		# comes with the next one.
+		if [ $rc -gt 128 ]; then
+			pending+=$line
+			continue
+		fi
+		line=$pending$line
+		pending=""
+		# The end of the output, once a last line without its newline has
+		# been read.
+		[ $rc = 0 ] || [ -n "$line" ] || break
+		[ "$print" = quiet ] || printf '%s\n' "$line"
+		printf '%s\n' "$line" >&"$ofd"
+		[ -z "$hook" ] || "$hook" "$line"
+		[ $rc = 0 ] || break
+	done
+	exec {fd}<&- {ofd}>&-
+	RC=0
+	wait "$CHILD" 2>/dev/null || RC=$?
+	CHILD=""
+	if [ -z "$SENT" ] && [ -n "$TERMINATED" ]; then
+		printf -v now '%(%s)T' -1
+		SENT=$now
+		WHY="by SIG$TERMINATED from outside, $(when "$now")"
+	fi
+}
 
 
 # ----------------------------------------------------------------- toolchain
@@ -476,15 +591,19 @@ sed 's/^/job: /' "$OUT/job.txt"
 FRESH=1
 [ -f "$BUILD/build.ninja" ] && FRESH=0
 echo "job: configuring ($OUT/configure.log)"
-if ! cmake -G Ninja -C "$PRESET" -S "$REPO/uros" -B "$BUILD" > "$OUT/configure.log" 2>&1; then
+if ! step cmake -G Ninja -C "$PRESET" -S "$REPO/uros" -B "$BUILD" > "$OUT/configure.log" 2>&1; then
+	stopped_before "configuring the build"
 	tail -n 30 "$OUT/configure.log"
 	die 3 "the configure failed: $OUT/configure.log"
 fi
+stopped_before "configuring the build"
 echo "job: building ($OUT/build.log)"
-if ! ninja -C "$BUILD" > "$OUT/build.log" 2>&1; then
+if ! step ninja -C "$BUILD" > "$OUT/build.log" 2>&1; then
+	stopped_before "building the tree"
 	tail -n 40 "$OUT/build.log"
 	die 3 "the build failed: $OUT/build.log"
 fi
+stopped_before "building the tree"
 WARN=$(grep 'warning:' "$OUT/build.log")
 if [ -n "$WARN" ]; then
 	printf '%s\n' "$WARN" | head -n 40
@@ -719,13 +838,16 @@ case $JOB in
 1-*)
 	pdir=$(mktemp -d) || die 3 "cannot create a scratch directory"
 	echo "job: both kernels with UROS_SYSCALL_PROFILE on ($OUT/profile-builds/)"
-	PROFILE_OUT=$("$REPO/scripts/profile-builds.sh" "$pdir" 2>&1)
+	# #951: a step, as the build is, read back from its file.
+	step "$REPO/scripts/profile-builds.sh" "$pdir" > "$pdir.out" 2>&1
 	PROFILE_BAD=$?
+	PROFILE_OUT=$(cat "$pdir.out")
 	printf '%s\n' "$PROFILE_OUT"
 	mkdir -p "$OUT/profile-builds"
 	cp "$pdir"/*.log "$OUT/profile-builds/" 2>/dev/null
-	rm -rf "$pdir"
+	rm -rf "$pdir" "$pdir.out"
 	sed -n 's/^profile-builds: /profile:  /p' <<< "$PROFILE_OUT" >> "$OUT/job.txt"
+	stopped_before "building both kernels with the profile on"
 	;;
 esac
 
@@ -736,9 +858,11 @@ esac
 # #769: asked of ablate.sh --check-all, which the merge test asks as well: the
 # question a merge is decided on is this one, from the same place.
 scratch=$(mktemp -d) || die 3 "cannot create a scratch directory"
-CHECK=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --check-all 2>&1)
+step env UROS_ABLATE_DIR="$scratch" "$REPO/scripts/ablate.sh" --check-all > "$scratch.out" 2>&1
 CHECK_RC=$?
-rm -rf "$scratch"
+CHECK=$(cat "$scratch.out")
+rm -rf "$scratch" "$scratch.out"
+stopped_before "asking whether every patch of ablations/ still applies"
 NPATCHES=$(ls "$REPO"/ablations/*.patch | wc -l)
 ROTTED=$(sed -n 's/^ablate: [0-9]* of the [0-9]* patches of ablations\/ no longer apply to [^ ]* -- regenerate them: //p' <<< "$CHECK")
 if [ $CHECK_RC != 0 ] && [ -z "$ROTTED" ]; then
@@ -758,22 +882,35 @@ BOOTS=0
 WRONG=0
 SHORT=0
 DONE_ROUNDS=0
-# #951: where the rounds stopped at --stop-at's time, for job.txt.  GitHub's own
-# limit stops only the step's shell: the container, and this script in it, went
-# on booting while the artifact was uploaded, and the job's summary was never
-# written.  So the job stops itself first.  GRACE is how long the merge test
-# has to end once sent SIGTERM: the boot it runs stops in seconds, but a side
-# build or ablate.sh --check-all it is in runs to its end before it stops.
+# #951: where the rounds stopped, at the time or at a SIGTERM, for job.txt.
 STOPPED=""
-GRACE=180
+# A line of the merge test's: a verdict is a row, written as it arrives, so
+# that a stopped job keeps every boot it finished.
+round_line() {	# the line
+	local -a m
+	if [[ $1 =~ $VERDICT_RE ]]; then
+		m=("${BASH_REMATCH[@]}")
+		row "$r" "${m[1]}" "${m[2]}" "${m[3]}" "${m[5]}" "${m[6]}" "${m[7]}" "${m[9]}"
+		got=$((got + 1))
+		[ "${m[6]}" = WRONG ] && bad=$((bad + 1))
+		[ "${m[6]}" = stopped ] && halted=$((halted + 1))
+	elif [[ $1 =~ $END_RE ]]; then
+		said=${BASH_REMATCH[1]}
+	elif [[ $1 =~ $STOP_RE ]]; then
+		where=${BASH_REMATCH[1]}
+	fi
+	return 0
+}
 for r in $(seq 1 "$ROUNDS"); do
-	# #951: a round that would start past the time is not started.
-	if [ -n "$STOP_AT" ]; then
-		printf -v now '%(%s)T' -1
-		if [ "$now" -ge "$STOP_AT" ]; then
-			STOPPED="by its time limit, $(when "$STOP_AT"), before round $r"
-			break
-		fi
+	# #951: a round that would start past the time, or after a SIGTERM, is
+	# not started.
+	printf -v now '%(%s)T' -1
+	if [ -n "$TERMINATED" ]; then
+		STOPPED="by SIG$TERMINATED from outside, $(when "$now"), before round $r"
+		break
+	elif [ -n "$STOP_AT" ] && [ "$now" -ge "$STOP_AT" ]; then
+		STOPPED="by its time limit, $(when "$STOP_AT"), before round $r"
+		break
 	fi
 	args=(-a "$MT_ACC" -o "$OUT/logs/r$r")
 	[ -n "$ENTRIES" ] && args+=(-e "$ENTRIES")
@@ -782,78 +919,17 @@ for r in $(seq 1 "$ROUNDS"); do
 	halted=0
 	said=""
 	where=""
-	sent=""
-	killed=""
-	pending=""
-	# Each row is written as its line arrives, so a job stopped by its time
-	# limit keeps every boot it finished.  #951: the merge test is read
-	# through a descriptor with its own process behind it, so that it can be
-	# sent SIGTERM at the time while this waits for its next line, and each
-	# line is copied to merge-rN.out as it comes.
-	exec {mtfd}< <(exec "$MT" "${args[@]}" 2>&1)
-	mt=$!
-	exec {outfd}> "$OUT/merge-r$r.out"
-	while :; do
-		limit=()
-		if [ -n "$sent" ]; then
-			printf -v now '%(%s)T' -1
-			left=$((sent + GRACE - now))
-			if [ $left -le 0 ]; then
-				kill -KILL "$mt" 2>/dev/null
-				killed="the merge test had not ended $GRACE s after SIGTERM, and was killed"
-				break
-			fi
-			limit=(-t "$left")
-		elif [ -n "$STOP_AT" ]; then
-			printf -v now '%(%s)T' -1
-			left=$((STOP_AT - now))
-			if [ $left -le 0 ]; then
-				kill -TERM "$mt" 2>/dev/null
-				sent=$now
-				continue
-			fi
-			limit=(-t "$left")
-		fi
-		rc=0
-		IFS= read -r "${limit[@]}" -u "$mtfd" line || rc=$?
-		# A read that timed out keeps what it had of a line, and the rest
-		# comes with the next one.
-		if [ $rc -gt 128 ]; then
-			pending+=$line
-			continue
-		fi
-		line=$pending$line
-		pending=""
-		# The end of the merge test's output, once a last line without its
-		# newline has been read.
-		[ $rc = 0 ] || [ -n "$line" ] || break
-		printf '%s\n' "$line"
-		printf '%s\n' "$line" >&"$outfd"
-		if [[ $line =~ $VERDICT_RE ]]; then
-			m=("${BASH_REMATCH[@]}")
-			row "$r" "${m[1]}" "${m[2]}" "${m[3]}" "${m[5]}" "${m[6]}" "${m[7]}" "${m[9]}"
-			got=$((got + 1))
-			[ "${m[6]}" = WRONG ] && bad=$((bad + 1))
-			[ "${m[6]}" = stopped ] && halted=$((halted + 1))
-		elif [[ $line =~ $END_RE ]]; then
-			said=${BASH_REMATCH[1]}
-		elif [[ $line =~ $STOP_RE ]]; then
-			where=${BASH_REMATCH[1]}
-		fi
-		[ $rc = 0 ] || break
-	done
-	exec {mtfd}<&- {outfd}>&-
-	wait "$mt" 2>/dev/null
+	stoppable "$OUT/merge-r$r.out" print round_line "$MT" "${args[@]}"
 	BOOTS=$((BOOTS + got - halted))
 	WRONG=$((WRONG + bad))
-	# #951: a round stopped at the time reported the boots it made, the last
-	# one stopped or none, and its total, and said where it stopped; what it
-	# did not say is said in job.txt instead.
-	if [ -n "$sent" ]; then
+	# #951: a stopped round reported the boots it made, the last one stopped
+	# or none, and its total, and said where it stopped; what it did not say
+	# is said in job.txt instead.
+	if [ -n "$SENT" ]; then
 		total=""
 		[ -n "$said" ] && [ "$said" -eq "$bad" ] ||
 			total="the merge test's own total was ${said:-never printed}, and $bad WRONG were read"
-		STOPPED="by its time limit, $(when "$STOP_AT"), in round $r, ${where:-where the merge test did not say}${STOPPED_BOOT:+: $STOPPED_BOOT}${killed:+; $killed}${total:+; $total}"
+		STOPPED="$WHY, in round $r, ${where:-where the merge test did not say}${STOPPED_BOOT:+: $STOPPED_BOOT}${KILLED:+; the merge test $KILLED}${total:+; $total}"
 		break
 	fi
 	# The census: a round counts only if it reported every boot it planned
