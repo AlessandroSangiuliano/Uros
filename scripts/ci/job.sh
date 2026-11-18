@@ -30,8 +30,8 @@
 # --share.
 #
 # Usage:
-#   scripts/ci/job.sh [--entries "N ..."] [--rounds R] [--accel L] [--out DIR]
-#                     [--no-install] [--dry-run]
+#   scripts/ci/job.sh [--entries "N ..."] [--rounds R] [--stop-at T] [--accel L]
+#                     [--out DIR] [--no-install] [--dry-run]
 #   scripts/ci/job.sh --ablate "P ..." [--boots N] [--accel L] [--out DIR]
 #                     [--no-install] [--dry-run]
 #   scripts/ci/job.sh --sweep all|"P ..." [--share J/N] [--accel L] [--out DIR]
@@ -39,6 +39,11 @@
 #
 #   --entries "N ..."  only these merge-test entries (default: its whole list)
 #   --rounds R         merge-test rounds, one after the other (default 1)
+#   --stop-at T        stop the rounds at T, in seconds since the epoch: the
+#                      merge test is sent SIGTERM, stops the boot it is
+#                      running and says so, and the job writes its record,
+#                      where it stopped included (#951).  The workflow gives
+#                      the time its step's limit leaves room for
 #   --ablate "P ..."   an A/B instead of the merge test, with these patches of
 #                      ablations/, named without the directory or ".patch"
 #   --boots N          with --ablate, boots per arm and accelerator (default 1)
@@ -57,8 +62,10 @@
 # The tree is the one this script is in.  GITHUB_RUN_ID and JOB_INDEX name the
 # run and the job in every row, and UROS_BUILD_DIR is honoured as by the
 # harness.  OUT/boots.csv gets one row per boot, its times in UTC; the logs of
-# every WRONG boot are copied to OUT/failed/rN/; OUT/job.txt says what the job
-# ran on and with which tools.  With --ablate, OUT/ablate.csv gets the rows
+# every WRONG boot are copied to OUT/failed/rN/, and those of a boot stopped at
+# the time limit to OUT/stopped/rN/; OUT/job.txt says what the job ran on and
+# with which tools, how many boots it planned, and how it ended.  With
+# --ablate, OUT/ablate.csv gets the rows
 # instead, one per boot of either arm, and every boot's log stays in
 # OUT/ablate/, where ablate.sh works; with --sweep the same, one row per
 # patch's boot, and what ablate.sh said of each patch in OUT/sweep/NAME.out.
@@ -73,8 +80,9 @@
 # a warning · 3 the job
 # could not boot, or could not read its boots: the packages, the configure or
 # the build failed, the build had a warning, a round or the A/B did not report
-# every boot it was meant to, a boot's log was not where the merge test puts
-# it, or a boot's row had a comma inside a field and was not written.
+# every boot it was meant to, the rounds were stopped at --stop-at's time, a
+# boot's log was not where the merge test puts it, or a boot's row had a comma
+# inside a field and was not written.
 set -u
 # The container has no locale but C, and a run outside it reads the same words:
 # under another locale the compilers translate the very `warning:' the build's
@@ -106,6 +114,11 @@ die() {
 	exit "$1"
 }
 
+# A time in seconds since the epoch, as job.txt says it (#951).
+when() {
+	date -u -d "@$1" '+%F %T UTC'
+}
+
 ENTRIES=""
 ROUNDS=1
 ROUNDS_SET=0
@@ -119,13 +132,15 @@ ACCEL=auto
 OUT=ci-out
 INSTALL=1
 DRY=0
+STOP_AT=""
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--entries|--rounds|--accel|--out|--ablate|--boots|--sweep|--share)
+	--entries|--rounds|--accel|--out|--ablate|--boots|--sweep|--share|--stop-at)
 		[ $# -ge 2 ] || die 2 "$1 needs a value"
 		case "$1" in
 		--entries)	ENTRIES=$2 ;;
 		--rounds)	ROUNDS=$2; ROUNDS_SET=1 ;;
+		--stop-at)	STOP_AT=$2 ;;
 		--ablate)	ABLATE=$2 ;;
 		--boots)	BOOTS=$2; BOOTS_SET=1 ;;
 		--sweep)	SWEEP=$2 ;;
@@ -144,6 +159,13 @@ done
 case "$ROUNDS" in
 ''|*[!0-9]*|0)	die 2 "--rounds takes a number of rounds, not '$ROUNDS'" ;;
 esac
+# #951: a time, and one the merge test's rounds have: an A/B and a sweep are
+# ablate.sh's boots, which nothing here stops.
+case "$STOP_AT" in
+*[!0-9]*)	die 2 "--stop-at takes a time in seconds since the epoch, not '$STOP_AT'" ;;
+esac
+[ -z "$STOP_AT" ] || [ -z "$ABLATE$SWEEP" ] ||
+	die 2 "--stop-at stops the merge test's rounds, and --ablate and --sweep boot no rounds: give one or the other"
 read -r -a WANT <<< "$(tr ',\n\t' '   ' <<< "$ENTRIES")"
 for e in "${WANT[@]}"; do
 	case "$e" in
@@ -413,6 +435,8 @@ else
 		echo "job:   entry $e${opt:+ (${opt//_/ })}${cpus:+ -smp $cpus}, judged by '$v'"
 	done <<< "$PLAN"
 	echo "job: rows: $CSV; logs of WRONG boots: $OUT/failed/"
+	[ -z "$STOP_AT" ] ||
+		echo "job: the rounds stop at $(when "$STOP_AT") (--stop-at $STOP_AT): the merge test is sent SIGTERM, and the boot it is running is said to be stopped, its logs in $OUT/stopped/"
 	echo "job: and every patch of ablations/ asked whether it still applies to the tree (scripts/ablate.sh --check)"
 fi
 if [ $DRY = 1 ]; then
@@ -438,10 +462,11 @@ fi
 	echo "ninja:    $(ninja --version 2>&1 | head -n 1)"
 	echo "grub:     $(grub-mkimage --version 2>&1 | head -n 1)"
 	# #951: what the job means to boot, written before it boots anything,
-	# so that a job that ends short of it -- cut off by GitHub before its
-	# summary -- leaves the number beside the rows it wrote.
+	# so that a job that ends short of it -- stopped at its time limit, or
+	# cut off by GitHub -- leaves the number beside the rows it wrote.
 	if [ -z "$ABLATE$SWEEP" ]; then
 		echo "plan:     $((PER_ROUND * ROUNDS)) boots, $ROUNDS round(s) of $PER_ROUND"
+		[ -z "$STOP_AT" ] || echo "limit:    the rounds stop at $(when "$STOP_AT") (--stop-at $STOP_AT)"
 	fi
 } > "$OUT/job.txt"
 sed 's/^/job: /' "$OUT/job.txt"
