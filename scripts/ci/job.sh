@@ -110,8 +110,16 @@ JOB=${JOB_INDEX:-0}
 PACKAGES=(gcc binutils cmake ninja make bison flex python git qemu-system-x86
 	grub e2fsprogs util-linux iproute2 gdb lib32-glibc lib32-gcc-libs)
 
+# #951: once job.txt is begun, a job that ends here says why in it as well, in
+# a "failed:" line: the job's summary on GitHub is that file, and without the
+# line pull-results.sh took a job whose build had failed -- the Ubuntu jobs of
+# 18/11 -- for one cut off before it could write its summary.  Its files are
+# named there as the artifact holds them, under OUT.  Before job.txt is begun
+# there is no file of this job's to write in, and OUT may hold an older job's.
+JOBTXT=""
 die() {
 	echo "job: $2" >&2
+	[ -z "$JOBTXT" ] || echo "failed:   ${2//"$OUT/"/}" >> "$JOBTXT"
 	exit "$1"
 }
 
@@ -592,6 +600,7 @@ stoppable() {	# out print|quiet hook|"" command...
 	fi
 	[ -z "$STOP_AT" ] || echo "limit:    the job stops at $(when "$STOP_AT") (--stop-at $STOP_AT)"
 } > "$OUT/job.txt"
+JOBTXT=$OUT/job.txt
 sed 's/^/job: /' "$OUT/job.txt"
 
 # --------------------------------------------------------------------- build
