@@ -57,6 +57,19 @@
 set -u
 set -m			# its own process group for each job: a job sent INT gets it
 
+# #951: a signal ignored when a shell starts can be neither trapped nor reset
+# by it, and every run this script starts inherits it.  Started under nohup,
+# or as an asynchronous command of a shell without job control, this script
+# had SIGHUP and SIGINT ignored, run-x86_64.sh could not stop at them, and
+# the signals check said WRONG twice of a run that was never asked (OMEGA,
+# 18/11, the union of #957 and #951).  So the script starts itself again
+# with them at their defaults.
+if [ -z "${LIFECYCLE_SIGNALS_GIVEN_BACK:-}" ] &&
+   ign=$(sed -n 's/^SigIgn:[[:space:]]*//p' /proc/$$/status) && [ -n "$ign" ] &&
+   (( 0x$ign & 0x3 )); then
+	LIFECYCLE_SIGNALS_GIVEN_BACK=1 exec env --default-signal=HUP,INT "$0" "$@"
+fi
+
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
