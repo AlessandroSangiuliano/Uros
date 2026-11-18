@@ -758,33 +758,111 @@ BOOTS=0
 WRONG=0
 SHORT=0
 DONE_ROUNDS=0
+# #951: where the rounds stopped at --stop-at's time, for job.txt.  GitHub's own
+# limit stops only the step's shell: the container, and this script in it, went
+# on booting while the artifact was uploaded, and the job's summary was never
+# written.  So the job stops itself first.  GRACE is how long the merge test
+# has to end once sent SIGTERM: the boot it runs stops in seconds, but a side
+# build or ablate.sh --check-all it is in runs to its end before it stops.
+STOPPED=""
+GRACE=180
 for r in $(seq 1 "$ROUNDS"); do
+	# #951: a round that would start past the time is not started.
+	if [ -n "$STOP_AT" ]; then
+		printf -v now '%(%s)T' -1
+		if [ "$now" -ge "$STOP_AT" ]; then
+			STOPPED="by its time limit, $(when "$STOP_AT"), before round $r"
+			break
+		fi
+	fi
 	args=(-a "$MT_ACC" -o "$OUT/logs/r$r")
 	[ -n "$ENTRIES" ] && args+=(-e "$ENTRIES")
 	got=0
 	bad=0
+	halted=0
 	said=""
+	where=""
+	sent=""
+	killed=""
+	pending=""
 	# Each row is written as its line arrives, so a job stopped by its time
-	# limit keeps every boot it finished.
-	while IFS= read -r line; do
+	# limit keeps every boot it finished.  #951: the merge test is read
+	# through a descriptor with its own process behind it, so that it can be
+	# sent SIGTERM at the time while this waits for its next line, and each
+	# line is copied to merge-rN.out as it comes.
+	exec {mtfd}< <(exec "$MT" "${args[@]}" 2>&1)
+	mt=$!
+	exec {outfd}> "$OUT/merge-r$r.out"
+	while :; do
+		limit=()
+		if [ -n "$sent" ]; then
+			printf -v now '%(%s)T' -1
+			left=$((sent + GRACE - now))
+			if [ $left -le 0 ]; then
+				kill -KILL "$mt" 2>/dev/null
+				killed="the merge test had not ended $GRACE s after SIGTERM, and was killed"
+				break
+			fi
+			limit=(-t "$left")
+		elif [ -n "$STOP_AT" ]; then
+			printf -v now '%(%s)T' -1
+			left=$((STOP_AT - now))
+			if [ $left -le 0 ]; then
+				kill -TERM "$mt" 2>/dev/null
+				sent=$now
+				continue
+			fi
+			limit=(-t "$left")
+		fi
+		rc=0
+		IFS= read -r "${limit[@]}" -u "$mtfd" line || rc=$?
+		# A read that timed out keeps what it had of a line, and the rest
+		# comes with the next one.
+		if [ $rc -gt 128 ]; then
+			pending+=$line
+			continue
+		fi
+		line=$pending$line
+		pending=""
+		# The end of the merge test's output, once a last line without its
+		# newline has been read.
+		[ $rc = 0 ] || [ -n "$line" ] || break
 		printf '%s\n' "$line"
+		printf '%s\n' "$line" >&"$outfd"
 		if [[ $line =~ $VERDICT_RE ]]; then
 			m=("${BASH_REMATCH[@]}")
 			row "$r" "${m[1]}" "${m[2]}" "${m[3]}" "${m[5]}" "${m[6]}" "${m[7]}" "${m[9]}"
 			got=$((got + 1))
 			[ "${m[6]}" = WRONG ] && bad=$((bad + 1))
+			[ "${m[6]}" = stopped ] && halted=$((halted + 1))
 		elif [[ $line =~ $END_RE ]]; then
 			said=${BASH_REMATCH[1]}
+		elif [[ $line =~ $STOP_RE ]]; then
+			where=${BASH_REMATCH[1]}
 		fi
-	done < <("$MT" "${args[@]}" 2>&1 | tee "$OUT/merge-r$r.out")
-	BOOTS=$((BOOTS + got))
+		[ $rc = 0 ] || break
+	done
+	exec {mtfd}<&- {outfd}>&-
+	wait "$mt" 2>/dev/null
+	BOOTS=$((BOOTS + got - halted))
 	WRONG=$((WRONG + bad))
+	# #951: a round stopped at the time reported the boots it made, the last
+	# one stopped or none, and its total, and said where it stopped; what it
+	# did not say is said in job.txt instead.
+	if [ -n "$sent" ]; then
+		total=""
+		[ -n "$said" ] && [ "$said" -eq "$bad" ] ||
+			total="the merge test's own total was ${said:-never printed}, and $bad WRONG were read"
+		STOPPED="by its time limit, $(when "$STOP_AT"), in round $r, ${where:-where the merge test did not say}${STOPPED_BOOT:+: $STOPPED_BOOT}${killed:+; $killed}${total:+; $total}"
+		break
+	fi
 	# The census: a round counts only if it reported every boot it planned
 	# and its own total agrees with the lines read.  A merge test that refused
 	# to start, died, or changed the shape of its lines would otherwise pass
-	# as a short round with nothing wrong in it.
-	if [ -z "$said" ] || [ "$got" -ne "$PER_ROUND" ] || [ "$said" -ne "$bad" ]; then
-		echo "job: round $r reported $got of $PER_ROUND boots, $bad WRONG, and the merge test's own total was ${said:-never printed}: $OUT/merge-r$r.out" >&2
+	# as a short round with nothing wrong in it -- and so would one stopped
+	# by a SIGTERM this script did not send.
+	if [ -z "$said" ] || [ "$got" -ne "$PER_ROUND" ] || [ "$said" -ne "$bad" ] || [ $halted != 0 ]; then
+		echo "job: round $r reported $got of $PER_ROUND boots, $bad WRONG and $halted stopped, and the merge test's own total was ${said:-never printed}: $OUT/merge-r$r.out" >&2
 		SHORT=1
 		break
 	fi
@@ -796,6 +874,7 @@ done
 	for w in "${WRONGS[@]}"; do
 		echo "WRONG:    $w"
 	done
+	[ -z "$STOPPED" ] || echo "stopped:  $STOPPED"
 	[ $SHORT = 0 ] || echo "short:    round $((DONE_ROUNDS + 1)) did not report every boot"
 	[ $UNFOUND = 0 ] || echo "unfound:  $UNFOUND boot(s) left no log under the name merge-test gives it"
 	for m in "${MALFORMED[@]}"; do
@@ -806,11 +885,12 @@ echo "job: $BOOTS boots in $DONE_ROUNDS of $ROUNDS round(s), $WRONG WRONG -- tre
 for w in "${WRONGS[@]}"; do
 	echo "job:   WRONG: $w"
 done
+[ -z "$STOPPED" ] || echo "job: stopped $STOPPED"
 [ $UNFOUND = 0 ] || echo "job: $UNFOUND boot(s) left no log under the name merge-test gives it: see the rows' log column" >&2
 [ ${#MALFORMED[@]} = 0 ] || echo "job: ${#MALFORMED[@]} row(s) with a comma inside a field were not written: see job.txt" >&2
 [ -z "$ROTTED" ] || echo "job: ablations: no longer apply: $ROTTED" >&2
 [ $PROFILE_BAD = 0 ] || echo "job: a kernel with UROS_SYSCALL_PROFILE on did not build without a warning: $OUT/profile-builds/" >&2
 [ $WRONG = 0 ] || exit 1
-[ $SHORT = 0 ] && [ $UNFOUND = 0 ] && [ ${#MALFORMED[@]} = 0 ] || exit 3
+[ $SHORT = 0 ] && [ -z "$STOPPED" ] && [ $UNFOUND = 0 ] && [ ${#MALFORMED[@]} = 0 ] || exit 3
 [ -z "$ROTTED" ] && [ $PROFILE_BAD = 0 ] || exit 2
 exit 0
