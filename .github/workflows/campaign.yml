@@ -56,6 +56,10 @@ on:
         description: "Each patch once instead of the merge test, shared out among the jobs: all (every ablation with an Expect: line) or patch names (empty: no sweep)"
         type: string
         required: false
+      minutes:
+        description: "Minutes the boots' step may run, 10 to 330; the merge test's rounds stop 5 before (empty: 330)"
+        type: string
+        required: false
   push:
     branches:
       - epic/v0.3.0-x86-64    # the branch EPIC below names
@@ -83,6 +87,8 @@ jobs:
       boots: ${{ steps.plan.outputs.boots }}
       sweep: ${{ steps.plan.outputs.sweep }}
       jobs: ${{ steps.plan.outputs.jobs }}
+      minutes: ${{ steps.plan.outputs.minutes }}
+      job_minutes: ${{ steps.plan.outputs.job_minutes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,6 +108,7 @@ jobs:
           ABLATE: ${{ inputs.ablate }}
           BOOTS: ${{ inputs.boots }}
           SWEEP: ${{ inputs.sweep }}
+          MINUTES: ${{ inputs.minutes }}
         run: |
           # Which toolchain builds and boots: ours, from Arch, in a container,
           # or Ubuntu's own, GCC and qemu several versions older -- both side
@@ -137,6 +144,18 @@ jobs:
           case "$boots" in
           ''|*[!0-9]*) echo "::error::boots is a number of boots, not '$boots'"; exit 1 ;;
           esac
+          # #951: the boots' step's limit and the job's, from one number.  The
+          # merge test's rounds stop five minutes before the step's limit
+          # (job.sh --stop-at), and the job's leaves fifteen more after it,
+          # for the summary and the upload.
+          minutes=${MINUTES:-330}
+          case "$minutes" in
+          ''|*[!0-9]*) echo "::error::minutes is a number from 10 to 330, not '$minutes'"; exit 1 ;;
+          esac
+          if [ "$minutes" -lt 10 ] || [ "$minutes" -gt 330 ]; then
+            echo "::error::minutes is a number from 10 to 330, not '$minutes'"
+            exit 1
+          fi
           # A sweep replaces the merge test and an A/B alike, and boots each
           # patch once.  Every patch is planned here, and the last job's share
           # asked for, so that a patch ablate.sh refuses, or more jobs than
@@ -173,14 +192,16 @@ jobs:
             echo "boots=$boots"
             echo "sweep=$SWEEP"
             echo "jobs=$jobs"
+            echo "minutes=$minutes"
+            echo "job_minutes=$((minutes + 15))"
           } >> "$GITHUB_OUTPUT"
 
   boot:
     needs: plan
     runs-on: ubuntu-latest
-    # Under the six hours GitHub gives a job, with room left for the upload
-    # after the boots' step has been stopped by its own limit.
-    timeout-minutes: 345
+    # Under the six hours GitHub gives a job, with room left after the boots'
+    # step for the summary and the upload: the plan's minutes and fifteen.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.job_minutes) }}
     strategy:
       # A WRONG boot fails its job, and must not cancel the others.
       fail-fast: false
