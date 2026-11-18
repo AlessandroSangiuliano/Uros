@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #951
+Takes out: the boot run by run-x86_64.sh as a job waited for -- it runs in the foreground again, as before #951, and a shell runs a trap only once the command it waits for in the foreground has ended: ablate.sh sent SIGTERM during a paused boot goes on until that boot's 120 s of silence are out.  harness-lifecycle-check.sh's abstop finds ablate.sh still running 30 s after SIGTERM.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: abstop
+Expect: lifecycle: abstop: .* -- WRONG
+Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM; abstop's probe is booted by run-x86_64.sh, the third of the three ways a boot is made, and only that way is taken back to the foreground, its status handed to the wait by a job already over
+
+diff --git a/scripts/ablate.sh b/scripts/ablate.sh
+index 15287c48..139a1d81 100755
+--- a/scripts/ablate.sh
++++ b/scripts/ablate.sh
+@@ -555,7 +555,8 @@ for i in $(seq 1 "$BOOTS"); do
+ 			else
+ 				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" UROS_X86_64_LOG=$log \
+ 					env --default-signal=INT,QUIT "$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
+-					> "$RUNDIR/$arm-$acc-$i.out" 2>&1 <&0 &
++					> "$RUNDIR/$arm-$acc-$i.out" 2>&1	# 951-ablate-boot-in-foreground: in the foreground, as before
++				brc=$?; ( exit $brc ) &	# and a job already over, with its status, for the wait below
+ 			fi
+ 			CHILD=$!
+ 			[ -z "$STOP" ] || kill -TERM "$CHILD" 2>/dev/null

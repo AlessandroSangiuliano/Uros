@@ -56,6 +56,10 @@ on:
         description: "Each patch once instead of the merge test, shared out among the jobs: all (every ablation with an Expect: line) or patch names (empty: no sweep)"
         type: string
         required: false
+      minutes:
+        description: "Minutes the boots' step may run, 10 to 330; the merge test's rounds stop 5 before (empty: 330)"
+        type: string
+        required: false
   push:
     branches:
       - epic/v0.3.0-x86-64    # the branch EPIC below names
@@ -83,6 +87,8 @@ jobs:
       boots: ${{ steps.plan.outputs.boots }}
       sweep: ${{ steps.plan.outputs.sweep }}
       jobs: ${{ steps.plan.outputs.jobs }}
+      minutes: ${{ steps.plan.outputs.minutes }}
+      job_minutes: ${{ steps.plan.outputs.job_minutes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,6 +108,7 @@ jobs:
           ABLATE: ${{ inputs.ablate }}
           BOOTS: ${{ inputs.boots }}
           SWEEP: ${{ inputs.sweep }}
+          MINUTES: ${{ inputs.minutes }}
         run: |
           # Which toolchain builds and boots: ours, from Arch, in a container,
           # or Ubuntu's own, GCC and qemu several versions older -- both side
@@ -137,6 +144,18 @@ jobs:
           case "$boots" in
           ''|*[!0-9]*) echo "::error::boots is a number of boots, not '$boots'"; exit 1 ;;
           esac
+          # #951: the boots' step's limit and the job's, from one number.  The
+          # merge test's rounds stop five minutes before the step's limit
+          # (job.sh --stop-at), and the job's leaves fifteen more after it,
+          # for the summary and the upload.
+          minutes=${MINUTES:-330}
+          case "$minutes" in
+          ''|*[!0-9]*) echo "::error::minutes is a number from 10 to 330, not '$minutes'"; exit 1 ;;
+          esac
+          if [ "$minutes" -lt 10 ] || [ "$minutes" -gt 330 ]; then
+            echo "::error::minutes is a number from 10 to 330, not '$minutes'"
+            exit 1
+          fi
           # A sweep replaces the merge test and an A/B alike, and boots each
           # patch once.  Every patch is planned here, and the last job's share
           # asked for, so that a patch ablate.sh refuses, or more jobs than
@@ -173,14 +192,16 @@ jobs:
             echo "boots=$boots"
             echo "sweep=$SWEEP"
             echo "jobs=$jobs"
+            echo "minutes=$minutes"
+            echo "job_minutes=$((minutes + 15))"
           } >> "$GITHUB_OUTPUT"
 
   boot:
     needs: plan
     runs-on: ubuntu-latest
-    # Under the six hours GitHub gives a job, with room left for the upload
-    # after the boots' step has been stopped by its own limit.
-    timeout-minutes: 345
+    # Under the six hours GitHub gives a job, with room left after the boots'
+    # step for the summary and the upload: the plan's minutes and fifteen.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.job_minutes) }}
     strategy:
       # A WRONG boot fails its job, and must not cancel the others.
       fail-fast: false
@@ -219,13 +240,25 @@ jobs:
           echo "job ${{ matrix.job }}: KVM available: $available" >> "$GITHUB_STEP_SUMMARY"
 
       # The workspace is mounted, so what job.sh writes in ci-out is where the
-      # upload looks for it.  --init passes the stop of a timed-out step on to
-      # job.sh, which as PID 1 a shell would ignore.  The device is passed only
-      # where it can be written, so the job's own test of /dev/kvm decides
-      # whether its boots run under KVM as well.
+      # upload looks for it.  The device is passed only where it can be
+      # written, so the job's own test of /dev/kvm decides whether its boots
+      # run under KVM as well.  --init makes job.sh a child of an init, which
+      # passes on a signal docker sends the container; as PID 1 a shell would
+      # ignore it.  But nothing came from GitHub: at the step's limit, and
+      # when a run is cancelled, the runner sends SIGINT, then SIGTERM, to
+      # this step's shell alone, then kills that shell alone, and docker was
+      # left running.  In the push campaign of 35f10d00 the container went on
+      # booting while the artifact was uploaded, and docker was killed at the
+      # job's end as an orphan (#951).  So the job stops by itself five
+      # minutes before this step's limit -- job.sh --stop-at, from the time
+      # read as this script starts, before the image is pulled -- and docker
+      # runs as a job waited for, under a name, so that each of the runner's
+      # signals is passed on to the container as a SIGTERM, which job.sh
+      # stops at as it does at its time.  The last wait gives docker's own
+      # status, whatever signal ended the first.
       - name: Build and boot in an Arch Linux container
         if: matrix.mode == 'arch'
-        timeout-minutes: 330
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
         env:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
@@ -235,7 +268,9 @@ jobs:
           SWEEP: ${{ needs.plan.outputs.sweep }}
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
           KVM: ${{ steps.kvm.outputs.available }}
+          MINUTES: ${{ needs.plan.outputs.minutes }}
         run: |
+          stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           kvm=()
           if [ "$KVM" = yes ]; then
             kvm=(--device /dev/kvm)
@@ -247,11 +282,21 @@ jobs:
           else
             what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
           fi
-          docker run --rm --init "${kvm[@]}" \
+          name=campaign-job
+          trap 'docker kill --signal=TERM "$name" > /dev/null 2>&1' INT TERM
+          docker run --rm --init --name "$name" "${kvm[@]}" \
             -v "$GITHUB_WORKSPACE:/work" -w /work \
             -e GITHUB_RUN_ID -e JOB_INDEX \
             archlinux:latest \
-            scripts/ci/job.sh "${what[@]}" --out ci-out
+            scripts/ci/job.sh "${what[@]}" --stop-at "$stop_at" --out ci-out &
+          pid=$!
+          wait "$pid" || true
+          while kill -0 "$pid" 2>/dev/null; do
+            wait "$pid" || true
+          done
+          rc=0
+          wait "$pid" || rc=$?
+          exit $rc
 
       # The same job on the runner itself, with Ubuntu's packages: the other
       # half of the comparison.  If its compiler cannot build the tree with no
@@ -259,7 +304,7 @@ jobs:
       # container is what the campaign keeps.
       - name: Build and boot on the runner's own Ubuntu
         if: matrix.mode == 'ubuntu'
-        timeout-minutes: 330
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
         env:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
@@ -268,7 +313,12 @@ jobs:
           BOOTS: ${{ needs.plan.outputs.boots }}
           SWEEP: ${{ needs.plan.outputs.sweep }}
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
+          MINUTES: ${{ needs.plan.outputs.minutes }}
         run: |
+          # #951: the job stops five minutes before this step's limit, as in
+          # the container's step above, and the runner's signals are passed on
+          # to it, here directly, as SIGTERM.
+          stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           sudo apt-get update -q
           sudo apt-get install -y -q gcc binutils cmake ninja-build make bison flex \
             python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
@@ -280,7 +330,17 @@ jobs:
           else
             what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
           fi
-          scripts/ci/job.sh --no-install "${what[@]}" --out ci-out
+          pid=""
+          trap '[ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null' INT TERM
+          scripts/ci/job.sh --no-install "${what[@]}" --stop-at "$stop_at" --out ci-out &
+          pid=$!
+          wait "$pid" || true
+          while kill -0 "$pid" 2>/dev/null; do
+            wait "$pid" || true
+          done
+          rc=0
+          wait "$pid" || rc=$?
+          exit $rc
 
       - name: Say what the job found
         if: always()
@@ -289,9 +349,10 @@ jobs:
             { echo '```'; cat ci-out/job.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Whatever the boots said: a WRONG boot is the reason to keep them.  The
-      # logs of the merge test's boots that were as they should be stay on the
-      # runner; an A/B keeps every boot's, few and all of them evidence.  Its
+      # Whatever the boots said: a WRONG boot is the reason to keep them, and a
+      # boot stopped at the time limit is kept as far as it got, in stopped/
+      # (#951).  The logs of the merge test's boots that were as they should be
+      # stay on the runner; an A/B keeps every boot's, few and all of them evidence.  Its
       # two worktrees go when ablate.sh ends, and are left out in case a
       # stopped job left them.
       - name: Keep the rows and the failed boots' logs

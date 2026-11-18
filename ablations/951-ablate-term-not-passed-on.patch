@@ -1,0 +1,38 @@
+Kind: ablation
+Issue: #951
+Takes out: the passing of SIGTERM on to what ablate.sh is doing -- its trap only notes the stop, and neither a build nor a boot whose job was not yet known is sent it: the wait the trap ends returns at once, the next waits for the boot to end by itself, and a paused boot runs until its 120 s of silence are out.  harness-lifecycle-check.sh's abstop finds ablate.sh still running 30 s after SIGTERM.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: abstop
+Expect: lifecycle: abstop: .* -- WRONG
+Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM; abstop runs ablate.sh -- this arm's -- on a probe patch of its own
+
+diff --git a/scripts/ablate.sh b/scripts/ablate.sh
+index 15287c48..23494aa2 100755
+--- a/scripts/ablate.sh
++++ b/scripts/ablate.sh
+@@ -402,7 +402,7 @@ CHILD=""
+ STOP=""
+ trap cleanup EXIT
+ trap 'stopped_by INT' INT
+-trap 'STOP=TERM; [ -z "$CHILD" ] || kill -TERM "$CHILD" 2>/dev/null' TERM
++trap 'STOP=TERM' TERM	# 951-ablate-term-not-passed-on: the stop noted, and not passed on
+ trap 'stopped_by HUP' HUP
+ # A long step, run as a job waited for: its status, or that of its stop.  A
+ # SIGTERM during the wait ends it at once, with 143 whatever the job did, and
+@@ -415,7 +415,6 @@ waited() {
+ 	local rc=0
+ 	env --default-signal=INT,QUIT "$@" <&0 &
+ 	CHILD=$!
+-	[ -z "$STOP" ] || kill -TERM "$CHILD" 2>/dev/null
+ 	wait "$CHILD" || rc=$?
+ 	if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+ 		rc=0
+@@ -558,7 +557,6 @@ for i in $(seq 1 "$BOOTS"); do
+ 					> "$RUNDIR/$arm-$acc-$i.out" 2>&1 <&0 &
+ 			fi
+ 			CHILD=$!
+-			[ -z "$STOP" ] || kill -TERM "$CHILD" 2>/dev/null
+ 			wait "$CHILD"
+ 			rc=$?
+ 			if [ -n "$STOP" ] && [ $rc -gt 128 ]; then

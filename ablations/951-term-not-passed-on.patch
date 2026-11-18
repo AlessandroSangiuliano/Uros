@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #951
+Takes out: the passing of SIGTERM on to the boot -- the trap only notes the stop, and a SIGTERM that came before the boot's job was known is not passed on either: the wait the trap ends returns at once, the next one waits for the boot to end by itself, and the boot, judged as any other, is never said to be stopped.  harness-lifecycle-check.sh's mtstop finds no line saying the boot was stopped, and the run saying it stopped after its last boot instead of at boot 1 of 1.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: mtstop
+Expect: lifecycle: mtstop: .* -- WRONG
+Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM
+
+diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
+index 5c58ad13..93ff51e4 100755
+--- a/scripts/merge-test-x86_64.sh
++++ b/scripts/merge-test-x86_64.sh
+@@ -444,7 +444,7 @@ fi
+ # process of the terminal's group anyway.
+ STOP=""
+ BOOT=""
+-trap 'STOP=TERM; [ -z "$BOOT" ] || kill -TERM "$BOOT" 2>/dev/null' TERM
++trap 'STOP=TERM' TERM	# 951-term-not-passed-on: the stop noted, and not passed on to the boot
+ lists_cover || exit 2
+ plan_boots "$SMP" "$ONLY"
+ if [ ${#CLASH[@]} -gt 0 ]; then
+@@ -930,7 +930,6 @@ for boot in "${PLAN[@]}"; do
+ 		  fi
+ 		  UROS_X86_64_LOG="$f" exec env --default-signal=INT,QUIT ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
+ 		BOOT=$!
+-		[ -z "$STOP" ] || kill -TERM "$BOOT" 2>/dev/null
+ 		wait "$BOOT" || rc=$?
+ 		# A SIGTERM during the wait ran the trap and ended the wait at once,
+ 		# with 143 whatever the boot did: the boot's own status is the next

@@ -12,12 +12,13 @@ Expect: merge-test: entry 14 kvm -smp 4 \(@char\) -- WRONG \(char\)
 Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take.  The arm's patch is in the merge test itself, which ablate.sh runs from the arm's tree.  Read in the ablated arm's full log for the char build that the boot passed the harness and has no "char_test: started".
 
 diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
+index 655724a2..38646014 100755
 --- a/scripts/merge-test-x86_64.sh
 +++ b/scripts/merge-test-x86_64.sh
-@@ -770,7 +770,7 @@
- 	done | grep -q yes
+@@ -841,7 +841,7 @@ marked() {
  }
- if marked char; then
+ # #951: and a run asked to stop builds no side build it will not boot.
+ if [ -z "$STOP" ] && marked char; then
 -	side_build "$CHAR_BUILD" char char_server -DOSFMK_BUILD_CHAR_SERVER=ON
 +	side_build "$CHAR_BUILD" char char_server
  	CHAR_REFUSED=$SIDE_REFUSED

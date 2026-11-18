@@ -10,8 +10,12 @@
 # takes every completed run it has not taken before, appends its rows to
 # ~/uros-tests/ci-campaign.csv, where they accumulate with the home machines'
 # rows, and keeps each job's artifact under ~/uros-tests/ci/<run-id>/job<N>/.
-# A row's log column then names the local copy of a WRONG boot's log, and is
-# "-" for a boot that was as it should be, whose log stayed on the runner.
+# A row's log column then names the local copy of a WRONG boot's log, or of a
+# boot stopped at the job's time limit, and is "-" for a boot that was as it
+# should be, whose log stayed on the runner.  Of each job it says whether it
+# finished, from its job.txt: or stopped at its time limit, or cut off before
+# its summary, or a round short -- and the boots it got, of those it planned
+# where its job.txt says (#951).
 # Times are the runner's, in UTC.  Compare rows within one job only: the
 # runner's clock is not ours to set.
 #
@@ -85,8 +89,15 @@ trap 'rm -rf "$STAGE"' EXIT
 # Boots and WRONG by entry and accelerator, from rows on stdin.  An entry is its
 # number with the options and processors that make it a line of its own in the
 # merge test, so 14 at -smp 1 is not added into 14 at -smp 4.
+# #951: a boot stopped at a job's time limit has a row of its own, "stopped",
+# and is neither a boot nor a WRONG: it is listed, and counted apart.
 summary() {
 	awk -F, '
+	$13 ~ /^stopped/ {
+		stopped++
+		list = list sprintf("  stopped  run %s job %s round %s, entry %s -smp %s %s: %s\n", $3, $4, $5, $10, $11, $9, $14)
+		next
+	}
 	{
 		k = sprintf("entry %s%s -smp %s %s", $10, ($12 == "" ? "" : " (" $12 ")"), $11, $9)
 		n[k]++
@@ -103,8 +114,42 @@ summary() {
 			printf "  %-38s %6d boots %5d WRONG\n", k, n[k], w[k] + 0 | cmd
 		close(cmd)
 		printf "%s", list
-		printf "  in all: %d boots, %d WRONG\n", all, wrong
+		printf "  in all: %d boots, %d WRONG%s\n", all, wrong, (stopped ? sprintf(", %d stopped at a time limit", stopped) : "")
 	}'
+}
+
+# #951: whether a job finished, from its job.txt: "plan:" is written before its
+# first boot; "boots:" once the merge test's rounds are over, and an A/B's
+# "ablate:" or a sweep's "sweep: N patches" once it has ended; "stopped:" when
+# it was stopped, at its time limit or by a SIGTERM -- before its first boot
+# too, when it has no rows at all; "short:" when a round came short.  A job.txt
+# without its summary or a "stopped:" line is a job cut off before writing
+# either, as every job GitHub's limit stopped was until #951.  The boots it got
+# are its rows, the stopped boot's not counted.
+job_end() {	# artifact-dir job description
+	local d=$1 j=$2 what=$3 plan got=0 stop short
+	if [ -f "$d/boots.csv" ]; then
+		got=$(tail -n +2 "$d/boots.csv" | awk -F, '$13 !~ /^stopped/' | wc -l)
+	elif [ -f "$d/ablate.csv" ]; then
+		got=$(tail -n +2 "$d/ablate.csv" | awk -F, '$14 != "stopped"' | wc -l)
+	elif [ ! -f "$d/job.txt" ]; then
+		return 0
+	fi
+	plan=$(sed -n 's/^plan: *\([0-9][0-9]*\) boots.*/\1/p' "$d/job.txt" 2>/dev/null)
+	plan=${plan:+ of the $plan planned}
+	stop=$(sed -n 's/^stopped: *//p' "$d/job.txt" 2>/dev/null)
+	short=$(sed -n 's/^short: *//p' "$d/job.txt" 2>/dev/null)
+	if [ ! -f "$d/job.txt" ]; then
+		echo "pull-results: $what: job $j left no job.txt; $got boots$plan"
+	elif [ -z "$stop" ] && ! grep -qE '^(boots:|ablate:   |sweep:    [0-9]+ patches of )' "$d/job.txt"; then
+		echo "pull-results: $what: job $j did NOT FINISH: its job.txt has no summary, so it was cut off before writing one; $got boots$plan"
+	elif [ -n "$stop" ]; then
+		echo "pull-results: $what: job $j STOPPED SHORT, $stop; $got boots$plan"
+	elif [ -n "$short" ]; then
+		echo "pull-results: $what: job $j came SHORT, $short; $got boots$plan"
+	else
+		echo "pull-results: $what: job $j finished; $got boots$plan"
+	fi
 }
 
 # An A/B's boots by patches, processor, arm, accelerator and verdict, from rows
@@ -146,7 +191,7 @@ import() {	# run-id description artifacts-the-api-listed
 		fi
 		if ! tail -n +2 "$d/boots.csv" | awk -F, -v OFS=, -v dest="$CI/$id/job$j" '
 			NF != 14 { exit 1 }
-			{ $14 = ($14 ~ /^failed\//) ? dest "/" $14 : "-"; print }' >> "$rows"; then
+			{ $14 = ($14 ~ /^(failed|stopped)\//) ? dest "/" $14 : "-"; print }' >> "$rows"; then
 			echo "pull-results: $what: job $j has a row without the 14 columns of the header; not imported" >&2
 			return 1
 		fi
@@ -166,6 +211,7 @@ import() {	# run-id description artifacts-the-api-listed
 		fi
 		[ -f "$d/boots.csv" ] || [ -f "$d/ablate.csv" ] ||
 			echo "pull-results: $what: job $j left no rows; what it left is in $CI/$id/job$j"
+		job_end "$d" "$j" "$what"
 	done
 	if grep -q "^[^,]*,[^,]*,$id," "$CSV"; then
 		echo "pull-results: $what: its rows are already in $CSV, from an import stopped before its record; recorded, not appended again"
@@ -185,12 +231,14 @@ import() {	# run-id description artifacts-the-api-listed
 	# The merge test's line, unless the run was an A/B and had none of its rows.
 	[ -s "$rows" ] || [ ! -s "$abrows" ] || return 0
 	awk -F, -v what="$what" -v jobs=${#jobs[@]} '
+		$13 ~ /^stopped/ { s++; next }
 		{ n++; if ($13 ~ /^WRONG/) w++; acc[$9] = 1; tree[$6] = 1 }
 		END {
 			a = ""; for (k in acc) a = a " " k
 			t = ""; for (k in tree) t = t " " k
-			printf "pull-results: %s: %d job(s), %d boots, %d WRONG; tree%s; accelerators%s\n",
-				what, jobs, n, w, (t == "" ? " -" : t), (a == "" ? " -" : a)
+			printf "pull-results: %s: %d job(s), %d boots, %d WRONG%s; tree%s; accelerators%s\n",
+				what, jobs, n, w, (s ? sprintf(", %d stopped at a time limit", s) : ""),
+				(t == "" ? " -" : t), (a == "" ? " -" : a)
 		}' "$rows"
 }
 

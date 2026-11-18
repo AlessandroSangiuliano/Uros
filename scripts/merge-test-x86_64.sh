@@ -58,7 +58,9 @@
 # of ablations/ no longer applies, and 0 if every judged entry is as it should
 # be and every patch applies.  How many were wrong is the last line's, "N
 # wrong": a count as the status said 2 and 3 as well, which ablate.sh reads as
-# a run that did not start (#782).
+# a run that did not start (#782).  Sent SIGTERM, a run stops the boot it is
+# running, says so of it in a verdict line whose result is "stopped", starts
+# no other, prints its totals and dies of the signal (#951).
 
 set -u
 ACC=both
@@ -428,6 +430,21 @@ if [ $PATCHES_ONLY = 1 ]; then
 	echo "$PATCHES_SAID"
 	exit $rc
 fi
+# #951: a run sent SIGTERM stops the boot it is running, says so of that boot
+# in a verdict line whose result is "stopped", starts no other, prints its
+# totals as a whole run does, and dies of the signal.  ci/job.sh sends it at
+# its time limit: a campaign job that ran out of GitHub's minutes was cut off
+# in a boot, which left no row and no log, and its summary was never written.
+# The trap passes the signal on to the boot, which run-x86_64.sh and
+# ush-x86_64.py stop as they stop for a Ctrl-C, their qemu stopped and the
+# lock given back.  So that it runs while a boot runs, the boot is a job
+# waited for: a shell runs a trap only once the command it waits for in the
+# foreground has ended (#801).  TERM and not INT: a SIGINT that comes while
+# the shell waits for a $(...) is lost (#801), and a Ctrl-C reaches every
+# process of the terminal's group anyway.
+STOP=""
+BOOT=""
+trap 'STOP=TERM; [ -z "$BOOT" ] || kill -TERM "$BOOT" 2>/dev/null' TERM
 lists_cover || exit 2
 plan_boots "$SMP" "$ONLY"
 if [ ${#CLASH[@]} -gt 0 ]; then
@@ -822,12 +839,13 @@ marked() {
 		[[ " ${opt//_/ } " == *" @$1 "* ]] && echo yes
 	done | grep -q yes
 }
-if marked char; then
+# #951: and a run asked to stop builds no side build it will not boot.
+if [ -z "$STOP" ] && marked char; then
 	side_build "$CHAR_BUILD" char char_server -DOSFMK_BUILD_CHAR_SERVER=ON
 	CHAR_REFUSED=$SIDE_REFUSED
 	[ -z "$CHAR_REFUSED" ] || echo "merge-test: $CHAR_REFUSED -- the entries marked @char are WRONG, not run" >&2
 fi
-if marked ush; then
+if [ -z "$STOP" ] && marked ush; then
 	side_build "$USH_BUILD" ush "char_server and the ush bundle" \
 		-DOSFMK_BUILD_CHAR_SERVER=ON -DUROS_BUNDLE_USH=ON
 	USH_REFUSED=$SIDE_REFUSED
@@ -836,6 +854,11 @@ fi
 echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}${STUB:+, gdb stub on every run}"
 echo "$SKIPPED" | sed '/^$/d; s/^/merge-test: not run -- /'
 [ ${#SAME[@]} -eq 0 ] || printf 'merge-test: booted once -- %s (#776)\n' "${SAME[@]}"
+# #951: the boots made so far, of all the run plans, for the line a stopped
+# run ends with.
+MADE=0
+PLANNED=$(( ${#PLAN[@]} * $(wc -w <<< "$ACCS") ))
+STOPPED_AT=""
 for boot in "${PLAN[@]}"; do
 	IFS=$'\x1f' read -r e v opt n <<< "$boot"
 	# #765: @char is the merge test's, not run-x86_64.sh's: it picks the
@@ -857,6 +880,12 @@ for boot in "${PLAN[@]}"; do
 		opt=$(echo " $opt " | sed 's/ @ush / /; s/^ *//; s/ *$//')
 	fi
 	for a in $ACCS; do
+		# #951: asked to stop between two boots, it starts no other.
+		if [ -n "$STOP" ]; then
+			STOPPED_AT="before boot $((MADE + 1)) of $PLANNED"
+			break 2
+		fi
+		MADE=$((MADE + 1))
 		budget=1200
 		k=""
 		# ush-x86_64.py's wait for each line a command prints (#952).
@@ -885,13 +914,40 @@ for boot in "${PLAN[@]}"; do
 		# root disk, and types its commands.  Its exit statuses are the
 		# harness's -- 0, 1, and 2 for a run it could not make -- and the
 		# line it carried is the full log.
+		# #951: a job waited for, so that a SIGTERM's trap runs during the
+		# boot and passes the signal on; its standard input named, which an
+		# asynchronous command would otherwise have from /dev/null, and
+		# SIGINT and SIGQUIT given back, which it would otherwise start
+		# with ignored, out of a shell's reach to trap again: a Ctrl-C is
+		# run-x86_64.sh's to stop at, as it was in the foreground (#801).  A
+		# SIGTERM that came before $BOOT was set is passed on here.
+		started=$SECONDS
 		( cd "$HERE" || exit 2
 		  [ -z "$build" ] || export UROS_BUILD_DIR=$build
 		  if [ "$side" = ush ]; then
-			exec ./scripts/ush-x86_64.py --build "$build" $k --entry "$e" --smp "$n" \
-				--budget "$budget" --wait "$wait" --log "$f"
+			exec env --default-signal=INT,QUIT ./scripts/ush-x86_64.py --build "$build" $k \
+				--entry "$e" --smp "$n" --budget "$budget" --wait "$wait" --log "$f"
 		  fi
-		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?
+		  UROS_X86_64_LOG="$f" exec env --default-signal=INT,QUIT ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
+		BOOT=$!
+		[ -z "$STOP" ] || kill -TERM "$BOOT" 2>/dev/null
+		wait "$BOOT" || rc=$?
+		# A SIGTERM during the wait ran the trap and ended the wait at once,
+		# with 143 whatever the boot did: the boot's own status is the next
+		# wait's, once it has stopped.
+		if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+			rc=0
+			wait "$BOOT" || rc=$?
+		fi
+		BOOT=""
+		# Stopped by the signal, the boot is said to be, and judged no
+		# further; one that ended by itself first is judged as any other,
+		# and the run stops before the next.
+		if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+			verdict_line "$e" "$a" "$n" "$shown" stopped "SIG$STOP $((SECONDS - started)) s into the boot, which then ended with status $rc" "$h"
+			STOPPED_AT="at boot $MADE of $PLANNED"
+			break 2
+		fi
 		# A run not made is WRONG, and says which: not started (2), qemu
 		# never ran or said nothing (3), stopped by a signal (above 128) --
 		# the statuses ablate.sh reads the same way -- or no full log
@@ -956,6 +1012,11 @@ for boot in "${PLAN[@]}"; do
 		fi
 	done
 done
+# #951: a stopped run says where it stopped, and prints the totals of the boots
+# it made as a whole run does.
+if [ -n "$STOP" ]; then
+	echo "merge-test: stopped by SIG$STOP ${STOPPED_AT:-after its last boot, $MADE of $PLANNED}"
+fi
 # ⚠️ Before the total and in a shape of its own: ci/job.sh reads the run's end
 # as exactly "merge-test: N wrong".
 echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK_WHERE:+:${CAMEBACK_WHERE#,}}"
@@ -965,6 +1026,12 @@ echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 # patches itself.
 echo "$PATCHES_SAID"
 echo "merge-test: $WRONG wrong"
+# #951: and a stopped run dies of the signal, as run-x86_64.sh does, so that
+# whoever sent it sees it obeyed.
+if [ -n "$STOP" ]; then
+	trap - TERM
+	kill -TERM $$
+fi
 # #782: whether, not how many -- see the header.
 [ $((WRONG + ROTTEN)) -eq 0 ] || exit 1
 exit 0
