@@ -916,16 +916,19 @@ for boot in "${PLAN[@]}"; do
 		# line it carried is the full log.
 		# #951: a job waited for, so that a SIGTERM's trap runs during the
 		# boot and passes the signal on; its standard input named, which an
-		# asynchronous command would otherwise have from /dev/null.  A
+		# asynchronous command would otherwise have from /dev/null, and
+		# SIGINT and SIGQUIT given back, which it would otherwise start
+		# with ignored, out of a shell's reach to trap again: a Ctrl-C is
+		# run-x86_64.sh's to stop at, as it was in the foreground (#801).  A
 		# SIGTERM that came before $BOOT was set is passed on here.
 		started=$SECONDS
 		( cd "$HERE" || exit 2
 		  [ -z "$build" ] || export UROS_BUILD_DIR=$build
 		  if [ "$side" = ush ]; then
-			exec ./scripts/ush-x86_64.py --build "$build" $k --entry "$e" --smp "$n" \
-				--budget "$budget" --wait "$wait" --log "$f"
+			exec env --default-signal=INT,QUIT ./scripts/ush-x86_64.py --build "$build" $k \
+				--entry "$e" --smp "$n" --budget "$budget" --wait "$wait" --log "$f"
 		  fi
-		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
+		  UROS_X86_64_LOG="$f" exec env --default-signal=INT,QUIT ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
 		BOOT=$!
 		[ -z "$STOP" ] || kill -TERM "$BOOT" 2>/dev/null
 		wait "$BOOT" || rc=$?
