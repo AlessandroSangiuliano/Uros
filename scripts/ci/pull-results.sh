@@ -28,12 +28,17 @@
 # append and its record -- is recorded without being appended again.
 #
 # Usage:  scripts/ci/pull-results.sh [--limit N] [--dir DIR]
+#         scripts/ci/pull-results.sh --job DIR [--job DIR ...]
 #   --limit N  how many of the latest completed runs to look at (default 30)
 #   --dir DIR  where ci-campaign.csv and ci/ live (default ~/uros-tests)
+#   --job DIR  only say of a job's directory -- job.sh's --out, or an artifact
+#              already kept -- whether it finished, as an import says it, with
+#              nothing listed, downloaded or appended (#951)
 #
-# Exit status: 0 every new run imported, or none was new · 1 a run could not be
-# listed, downloaded or read, and is left for the next call · 2 the command
-# line is wrong, gh is missing, or ci-campaign.csv or ci-ablate.csv has a
+# Exit status: 0 every new run imported, or none was new; with --job, each
+# directory said · 1 a run could not be listed, downloaded or read, and is
+# left for the next call · 2 the command line is wrong, a --job is not a
+# directory, gh is missing, or ci-campaign.csv or ci-ablate.csv has a
 # header other than the one job.sh writes.
 set -u
 
@@ -42,6 +47,7 @@ HEADER=date,time,run_id,job,round,tree,cpu_model,mhz,accel,entry,smp,opt,verdict
 AB_HEADER=date,time,run_id,job,tree,cpu_model,mhz,patches,arm,boot,accel,run,harness_status,verdict,log
 LIMIT=30
 DIR=$HOME/uros-tests
+ASK=()
 
 die() {
 	echo "pull-results: $2" >&2
@@ -50,11 +56,12 @@ die() {
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--limit|--dir)
+	--limit|--dir|--job)
 		[ $# -ge 2 ] || die 2 "$1 needs a value"
 		case "$1" in
 		--limit)	LIMIT=$2 ;;
 		--dir)		DIR=$2 ;;
+		--job)		ASK+=("$2") ;;
 		esac
 		shift 2 ;;
 	-h|--help)	sed -n '/^# Usage:/,/^# header other than/p' "$0"; exit 0 ;;
@@ -64,28 +71,6 @@ done
 case "$LIMIT" in
 ''|*[!0-9]*|0)	die 2 "--limit takes a number of runs, not '$LIMIT'" ;;
 esac
-command -v gh >/dev/null 2>&1 || die 2 "gh is not installed, and the runs are reached through it"
-
-CSV=$DIR/ci-campaign.csv
-CI=$DIR/ci
-DONE=$CI/imported-runs
-mkdir -p "$CI" || die 2 "cannot create $CI"
-touch "$DONE"
-AB_CSV=$DIR/ci-ablate.csv
-for f in "$CSV:$HEADER" "$AB_CSV:$AB_HEADER"; do
-	file=${f%%:*}
-	head=${f#*:}
-	if [ -s "$file" ]; then
-		[ "$(head -n 1 "$file")" = "$head" ] ||
-			die 2 "$file has another header than the one job.sh writes: rows appended to it would not line up"
-	else
-		echo "$head" > "$file"
-	fi
-done
-# Downloads land beside the results, not in /tmp, and go once read.
-STAGE=$(mktemp -d "$CI/.incoming.XXXXXX") || die 2 "cannot create a directory in $CI"
-trap 'rm -rf "$STAGE"' EXIT
-
 # Boots and WRONG by entry and accelerator, from rows on stdin.  An entry is its
 # number with the options and processors that make it a line of its own in the
 # merge test, so 14 at -smp 1 is not added into 14 at -smp 4.
@@ -246,6 +231,41 @@ import() {	# run-id description artifacts-the-api-listed
 				(t == "" ? " -" : t), (a == "" ? " -" : a)
 		}' "$rows"
 }
+
+# --job: what an import says of a job, of directories already here (#951).
+if [ ${#ASK[@]} -gt 0 ]; then
+	for d in "${ASK[@]}"; do
+		[ -d "$d" ] || die 2 "--job takes a job's directory, and $d is not one"
+		if [ -f "$d/job.txt" ] || [ -f "$d/boots.csv" ] || [ -f "$d/ablate.csv" ]; then
+			job_end "$d" "${d%/}" here
+		else
+			echo "pull-results: here: job ${d%/} has no job.txt and no rows"
+		fi
+	done
+	exit 0
+fi
+
+command -v gh >/dev/null 2>&1 || die 2 "gh is not installed, and the runs are reached through it"
+
+CSV=$DIR/ci-campaign.csv
+CI=$DIR/ci
+DONE=$CI/imported-runs
+mkdir -p "$CI" || die 2 "cannot create $CI"
+touch "$DONE"
+AB_CSV=$DIR/ci-ablate.csv
+for f in "$CSV:$HEADER" "$AB_CSV:$AB_HEADER"; do
+	file=${f%%:*}
+	head=${f#*:}
+	if [ -s "$file" ]; then
+		[ "$(head -n 1 "$file")" = "$head" ] ||
+			die 2 "$file has another header than the one job.sh writes: rows appended to it would not line up"
+	else
+		echo "$head" > "$file"
+	fi
+done
+# Downloads land beside the results, not in /tmp, and go once read.
+STAGE=$(mktemp -d "$CI/.incoming.XXXXXX") || die 2 "cannot create a directory in $CI"
+trap 'rm -rf "$STAGE"' EXIT
 
 # gh finds the repository from the checkout's remote.
 cd "$REPO" || die 2 "cannot enter $REPO"
