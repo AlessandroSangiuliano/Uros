@@ -437,6 +437,12 @@ fi
 	echo "cmake:    $(cmake --version 2>&1 | head -n 1)"
 	echo "ninja:    $(ninja --version 2>&1 | head -n 1)"
 	echo "grub:     $(grub-mkimage --version 2>&1 | head -n 1)"
+	# #951: what the job means to boot, written before it boots anything,
+	# so that a job that ends short of it -- cut off by GitHub before its
+	# summary -- leaves the number beside the rows it wrote.
+	if [ -z "$ABLATE$SWEEP" ]; then
+		echo "plan:     $((PER_ROUND * ROUNDS)) boots, $ROUNDS round(s) of $PER_ROUND"
+	fi
 } > "$OUT/job.txt"
 sed 's/^/job: /' "$OUT/job.txt"
 
