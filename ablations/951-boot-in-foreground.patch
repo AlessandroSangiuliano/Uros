@@ -8,18 +8,18 @@ Expect: lifecycle: mtstop: .* -- WRONG
 Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM
 
 diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
-index 655724a2..da6319ea 100755
+index 5c58ad13..a9618a9e 100755
 --- a/scripts/merge-test-x86_64.sh
 +++ b/scripts/merge-test-x86_64.sh
-@@ -925,10 +925,7 @@ for boot in "${PLAN[@]}"; do
- 			exec ./scripts/ush-x86_64.py --build "$build" $k --entry "$e" --smp "$n" \
- 				--budget "$budget" --wait "$wait" --log "$f"
+@@ -928,10 +928,7 @@ for boot in "${PLAN[@]}"; do
+ 			exec env --default-signal=INT,QUIT ./scripts/ush-x86_64.py --build "$build" $k \
+ 				--entry "$e" --smp "$n" --budget "$budget" --wait "$wait" --log "$f"
  		  fi
--		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
+-		  UROS_X86_64_LOG="$f" exec env --default-signal=INT,QUIT ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
 -		BOOT=$!
 -		[ -z "$STOP" ] || kill -TERM "$BOOT" 2>/dev/null
 -		wait "$BOOT" || rc=$?
-+		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?	# 951-boot-in-foreground: in the foreground, as before
++		  UROS_X86_64_LOG="$f" exec env --default-signal=INT,QUIT ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?	# 951-boot-in-foreground: in the foreground, as before
  		# A SIGTERM during the wait ran the trap and ended the wait at once,
  		# with 143 whatever the boot did: the boot's own status is the next
  		# wait's, once it has stopped.

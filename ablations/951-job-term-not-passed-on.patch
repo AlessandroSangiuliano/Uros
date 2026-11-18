@@ -8,7 +8,7 @@ Expect: lifecycle: jobstop: .* -- WRONG
 Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM; jobstop runs job.sh -- this arm's -- with the arm's build
 
 diff --git a/scripts/ci/job.sh b/scripts/ci/job.sh
-index 35742d61..836c82a2 100755
+index a8bf086e..5dc19b45 100755
 --- a/scripts/ci/job.sh
 +++ b/scripts/ci/job.sh
 @@ -464,7 +464,7 @@ fi
@@ -19,10 +19,10 @@ index 35742d61..836c82a2 100755
 +trap 'TERMINATED=TERM' TERM	# 951-job-term-not-passed-on: the stop noted, and not passed on
  
  # A step of the job's own, run as a job waited for, so that the trap runs
- # during it (#801): its status, or that of its stop.
-@@ -472,7 +472,6 @@ step() {
+ # during it (#801): its status, or that of its stop.  It gets SIGINT and
+@@ -474,7 +474,6 @@ step() {
  	local rc=0
- 	"$@" <&0 &
+ 	env --default-signal=INT,QUIT "$@" <&0 &
  	CHILD=$!
 -	[ -z "$TERMINATED" ] || kill -TERM "$CHILD" 2>/dev/null
  	wait "$CHILD" || rc=$?

@@ -8,7 +8,7 @@ Expect: lifecycle: mtstop: .* -- WRONG
 Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM
 
 diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
-index 655724a2..084fed50 100755
+index 5c58ad13..93ff51e4 100755
 --- a/scripts/merge-test-x86_64.sh
 +++ b/scripts/merge-test-x86_64.sh
 @@ -444,7 +444,7 @@ fi
@@ -20,9 +20,9 @@ index 655724a2..084fed50 100755
  lists_cover || exit 2
  plan_boots "$SMP" "$ONLY"
  if [ ${#CLASH[@]} -gt 0 ]; then
-@@ -927,7 +927,6 @@ for boot in "${PLAN[@]}"; do
+@@ -930,7 +930,6 @@ for boot in "${PLAN[@]}"; do
  		  fi
- 		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
+ 		  UROS_X86_64_LOG="$f" exec env --default-signal=INT,QUIT ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
  		BOOT=$!
 -		[ -z "$STOP" ] || kill -TERM "$BOOT" 2>/dev/null
  		wait "$BOOT" || rc=$?
