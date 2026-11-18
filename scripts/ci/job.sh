@@ -32,18 +32,19 @@
 # Usage:
 #   scripts/ci/job.sh [--entries "N ..."] [--rounds R] [--stop-at T] [--accel L]
 #                     [--out DIR] [--no-install] [--dry-run]
-#   scripts/ci/job.sh --ablate "P ..." [--boots N] [--accel L] [--out DIR]
-#                     [--no-install] [--dry-run]
-#   scripts/ci/job.sh --sweep all|"P ..." [--share J/N] [--accel L] [--out DIR]
-#                     [--no-install] [--dry-run]
+#   scripts/ci/job.sh --ablate "P ..." [--boots N] [--stop-at T] [--accel L]
+#                     [--out DIR] [--no-install] [--dry-run]
+#   scripts/ci/job.sh --sweep all|"P ..." [--share J/N] [--stop-at T] [--accel L]
+#                     [--out DIR] [--no-install] [--dry-run]
 #
 #   --entries "N ..."  only these merge-test entries (default: its whole list)
 #   --rounds R         merge-test rounds, one after the other (default 1)
-#   --stop-at T        stop the rounds at T, in seconds since the epoch: the
-#                      merge test is sent SIGTERM, stops the boot it is
-#                      running and says so, and the job writes its record,
-#                      where it stopped included (#951).  The workflow gives
-#                      the time its step's limit leaves room for
+#   --stop-at T        stop at T, in seconds since the epoch: the merge test or
+#                      ablate.sh is sent SIGTERM, stops the boot it is running
+#                      and says so, and the job writes its record, where it
+#                      stopped included (#951).  The workflow gives the time
+#                      its step's limit leaves room for.  A SIGTERM sent to
+#                      the job does the same, at once: a cancelled run's
 #   --ablate "P ..."   an A/B instead of the merge test, with these patches of
 #                      ablations/, named without the directory or ".patch"
 #   --boots N          with --ablate, boots per arm and accelerator (default 1)
@@ -159,13 +160,10 @@ done
 case "$ROUNDS" in
 ''|*[!0-9]*|0)	die 2 "--rounds takes a number of rounds, not '$ROUNDS'" ;;
 esac
-# #951: a time, and one the merge test's rounds have: an A/B and a sweep are
-# ablate.sh's boots, which nothing here stops.
+# #951: a time, for the rounds, the A/B or the sweep alike.
 case "$STOP_AT" in
 *[!0-9]*)	die 2 "--stop-at takes a time in seconds since the epoch, not '$STOP_AT'" ;;
 esac
-[ -z "$STOP_AT" ] || [ -z "$ABLATE$SWEEP" ] ||
-	die 2 "--stop-at stops the merge test's rounds, and --ablate and --sweep boot no rounds: give one or the other"
 read -r -a WANT <<< "$(tr ',\n\t' '   ' <<< "$ENTRIES")"
 for e in "${WANT[@]}"; do
 	case "$e" in
@@ -363,6 +361,10 @@ if [ -n "$ABLATE" ]; then
 		[ $rc = 2 ] && die 2 "ablate.sh refuses this A/B"
 		die 3 "ablate.sh could not plan this A/B (status $rc)"
 	fi
+	# What ablate.sh plans, which a patch's Accel: line can narrow to one
+	# accelerator (#659); the arithmetic only where the plan does not say.
+	AB_WANT=$(sed -n 's/^ablate: plan: .*, \([0-9][0-9]*\) in all$/\1/p' <<< "$AB_PLAN")
+	[ -n "$AB_WANT" ] || AB_WANT=$((BOOTS * (HAS_TCG + HAS_KVM) * 2))
 fi
 # Each patch of a sweep planned by ablate.sh in the same way, every refusal said
 # before anything is built, and the boots each plan counts kept: they are what
@@ -579,10 +581,14 @@ stoppable() {	# out print|quiet hook|"" command...
 	# #951: what the job means to boot, written before it boots anything,
 	# so that a job that ends short of it -- stopped at its time limit, or
 	# cut off by GitHub -- leaves the number beside the rows it wrote.
-	if [ -z "$ABLATE$SWEEP" ]; then
+	if [ -n "$ABLATE" ]; then
+		echo "plan:     $AB_WANT boots, an A/B of ${PATCHES[*]##*/}"
+	elif [ -n "$SWEEP" ]; then
+		echo "plan:     $SW_WANT boots, a sweep of ${#SWEPT[@]} patches"
+	else
 		echo "plan:     $((PER_ROUND * ROUNDS)) boots, $ROUNDS round(s) of $PER_ROUND"
-		[ -z "$STOP_AT" ] || echo "limit:    the rounds stop at $(when "$STOP_AT") (--stop-at $STOP_AT)"
 	fi
+	[ -z "$STOP_AT" ] || echo "limit:    the job stops at $(when "$STOP_AT") (--stop-at $STOP_AT)"
 } > "$OUT/job.txt"
 sed 's/^/job: /' "$OUT/job.txt"
 
@@ -675,21 +681,35 @@ ab_rows() {
 	fi
 }
 
+# #951: where ablate.sh said it stopped, when it was sent SIGTERM.
+AB_WHERE=""
+ab_line() {	# a line of ablate.sh's
+	[[ $1 =~ ^ablate:\ stopped\ by\ SIG[A-Z]+\ (.*)$ ]] && AB_WHERE=${BASH_REMATCH[1]}
+	return 0
+}
+
 if [ -n "$ABLATE" ]; then
 	echo "job: the A/B ($OUT/ablate.out)"
-	UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --ab --boots "$BOOTS" \
-		--accel "$ACCEL" "${PATCHES[@]}" 2>&1 | tee "$OUT/ablate.out"
-	rc=${PIPESTATUS[0]}
+	stoppable "$OUT/ablate.out" print ab_line \
+		env UROS_ABLATE_DIR="$OUT/ablate" "$REPO/scripts/ablate.sh" --ab --boots "$BOOTS" \
+		--accel "$ACCEL" "${PATCHES[@]}"
+	rc=$RC
 	ab_rows
-	# What ablate.sh planned, which a patch's Accel: line can narrow to one
-	# accelerator (#659); the arithmetic only where the plan does not say.
-	want=$(sed -n 's/^ablate: plan: .*, \([0-9][0-9]*\) in all$/\1/p' <<< "$AB_PLAN")
-	[ -n "$want" ] || want=$((BOOTS * (HAS_TCG + HAS_KVM) * 2))
+	want=$AB_WANT
+	stop=""
+	[ -z "$SENT" ] ||
+		stop="$WHY, ${AB_WHERE:-where ablate.sh did not say}${KILLED:+; ablate.sh $KILLED}"
 	{
 		echo "ablate:   ${PATCHES[*]##*/}, $BOOTS boot(s) per arm and accelerator, $n of $want boots reported, ablate.sh status $rc"
 		grep '^ablate: \(ablated tree caught\|fixed tree passed\)' "$OUT/ablate.out" | sed 's/^ablate: /result:   /'
+		[ -z "$stop" ] || echo "stopped:  $stop"
 	} >> "$OUT/job.txt"
 	echo "job: the A/B reported $n of $want boots, ablate.sh status $rc -- tree $TREE, $CPU, $ACCS"
+	# A stopped A/B reported the boots it made, the last one stopped or none.
+	if [ -n "$stop" ]; then
+		echo "job: stopped $stop"
+		exit 3
+	fi
 	case $rc in
 	0|1)	[ $n = $want ] || die 3 "the A/B reported $n of the $want boots it was meant to: $OUT/ablate.out"
 		exit $rc ;;
@@ -717,14 +737,35 @@ if [ -n "$SWEEP" ]; then
 	mkdir -p "$OUT/sweep" || die 3 "cannot create $OUT/sweep"
 	worst=0
 	short=()
+	# #951: where the sweep stopped, at the time or at a SIGTERM: a patch that
+	# would start past either is not started, and one under way is stopped.
+	sw_stop=""
+	k=0
 	for p in "${SWEPT[@]}"; do
 		name=${p##*/}
 		name=${name%.patch}
+		k=$((k + 1))
+		printf -v now '%(%s)T' -1
+		if [ -n "$TERMINATED" ]; then
+			sw_stop="by SIG$TERMINATED from outside, $(when "$now"), before patch $k of ${#SWEPT[@]}, $name"
+			break
+		elif [ -n "$STOP_AT" ] && [ "$now" -ge "$STOP_AT" ]; then
+			sw_stop="by its time limit, $(when "$STOP_AT"), before patch $k of ${#SWEPT[@]}, $name"
+			break
+		fi
 		before=$(sweep_rows)
-		UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --boots 1 \
-			--accel "$(sweep_accel "$p")" "$p" > "$OUT/sweep/$name.out" 2>&1
-		rc=$?
+		AB_WHERE=""
+		stoppable "$OUT/sweep/$name.out" quiet ab_line \
+			env UROS_ABLATE_DIR="$OUT/ablate" "$REPO/scripts/ablate.sh" --boots 1 \
+			--accel "$(sweep_accel "$p")" "$p"
+		rc=$RC
 		added=$(($(sweep_rows) - before))
+		if [ -n "$SENT" ]; then
+			sw_stop="$WHY, at patch $k of ${#SWEPT[@]}, $name: ${AB_WHERE:-where ablate.sh did not say}${KILLED:+; ablate.sh $KILLED}"
+			echo "job: $name: stopped $WHY"
+			echo "sweep:    $name: stopped $WHY" >> "$OUT/job.txt"
+			break
+		fi
 		case $rc in
 		0)	say=CAUGHT ;;
 		1)	say="NOT CAUGHT" ;;
@@ -745,6 +786,11 @@ if [ -n "$SWEEP" ]; then
 	ab_rows
 	echo "sweep:    ${#SWEPT[@]} patches of ${#NAMES[@]} (share $SHARE), $n boots reported, the worst status $worst" >> "$OUT/job.txt"
 	echo "job: the sweep reported $n boots of ${#SWEPT[@]} patches, the worst status $worst -- tree $TREE, $CPU, $ACCS"
+	if [ -n "$sw_stop" ]; then
+		echo "stopped:  $sw_stop" >> "$OUT/job.txt"
+		echo "job: stopped $sw_stop"
+		exit 3
+	fi
 	[ ${#short[@]} = 0 ] ||
 		die 3 "the sweep has patches that reported fewer boots than their plans: ${short[*]}: $OUT/sweep/"
 	exit $worst
