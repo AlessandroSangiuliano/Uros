@@ -1,13 +1,11 @@
 Kind: ablation
 Issue: #951
 Takes out: the passing of SIGTERM on to the boot -- the trap only notes the stop, and a SIGTERM that came before the boot's job was known is not passed on either: the wait the trap ends returns at once, the next one waits for the boot to end by itself, and the boot, judged as any other, is never said to be stopped.  harness-lifecycle-check.sh's mtstop finds no line saying the boot was stopped, and the run saying it stopped after its last boot instead of at boot 1 of 1.
-Accel: tcg
 Script: scripts/harness-lifecycle-check.sh
-Script: --kvm
 Script: --only
 Script: mtstop
 Expect: lifecycle: mtstop: .* -- WRONG
-Note: the boot is under KVM, asked of harness-lifecycle-check.sh with --kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, as 765-char-build-without-char-server's says
+Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM
 
 diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
 index 655724a2..084fed50 100755
