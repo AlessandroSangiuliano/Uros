@@ -382,6 +382,14 @@ lists_cover() {
 		echo "merge-test: lists: $e -- at the count ENTRIES is written for, $SMP_LISTED, each line's boot needs a name of its own (#776)" >&2
 		bad=1
 	done
+	# #957: and no parenthesis in a line's options, which its verdict lines
+	# show between parentheses: ci/job.sh's VERDICT_RE ends them at the first
+	# ")", and a verdict line it cannot read leaves its boot with no row.
+	while read -r e _ opt _; do
+		[[ $e =~ ^[0-9]+$ && $opt == *['()']* ]] || continue
+		echo "merge-test: lists: entry $e's options $opt have a parenthesis, and its verdict lines show them between parentheses, which ci/job.sh reads only up to the first ')' (#957)" >&2
+		bad=1
+	done <<< "$ENTRIES"
 	[ $bad = 0 ] &&
 		echo "merge-test: lists: each of grub.cfg's $n entries is run or said not run: $(wc -w <<< "$run") run, $(wc -w <<< "$skip") not"
 	return $bad
