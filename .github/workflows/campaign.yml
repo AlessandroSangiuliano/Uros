@@ -9,6 +9,12 @@
 # ~/uros-tests.  The runner's clock is not ours to set, so rows are compared
 # within one job only.
 #
+# Run by hand with `ablate`, every job takes fixes out instead: scripts/ablate.sh
+# --ab with the patches of ablations/ named, for a defect only some runners
+# show -- #603's showed only on the AMD EPYC 9V45 under KVM (#656).  Or with
+# `sweep`, the jobs share out the patches and run each once, the ablated arm
+# alone: whether every patch still applies, builds and is caught (#643).
+#
 # ⚠️ schedule and workflow_dispatch run only from a workflow file on the default
 # branch, master, and whether this file lives there is the repository owner's
 # decision.  Until it does, it runs on pushes to the epic, from the epic's copy.
@@ -38,6 +44,22 @@ on:
         description: "arch: the Arch Linux container; ubuntu: the runner's own packages; both: each job in both, to compare them (empty: arch)"
         type: string
         required: false
+      ablate:
+        description: "An A/B instead of the merge test: patches of ablations/ by name, e.g. 603-ast-interrupt-late 603-act-ast (empty: the merge test)"
+        type: string
+        required: false
+      boots:
+        description: "With ablate: boots per arm and accelerator in each job (empty: 3)"
+        type: string
+        required: false
+      sweep:
+        description: "Each patch once instead of the merge test, shared out among the jobs: all (every ablation with an Expect: line) or patch names (empty: no sweep)"
+        type: string
+        required: false
+      minutes:
+        description: "Minutes the boots' step may run, 10 to 330; the merge test's rounds stop 5 before (empty: 330)"
+        type: string
+        required: false
   push:
     branches:
       - epic/v0.3.0-x86-64    # the branch EPIC below names
@@ -61,6 +83,12 @@ jobs:
       rounds: ${{ steps.plan.outputs.rounds }}
       entries: ${{ steps.plan.outputs.entries }}
       modes: ${{ steps.plan.outputs.modes }}
+      ablate: ${{ steps.plan.outputs.ablate }}
+      boots: ${{ steps.plan.outputs.boots }}
+      sweep: ${{ steps.plan.outputs.sweep }}
+      jobs: ${{ steps.plan.outputs.jobs }}
+      minutes: ${{ steps.plan.outputs.minutes }}
+      job_minutes: ${{ steps.plan.outputs.job_minutes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,6 +105,10 @@ jobs:
           ROUNDS: ${{ inputs.rounds }}
           ENTRIES: ${{ inputs.entries }}
           MODE: ${{ inputs.mode }}
+          ABLATE: ${{ inputs.ablate }}
+          BOOTS: ${{ inputs.boots }}
+          SWEEP: ${{ inputs.sweep }}
+          MINUTES: ${{ inputs.minutes }}
         run: |
           # Which toolchain builds and boots: ours, from Arch, in a container,
           # or Ubuntu's own, GCC and qemu several versions older -- both side
@@ -102,21 +134,74 @@ jobs:
           case "$ENTRIES" in
           *[!0-9\ ,]*) echo "::error::entries are entry numbers, not '$ENTRIES'"; exit 1 ;;
           esac
-          scripts/ci/job.sh --dry-run --no-install --rounds "$rounds" ${ENTRIES:+--entries "$ENTRIES"}
+          case "$ABLATE" in
+          *[!A-Za-z0-9._\ ,-]*) echo "::error::ablate names patches of ablations/, not '$ABLATE'"; exit 1 ;;
+          esac
+          case "$SWEEP" in
+          *[!A-Za-z0-9._\ ,-]*) echo "::error::sweep is all or names patches of ablations/, not '$SWEEP'"; exit 1 ;;
+          esac
+          boots=${BOOTS:-3}
+          case "$boots" in
+          ''|*[!0-9]*) echo "::error::boots is a number of boots, not '$boots'"; exit 1 ;;
+          esac
+          # #951: the boots' step's limit and the job's, from one number.  The
+          # merge test's rounds stop five minutes before the step's limit
+          # (job.sh --stop-at), and the job's leaves fifteen more after it,
+          # for the summary and the upload.
+          minutes=${MINUTES:-330}
+          case "$minutes" in
+          ''|*[!0-9]*) echo "::error::minutes is a number from 10 to 330, not '$minutes'"; exit 1 ;;
+          esac
+          if [ "$minutes" -lt 10 ] || [ "$minutes" -gt 330 ]; then
+            echo "::error::minutes is a number from 10 to 330, not '$minutes'"
+            exit 1
+          fi
+          # A sweep replaces the merge test and an A/B alike, and boots each
+          # patch once.  Every patch is planned here, and the last job's share
+          # asked for, so that a patch ablate.sh refuses, or more jobs than
+          # patches, stops the run before the runners start.
+          if [ -n "$SWEEP" ]; then
+            if [ -n "$ABLATE$ENTRIES$ROUNDS$BOOTS" ]; then
+              echo "::error::sweep boots each patch once, in place of the merge test and an A/B: leave entries, rounds, ablate and boots empty"
+              exit 1
+            fi
+            scripts/ci/job.sh --dry-run --no-install --sweep "$SWEEP"
+            scripts/ci/job.sh --dry-run --no-install --sweep "$SWEEP" --share "$jobs/$jobs" > /dev/null
+          # An A/B replaces the merge test: what it boots is its patches'
+          # Run: line, so the merge test's two inputs would mean nothing.
+          elif [ -n "$ABLATE" ]; then
+            if [ -n "$ENTRIES$ROUNDS" ]; then
+              echo "::error::entries and rounds choose the merge test's boots, and ablate replaces the merge test: leave them empty"
+              exit 1
+            fi
+            scripts/ci/job.sh --dry-run --no-install --ablate "$ABLATE" --boots "$boots"
+          else
+            if [ -n "$BOOTS" ]; then
+              echo "::error::boots counts the boots of an A/B, and goes with ablate"
+              exit 1
+            fi
+            scripts/ci/job.sh --dry-run --no-install --rounds "$rounds" ${ENTRIES:+--entries "$ENTRIES"}
+          fi
           {
             echo "sha=$(git rev-parse HEAD)"
             echo "matrix=[$(seq -s, 1 "$jobs")]"
             echo "rounds=$rounds"
             echo "entries=$ENTRIES"
             echo "modes=$modes"
+            echo "ablate=$ABLATE"
+            echo "boots=$boots"
+            echo "sweep=$SWEEP"
+            echo "jobs=$jobs"
+            echo "minutes=$minutes"
+            echo "job_minutes=$((minutes + 15))"
           } >> "$GITHUB_OUTPUT"
 
   boot:
     needs: plan
     runs-on: ubuntu-latest
-    # Under the six hours GitHub gives a job, with room left for the upload
-    # after the boots' step has been stopped by its own limit.
-    timeout-minutes: 345
+    # Under the six hours GitHub gives a job, with room left after the boots'
+    # step for the summary and the upload: the plan's minutes and fifteen.
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.job_minutes) }}
     strategy:
       # A WRONG boot fails its job, and must not cancel the others.
       fail-fast: false
@@ -140,6 +225,10 @@ jobs:
             sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm || true
+          # The trigger returns before udev has applied the mode: the first run
+          # tested /dev/kvm a moment too early, found it unwritable, and listed
+          # it crw-rw-rw- on the next line.  settle waits for the queue.
+          sudo udevadm settle || true
           if [ -c /dev/kvm ] && [ -w /dev/kvm ]; then
             available=yes
           else
@@ -151,28 +240,63 @@ jobs:
           echo "job ${{ matrix.job }}: KVM available: $available" >> "$GITHUB_STEP_SUMMARY"
 
       # The workspace is mounted, so what job.sh writes in ci-out is where the
-      # upload looks for it.  --init passes the stop of a timed-out step on to
-      # job.sh, which as PID 1 a shell would ignore.  The device is passed only
-      # where it can be written, so the job's own test of /dev/kvm decides
-      # whether its boots run under KVM as well.
+      # upload looks for it.  The device is passed only where it can be
+      # written, so the job's own test of /dev/kvm decides whether its boots
+      # run under KVM as well.  --init makes job.sh a child of an init, which
+      # passes on a signal docker sends the container; as PID 1 a shell would
+      # ignore it.  But nothing came from GitHub: at the step's limit, and
+      # when a run is cancelled, the runner sends SIGINT, then SIGTERM, to
+      # this step's shell alone, then kills that shell alone, and docker was
+      # left running.  In the push campaign of 35f10d00 the container went on
+      # booting while the artifact was uploaded, and docker was killed at the
+      # job's end as an orphan (#951).  So the job stops by itself five
+      # minutes before this step's limit -- job.sh --stop-at, from the time
+      # read as this script starts, before the image is pulled -- and docker
+      # runs as a job waited for, under a name, so that each of the runner's
+      # signals is passed on to the container as a SIGTERM, which job.sh
+      # stops at as it does at its time.  The last wait gives docker's own
+      # status, whatever signal ended the first.
       - name: Build and boot in an Arch Linux container
         if: matrix.mode == 'arch'
-        timeout-minutes: 330
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
         env:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
           ENTRIES: ${{ needs.plan.outputs.entries }}
+          ABLATE: ${{ needs.plan.outputs.ablate }}
+          BOOTS: ${{ needs.plan.outputs.boots }}
+          SWEEP: ${{ needs.plan.outputs.sweep }}
+          SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
           KVM: ${{ steps.kvm.outputs.available }}
+          MINUTES: ${{ needs.plan.outputs.minutes }}
         run: |
+          stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           kvm=()
           if [ "$KVM" = yes ]; then
             kvm=(--device /dev/kvm)
           fi
-          docker run --rm --init "${kvm[@]}" \
+          if [ -n "$SWEEP" ]; then
+            what=(--sweep "$SWEEP" --share "$SHARE")
+          elif [ -n "$ABLATE" ]; then
+            what=(--ablate "$ABLATE" --boots "$BOOTS")
+          else
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
+          fi
+          name=campaign-job
+          trap 'docker kill --signal=TERM "$name" > /dev/null 2>&1' INT TERM
+          docker run --rm --init --name "$name" "${kvm[@]}" \
             -v "$GITHUB_WORKSPACE:/work" -w /work \
             -e GITHUB_RUN_ID -e JOB_INDEX \
             archlinux:latest \
-            scripts/ci/job.sh --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
+            scripts/ci/job.sh "${what[@]}" --stop-at "$stop_at" --out ci-out &
+          pid=$!
+          wait "$pid" || true
+          while kill -0 "$pid" 2>/dev/null; do
+            wait "$pid" || true
+          done
+          rc=0
+          wait "$pid" || rc=$?
+          exit $rc
 
       # The same job on the runner itself, with Ubuntu's packages: the other
       # half of the comparison.  If its compiler cannot build the tree with no
@@ -180,17 +304,43 @@ jobs:
       # container is what the campaign keeps.
       - name: Build and boot on the runner's own Ubuntu
         if: matrix.mode == 'ubuntu'
-        timeout-minutes: 330
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
         env:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
           ENTRIES: ${{ needs.plan.outputs.entries }}
+          ABLATE: ${{ needs.plan.outputs.ablate }}
+          BOOTS: ${{ needs.plan.outputs.boots }}
+          SWEEP: ${{ needs.plan.outputs.sweep }}
+          SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
+          MINUTES: ${{ needs.plan.outputs.minutes }}
         run: |
+          # #951: the job stops five minutes before this step's limit, as in
+          # the container's step above, and the runner's signals are passed on
+          # to it, here directly, as SIGTERM.
+          stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           sudo apt-get update -q
-          sudo apt-get install -y -q gcc binutils cmake ninja-build bison flex \
+          sudo apt-get install -y -q gcc binutils cmake ninja-build make bison flex \
             python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
-            iproute2 psmisc gdb
-          scripts/ci/job.sh --no-install --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
+            iproute2 gdb
+          if [ -n "$SWEEP" ]; then
+            what=(--sweep "$SWEEP" --share "$SHARE")
+          elif [ -n "$ABLATE" ]; then
+            what=(--ablate "$ABLATE" --boots "$BOOTS")
+          else
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
+          fi
+          pid=""
+          trap '[ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null' INT TERM
+          scripts/ci/job.sh --no-install "${what[@]}" --stop-at "$stop_at" --out ci-out &
+          pid=$!
+          wait "$pid" || true
+          while kill -0 "$pid" 2>/dev/null; do
+            wait "$pid" || true
+          done
+          rc=0
+          wait "$pid" || rc=$?
+          exit $rc
 
       - name: Say what the job found
         if: always()
@@ -199,8 +349,12 @@ jobs:
             { echo '```'; cat ci-out/job.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Whatever the boots said: a WRONG boot is the reason to keep them.  The
-      # logs of the boots that were as they should be stay on the runner.
+      # Whatever the boots said: a WRONG boot is the reason to keep them, and a
+      # boot stopped at the time limit is kept as far as it got, in stopped/
+      # (#951).  The logs of the merge test's boots that were as they should be
+      # stay on the runner; an A/B keeps every boot's, few and all of them evidence.  Its
+      # two worktrees go when ablate.sh ends, and are left out in case a
+      # stopped job left them.
       - name: Keep the rows and the failed boots' logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -209,6 +363,8 @@ jobs:
           path: |
             ci-out/
             !ci-out/logs/
+            !ci-out/ablate/runs/*/fixed/
+            !ci-out/ablate/runs/*/ablated/
           if-no-files-found: warn
           retention-days: 30
           overwrite: true
