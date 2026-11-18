@@ -37,6 +37,10 @@
 #              stopped, says where it stopped and what its boots said, removes
 #              its worktrees and ends by the signal, and leaves neither the
 #              boot's qemu nor the lock: an A/B or a sweep stopped so (#951)
+#   jobstop    ci/job.sh, sent TERM during a boot of its merge test's, writes
+#              in job.txt where it stopped and the boot it stopped, that boot's
+#              row and logs, and exits 3, leaving neither the boot's qemu nor
+#              the lock: a cancelled campaign run (#951)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
@@ -58,7 +62,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -666,7 +670,78 @@ if wanted abstop; then
 			fi
 		fi
 	fi
+	# An ablate.sh this check had to kill could not remove its worktree, and
+	# the check does, once the verdict is said.
+	for w in "$OUT"/abstop-dir/runs/*/ablated; do
+		[ -d "$w" ] && git -C "$REPO" worktree remove --force "$w" 2>/dev/null
+	done
 	git -C "$REPO" worktree prune 2>/dev/null
+fi
+
+# ── jobstop ───────────────────────────────────────────────────────────
+# #951: ci/job.sh, sent SIGTERM during a boot of its merge test's, passes it on
+# to the merge test, which stops that boot, and writes in job.txt where it
+# stopped -- "stopped: by SIGTERM from outside, ..., in round 1, at boot 1 of
+# 2: entry 1 ..." -- the boot's row as stopped and its logs in stopped/r1/,
+# and exits 3, the boot's qemu gone and the lock given back: what a cancelled
+# campaign run now does, its step passing the runner's signal on.  job.sh runs
+# with this build, configured again from the preset, which leaves a configured
+# build as it is, and built; it asks whether the patches apply, and its merge
+# test boots entries 1 and 5.  The signal goes as soon as entry 1's qemu is
+# there, under KVM a few seconds before that boot ends by itself.
+if wanted jobstop; then
+	acc=tcg
+	[ ${#KVM[@]} = 0 ] || acc=kvm
+	rm -rf "$OUT/jobstop" "$OUT/jobstop.ended" "$OUT/jobstop.ended.pid"
+	python3 -I "$REPO/scripts/ended-by.py" "$OUT/jobstop.ended" -- \
+		"$REPO/scripts/ci/job.sh" --no-install --entries "1 5" --accel "$acc" --rounds 1 \
+		--out "$OUT/jobstop" > "$OUT/jobstop.out" 2>&1 &
+	JOB=$!
+	for i in $(seq 1 100); do
+		[ -s "$OUT/jobstop.ended.pid" ] && break
+		sleep 0.05
+	done
+	JS=$(cat "$OUT/jobstop.ended.pid" 2>/dev/null)
+	STARTED+=(${JS:+"$JS"} "$JOB")
+	# Its merge test, whose command name the kernel cuts to fifteen
+	# characters, that one's run-x86_64.sh, and its qemu.
+	m="" r="" q=""
+	[ -n "$JS" ] && m=$(child_named "$JS" merge-test-x86_ 600) &&
+		r=$(child_named "$m" run-x86_64.sh 300) && q=$(first_qemu_of "$r")
+	if [ -z "$q" ]; then
+		ended_within "$JOB" 300 || kill -KILL "$JS" 2>/dev/null
+		wait "$JOB" 2>/dev/null
+		say jobstop "job.sh's merge test never started a boot's qemu (job.sh ended by $(cat "$OUT/jobstop.ended" 2>/dev/null || echo 'nothing said'), $OUT/jobstop.out)" "NOT ASKED"
+	elif qemu_gone_before "$q" jobstop; then
+		ended_within "$JOB" 300 || kill -KILL "$JS" 2>/dev/null
+		wait "$JOB" 2>/dev/null
+	else
+		kill -s TERM "$JS"
+		if ! ended_within "$JS" 30; then
+			kill -KILL "$JS" 2>/dev/null
+			[ -n "$m" ] && kill -KILL "$m" 2>/dev/null
+			wait "$JOB" 2>/dev/null
+			say jobstop "job.sh WENT ON for 30 s after SIGTERM$(leftovers "$q")" WRONG
+		else
+			wait "$JOB"
+			ended=$(cat "$OUT/jobstop.ended" 2>/dev/null)
+			left=$(leftovers "$q")
+			grep -aqE "^stopped:  by SIGTERM from outside, .*, in round 1, at boot 1 of 2: entry 1 $acc -smp [0-9]+, .*: stopped/r1/e1-$acc[0-9]+-full.log$" \
+				"$OUT/jobstop/job.txt" 2>/dev/null ||
+				left="$left; job.txt does not say it stopped at boot 1 of 2 and which boot it was: $(grep -a '^stopped:' "$OUT/jobstop/job.txt" 2>/dev/null || echo 'it has no stopped: line')"
+			grep -aqE ",$acc,1,[0-9;]+,,stopped \(" "$OUT/jobstop/boots.csv" 2>/dev/null ||
+				left="$left; no row of boots.csv says its boot was stopped"
+			ls "$OUT"/jobstop/stopped/r1/e1-"$acc"*-full.log > /dev/null 2>&1 ||
+				left="$left; the stopped boot's log is not in stopped/r1/"
+			[ "$ended" = "exit 3" ] ||
+				left="$left; it ended by ${ended:-nothing said}, not exit 3"
+			if [ -n "$left" ]; then
+				say jobstop "sent SIGTERM with its merge test's qemu (pid $q) up$left" WRONG
+			else
+				say jobstop "sent SIGTERM with its merge test's qemu (pid $q) up, it wrote in job.txt where it stopped and the boot it stopped, that boot's row and logs, and exited 3, the qemu gone and the lock given back" PASS
+			fi
+		fi
+	fi
 fi
 
 echo "lifecycle: $pass PASS, $wrong WRONG, $unasked NOT ASKED -- $OUT"
