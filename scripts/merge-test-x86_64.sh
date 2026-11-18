@@ -292,6 +292,21 @@ boot_name() {	# entry accelerator -smp options-as-shown
 	echo "e$1-$2${3//,/_}${4:+-${4##* }}"
 }
 
+# #957: a boot's verdict line, every one of them, in the one shape ci/job.sh's
+# VERDICT_RE reads: "merge-test: entry E ACC -smp N [(OPTIONS) ]-- RESULT
+# (KIND)[: LOG]".  It reads the kind up to its first ")", and a line it cannot
+# read is a boot with no row, its logs not copied to failed/, and a round
+# reported short -- the job's status 3, not the 1 of a WRONG.  A note quoting
+# a test's own line did that: refused_fault_test's WRONG ends in "(#750)".  So
+# the kind -- the judge's word and the note after it, whoever wrote the note
+# -- is printed here with no parenthesis and on one line.  The options are
+# the list's own, and lists_cover() refuses a parenthesis in them.
+verdict_line() {	# entry accelerator -smp options-as-shown result kind [log]
+	local kind=${6//[()]/}
+	kind=${kind//[$'\n\r']/ }
+	echo "merge-test: entry $1 $2 -smp $3 ${4:+($4) }-- $5 ($kind)${7:+: $7}"
+}
+
 # #776: the boots a run makes at -smp $1 of the entries in $2 (" N ... ", or
 # empty for all), one in PLAN each: entry, verdict, options as the verdict
 # line shows them, and -smp, apart by a unit separator.  Every boot removes
@@ -851,7 +866,7 @@ for boot in "${PLAN[@]}"; do
 		# a boot that never happened.
 		rm -f "$h" "$f" "$f.walk.txt"
 		if [ -n "$refused" ]; then
-			echo "merge-test: entry $e $a -smp $n ($shown) -- WRONG (did not run, the $side build: ${refused//[()]/}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "did not run, the $side build: $refused" "$h"
 			echo "$refused" > "$h"
 			WRONG=$((WRONG + 1))
 			continue
@@ -885,7 +900,7 @@ for boot in "${PLAN[@]}"; do
 		*)	[ -e "$f" ] || notrun="no full log was written" ;;
 		esac
 		if [ -n "$notrun" ]; then
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (did not run, status $rc: ${notrun//[()]/}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "did not run, status $rc: $notrun" "$h"
 			WRONG=$((WRONG + 1))
 			continue
 		fi
@@ -904,7 +919,7 @@ for boot in "${PLAN[@]}"; do
 		ng_rc=0
 		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
 		if ! judge "$e" "$v" "$h" "$f" "$a" "$n"; then
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG ($v${NOTE:+: $NOTE}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "$v${NOTE:+: $NOTE}" "$h"
 			WRONG=$((WRONG + 1))
 		elif [ $ng_rc -ne 0 ]; then
 			# One line, the last, which says why: ci/job.sh reads the
@@ -912,22 +927,21 @@ for boot in "${PLAN[@]}"; do
 			why=$(printf '%s\n' "$ng" | tail -n 1)
 			[ -n "$why" ] || why="nothing said on its output"
 			printf 'NO GLYPH (#661): the check could not run (exit %s): %s\n' "$ng_rc" "$why" >> "$h"
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "the no-glyph check could not run: $why" "$h"
 			WRONG=$((WRONG + 1))
 		elif [ -n "$ng" ]; then
 			printf '%s\n' "$ng" | sed 's/^/NO GLYPH (#661): line /' >> "$h"
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (no glyph): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "no glyph" "$h"
 			WRONG=$((WRONG + 1))
 		else
 			# #742: said in the row as well, which ci/job.sh writes from
-			# this line.  No parenthesis in the note: its VERDICT_RE ends
-			# the kind at the first one.
+			# this line.
 			if grep -aq 'the debug registers came back' "$f"; then
 				NOTE="${NOTE:+$NOTE; }#742: the debug registers came back"
 				CAMEBACK=$((CAMEBACK + 1))
 				CAMEBACK_WHERE="$CAMEBACK_WHERE, entry $e $a -smp $n"
 			fi
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- as it should be ($v${NOTE:+: $NOTE})"
+			verdict_line "$e" "$a" "$n" "$shown" "as it should be" "$v${NOTE:+: $NOTE}"
 			case $NOTE in
 			"NOT ASKED"*)
 				UNASKED=$((UNASKED + 1))
