@@ -636,10 +636,12 @@ UNFOUND=0
 MALFORMED=()
 HEADER_COMMAS=${HEADER//[^,]/}
 # One boot's row.  The verdict is the merge test's words, its kind of judgement
-# included.  A WRONG boot's logs are copied where the artifact keeps them.
+# included.  A WRONG boot's logs are copied where the artifact keeps them, and
+# so are a stopped boot's, as far as it got (#951).
+STOPPED_BOOT=""
 row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 	local r=$1 e=$2 a=$3 n=$4 opt=$5 res=$6 kind=$7 named=$8
-	local rdir=$OUT/logs/r$r tag h f keep log mhz x line commas
+	local rdir=$OUT/logs/r$r tag h f keep log mhz x line commas dest
 	# The name merge-test-x86_64.sh gives a boot's logs, its boot_name() --
 	# one boot's, at the count this script runs it at: its lists_cover(),
 	# which -L asks, refuses two lines with one name there (#776).  A WRONG
@@ -668,13 +670,19 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 		log="missing: ${f#"$OUT"/}"
 		UNFOUND=$((UNFOUND + 1))
 	fi
-	if [ "$res" = WRONG ]; then
-		mkdir -p "$OUT/failed/r$r"
+	if [ "$res" = WRONG ] || [ "$res" = stopped ]; then
+		dest=failed
+		[ "$res" = stopped ] && dest=stopped
+		mkdir -p "$OUT/$dest/r$r"
 		for x in "$h" "$f" "$f.walk.txt"; do
-			[ -f "$x" ] && cp -p "$x" "$OUT/failed/r$r/"
+			[ -f "$x" ] && cp -p "$x" "$OUT/$dest/r$r/"
 		done
-		[ -f "$keep" ] && log=failed/r$r/${keep##*/}
-		WRONGS+=("round $r, entry $e $a -smp $n${opt:+ ($opt)}: $log")
+		[ -f "$keep" ] && log=$dest/r$r/${keep##*/}
+		if [ "$res" = WRONG ]; then
+			WRONGS+=("round $r, entry $e $a -smp $n${opt:+ ($opt)}: $log")
+		else
+			STOPPED_BOOT="entry $e $a -smp $n${opt:+ ($opt)}, $kind: $log"
+		fi
 	fi
 	line="$(date -u '+%F,%T'),$RUN_ID,$JOB,$r,$TREE,$CPU,$mhz,$a,$e,${n//,/;},${opt//,/ },$res (${kind//,/ }),$log"
 	# As many columns as the header: one comma inside a field shifts every
@@ -694,8 +702,11 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 # maxcpus=128 (#663) -- so it is a token, not a number: read as a number, those
 # two boots were not counted, every round came out 86 of 88, and every job
 # stopped after its first.
-VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9][^ ]*) (\(([^)]*)\) )?-- (as it should be|WRONG) \(([^)]*)\)(: (.*))?$'
+# #951: and a boot the merge test stopped when it was sent SIGTERM is said with
+# the result "stopped", and the run says where it stopped before its totals.
+VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9][^ ]*) (\(([^)]*)\) )?-- (as it should be|WRONG|stopped) \(([^)]*)\)(: (.*))?$'
 END_RE='^merge-test: ([0-9]+) wrong$'
+STOP_RE='^merge-test: stopped by SIG[A-Z]+ (.*)$'
 
 # Both kernels with the trap phase profile on, the kernel and nothing else,
 # in the first job only (#622).  UROS_SYSCALL_PROFILE is off in the preset, and
