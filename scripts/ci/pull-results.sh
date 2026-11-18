@@ -121,19 +121,18 @@ summary() {
 # #951: whether a job finished, from its job.txt: "plan:" is written before its
 # first boot; "boots:" once the merge test's rounds are over, and an A/B's
 # "ablate:" or a sweep's "sweep: N patches" once it has ended; "stopped:" when
-# it was stopped, at its time limit or by a SIGTERM; "short:" when a round came
-# short.  A job.txt without its summary is a job cut off before writing it, as
-# every job GitHub's limit stopped was until #951.  The boots it got are its
-# rows, the stopped boot's not counted.
+# it was stopped, at its time limit or by a SIGTERM -- before its first boot
+# too, when it has no rows at all; "short:" when a round came short.  A job.txt
+# without its summary or a "stopped:" line is a job cut off before writing
+# either, as every job GitHub's limit stopped was until #951.  The boots it got
+# are its rows, the stopped boot's not counted.
 job_end() {	# artifact-dir job description
-	local d=$1 j=$2 what=$3 plan got stop short ended
+	local d=$1 j=$2 what=$3 plan got=0 stop short
 	if [ -f "$d/boots.csv" ]; then
 		got=$(tail -n +2 "$d/boots.csv" | awk -F, '$13 !~ /^stopped/' | wc -l)
-		ended='^boots:'
 	elif [ -f "$d/ablate.csv" ]; then
 		got=$(tail -n +2 "$d/ablate.csv" | awk -F, '$14 != "stopped"' | wc -l)
-		ended='^(ablate:   |sweep:    [0-9]+ patches of )'
-	else
+	elif [ ! -f "$d/job.txt" ]; then
 		return 0
 	fi
 	plan=$(sed -n 's/^plan: *\([0-9][0-9]*\) boots.*/\1/p' "$d/job.txt" 2>/dev/null)
@@ -142,7 +141,7 @@ job_end() {	# artifact-dir job description
 	short=$(sed -n 's/^short: *//p' "$d/job.txt" 2>/dev/null)
 	if [ ! -f "$d/job.txt" ]; then
 		echo "pull-results: $what: job $j left no job.txt; $got boots$plan"
-	elif ! grep -qE "$ended" "$d/job.txt"; then
+	elif [ -z "$stop" ] && ! grep -qE '^(boots:|ablate:   |sweep:    [0-9]+ patches of )' "$d/job.txt"; then
 		echo "pull-results: $what: job $j did NOT FINISH: its job.txt has no summary, so it was cut off before writing one; $got boots$plan"
 	elif [ -n "$stop" ]; then
 		echo "pull-results: $what: job $j STOPPED SHORT, $stop; $got boots$plan"
