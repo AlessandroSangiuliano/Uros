@@ -407,10 +407,13 @@ trap 'stopped_by HUP' HUP
 # A long step, run as a job waited for: its status, or that of its stop.  A
 # SIGTERM during the wait ends it at once, with 143 whatever the job did, and
 # the job's own status is the next wait's; one that came before the job was
-# known is passed on here.
+# known is passed on here.  The job gets SIGINT and SIGQUIT back, which an
+# asynchronous command of a shell without job control starts with ignored: a
+# Ctrl-C is its own to stop at, as it was in the foreground.  The boots below
+# are started the same way.
 waited() {
 	local rc=0
-	"$@" <&0 &
+	env --default-signal=INT,QUIT "$@" <&0 &
 	CHILD=$!
 	[ -z "$STOP" ] || kill -TERM "$CHILD" 2>/dev/null
 	wait "$CHILD" || rc=$?
@@ -534,7 +537,7 @@ for i in $(seq 1 "$BOOTS"); do
 				# harness's is.
 				log="$RUNDIR/$arm-$acc-$i.out"
 				mkdir -p "$RUNDIR/$arm-$acc-$i"
-				python3 "$RUNDIR/$arm/scripts/fbcons-readback.py" "${kvm[@]}" \
+				env --default-signal=INT,QUIT python3 "$RUNDIR/$arm/scripts/fbcons-readback.py" "${kvm[@]}" \
 					--build "$RUNDIR/$arm/uros/build-x86_64" \
 					--out "$RUNDIR/$arm-$acc-$i" "${SCREEN[@]}" \
 					> "$log" 2>&1 <&0 &
@@ -547,11 +550,11 @@ for i in $(seq 1 "$BOOTS"); do
 				log="$RUNDIR/$arm-$acc-$i.out"
 				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" \
 				UROS_X86_64_LOG="$RUNDIR/$arm-$acc-$i.log" \
-					"$RUNDIR/$arm/${SCRIPT[0]}" "${kvm[@]}" "${SCRIPT[@]:1}" \
+					env --default-signal=INT,QUIT "$RUNDIR/$arm/${SCRIPT[0]}" "${kvm[@]}" "${SCRIPT[@]:1}" \
 					> "$log" 2>&1 <&0 &
 			else
 				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" UROS_X86_64_LOG=$log \
-					"$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
+					env --default-signal=INT,QUIT "$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
 					> "$RUNDIR/$arm-$acc-$i.out" 2>&1 <&0 &
 			fi
 			CHILD=$!

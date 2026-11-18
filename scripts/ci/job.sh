@@ -467,10 +467,12 @@ GRACE=180
 trap 'TERMINATED=TERM; [ -z "$CHILD" ] || kill -TERM "$CHILD" 2>/dev/null' TERM
 
 # A step of the job's own, run as a job waited for, so that the trap runs
-# during it (#801): its status, or that of its stop.
+# during it (#801): its status, or that of its stop.  It gets SIGINT and
+# SIGQUIT back, which an asynchronous command of a shell without job control
+# starts with ignored: a Ctrl-C is its own to stop at, as in the foreground.
 step() {
 	local rc=0
-	"$@" <&0 &
+	env --default-signal=INT,QUIT "$@" <&0 &
 	CHILD=$!
 	[ -z "$TERMINATED" ] || kill -TERM "$CHILD" 2>/dev/null
 	wait "$CHILD" || rc=$?
