@@ -50,7 +50,10 @@
 # Exit status: 0 every ablated boot was caught and every fixed boot passed ·
 # 1 at least one was not · 2 a patch does not apply, or the command line is
 # wrong · 3 a tree did not build, or the harness could not run a boot -- which
-# says nothing about the test.
+# says nothing about the test.  Sent SIGTERM, it stops what it is doing, the
+# boot it is running or the build, says so -- a stopped boot has a row whose
+# verdict is "stopped" -- prints what the boots it made said, removes its
+# worktrees and ends by the signal (#951).
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -379,15 +382,56 @@ cleanup() {
 stopped_by() {
 	trap - EXIT
 	trap '' INT TERM HUP
+	if [ -n "$CHILD" ]; then
+		kill -TERM "$CHILD" 2>/dev/null
+		wait "$CHILD" 2>/dev/null
+	fi
 	cleanup
 	echo "ablate: stopped by SIG$1" >&2
 	trap - INT TERM HUP
 	kill -s "$1" "$$"
 }
+# #951: SIGTERM is how ci/job.sh stops an A/B or a sweep at a campaign job's
+# time, and it asks more of a run than INT and HUP do: the boot it stops is
+# said, in a row of its own, and so is what the boots before it said.  So the
+# trap passes it on to what the run is doing, a build or a boot, which is a
+# job waited for so that the trap runs during it (#801), and the run stops
+# where it is: before its first boot, after the build it was in; in a boot,
+# once that boot has stopped; or between two, before the next.
+CHILD=""
+STOP=""
 trap cleanup EXIT
 trap 'stopped_by INT' INT
-trap 'stopped_by TERM' TERM
+trap 'STOP=TERM; [ -z "$CHILD" ] || kill -TERM "$CHILD" 2>/dev/null' TERM
 trap 'stopped_by HUP' HUP
+# A long step, run as a job waited for: its status, or that of its stop.  A
+# SIGTERM during the wait ends it at once, with 143 whatever the job did, and
+# the job's own status is the next wait's; one that came before the job was
+# known is passed on here.
+waited() {
+	local rc=0
+	"$@" <&0 &
+	CHILD=$!
+	[ -z "$STOP" ] || kill -TERM "$CHILD" 2>/dev/null
+	wait "$CHILD" || rc=$?
+	if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+		rc=0
+		wait "$CHILD" || rc=$?
+	fi
+	CHILD=""
+	return $rc
+}
+# A run asked to stop before its first boot ends here, its worktrees removed:
+# nothing was booted, so nothing is said but where it stopped.
+stop_before_boots() {	# what it was doing
+	[ -z "$STOP" ] && return 0
+	trap - EXIT
+	trap '' INT TERM HUP
+	cleanup
+	echo "ablate: stopped by SIG$STOP while $1, before its first boot"
+	trap - INT TERM HUP
+	kill -s "$STOP" "$$"
+}
 
 # The build is configured with every OSFMK_* and UROS_* option of the main
 # build, because this tree's configuration cannot be reproduced from the
@@ -406,7 +450,7 @@ configure() {
 		opts+=("-D$n:$t=$v")
 	done < <(grep -E '^(OSFMK|UROS)_[A-Z0-9_]*:(BOOL|STRING|UNINITIALIZED)=' "$cache" | grep -v '_LAST:')
 	echo "configuring with ${#opts[@]} options of $REF"
-	cmake -S "$wt/uros" -B "$wt/uros/build-x86_64" -G "$gen" -DCMAKE_BUILD_TYPE="$bt" "${opts[@]}"
+	waited cmake -S "$wt/uros" -B "$wt/uros/build-x86_64" -G "$gen" -DCMAKE_BUILD_TYPE="$bt" "${opts[@]}"
 }
 
 # One worktree per arm: the ablated one takes every patch, the fixed one only
@@ -423,9 +467,11 @@ for arm in "${ARMS[@]}"; do
 		git -C "$wt" apply "$p" || die 2 "$(basename "$p") does not apply to $SHORT"
 	done
 	configure "$wt" > "$RUNDIR/$arm-configure.log" 2>&1 ||
-		die 3 "$arm: the configuration failed, see $RUNDIR/$arm-configure.log"
-	ninja -C "$wt/uros/build-x86_64" > "$RUNDIR/$arm-build.log" 2>&1 ||
-		die 3 "$arm: the tree does not build, see $RUNDIR/$arm-build.log"
+		{ stop_before_boots "configuring the $arm arm"; die 3 "$arm: the configuration failed, see $RUNDIR/$arm-configure.log"; }
+	stop_before_boots "configuring the $arm arm"
+	waited ninja -C "$wt/uros/build-x86_64" > "$RUNDIR/$arm-build.log" 2>&1 ||
+		{ stop_before_boots "building the $arm arm"; die 3 "$arm: the tree does not build, see $RUNDIR/$arm-build.log"; }
+	stop_before_boots "building the $arm arm"
 	# Which kernel the arm built, by its code: the md5 of the whole file
 	# changes from one build of the same tree to the next, the md5 of .text
 	# does not, so the two arms' lines say whether their kernels differ.
@@ -452,9 +498,20 @@ names=$(for p in "${EXPANDED[@]}"; do basename "$p" .patch; done | paste -sd+)
 host=$(uname -n)
 
 caught=0 missed=0 passed=0 failed=0
+# #951: the boots made so far, of all the run plans, for the line a stopped run
+# ends with.
+MADE=0
+TOTAL=$(( BOOTS * ${#ACCELS[@]} * ${#ARMS[@]} ))
+STOPPED_AT=""
 for i in $(seq 1 "$BOOTS"); do
 	for acc in "${ACCELS[@]}"; do
 		for arm in "${ARMS[@]}"; do
+			# #951: asked to stop between two boots, it starts no other.
+			if [ -n "$STOP" ]; then
+				STOPPED_AT="before boot $((MADE + 1)) of $TOTAL"
+				break 3
+			fi
+			MADE=$((MADE + 1))
 			log="$RUNDIR/$arm-$acc-$i.log"
 			kvm=()
 			[ "$acc" = kvm ] && kvm=(--kvm)
@@ -465,7 +522,12 @@ for i in $(seq 1 "$BOOTS"); do
 			# A/B of a tree against itself, which no log would show, because a
 			# log does not say which tree it booted (#587).  So every boot is
 			# handed its arm's build here.
+			# #951: and each is a job waited for, so that a SIGTERM's
+			# trap runs during it and passes the signal on; its
+			# standard input named, which an asynchronous command
+			# would otherwise have from /dev/null.
 			set +e
+			started=$SECONDS
 			if [ ${#SCREEN[@]} -gt 0 ]; then
 				# #670: its own build again, read off its screen; the
 				# script's exit 2 is a run it could not make, as the
@@ -475,7 +537,7 @@ for i in $(seq 1 "$BOOTS"); do
 				python3 "$RUNDIR/$arm/scripts/fbcons-readback.py" "${kvm[@]}" \
 					--build "$RUNDIR/$arm/uros/build-x86_64" \
 					--out "$RUNDIR/$arm-$acc-$i" "${SCREEN[@]}" \
-					> "$log" 2>&1
+					> "$log" 2>&1 <&0 &
 			elif [ ${#SCRIPT[@]} -gt 0 ]; then
 				# #618: its own tree's script, with its own build;
 				# its exit 2 is a run it could not make.  A boot it
@@ -486,40 +548,55 @@ for i in $(seq 1 "$BOOTS"); do
 				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" \
 				UROS_X86_64_LOG="$RUNDIR/$arm-$acc-$i.log" \
 					"$RUNDIR/$arm/${SCRIPT[0]}" "${kvm[@]}" "${SCRIPT[@]:1}" \
-					> "$log" 2>&1
+					> "$log" 2>&1 <&0 &
 			else
 				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" UROS_X86_64_LOG=$log \
 					"$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
-					> "$RUNDIR/$arm-$acc-$i.out" 2>&1
+					> "$RUNDIR/$arm-$acc-$i.out" 2>&1 <&0 &
 			fi
+			CHILD=$!
+			[ -z "$STOP" ] || kill -TERM "$CHILD" 2>/dev/null
+			wait "$CHILD"
 			rc=$?
+			if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+				wait "$CHILD"
+				rc=$?
+			fi
+			CHILD=""
 			set -e
-			# Above 128 the boot's runner was killed by a signal: a run
-			# not made, like 2 and 3, and not a verdict on the tree
-			# (#661's review, seven rounds).
-			case $rc in
-			2|3|129|1[3-9][0-9]|2[0-5][0-9])
-				die 3 "$arm, $acc, boot $i: the harness could not run it (status $rc), see $RUNDIR/$arm-$acc-$i.out" ;;
-			esac
-			hit=0
-			# In UTF-8 wherever this runs: over ssh a machine can have no
-			# LANG at all, and in the C locale the . that a patch writes
-			# for an em dash is one byte of three.
-			LC_ALL=C.UTF-8 grep -Eqf "$RUNDIR/expect" "$log" && hit=1
-			if [ "$arm" = ablated ]; then
-				if [ $hit = 1 ]; then
-					verdict=CAUGHT
-					caught=$((caught + 1))
-				else
-					verdict="NOT CAUGHT"
-					missed=$((missed + 1))
-				fi
-			elif [ $rc = 0 ] && [ $hit = 0 ]; then
-				verdict=PASSED
-				passed=$((passed + 1))
+			# Stopped by the signal, the boot is said to be, and judged no
+			# further; one that ended by itself first is judged as any
+			# other, and the run stops before the next.
+			if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+				verdict=stopped
 			else
-				verdict=FAILED
-				failed=$((failed + 1))
+				# Above 128 the boot's runner was killed by a signal: a
+				# run not made, like 2 and 3, and not a verdict on the
+				# tree (#661's review, seven rounds).
+				case $rc in
+				2|3|129|1[3-9][0-9]|2[0-5][0-9])
+					die 3 "$arm, $acc, boot $i: the harness could not run it (status $rc), see $RUNDIR/$arm-$acc-$i.out" ;;
+				esac
+				hit=0
+				# In UTF-8 wherever this runs: over ssh a machine can have
+				# no LANG at all, and in the C locale the . that a patch
+				# writes for an em dash is one byte of three.
+				LC_ALL=C.UTF-8 grep -Eqf "$RUNDIR/expect" "$log" && hit=1
+				if [ "$arm" = ablated ]; then
+					if [ $hit = 1 ]; then
+						verdict=CAUGHT
+						caught=$((caught + 1))
+					else
+						verdict="NOT CAUGHT"
+						missed=$((missed + 1))
+					fi
+				elif [ $rc = 0 ] && [ $hit = 0 ]; then
+					verdict=PASSED
+					passed=$((passed + 1))
+				else
+					verdict=FAILED
+					failed=$((failed + 1))
+				fi
 			fi
 			clock=$(sed -n 's/.*clock in run: median \([0-9]*\)MHz.*/\1/p' "$log" | head -n 1)
 			power=$(sed -n 's/.*host start:.* power=\([^ ]*\).*/\1/p' "$log" | head -n 1)
@@ -533,11 +610,28 @@ for i in $(seq 1 "$BOOTS"); do
 			# test writes its topology the same way, with ';'.
 			runcol=${runcol//,/;}
 			echo "$(date +%F,%T),$host,$SHORT,$names,$arm,$i,$acc,\"$runcol\",$clock,$power,$rc,$verdict,$log" >> "$CSV"
+			if [ "$verdict" = stopped ]; then
+				echo "ablate: $arm, $acc, boot $i: stopped (SIG$STOP $((SECONDS - started)) s into the boot, harness status $rc)"
+				STOPPED_AT="at boot $MADE of $TOTAL, $arm, $acc, boot $i"
+				break 3
+			fi
 			echo "ablate: $arm, $acc, boot $i: $verdict (harness status $rc, ${clock:-?} MHz, power ${power:-?})"
 		done
 	done
 done
 
+# #951: a stopped run says where it stopped, and then what the boots it made
+# said, as a whole run does.
+[ -z "$STOP" ] || echo "ablate: stopped by SIG$STOP ${STOPPED_AT:-after its last boot, $MADE of $TOTAL}"
 echo "ablate: ablated tree caught $caught of $((caught + missed))"
 [ $AB = 1 ] && echo "ablate: fixed tree passed $passed of $((passed + failed))"
+# And it ends by the signal, its worktrees removed first, with the signals
+# that could cut the removal short ignored, as stopped_by() does.
+if [ -n "$STOP" ]; then
+	trap - EXIT
+	trap '' INT TERM HUP
+	cleanup
+	trap - INT TERM HUP
+	kill -s "$STOP" "$$"
+fi
 [ $missed = 0 ] && [ $failed = 0 ]
