@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #951
+Takes out: the boot as a job waited for -- it runs in the foreground again, as before #951, and a shell runs a trap only once the command it waits for in the foreground has ended: the merge test sent SIGTERM during its boot lets that boot run to its end, judges it as any other, and never says it was stopped.  harness-lifecycle-check.sh's mtstop finds no line saying the boot was stopped, and the run saying it stopped after its last boot instead of at boot 1 of 1.
+Accel: tcg
+Script: scripts/harness-lifecycle-check.sh
+Script: --kvm
+Script: --only
+Script: mtstop
+Expect: lifecycle: mtstop: .* -- WRONG
+Note: the boot is under KVM, asked of harness-lifecycle-check.sh with --kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, as 765-char-build-without-char-server's says
+
+diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
+index 655724a2..da6319ea 100755
+--- a/scripts/merge-test-x86_64.sh
++++ b/scripts/merge-test-x86_64.sh
+@@ -925,10 +925,7 @@ for boot in "${PLAN[@]}"; do
+ 			exec ./scripts/ush-x86_64.py --build "$build" $k --entry "$e" --smp "$n" \
+ 				--budget "$budget" --wait "$wait" --log "$f"
+ 		  fi
+-		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
+-		BOOT=$!
+-		[ -z "$STOP" ] || kill -TERM "$BOOT" 2>/dev/null
+-		wait "$BOOT" || rc=$?
++		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?	# 951-boot-in-foreground: in the foreground, as before
+ 		# A SIGTERM during the wait ran the trap and ended the wait at once,
+ 		# with 143 whatever the boot did: the boot's own status is the next
+ 		# wait's, once it has stopped.
