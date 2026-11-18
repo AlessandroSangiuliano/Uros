@@ -240,13 +240,21 @@ jobs:
           echo "job ${{ matrix.job }}: KVM available: $available" >> "$GITHUB_STEP_SUMMARY"
 
       # The workspace is mounted, so what job.sh writes in ci-out is where the
-      # upload looks for it.  --init passes the stop of a timed-out step on to
-      # job.sh, which as PID 1 a shell would ignore.  The device is passed only
-      # where it can be written, so the job's own test of /dev/kvm decides
-      # whether its boots run under KVM as well.
+      # upload looks for it.  The device is passed only where it can be
+      # written, so the job's own test of /dev/kvm decides whether its boots
+      # run under KVM as well.  --init makes job.sh a child of an init, which
+      # passes on a signal docker sends the container; as PID 1 a shell would
+      # ignore it.  But nothing comes from GitHub's own limit: the runner sends
+      # SIGINT, then SIGTERM, to this step's shell alone, then kills that shell
+      # alone, and docker is left running.  In the push campaign of 35f10d00
+      # the container went on booting while the artifact was uploaded, and
+      # docker was killed at the job's end as an orphan (#951).  So the merge
+      # test's rounds stop by themselves five minutes before this step's limit:
+      # job.sh --stop-at, from the time read as this script starts, before the
+      # image is pulled.
       - name: Build and boot in an Arch Linux container
         if: matrix.mode == 'arch'
-        timeout-minutes: 330
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
         env:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
@@ -256,7 +264,9 @@ jobs:
           SWEEP: ${{ needs.plan.outputs.sweep }}
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
           KVM: ${{ steps.kvm.outputs.available }}
+          MINUTES: ${{ needs.plan.outputs.minutes }}
         run: |
+          stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           kvm=()
           if [ "$KVM" = yes ]; then
             kvm=(--device /dev/kvm)
@@ -266,7 +276,7 @@ jobs:
           elif [ -n "$ABLATE" ]; then
             what=(--ablate "$ABLATE" --boots "$BOOTS")
           else
-            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --stop-at "$stop_at")
           fi
           docker run --rm --init "${kvm[@]}" \
             -v "$GITHUB_WORKSPACE:/work" -w /work \
@@ -280,7 +290,7 @@ jobs:
       # container is what the campaign keeps.
       - name: Build and boot on the runner's own Ubuntu
         if: matrix.mode == 'ubuntu'
-        timeout-minutes: 330
+        timeout-minutes: ${{ fromJSON(needs.plan.outputs.minutes) }}
         env:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
@@ -289,7 +299,11 @@ jobs:
           BOOTS: ${{ needs.plan.outputs.boots }}
           SWEEP: ${{ needs.plan.outputs.sweep }}
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
+          MINUTES: ${{ needs.plan.outputs.minutes }}
         run: |
+          # #951: the rounds stop five minutes before this step's limit, as in
+          # the container's step above.
+          stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           sudo apt-get update -q
           sudo apt-get install -y -q gcc binutils cmake ninja-build make bison flex \
             python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
@@ -299,7 +313,7 @@ jobs:
           elif [ -n "$ABLATE" ]; then
             what=(--ablate "$ABLATE" --boots "$BOOTS")
           else
-            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --stop-at "$stop_at")
           fi
           scripts/ci/job.sh --no-install "${what[@]}" --out ci-out
 
@@ -310,9 +324,10 @@ jobs:
             { echo '```'; cat ci-out/job.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # Whatever the boots said: a WRONG boot is the reason to keep them.  The
-      # logs of the merge test's boots that were as they should be stay on the
-      # runner; an A/B keeps every boot's, few and all of them evidence.  Its
+      # Whatever the boots said: a WRONG boot is the reason to keep them, and a
+      # boot stopped at the time limit is kept as far as it got, in stopped/
+      # (#951).  The logs of the merge test's boots that were as they should be
+      # stay on the runner; an A/B keeps every boot's, few and all of them evidence.  Its
       # two worktrees go when ablate.sh ends, and are left out in case a
       # stopped job left them.
       - name: Keep the rows and the failed boots' logs
