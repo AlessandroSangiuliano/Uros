@@ -525,8 +525,7 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# to the prompt says none.  #958: and when it is not, the note says why:
 	# the count where the session got that far, or else the script's last
 	# line, which says what it read when it stopped before typing -- at its
-	# prompt, a root disk that ext2 never said was ready.  Without their
-	# parentheses (#742).
+	# prompt, a root disk that ext2 never said was ready.
 	ush) out=$(grep -aoE '^ush-x86_64: [0-9]+ of [0-9]+ commands answered' "$h" | tail -n 1)
 		out=${out#ush-x86_64: }
 		if [ -n "$out" ] && [ "${out%% *}" -gt 0 ] &&
@@ -535,7 +534,7 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		else
 			[ -n "$out" ] ||
 				out=$(grep -av -e '^ *$' -e '^ush-x86_64: log: ' "$h" | tail -n 1 | sed 's/^ush-x86_64: //')
-			NOTE=${out//[()]/}
+			NOTE=$out
 			false
 		fi ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/mig) bad request message ID' "$f" ;;
@@ -677,7 +676,7 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 			out=$("$HERE/scripts/ddb-report-check.sh" "$f" clock_event_tick)
 			case $out in
 			"ddb-report-check: PASS"*) ;;
-			*)	NOTE="${out//[()]/}"
+			*)	NOTE=$out
 				false ;;
 			esac
 		elif grep -aqE 'UrMach x86-64: trap |no handler' "$f"; then
@@ -706,8 +705,7 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# below it did in each boot of 954-waker-outranked, all four of which
 	# the harness passed.  So its PASS is asked for, except on one
 	# processor, where the question does not arise and the verdict says
-	# NOT ASKED (#779).  The note is the verdict's word, not its line,
-	# whose parentheses would end the kind early (#742).
+	# NOT ASKED (#779).  The note is the verdict's word, not its line.
 	wakee)	out=$(grep -a 'wakee_test: \(PASS\|WRONG\|NOT ASKED\)' "$f" | head -n 1)
 		case $out in
 		*"wakee_test: PASS"*)
