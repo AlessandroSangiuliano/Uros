@@ -58,7 +58,9 @@
 # of ablations/ no longer applies, and 0 if every judged entry is as it should
 # be and every patch applies.  How many were wrong is the last line's, "N
 # wrong": a count as the status said 2 and 3 as well, which ablate.sh reads as
-# a run that did not start (#782).
+# a run that did not start (#782).  Sent SIGTERM, a run stops the boot it is
+# running, says so of it in a verdict line whose result is "stopped", starts
+# no other, prints its totals and dies of the signal (#951).
 
 set -u
 ACC=both
@@ -837,12 +839,13 @@ marked() {
 		[[ " ${opt//_/ } " == *" @$1 "* ]] && echo yes
 	done | grep -q yes
 }
-if marked char; then
+# #951: and a run asked to stop builds no side build it will not boot.
+if [ -z "$STOP" ] && marked char; then
 	side_build "$CHAR_BUILD" char char_server -DOSFMK_BUILD_CHAR_SERVER=ON
 	CHAR_REFUSED=$SIDE_REFUSED
 	[ -z "$CHAR_REFUSED" ] || echo "merge-test: $CHAR_REFUSED -- the entries marked @char are WRONG, not run" >&2
 fi
-if marked ush; then
+if [ -z "$STOP" ] && marked ush; then
 	side_build "$USH_BUILD" ush "char_server and the ush bundle" \
 		-DOSFMK_BUILD_CHAR_SERVER=ON -DUROS_BUNDLE_USH=ON
 	USH_REFUSED=$SIDE_REFUSED
@@ -1006,6 +1009,11 @@ for boot in "${PLAN[@]}"; do
 		fi
 	done
 done
+# #951: a stopped run says where it stopped, and prints the totals of the boots
+# it made as a whole run does.
+if [ -n "$STOP" ]; then
+	echo "merge-test: stopped by SIG$STOP ${STOPPED_AT:-after its last boot, $MADE of $PLANNED}"
+fi
 # ⚠️ Before the total and in a shape of its own: ci/job.sh reads the run's end
 # as exactly "merge-test: N wrong".
 echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK_WHERE:+:${CAMEBACK_WHERE#,}}"
@@ -1015,6 +1023,12 @@ echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 # patches itself.
 echo "$PATCHES_SAID"
 echo "merge-test: $WRONG wrong"
+# #951: and a stopped run dies of the signal, as run-x86_64.sh does, so that
+# whoever sent it sees it obeyed.
+if [ -n "$STOP" ]; then
+	trap - TERM
+	kill -TERM $$
+fi
 # #782: whether, not how many -- see the header.
 [ $((WRONG + ROTTEN)) -eq 0 ] || exit 1
 exit 0
