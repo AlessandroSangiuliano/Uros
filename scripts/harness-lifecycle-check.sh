@@ -33,6 +33,10 @@
 #              was stopped, says where it stopped, prints its total and ends
 #              by the signal, and leaves neither the boot's qemu nor the lock:
 #              what ci/job.sh stops it with at a campaign job's time (#951)
+#   abstop     ablate.sh, sent TERM during a boot, writes that boot's row as
+#              stopped, says where it stopped and what its boots said, removes
+#              its worktrees and ends by the signal, and leaves neither the
+#              boot's qemu nor the lock: an A/B or a sweep stopped so (#951)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
@@ -54,7 +58,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -583,6 +587,86 @@ if wanted mtstop; then
 			fi
 		fi
 	fi
+fi
+
+# ── abstop ────────────────────────────────────────────────────────────
+# #951: ablate.sh, sent SIGTERM during a boot, passes it on to the boot,
+# writes that boot's row with the verdict "stopped", says where it stopped and
+# what its boots said, removes its worktrees and ends by the signal, the
+# boot's qemu gone and the lock given back -- how ci/job.sh stops an A/B or a
+# sweep at a campaign job's time.  Its patch is a probe written here, which
+# changes a line of ablations/README.md and so nothing that is built, and its
+# Run: line boots entry 6 paused: the boot is under way until the signal
+# comes, or its 120 s of silence run out.  One arm, two boots, so that the
+# run is stopped at the first of two.
+if wanted abstop; then
+	acc=tcg
+	[ ${#KVM[@]} = 0 ] || acc=kvm
+	mkdir -p "$OUT/abstop-dir"
+	# The probe: ablations/README.md with one line more, its paths the tree's.
+	cp "$REPO/ablations/README.md" "$OUT/abstop-readme.new"
+	echo "abstop probe of $(date '+%F %T')" >> "$OUT/abstop-readme.new"
+	{
+		printf '%s\n' 'Kind: ablation' 'Issue: #951' \
+			"Takes out: nothing -- harness-lifecycle-check.sh's probe for abstop, which stops this run in its first boot" \
+			"Run: --entry $ENTRY 120 ${PAUSED[*]}" \
+			'Expect: a line no boot prints, since the boot is stopped before it ends' ''
+		diff -u --label a/ablations/README.md --label b/ablations/README.md \
+			"$REPO/ablations/README.md" "$OUT/abstop-readme.new" |
+			sed '1i diff --git a/ablations/README.md b/ablations/README.md'
+	} > "$OUT/abstop.patch"
+	rm -f "$OUT/abstop-readme.new" "$OUT/abstop.ended" "$OUT/abstop.ended.pid"
+	UROS_ABLATE_DIR="$OUT/abstop-dir" UROS_ABLATE_REF_BUILD="$BUILD" \
+		python3 -I "$REPO/scripts/ended-by.py" "$OUT/abstop.ended" -- \
+		"$REPO/scripts/ablate.sh" --boots 2 --accel "$acc" "$OUT/abstop.patch" \
+		> "$OUT/abstop.out" 2>&1 &
+	JOB=$!
+	for i in $(seq 1 100); do
+		[ -s "$OUT/abstop.ended.pid" ] && break
+		sleep 0.05
+	done
+	AB=$(cat "$OUT/abstop.ended.pid" 2>/dev/null)
+	STARTED+=(${AB:+"$AB"} "$JOB")
+	# Its first boot, once the arm is built: run-x86_64.sh, ablate.sh's
+	# child, and that run's qemu.
+	r="" q=""
+	[ -n "$AB" ] && r=$(child_named "$AB" run-x86_64.sh 900) && q=$(first_qemu_of "$r")
+	if [ -z "$q" ]; then
+		ended_within "$JOB" 300 || kill -KILL "$AB" 2>/dev/null
+		wait "$JOB" 2>/dev/null
+		say abstop "ablate.sh never started its boot's qemu (it ended by $(cat "$OUT/abstop.ended" 2>/dev/null || echo 'nothing said'), $OUT/abstop.out)" "NOT ASKED"
+	else
+		sleep 1
+		kill -s TERM "$AB"
+		if ! ended_within "$AB" 30; then
+			kill -KILL "$AB" 2>/dev/null
+			wait "$JOB" 2>/dev/null
+			say abstop "ablate.sh WENT ON for 30 s after SIGTERM$(leftovers "$q")" WRONG
+		else
+			wait "$JOB"
+			ended=$(cat "$OUT/abstop.ended" 2>/dev/null)
+			left=$(leftovers "$q")
+			run=$(ls -d "$OUT/abstop-dir/runs/"*/ 2>/dev/null | tail -n 1)
+			grep -aq ",ablated,1,$acc,.*,stopped," "$OUT/abstop-dir/ablate.csv" 2>/dev/null ||
+				left="$left; no row of ablate.csv says its boot was stopped"
+			grep -aq "^ablate: ablated, $acc, boot 1: stopped (" "$OUT/abstop.out" ||
+				left="$left; no line says its boot was stopped"
+			grep -aq "^ablate: stopped by SIGTERM at boot 1 of 2, ablated, $acc, boot 1$" "$OUT/abstop.out" ||
+				left="$left; it did not say it stopped at boot 1 of 2: $(grep -a '^ablate: stopped' "$OUT/abstop.out" || echo 'it said nothing of it')"
+			grep -aq '^ablate: ablated tree caught 0 of 0$' "$OUT/abstop.out" ||
+				left="$left; it did not say what its boots said"
+			[ -n "$run" ] && [ ! -d "${run}ablated" ] ||
+				left="$left; its worktree is still there, ${run:-no run directory}ablated"
+			[ "$ended" = "signal $(kill -l TERM)" ] ||
+				left="$left; it ended by ${ended:-nothing said}, not by the signal"
+			if [ -n "$left" ]; then
+				say abstop "sent SIGTERM with its boot's qemu (pid $q) up$left" WRONG
+			else
+				say abstop "sent SIGTERM with its boot's qemu (pid $q) up, it wrote that boot's row as stopped, said where it stopped and what its boots said, removed its worktree and ended by the signal, the qemu gone and the lock given back" PASS
+			fi
+		fi
+	fi
+	git -C "$REPO" worktree prune 2>/dev/null
 fi
 
 echo "lifecycle: $pass PASS, $wrong WRONG, $unasked NOT ASKED -- $OUT"
