@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #951
+Takes out: the passing of a SIGTERM to job.sh on to what it is doing -- its trap only notes it, and a step whose job was not yet known is not sent it either: the merge test is never sent the signal, goes on to the end of its boots, and job.txt can say only that the job was stopped, not at which boot.  harness-lifecycle-check.sh's jobstop finds no "at boot 1 of 2: entry 1" in job.txt's stopped: line, and no stopped row.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: jobstop
+Expect: lifecycle: jobstop: .* -- WRONG
+Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM; jobstop runs job.sh -- this arm's -- with the arm's build
+
+diff --git a/scripts/ci/job.sh b/scripts/ci/job.sh
+index 35742d61..836c82a2 100755
+--- a/scripts/ci/job.sh
++++ b/scripts/ci/job.sh
+@@ -464,7 +464,7 @@ fi
+ TERMINATED=""
+ CHILD=""
+ GRACE=180
+-trap 'TERMINATED=TERM; [ -z "$CHILD" ] || kill -TERM "$CHILD" 2>/dev/null' TERM
++trap 'TERMINATED=TERM' TERM	# 951-job-term-not-passed-on: the stop noted, and not passed on
+ 
+ # A step of the job's own, run as a job waited for, so that the trap runs
+ # during it (#801): its status, or that of its stop.
+@@ -472,7 +472,6 @@ step() {
+ 	local rc=0
+ 	"$@" <&0 &
+ 	CHILD=$!
+-	[ -z "$TERMINATED" ] || kill -TERM "$CHILD" 2>/dev/null
+ 	wait "$CHILD" || rc=$?
+ 	if [ -n "$TERMINATED" ] && [ $rc -gt 128 ]; then
+ 		rc=0
