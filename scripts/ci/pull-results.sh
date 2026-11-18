@@ -13,9 +13,9 @@
 # A row's log column then names the local copy of a WRONG boot's log, or of a
 # boot stopped at the job's time limit, and is "-" for a boot that was as it
 # should be, whose log stayed on the runner.  Of each job it says whether it
-# finished, from its job.txt: or stopped at its time limit, or cut off before
-# its summary, or a round short -- and the boots it got, of those it planned
-# where its job.txt says (#951).
+# finished, from its job.txt: or failed, and why, or stopped at its time limit,
+# or cut off before its summary, or a round short -- and the boots it got, of
+# those it planned where its job.txt says (#951).
 # Times are the runner's, in UTC.  Compare rows within one job only: the
 # runner's clock is not ours to set.
 #
@@ -122,12 +122,14 @@ summary() {
 # first boot; "boots:" once the merge test's rounds are over, and an A/B's
 # "ablate:" or a sweep's "sweep: N patches" once it has ended; "stopped:" when
 # it was stopped, at its time limit or by a SIGTERM -- before its first boot
-# too, when it has no rows at all; "short:" when a round came short.  A job.txt
-# without its summary or a "stopped:" line is a job cut off before writing
-# either, as every job GitHub's limit stopped was until #951.  The boots it got
-# are its rows, the stopped boot's not counted.
+# too, when it has no rows at all; "short:" when a round came short; "failed:"
+# when it ended on a failure, its build's for one, and why -- before its
+# summary, or after it, as an A/B that reported fewer boots than it was meant
+# to.  A job.txt with none of these is a job cut off before writing its
+# summary, as every job GitHub's limit stopped was until #951.  The boots it
+# got are its rows, the stopped boot's not counted.
 job_end() {	# artifact-dir job description
-	local d=$1 j=$2 what=$3 plan got=0 stop short
+	local d=$1 j=$2 what=$3 plan got=0 stop short fail
 	if [ -f "$d/boots.csv" ]; then
 		got=$(tail -n +2 "$d/boots.csv" | awk -F, '$13 !~ /^stopped/' | wc -l)
 	elif [ -f "$d/ablate.csv" ]; then
@@ -139,8 +141,11 @@ job_end() {	# artifact-dir job description
 	plan=${plan:+ of the $plan planned}
 	stop=$(sed -n 's/^stopped: *//p' "$d/job.txt" 2>/dev/null)
 	short=$(sed -n 's/^short: *//p' "$d/job.txt" 2>/dev/null)
+	fail=$(sed -n 's/^failed: *//p' "$d/job.txt" 2>/dev/null)
 	if [ ! -f "$d/job.txt" ]; then
 		echo "pull-results: $what: job $j left no job.txt; $got boots$plan"
+	elif [ -n "$fail" ]; then
+		echo "pull-results: $what: job $j FAILED: $fail; $got boots$plan"
 	elif [ -z "$stop" ] && ! grep -qE '^(boots:|ablate:   |sweep:    [0-9]+ patches of )' "$d/job.txt"; then
 		echo "pull-results: $what: job $j did NOT FINISH: its job.txt has no summary, so it was cut off before writing one; $got boots$plan"
 	elif [ -n "$stop" ]; then
