@@ -29,11 +29,16 @@
 #              which signals what is left of the unit twice -- leaves neither
 #              its qemu nor the lock, and run-x86_64.sh says it was stopped
 #              (#801)
+#   mtstop     merge-test-x86_64.sh, sent TERM during a boot, says that boot
+#              was stopped, says where it stopped, prints its total and ends
+#              by the signal, and leaves neither the boot's qemu nor the lock:
+#              what ci/job.sh stops it with at a campaign job's time (#951)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
 # under KVM before a signal could come, so a run to be signalled or killed
-# boots with its guest paused (#801).
+# boots with its guest paused (#801).  mtstop's boot is the merge test's own,
+# entry 1's, which it gives no -S.
 #
 # Usage:  harness-lifecycle-check.sh [--kvm] [--only CHECK[,CHECK...]] [--out DIR]
 # Exit:   0 every check PASS · 1 a check WRONG · 2 it could not be run (the
@@ -49,7 +54,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -93,6 +98,23 @@ qemu_children() {
 		[ "${2:-}" = "$PARENT" ] && echo "${d#/proc/}"
 	done
 	return 0
+}
+# The first child of PARENT whose command name is NAME, waited for: the merge
+# test's boot is its run-x86_64.sh (#951).
+child_named() {	# PARENT NAME [seconds]
+	local parent=$1 name=$2 secs=${3:-90} d stat i
+	for i in $(seq 1 $(( secs * 10 ))); do
+		for d in /proc/[0-9]*; do
+			[ "$(cat "$d/comm" 2>/dev/null)" = "$name" ] || continue
+			stat=$(cat "$d/stat" 2>/dev/null) || continue
+			# shellcheck disable=SC2086
+			set -- ${stat##*) }
+			[ "${2:-}" = "$parent" ] && { echo "${d#/proc/}"; return 0; }
+		done
+		kill -0 "$parent" 2>/dev/null || return 1
+		sleep 0.1
+	done
+	return 1
 }
 first_qemu_of() {	# PID [seconds]: the first qemu child of PID, waited for
 	local i
@@ -498,6 +520,68 @@ if wanted unitstop; then
 				say "unitstop $name" "its unit stopped with its qemu (pid $q) up, its qemu gone and the lock given back" PASS
 			fi
 		done
+	fi
+fi
+
+# ── mtstop ────────────────────────────────────────────────────────────
+# #951: the merge test, sent SIGTERM during a boot, passes it on to the boot,
+# says so of that boot in a verdict line whose result is "stopped", says where
+# it stopped, prints its total and ends by the signal, the boot's qemu gone
+# and the lock given back.  ci/job.sh stops it so at a campaign job's time,
+# because GitHub's own limit stops only the step's shell.  The merge test
+# gives run-x86_64.sh only its list's options, so its boot cannot be held at
+# -S: it boots entry 1, its shortest line judged by the harness, and the
+# signal goes as soon as that boot's qemu is there; a boot that ended first
+# makes the check one that could not be posed.
+if wanted mtstop; then
+	acc=tcg
+	[ ${#KVM[@]} = 0 ] || acc=kvm
+	rm -rf "$OUT/mtstop" "$OUT/mtstop.ended" "$OUT/mtstop.ended.pid"
+	python3 -I "$REPO/scripts/ended-by.py" "$OUT/mtstop.ended" -- \
+		"$REPO/scripts/merge-test-x86_64.sh" -a "$acc" -e 1 -o "$OUT/mtstop" \
+		> "$OUT/mtstop.out" 2>&1 &
+	JOB=$!
+	for i in $(seq 1 100); do
+		[ -s "$OUT/mtstop.ended.pid" ] && break
+		sleep 0.05
+	done
+	MT=$(cat "$OUT/mtstop.ended.pid" 2>/dev/null)
+	STARTED+=(${MT:+"$MT"} "$JOB")
+	# Its boot, after the lists and the patches are asked: run-x86_64.sh, the
+	# merge test's child, and that run's qemu.
+	r="" q=""
+	[ -n "$MT" ] && r=$(child_named "$MT" run-x86_64.sh 300) && q=$(first_qemu_of "$r")
+	if [ -z "$q" ]; then
+		ended_within "$JOB" 300 || kill -KILL "$MT" 2>/dev/null
+		wait "$JOB" 2>/dev/null
+		say mtstop "the merge test never started its boot's qemu (it ended by $(cat "$OUT/mtstop.ended" 2>/dev/null || echo 'nothing said'), $OUT/mtstop.out)" "NOT ASKED"
+	elif qemu_gone_before "$q" mtstop; then
+		ended_within "$JOB" 300 || kill -KILL "$MT" 2>/dev/null
+		wait "$JOB" 2>/dev/null
+	else
+		kill -s TERM "$MT"
+		if ! ended_within "$MT" 30; then
+			kill -KILL "$MT" 2>/dev/null
+			wait "$JOB" 2>/dev/null
+			say mtstop "the merge test WENT ON for 30 s after SIGTERM$(leftovers "$q")" WRONG
+		else
+			wait "$JOB"
+			ended=$(cat "$OUT/mtstop.ended" 2>/dev/null)
+			left=$(leftovers "$q")
+			grep -aqE "^merge-test: entry 1 $acc -smp [0-9]+ -- stopped \(" "$OUT/mtstop.out" ||
+				left="$left; no line says its boot was stopped"
+			grep -aq '^merge-test: stopped by SIGTERM at boot 1 of 1$' "$OUT/mtstop.out" ||
+				left="$left; it did not say it stopped at boot 1 of 1: $(grep -a '^merge-test: stopped' "$OUT/mtstop.out" || echo 'it said nothing of it')"
+			grep -aqE '^merge-test: [0-9]+ wrong$' "$OUT/mtstop.out" ||
+				left="$left; it printed no total"
+			[ "$ended" = "signal $(kill -l TERM)" ] ||
+				left="$left; it ended by ${ended:-nothing said}, not by the signal"
+			if [ -n "$left" ]; then
+				say mtstop "sent SIGTERM with its boot's qemu (pid $q) up$left" WRONG
+			else
+				say mtstop "sent SIGTERM with its boot's qemu (pid $q) up, it said that boot was stopped and where it stopped, printed its total and ended by the signal, the qemu gone and the lock given back" PASS
+			fi
+		fi
 	fi
 fi
 
