@@ -487,6 +487,7 @@ task_init(void)
 	vm_map_deallocate(kernel_task->map);
 	kernel_task->map = kernel_map;
 	kernel_task->sec_token = KERNEL_SECURITY_TOKEN;	/* #747 */
+	kernel_task->itk_space->is_identity = 0;	/* no task to derive to */
 
 #if	MACH_ASSERT
 	if (watchacts & WA_TASK)
@@ -797,6 +798,7 @@ task_create_local(
                 new_task->paged_ledger_port = ledger_copy(root_paged_ledger);
 	}
 	new_task->sec_token = task_identity_new();	/* #747: its own */
+	new_task->itk_space->is_identity = urmach_identity_of(new_task->sec_token);
 	pset_lock(pset);
 	pset_add_task(pset, new_task);
 	pset_unlock(pset);

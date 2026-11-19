@@ -32,6 +32,9 @@
  */
 #define	URMACH_IDENTITY_TASK_BIT	(1ULL << 63)
 
+/* An identity as one number, as MIG carries it (mach_host.defs). */
+typedef uint64_t	urmach_identity_t;
+
 /* The identity a security token carries, as one number. */
 static __inline__ uint64_t
 urmach_identity_of(security_token_t t)

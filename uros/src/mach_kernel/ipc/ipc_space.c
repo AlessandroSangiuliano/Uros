@@ -212,6 +212,7 @@ ipc_space_create(
 	space->is_tree_hash = 0;
 	space->is_generation = 0;
 	space->is_seq = 0;		/* #331 step 2: table seqlock */
+	space->is_identity = 0;		/* #747: its task writes it */
 
 	*spacep = space;
 	return KERN_SUCCESS;
@@ -249,6 +250,7 @@ ipc_space_create_special(
 	space->is_active = FALSE;
 	space->is_generation = 0;
 	space->is_seq = 0;		/* #331 step 2: table seqlock */
+	space->is_identity = 0;		/* #747: no task's */
 
 	*spacep = space;
 	return KERN_SUCCESS;
