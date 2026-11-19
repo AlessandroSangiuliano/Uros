@@ -36,6 +36,7 @@
 #                     [--out DIR] [--no-install] [--dry-run]
 #   scripts/ci/job.sh --sweep all|"P ..." [--share J/N] [--stop-at T] [--accel L]
 #                     [--out DIR] [--no-install] [--dry-run]
+#   scripts/ci/job.sh --packages arch|ubuntu
 #
 #   --entries "N ..."  only these merge-test entries (default: its whole list)
 #   --rounds R         merge-test rounds, one after the other (default 1)
@@ -59,6 +60,8 @@
 #   --out DIR          rows, logs and the job's record (default ./ci-out)
 #   --no-install       use the tools already here, outside a container
 #   --dry-run          print the plan; install, build and boot nothing
+#   --packages D       print, on one line, the packages the job needs by their
+#                      names in D, arch or ubuntu, and do nothing else (#960)
 #
 # The tree is the one this script is in.  GITHUB_RUN_ID and JOB_INDEX name the
 # run and the job in every row, and UROS_BUILD_DIR is honoured as by the
@@ -108,8 +111,49 @@ JOB=${JOB_INDEX:-0}
 # a run cut short with the stub on, and lib32-glibc and lib32-gcc-libs let the
 # host tests build for -m32 as well.  No psmisc: it was there for
 # run-x86_64.sh's killall, and the harness kills nothing by name since #618.
-PACKAGES=(gcc binutils cmake ninja make bison flex python git qemu-system-x86
-	grub e2fsprogs util-linux iproute2 gdb lib32-glibc lib32-gcc-libs)
+#
+# #960: each by its name in Arch Linux, which this script installs in the
+# container, and in Ubuntu, which campaign.yml installs on the runner for its
+# `ubuntu' mode, as --packages prints them: one row a tool, so that neither
+# list can gain or lose one the other has.  campaign.yml had a list of its own,
+# with nothing for lib32-glibc and lib32-gcc-libs: past fwrite_hook.c, the
+# Ubuntu jobs of 18/11 would have stopped on the -m32 host tests.  In Ubuntu
+# both come with gcc-multilib.  BUILD.md asks for the same lists.
+PACKAGE_TABLE='
+gcc		gcc
+binutils	binutils
+cmake		cmake
+ninja		ninja-build
+make		make
+bison		bison
+flex		flex
+python		python3
+git		git
+qemu-system-x86	qemu-system-x86
+grub		grub-common,grub-pc-bin
+e2fsprogs	e2fsprogs
+util-linux	util-linux
+iproute2	iproute2
+gdb		gdb
+lib32-glibc	gcc-multilib
+lib32-gcc-libs	gcc-multilib
+'
+# One column of the table, arch or ubuntu, on one line, each name once and in
+# the table's order.  A row that is not two names fails it, rather than
+# dropping a tool from both lists unsaid.
+packages() {	# arch|ubuntu
+	local col
+	case "$1" in
+	arch)	col=1 ;;
+	ubuntu)	col=2 ;;
+	*)	return 2 ;;
+	esac
+	awk -v c=$col '
+		NF == 0 { next }
+		NF != 2 { bad = 1; exit }
+		{ n = split($c, p, ","); for (i = 1; i <= n; i++) if (!seen[p[i]]++) out = out (out == "" ? "" : " ") p[i] }
+		END { if (bad || out == "") exit 1; print out }' <<< "$PACKAGE_TABLE"
+}
 
 # #951: once job.txt is begun, a job that ends here says why in it as well, in
 # a "failed:" line: the job's summary on GitHub is that file, and without the
@@ -123,6 +167,9 @@ die() {
 	[ -z "$JOBTXT" ] || echo "failed:   ${2//"$OUT/"/}" >> "$JOBTXT"
 	exit "$1"
 }
+
+ARCH_PACKAGES=$(packages arch) || die 2 "the package table has a row that is not two names, an Arch Linux one and an Ubuntu one"
+read -r -a PACKAGES <<< "$ARCH_PACKAGES"
 
 # A time in seconds since the epoch, as job.txt says it (#951).
 when() {
@@ -161,6 +208,13 @@ while [ $# -gt 0 ]; do
 		shift 2 ;;
 	--no-install)	INSTALL=0; shift ;;
 	--dry-run)	DRY=1; shift ;;
+	--packages)
+		[ $# -ge 2 ] || die 2 "$1 needs a value"
+		case "$2" in
+		arch|ubuntu)	packages "$2" || die 2 "the package table has a row that is not two names" ;;
+		*)		die 2 "--packages takes arch or ubuntu, not '$2'" ;;
+		esac
+		exit 0 ;;
 	-h|--help)	sed -n '/^# Usage:/,/^# it\.$/p' "$0"; exit 0 ;;
 	*)		die 2 "unknown argument '$1' (--help says what it takes)" ;;
 	esac
