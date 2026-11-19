@@ -113,15 +113,23 @@ blk_authed_handle(mach_port_t device)
 	 * leaves it behind the kernel's, and the next use asks again.
 	 */
 	now = (uint32_t)urmach_cap_epoch();
-	if (h->cap_epoch != now) {
+	/*
+	 * #747: and on every use while the token has a deadline.  A deadline
+	 * does not move the epoch, so a handle opened on a capability asked
+	 * for 300 ms read on past the 300 ms; the trap reads the clock.
+	 */
+	if (h->cap_epoch != now || h->cap.expires != 0) {
 		kr = blk_token_check(&h->cap, h->presenter,	/* #747 */
 				     RESOURCE_BLK_DEVICE, h->cap_op,
 				     h->cap_resource_id);
 		if (kr != KERN_SUCCESS) {
 			h->revoked = 1;
-			printf("blk: handle for %s revoked: its token no longer "
+			printf("blk: handle for %s %s: its token no longer "
 			       "verifies (kr=%d, #744)\n",
-			       h->part ? h->part->name : "(unknown)", (int)kr);
+			       h->part ? h->part->name : "(unknown)",
+			       kr == CAP_ERR_EXPIRED ? "past its deadline (#747)"
+						     : "revoked",
+			       (int)kr);
 			return NULL;
 		}
 		h->cap_epoch = now;
@@ -1447,7 +1455,9 @@ blk_xlate_held(struct blk_handle *h, unsigned int used,
 	for (i = 0; i < h->n_dma_caps; i++) {
 		struct blk_xlate *x = &h->dma_xlate[i];
 
-		if (x->npages == 0 || x->epoch == now)
+		/* #747: a token with a deadline is asked on every use. */
+		if (x->npages == 0 ||
+		    (x->epoch == now && h->dma_cap[i].expires == 0))
 			continue;
 		r = blk_tsc();
 		why[i] = blk_token_check(&h->dma_cap[i], cap_self(),
