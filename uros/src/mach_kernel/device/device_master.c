@@ -332,7 +332,70 @@ device_master_init(void)
 		irq_forward_table[i].notify_port = IP_NULL;
 		irq_forward_table[i].active = 0;
 		irq_forward_table[i].owner = TASK_NULL;
+		irq_forward_table[i].bdf = DEVICE_DMA_NO_BDF;	/* #745 */
 	}
+}
+
+/*
+ * Give back slot `i' of the forwarding table (#745), irq_forward_lock held at
+ * splhigh: the one way a registration ends, whoever ends it -- its owner
+ * unregistering, a revocation of the claim its device rests on, its owner's
+ * death.  A message-signalled slot is disarmed in its device and a line given
+ * back at its pin, the handler with it (#520); the pending count goes with the
+ * entry (#457).  The owner's reference is handed to the caller, which drops it
+ * outside the lock.
+ *
+ * ⚠️ The death of a driver used to mask its slots and nothing more:
+ * device_md_irq_mask() returns at once for a message-signalled slot, so a dead
+ * driver's MSI slots stayed armed in its device with their handler, and its
+ * lines stayed held at their pins.  It takes this path now, as the other two.
+ */
+static task_t
+irq_forward_release_locked(unsigned int i)
+{
+	task_t owner = irq_forward_table[i].owner;
+
+	if (irq_forward_table[i].active) {
+		/*
+		 * 🔴 The right one of the two (#520).  A message-signalled
+		 * slot has to be disarmed in the DEVICE; a line is masked at
+		 * the pin.  This used to call the line's release for both, and
+		 * the line's release returns without acting on anything above
+		 * the sixteen lines -- so every MSI slot ever given back was
+		 * left armed at a vector whose handler had just been released.
+		 */
+		if (irq_forward_table[i].msi)
+			device_md_msi_unregister(i);
+		else
+			device_md_irq_unregister(i);
+	}
+	irq_forward_table[i].notify_port = IP_NULL;
+	irq_forward_table[i].active = 0;
+	irq_forward_table[i].msi = 0;
+	irq_forward_table[i].bdf = DEVICE_DMA_NO_BDF;
+	/*
+	 * 🔴 AND THE COUNT, or the bottom half spins for ever (#457).
+	 *
+	 * A front can arrive between the top half's increment and this
+	 * unregister, leaving irq_pending[i] non-zero on a line that is no
+	 * longer active.  irq_forward_thread() then cannot make progress and
+	 * cannot stop: its drain loop skips the entry -- `pending == 0 ||
+	 * !active' -- without clearing it, so nothing is sent and `any' stays
+	 * FALSE; and the block below that loop refuses to sleep precisely
+	 * because some irq_pending[] is non-zero.  It cancels its own wait and
+	 * rescans, at full speed, with nothing left that could ever clear the
+	 * count.
+	 *
+	 * 🔑 Cleared HERE rather than tolerated in the loop, because a line
+	 * nobody is registered for has no pending notifications by definition:
+	 * this is where the state stops being true, so this is where it is not
+	 * allowed to become false.  Teaching the drain loop to skip it more
+	 * gracefully would have left the stranded count in existence and made
+	 * the spin depend on the shape of a `continue'.
+	 */
+	irq_pending[i] = 0;
+	irq_forward_table[i].owner = TASK_NULL;
+	return owner;
 }
 
 /* ================================================================
@@ -651,7 +714,7 @@ device_owns_phys(unsigned int claim, vm_offset_t phys, uint64_t *end)
  * page the region's last byte is on.
  */
 static kern_return_t
-check_mmio_phys(vm_offset_t phys, vm_size_t len)
+check_mmio_phys(vm_offset_t phys, vm_size_t len, natural_t *bdf_out)
 {
 	task_t me = current_task();
 	unsigned i, n;
@@ -689,8 +752,10 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 		return KERN_NO_ACCESS;
 	}
 
-	if (mine && (uint64_t)phys + len <= end)
+	if (mine && (uint64_t)phys + len <= end) {
+		*bdf_out = my_bdf;		/* #745: whose mapping it is */
 		return KERN_SUCCESS;
+	}
 
 	if (mine) {
 		printf("device_mmio_map: 0x%lx..0x%lx runs past the end of the "
@@ -1082,7 +1147,7 @@ measure_regions(struct device_claim_entry *e, natural_t bdf)
  * two answers are not treated as owning line 0 or line 255.
  */
 static kern_return_t
-check_irq_owner(unsigned int irq)
+check_irq_owner(unsigned int irq, natural_t *bdf_out)
 {
 	task_t		me = current_task();
 	unsigned	i, n;
@@ -1133,8 +1198,14 @@ check_irq_owner(unsigned int irq)
 		return KERN_NO_ACCESS;
 	}
 
-	if (mine || other_bdf == DEVICE_DMA_NO_BDF)
+	/*
+	 * #745: and which device the line rests on, for a revocation of its
+	 * claim to find it -- none, for a line no claimed device raises.
+	 */
+	if (mine || other_bdf == DEVICE_DMA_NO_BDF) {
+		*bdf_out = mine ? my_bdf : DEVICE_DMA_NO_BDF;
 		return KERN_SUCCESS;
+	}
 
 	printf("device_intr_register: irq %u is raised by %u:%u.%u, "
 	       "which another task holds\n", irq,
@@ -1152,6 +1223,7 @@ ds_master_device_intr_register(
 	task_t me = current_task();
 	kern_return_t kr;
 	spl_t s;
+	natural_t bdf = DEVICE_DMA_NO_BDF;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -1169,7 +1241,7 @@ ds_master_device_intr_register(
 	if (irq >= IRQ_FORWARD_LINES)
 		return KERN_INVALID_ARGUMENT;
 
-	kr = check_irq_owner(irq);
+	kr = check_irq_owner(irq, &bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1202,6 +1274,7 @@ ds_master_device_intr_register(
 	irq_forward_table[irq].notify_port = notify_port;
 	irq_forward_table[irq].active = 1;
 	irq_forward_table[irq].owner = me;
+	irq_forward_table[irq].bdf = bdf;		/* #745 */
 	task_reference(me);
 
 	if (!device_md_irq_register(irq, irq_forward_handler)) {
@@ -1214,6 +1287,7 @@ ds_master_device_intr_register(
 		irq_forward_table[irq].notify_port = IP_NULL;
 		irq_forward_table[irq].active = 0;
 		irq_forward_table[irq].owner = TASK_NULL;
+		irq_forward_table[irq].bdf = DEVICE_DMA_NO_BDF;
 		simple_unlock(&irq_forward_lock);
 		splx(s);
 		task_deallocate(me);	/* outside the spin lock */
@@ -1330,6 +1404,8 @@ ds_master_device_msi_register(
 	 * the shape #531 spent a day on.  Both fill it now.
 	 */
 	irq_forward_table[slot].owner = me;
+	irq_forward_table[slot].bdf =			/* #745 */
+	    (natural_t)((bus << 8) | (dev << 3) | func);
 	task_reference(me);
 
 	simple_unlock(&irq_forward_lock);
@@ -1388,59 +1464,15 @@ ds_master_device_intr_unregister(
 	 * the mirror reason: until the line is given up an interrupt can still
 	 * arrive, and it must find an entry that still says where to send it.
 	 */
-	/*
-	 * 🔴 The right one of the two (#520).  A message-signalled slot has to
-	 * be disarmed in the DEVICE; a line is masked at the pin.  This used to
-	 * call the line's release for both, and the line's release returns
-	 * without acting on anything above the sixteen lines -- so every MSI
-	 * slot ever given back was left armed at a vector whose handler had
-	 * just been released.
-	 */
-	if (irq_forward_table[irq].msi)
-		device_md_msi_unregister(irq);
-	else
-		device_md_irq_unregister(irq);
+	{
+		task_t owner = irq_forward_release_locked(irq);	/* #745 */
 
-	irq_forward_table[irq].notify_port = IP_NULL;
-	irq_forward_table[irq].active = 0;
-	irq_forward_table[irq].msi = 0;
-
-	/*
-	 * 🔴 AND THE COUNT, or the bottom half spins for ever (#457).
-	 *
-	 * A front can arrive between the top half's increment and this
-	 * unregister, leaving irq_pending[irq] non-zero on a line that is no
-	 * longer active.  irq_forward_thread() then cannot make progress and
-	 * cannot stop: its drain loop skips the entry -- `pending == 0 ||
-	 * !active' -- without clearing it, so nothing is sent and `any' stays
-	 * FALSE; and the block below that loop refuses to sleep precisely
-	 * because some irq_pending[] is non-zero.  It cancels its own wait and
-	 * rescans, at full speed, with nothing left that could ever clear the
-	 * count.
-	 *
-	 * 🔑 Cleared HERE rather than tolerated in the loop, because a line
-	 * nobody is registered for has no pending notifications by definition:
-	 * this is where the state stops being true, so this is where it is not
-	 * allowed to become false.  Teaching the drain loop to skip it more
-	 * gracefully would have left the stranded count in existence and made
-	 * the spin depend on the shape of a `continue'.
-	 */
-	irq_pending[irq] = 0;
-
-	/* The reference this line held on its owner goes back with it. */
-	if (irq_forward_table[irq].owner != TASK_NULL) {
-		task_t owner = irq_forward_table[irq].owner;
-
-		irq_forward_table[irq].owner = TASK_NULL;
 		simple_unlock(&irq_forward_lock);
 		splx(s);
-		task_deallocate(owner);
-		return KERN_SUCCESS;
+		/* The reference this line held on its owner goes back with it. */
+		if (owner != TASK_NULL)
+			task_deallocate(owner);
 	}
-
-	simple_unlock(&irq_forward_lock);
-	splx(s);
-
 	return KERN_SUCCESS;
 }
 
@@ -2802,6 +2834,203 @@ ds_master_device_dma_map_user(
 }
 
 /*
+ * ── The mappings a claim made of its device's memory (#745) ──────────
+ *
+ * 🔴 A REVOCATION LEFT THE DRIVER ITS REGISTERS.  device_master_cap_revoked()
+ * dropped the claim and its IOMMU domain, so the device stopped reaching
+ * memory -- and the BARs the driver had mapped stayed in its address space, so
+ * it went on programming the device.  Nothing recorded those mappings: the
+ * kernel could not take back what it had never written down.
+ *
+ * 🔑 So every mapping of a claimed device's memory is written down here when it
+ * is made -- the device, the task it was made in, where, how much, and the
+ * frames -- and a mapping that cannot be written down is not made: one the
+ * kernel could not take back is not one it may give.  It is written down under
+ * device_table_lock with the claim looked for again, so a revocation that ran
+ * between the check and the mapping finds the record, or the record finds the
+ * claim gone and the mapping is undone.
+ *
+ * ⚠️ Taken back by its frames and not by its address (vm_map_remove_frames(),
+ * #599): the task may have unmapped the range and mapped something else there.
+ * A task holds a reference while it is in the table, given back when its record
+ * goes: when it unmaps, when the claim ends, when it dies.
+ */
+#define MMIO_MAPPINGS_MAX	64
+
+struct mmio_mapping {
+	natural_t	bdf;		/* DEVICE_DMA_NO_BDF: the slot is free */
+	task_t		task;		/* where it was made, referenced */
+	vm_offset_t	uva;		/* page-aligned */
+	vm_size_t	size;		/* a whole number of pages */
+	vm_offset_t	phys;		/* page-aligned, contiguous */
+};
+
+static struct mmio_mapping mmio_mapping[MMIO_MAPPINGS_MAX] = {
+	[0 ... MMIO_MAPPINGS_MAX - 1] = { .bdf = DEVICE_DMA_NO_BDF }
+};
+
+/*
+ * Take back from `task' the pages of [uva, uva + size) that still map the
+ * device's frames from `phys' on, and leave the rest.
+ */
+static void
+mmio_mapping_take_back(task_t task, vm_offset_t uva, vm_size_t size,
+		       vm_offset_t phys)
+{
+	vm_offset_t	pa[64];
+	unsigned int	npages = (unsigned int)(size / PAGE_SIZE), done = 0;
+	unsigned int	i, n;
+
+	while (done < npages) {
+		n = npages - done < 64 ? npages - done : 64;
+		for (i = 0; i < n; i++)
+			pa[i] = phys + (vm_offset_t)(done + i) * PAGE_SIZE;
+		(void) vm_map_remove_frames(task->map,
+					    uva + (vm_offset_t)done * PAGE_SIZE,
+					    pa, n, VM_MAP_NO_FLAGS);
+		done += n;
+	}
+}
+
+/*
+ * Write down a mapping just made of claimed device `bdf' in `task', for the
+ * caller's claim.  If the claim is gone or the table is full, the mapping is
+ * taken back and the answer says why.
+ */
+static kern_return_t
+mmio_mapping_keep(natural_t bdf, task_t task, vm_offset_t uva, vm_size_t size,
+		  vm_offset_t phys)
+{
+	task_t		me = current_task();
+	unsigned	i, n;
+	kern_return_t	kr = KERN_RESOURCE_SHORTAGE;
+
+	mutex_lock(&device_table_lock);
+	n = device_nclaims;
+	for (i = 0; i < n; i++)
+		if (device_claim[i].bdf == bdf && device_claim[i].task == me)
+			break;
+	if (i == n) {
+		kr = KERN_NO_ACCESS;
+	} else {
+		for (i = 0; i < MMIO_MAPPINGS_MAX; i++)
+			if (mmio_mapping[i].bdf == DEVICE_DMA_NO_BDF)
+				break;
+		if (i < MMIO_MAPPINGS_MAX) {
+			task_reference(task);
+			mmio_mapping[i].task = task;
+			mmio_mapping[i].uva  = uva;
+			mmio_mapping[i].size = size;
+			mmio_mapping[i].phys = phys;
+			mmio_mapping[i].bdf  = bdf;
+			kr = KERN_SUCCESS;
+		}
+	}
+	mutex_unlock(&device_table_lock);
+
+	if (kr != KERN_SUCCESS) {
+		printf("device: a mapping of %02x:%02x.%u is not given: %s "
+		       "(#745)\n", (unsigned)(bdf >> 8),
+		       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7),
+		       kr == KERN_NO_ACCESS ? "its claim ended while it was made"
+		       : "the kernel has no room to record it, so it could "
+		       "not be taken back");
+		mmio_mapping_take_back(task, uva, size, phys);
+	}
+	return kr;
+}
+
+/*
+ * Forget the records of `task' that lie wholly in [start, end): the task
+ * unmapped them.  A record it unmapped part of stays, for what is left.
+ */
+static void
+mmio_mapping_forget(task_t task, vm_offset_t start, vm_offset_t end)
+{
+	unsigned int i;
+
+	for (i = 0; i < MMIO_MAPPINGS_MAX; i++) {
+		task_t gone = TASK_NULL;
+
+		mutex_lock(&device_table_lock);
+		if (mmio_mapping[i].bdf != DEVICE_DMA_NO_BDF &&
+		    mmio_mapping[i].task == task &&
+		    mmio_mapping[i].uva >= start &&
+		    mmio_mapping[i].uva + mmio_mapping[i].size <= end) {
+			gone = mmio_mapping[i].task;
+			mmio_mapping[i].bdf = DEVICE_DMA_NO_BDF;
+			mmio_mapping[i].task = TASK_NULL;
+		}
+		mutex_unlock(&device_table_lock);
+		if (gone != TASK_NULL)
+			task_deallocate(gone);
+	}
+}
+
+/*
+ * Take back every mapping of device `bdf', from whichever task it was made in,
+ * except `dying', whose map is going anyway: its claim has ended.  Returns how
+ * many were taken back.
+ */
+static unsigned int
+mmio_mappings_withdraw(natural_t bdf, task_t dying)
+{
+	unsigned int i, taken = 0;
+
+	for (i = 0; i < MMIO_MAPPINGS_MAX; i++) {
+		struct mmio_mapping m;
+
+		mutex_lock(&device_table_lock);
+		if (mmio_mapping[i].bdf != bdf) {
+			mutex_unlock(&device_table_lock);
+			continue;
+		}
+		m = mmio_mapping[i];
+		mmio_mapping[i].bdf = DEVICE_DMA_NO_BDF;
+		mmio_mapping[i].task = TASK_NULL;
+		mutex_unlock(&device_table_lock);
+
+		if (m.task != dying) {
+			mmio_mapping_take_back(m.task, m.uva, m.size, m.phys);
+			printf("device: the mapping of %02x:%02x.%u at 0x%lx (%lu "
+			       "bytes) in task 0x%lx is taken back with its "
+			       "claim (#745)\n", (unsigned)(bdf >> 8),
+			       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7),
+			       (unsigned long)m.uva, (unsigned long)m.size,
+			       (unsigned long)m.task);
+			taken++;
+		}
+		task_deallocate(m.task);
+	}
+	return taken;
+}
+
+/*
+ * The records of a task that is dying, given up with their references: its map
+ * goes with it, and a reference kept here would pin its task struct (#513).
+ */
+static void
+mmio_mappings_task_died(task_t task)
+{
+	unsigned int i;
+
+	for (i = 0; i < MMIO_MAPPINGS_MAX; i++) {
+		task_t gone = TASK_NULL;
+
+		mutex_lock(&device_table_lock);
+		if (mmio_mapping[i].bdf != DEVICE_DMA_NO_BDF &&
+		    mmio_mapping[i].task == task) {
+			gone = mmio_mapping[i].task;
+			mmio_mapping[i].bdf = DEVICE_DMA_NO_BDF;
+			mmio_mapping[i].task = TASK_NULL;
+		}
+		mutex_unlock(&device_table_lock);
+		if (gone != TASK_NULL)
+			task_deallocate(gone);
+	}
+}
+
+/*
  * device_mmio_map — map a physical MMIO range (PCI BAR) into a user task.
  * phys_addr need not be page-aligned; the returned uva has the same
  * page offset as phys_addr.
@@ -2820,6 +3049,7 @@ ds_master_device_mmio_map(
 	vm_offset_t	uva;
 	vm_size_t	round_sz;
 	kern_return_t	kr;
+	natural_t	bdf = DEVICE_DMA_NO_BDF;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -2836,7 +3066,7 @@ ds_master_device_mmio_map(
 	page_offset = (vm_offset_t)phys_addr - phys_base;
 	round_sz    = round_page(page_offset + size);
 
-	kr = check_mmio_phys(phys_base, round_sz);
+	kr = check_mmio_phys(phys_base, round_sz, &bdf);
 	if (kr != KERN_SUCCESS) {
 		task_deallocate(task);
 		return kr;
@@ -2844,6 +3074,8 @@ ds_master_device_mmio_map(
 
 	kr = map_pages_into_task(task, phys_base, 0,
 				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
+	if (kr == KERN_SUCCESS)				/* #745 */
+		kr = mmio_mapping_keep(bdf, task, uva, round_sz, phys_base);
 	task_deallocate(task);
 	if (kr != KERN_SUCCESS)
 		return kr;
@@ -2939,6 +3171,8 @@ ds_master_device_region_map(
 
 	kr = map_pages_into_task(task, phys_base, 0,
 				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
+	if (kr == KERN_SUCCESS)				/* #745 */
+		kr = mmio_mapping_keep(bdf, task, uva, round_sz, phys_base);
 	task_deallocate(task);
 	if (kr != KERN_SUCCESS)
 		return kr;
@@ -2973,6 +3207,10 @@ ds_master_device_mmio_unmap(
 			   trunc_page((vm_offset_t)uva),
 			   round_page((vm_offset_t)uva + size),
 			   FALSE);
+	/* #745: and its record, which a revocation would otherwise take back */
+	if (kr == KERN_SUCCESS)
+		mmio_mapping_forget(task, trunc_page((vm_offset_t)uva),
+				    round_page((vm_offset_t)uva + size));
 	task_deallocate(task);
 	return kr;
 }
@@ -4769,6 +5007,51 @@ purge_grants_for_locked(natural_t bdf)
  * started in would have widened its reach, which is worse than not revoking
  * because somebody trusted it.
  */
+/*
+ * The interrupts of a claimed device, given back from its holder when the
+ * capability behind the claim is revoked (#745): the lines its device raises
+ * and the message-signalled slots in its table, and only those -- a driver
+ * holds the interrupts of every device it claimed, and one claim's end is not
+ * the others'.  A line no claimed device raises rests on no claim and stays.
+ * Returns how many were given back.
+ */
+static unsigned int
+irq_forward_release_for(task_t holder, natural_t bdf)
+{
+	unsigned int i, n = 0;
+
+	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
+		spl_t	s;
+		task_t	owner;
+		int	msi;
+
+		if (irq_forward_table[i].owner != holder ||
+		    irq_forward_table[i].bdf != bdf)
+			continue;
+		s = splhigh();
+		simple_lock(&irq_forward_lock);
+		if (irq_forward_table[i].owner != holder ||
+		    irq_forward_table[i].bdf != bdf) {
+			simple_unlock(&irq_forward_lock);
+			splx(s);
+			continue;
+		}
+		msi = irq_forward_table[i].msi;	/* the release clears it */
+		owner = irq_forward_release_locked(i);
+		simple_unlock(&irq_forward_lock);
+		splx(s);
+
+		printf("device: %s %u of %02x:%02x.%u taken from task 0x%lx with "
+		       "its claim (#745)\n", msi ? "message-signalled slot" :
+		       "irq", i, (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)holder);
+		n++;
+		if (owner != TASK_NULL)
+			task_deallocate(owner);
+	}
+	return n;
+}
+
 void
 device_master_cap_revoked(uint64_t cap_id)
 {
@@ -4845,6 +5128,20 @@ device_master_cap_revoked(uint64_t cap_id)
 		       "nothing\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 7));
+
+		/*
+		 * #745: and the device's interrupts, which the holder no longer
+		 * has the right to hear -- before the domain, as a dying
+		 * driver's are, so that the device stops being heard before its
+		 * memory is taken from under it.
+		 */
+		(void) irq_forward_release_for(holder, bdf);
+		/*
+		 * #745: and the mappings of its regions, from every task they
+		 * were made in: a driver that keeps its BARs keeps programming
+		 * the device.
+		 */
+		(void) mmio_mappings_withdraw(bdf, TASK_NULL);
 
 		(void) device_md_dma_release(bdf);
 		task_deallocate(holder);
@@ -4961,14 +5258,13 @@ device_master_task_terminating(task_t task)
 			splx(s);
 			continue;
 		}
-		if (irq_forward_table[i].active) {
-			device_md_irq_mask(i);
-			irq_forward_table[i].active = 0;
-			irq_forward_table[i].notify_port = IP_NULL;
-			irq_pending[i] = 0;
-		}
-		owner = irq_forward_table[i].owner;
-		irq_forward_table[i].owner = TASK_NULL;
+		/*
+		 * #745: given back as an unregister gives it back.  It was
+		 * masked and nothing more, so a message-signalled slot stayed
+		 * armed in the dead driver's device and a line stayed held at
+		 * its pin (see irq_forward_release_locked()).
+		 */
+		owner = irq_forward_release_locked(i);
 		simple_unlock(&irq_forward_lock);
 		splx(s);
 
@@ -5028,6 +5324,12 @@ device_master_task_terminating(task_t task)
 		dma_regions_reclaimed++;
 	}
 
+	/*
+	 * #745: the records of mappings made in this task go with it -- its
+	 * map goes, and a reference kept there would pin its task struct.
+	 */
+	mmio_mappings_task_died(task);
+
 	for (i = 0; i < device_nclaims; i++) {
 		natural_t	bdf;
 
@@ -5058,6 +5360,9 @@ device_master_task_terminating(task_t task)
 		       "nothing\n", (unsigned long)task,
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 7));
+
+		/* #745: and what its claim mapped in other tasks. */
+		(void) mmio_mappings_withdraw(bdf, task);
 
 		(void) device_md_dma_release(bdf);
 		task_deallocate(task);

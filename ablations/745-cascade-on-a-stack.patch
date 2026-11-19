@@ -1,0 +1,54 @@
+Kind: ablation
+Issue: #745
+Takes out: the walk by the tree's own links -- cap_revoke() walks the subtree on a stack of CAP_MAX_DEPTH + 1 entries again, as it did, and a capability with more than seventeen children waiting leaves the oldest of them and their subtrees unrevoked while the revocation answers success; cap_test's [48] must say WRONG for a capability with 20 children and 2 grandchildren under its oldest
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[48\] WRONG — after its parent was revoked, [0-9]+ of the 22 still verified by the kernel.s trap
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 7b0c681b..a260a505 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -569,19 +569,16 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
+     }
+ 
+     struct cap_entry *e;
+-    int revoked = 0, descend = 1;
++    int revoked = 0;
+     kern_return_t kr, refused = KERN_SUCCESS;
++    uint64_t stack[CAP_MAX_DEPTH + 1];
++    int top = 0;
+ 
+-    for (e = root; e != NULL; e = cap_subtree_next(cap_id, e, descend)) {
+-        uint64_t id = e->token.cap_id;
+-
+-        /*
+-         * One revoked before took its own subtree with it, so the walk goes
+-         * past it and not into it.
+-         */
+-        descend = !e->token.revoked;
+-        if (!descend)
+-            continue;
++    stack[top++] = cap_id;
++    while (top > 0) {
++        uint64_t id = stack[--top];
++        e = cap_table_find_by_id(id);
++        if (!e || e->token.revoked) continue;
+ 
+         cap_table_mark_revoked(e);
+         revoked++;
+@@ -618,6 +615,14 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
+             if (refused == KERN_SUCCESS)
+                 refused = kr;
+         }
++
++        uint64_t child = e->token.first_child_cap_id;
++        while (child != 0 && top <= CAP_MAX_DEPTH) {
++            stack[top++] = child;
++            struct cap_entry *c = cap_table_find_by_id(child);
++            if (!c) break;
++            child = c->token.next_sibling_cap_id;
++        }
+     }
+ 
+     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",

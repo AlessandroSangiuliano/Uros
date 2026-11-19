@@ -109,6 +109,17 @@ struct irq_forward {
 	 * because the numbering is the machine's and this file is not.
 	 */
 	int		msi;		/* nonzero if a message, not a line */
+
+	/*
+	 * 🔑 THE DEVICE THE SLOT RESTS ON (#745): the claimed device that
+	 * raises the line, or whose table holds the message-signalled slot --
+	 * or DEVICE_DMA_NO_BDF, for a line no claimed device raises
+	 * (char_server's ISA lines, irq_claim_test's line nobody drives).  A
+	 * revocation of the claim gives back the slots that rest on its device
+	 * and only those: a driver holds the interrupts of every device it
+	 * claimed, and one claim's end is not the others'.
+	 */
+	natural_t	bdf;
 };
 
 extern struct irq_forward irq_forward_table[];

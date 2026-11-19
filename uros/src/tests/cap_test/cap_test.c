@@ -183,7 +183,7 @@ wait_for_cap_server(void)
         return MACH_PORT_NULL;
     }
     memset(&bogus, 0x5A, sizeof(bogus));
-    kr = cap_verify(&bogus, 1, 0);
+    kr = cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
     /*
      * ⚠️ An answer FROM cap_server, which is one of its own codes.  A request
      * destroyed unanswered comes back MIG_SERVER_DIED, and a send that could
@@ -851,6 +851,143 @@ derived_ports_are_bounded(void)
                "after all were given back and %u wait(s) of 10 ms (#937)\n",
                (unsigned)s2.family, w2);
     return ok;
+}
+
+/*
+ * Test [48]: a revocation reaches every capability derived from the one it
+ * revokes, however many there are (#745).
+ *
+ * cap_revoke() walked the tree on a stack of seventeen entries and dropped the
+ * children it had no room for, with their subtrees: their holders kept their
+ * authority after a revocation that said it succeeded.  This arm acquires a
+ * block-device capability, derives CT48_CHILDREN children of it with READ
+ * alone and two grandchildren under the oldest child, revokes the parent, and
+ * asks the kernel's trap and cap_server's RPC about every one of them: each
+ * must be refused as revoked.
+ *
+ * 🔑 Under the OLDEST child, because a child is linked first among its
+ * siblings, so the walk met the children newest first and the stack had no room
+ * left by the time it came to the three oldest: those and their subtrees were
+ * what the old walk lost.
+ *
+ * It derives through libcap's cap_derive(), the first caller it has had (#747).
+ */
+#define CT48_CHILDREN	20
+#define CT48_ID		0x745ULL
+
+static int
+a_revocation_reaches_every_child(void)
+{
+    struct uros_cap parent, child[CT48_CHILDREN], grand[2];
+    kern_return_t   kr, rv;
+    unsigned int    i, trap_left = 0, rpc_left = 0, first_left = CT48_CHILDREN;
+
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT48_ID,
+                     CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &parent);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [48] WRONG — no block-device capability to derive "
+               "from: %d (#745)\n", (int)kr);
+        return 0;
+    }
+    for (i = 0; i < CT48_CHILDREN; i++) {
+        kr = cap_derive(&parent, CAP_OP_BLK_READ, 0, &child[i]);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [48] WRONG — the derivation of child %u was "
+                   "refused: %d (#745)\n", i, (int)kr);
+            return 0;
+        }
+    }
+    for (i = 0; i < 2; i++) {
+        kr = cap_derive(&child[0], CAP_OP_BLK_READ, 0, &grand[i]);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [48] WRONG — the derivation of grandchild %u "
+                   "was refused: %d (#745)\n", i, (int)kr);
+            return 0;
+        }
+    }
+
+    rv = cap_revoke(parent.cap_id);
+
+    for (i = 0; i < CT48_CHILDREN + 2; i++) {
+        const struct uros_cap *t = i < CT48_CHILDREN ? &child[i]
+                                 : &grand[i - CT48_CHILDREN];
+
+        if (urmach_cap_verify(t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                              CT48_ID) != CAP_ERR_REVOKED) {
+            trap_left++;
+            if (first_left == CT48_CHILDREN)
+                first_left = i;
+        }
+        if (cap_verify(t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                       CT48_ID) != CAP_ERR_REVOKED)
+            rpc_left++;
+    }
+
+    if (rv == KERN_SUCCESS && trap_left == 0 && rpc_left == 0) {
+        printf("cap_test: [48] a capability with %u children and 2 "
+               "grandchildren under its oldest was revoked: all %u refused as "
+               "revoked, by the kernel's trap and by cap_server (#745)\n",
+               (unsigned)CT48_CHILDREN, (unsigned)CT48_CHILDREN + 2);
+        return 1;
+    }
+    if (rv != KERN_SUCCESS)
+        printf("cap_test: [48] WRONG — the revocation of a capability with "
+               "%u children was answered %d (#745)\n",
+               (unsigned)CT48_CHILDREN, (int)rv);
+    if (trap_left != 0 || rpc_left != 0)
+        printf("cap_test: [48] WRONG — after its parent was revoked, %u of "
+               "the %u still verified by the kernel's trap and %u by "
+               "cap_server, the first of them %s %u (#745)\n", trap_left,
+               (unsigned)CT48_CHILDREN + 2, rpc_left,
+               first_left < CT48_CHILDREN ? "child" : "grandchild",
+               first_left < CT48_CHILDREN ? first_left
+                                          : first_left - CT48_CHILDREN);
+    return 0;
+}
+
+/*
+ * Test [49]: cap_server's cap_verify asks the kind of resource, as the trap
+ * does (#745).
+ *
+ * The RPC compared a token's id, operations, revocation and MAC and was not
+ * given the type, so a token for one kind of resource verified for another
+ * whose id matched -- what #599 closed in the trap.  A block-device capability
+ * must verify as a block device and be refused as a DMA buffer of the same id,
+ * by the RPC and by the trap alike.
+ */
+#define CT49_ID		0x7451ULL
+
+static int
+cap_verify_asks_the_type(void)
+{
+    struct uros_cap t;
+    kern_return_t   kr, same, other, trap;
+
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT49_ID, CAP_OP_BLK_READ, 0, &t);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [49] WRONG — no block-device capability to ask "
+               "about: %d (#745)\n", (int)kr);
+        return 0;
+    }
+    same  = cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT49_ID);
+    other = cap_verify(&t, RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ, CT49_ID);
+    trap  = urmach_cap_verify(&t, RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ,
+                              CT49_ID);
+
+    if (same == KERN_SUCCESS && other == CAP_ERR_RESOURCE_MISMATCH &&
+        trap == CAP_ERR_RESOURCE_MISMATCH) {
+        printf("cap_test: [49] a block-device capability verified as one and "
+               "was refused as a DMA buffer of the same id with "
+               "CAP_ERR_RESOURCE_MISMATCH, by cap_server and by the trap "
+               "(#745)\n");
+        return 1;
+    }
+    printf("cap_test: [49] WRONG — a block-device capability asked as one "
+           "answered %d, and as a DMA buffer of the same id %d from "
+           "cap_server and %d from the trap, where those two must be "
+           "CAP_ERR_RESOURCE_MISMATCH(%d) (#745)\n", (int)same, (int)other,
+           (int)trap, (int)CAP_ERR_RESOURCE_MISMATCH);
+    return 0;
 }
 
 /*
@@ -5201,6 +5338,11 @@ main(int argc, char **argv)
         pass = 0;
     /* #937: and derived ports are bounded. */
     if (!derived_ports_are_bounded())
+        pass = 0;
+    /* #745: a revocation reaches every child, and cap_verify asks the type. */
+    if (!a_revocation_reaches_every_child())
+        pass = 0;
+    if (!cap_verify_asks_the_type())
         pass = 0;
 
     /*

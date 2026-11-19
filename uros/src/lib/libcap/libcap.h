@@ -78,10 +78,13 @@ kern_return_t cap_revoke(uint64_t cap_id);
 
 /*
  * cap_verify() — check that the caller is allowed to perform `op`
- * on `resource_id` using `token`.  In Issue A this is an RPC; once
- * Issue B lands it routes to the UrMach fast-path trap.
+ * on the resource of kind `resource_type` named `resource_id` using
+ * `token`.  In Issue A this is an RPC; once Issue B lands it routes to
+ * the UrMach fast-path trap.  The kind is asked as the trap asks it
+ * (#599, #745).
  */
 kern_return_t cap_verify(const struct uros_cap *token,
+                         uint32_t resource_type,
                          uint64_t op,
                          uint64_t resource_id);
 

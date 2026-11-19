@@ -383,6 +383,7 @@ static struct pci_bar_region	nic_region;
 static natural_t		nic_bdf;	/* the owned card, for [11] (#598) */
 static int			nic_owned;
 static unsigned int		nic_class;	/* its class, for [13]'s tokens */
+static uint64_t			nic_cap_id;	/* the claim's token, for [18] (#745) */
 
 static int
 own_the_network_card(natural_t *bdf_out)
@@ -469,6 +470,12 @@ own_the_network_card(natural_t *bdf_out)
 		return 0;
 	}
 
+	/*
+	 * The token the claim rests on: a capability presented again only
+	 * narrows the claim and is not recorded, so this is the one whose
+	 * revocation ends it ([18], #745).
+	 */
+	nic_cap_id = tok.cap_id;
 	*bdf_out = bdf;
 	return 1;
 }
@@ -782,7 +789,8 @@ arm_seven_the_card_rings(void)
  * is said NOT ASKED instead of passed.
  *
  * ⚠️ The order is forced: a claim can give an operation up and never gain one
- * back, which [17] asks, so this is the last thing done with the card.
+ * back, which [17] asks, so nothing after this uses the claim -- [18] to [20]
+ * end it and claim the card afresh (#745).
  */
 static kern_return_t
 narrow_the_claim(uint64_t ops)
@@ -1036,6 +1044,194 @@ arm_eight_each_operation_its_own(void)
 	return ok;
 }
 
+/*
+ * Does a region of this task's map cover `a'?  vm_region() answers the region
+ * at the address or the next one above it, so a region that starts above it is
+ * the address unmapped -- as is no region at all.
+ */
+static int
+page_mapped(vm_address_t a)
+{
+	vm_address_t			at = a;
+	vm_size_t			sz = 0;
+	vm_region_basic_info_data_t	bi;
+	mach_msg_type_number_t		c = VM_REGION_BASIC_INFO_COUNT;
+	mach_port_t			name = MACH_PORT_NULL;
+	kern_return_t			kr;
+
+	kr = vm_region(mach_task_self(), &at, &sz, VM_REGION_BASIC_INFO,
+		       (vm_region_info_t) &bi, &c, &name);
+	if (name != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), name);
+	return kr == KERN_SUCCESS && at <= a && a - at < sz;
+}
+
+/*
+ * [18] to [20]: a revoked claim takes back what it made (#745).
+ *
+ * 🔴 A REVOCATION ENDED THE CLAIM AND NOTHING THE CLAIM HAD MADE.  The kernel
+ * dropped the claim and the device's DMA, and left registered the line or the
+ * message-signalled slot taken under it, and the device's registers mapped in
+ * every task that had mapped them: the holder whose capability was gone kept
+ * hearing the device and kept programming it, and only its next call was
+ * refused.
+ *
+ * 🔑 So the card is claimed afresh, its interrupt registered and its first
+ * page mapped -- each seen in place, the controls -- and the claim's own
+ * capability is revoked.  Then the slot must be gone, so that giving it back
+ * is refused as nothing registered, and the page must be gone from this task's
+ * map.  Nothing is read or written through the mapping, and nothing is printed
+ * between the revocation and the two questions, so that nothing else can come
+ * to rest at the page's address meanwhile.
+ *
+ * ⚠️ AFRESH, because [13] to [17] left the claim holding nothing and a claim
+ * never gains an operation back.  This task gives it up the one way a holder
+ * can, by revoking the capability it rests on, which is [18]: the card's
+ * configuration space, which answered in [16], is refused now, and a new
+ * capability claims the card with all three operations.  So this is the last
+ * thing done with the card, and the card is left unclaimed.
+ */
+static int
+arm_nine_a_revocation_takes_back_what_the_claim_made(void)
+{
+	natural_t	bus = nic_bdf >> 8, dev = (nic_bdf >> 3) & 0x1F;
+	natural_t	fn = nic_bdf & 0x7, cfg = 0, slot = 0, line = 0;
+	struct uros_cap	tok;
+	vm_address_t	uva = 0;
+	mach_port_t	port = MACH_PORT_NULL;
+	kern_return_t	k_rev, k_cfg, k_claim, k_irq, k_map;
+	kern_return_t	k_unreg = KERN_SUCCESS;
+	const char	*kind = "message-signalled slot";
+	int		ok = 0, before = 0, after = 0;
+
+	if (!nic_owned) {
+		printf("irq_claim_test: [18] NOT ASKED — no owned card, so no "
+		       "claim to revoke (#745)\n");
+		printf("irq_claim_test: [19] NOT ASKED — nor [20]\n");
+		return 3;
+	}
+
+	/* [18] The claim's own capability revoked: the claim ends. */
+	k_rev = cap_revoke(nic_cap_id);
+	k_cfg = device_pci_config_read(master_device, bus, dev, fn, 0x00, &cfg);
+	memset(&tok, 0, sizeof(tok));
+	k_claim = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)nic_class,
+			      CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+			      | CAP_OP_PCI_IRQ, 0, &tok);
+	if (k_claim == KERN_SUCCESS)
+		k_claim = device_claim(master_device, nic_bdf, (char *)&tok,
+				       sizeof(tok));
+	if (k_rev != KERN_SUCCESS || k_cfg != KERN_NO_ACCESS
+	    || k_claim != KERN_SUCCESS) {
+		printf("irq_claim_test: [18] WRONG — revoking the claim's "
+		       "capability answered %d, the card's configuration space "
+		       "then %d, and a new claim %d (#745)\n", (int)k_rev,
+		       (int)k_cfg, (int)k_claim);
+		printf("irq_claim_test: [19] DID NOT RUN — nor [20]: no claim "
+		       "made afresh to revoke\n");
+		return ok;
+	}
+	printf("irq_claim_test: [18] the claim's capability revoked, the card's "
+	       "configuration space, which answered in [16], was refused with "
+	       "KERN_NO_ACCESS, and a new capability claimed the card afresh "
+	       "(#745)\n");
+	ok++;
+
+	/*
+	 * The controls: an interrupt and a page, each seen in place.  A
+	 * message-signalled slot where the card has a table for one, else the
+	 * card's own line -- the release is one function for both, and a board
+	 * gives one kind or the other.
+	 */
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &port) != KERN_SUCCESS)
+		return ok;
+	k_irq = device_msi_register(master_device, bus, dev, fn, 0, port,
+				    MACH_MSG_TYPE_MAKE_SEND, &slot);
+	if (k_irq != KERN_SUCCESS
+	    && device_pci_config_read(master_device, bus, dev, fn, 0x3C,
+				      &cfg) == KERN_SUCCESS
+	    && (cfg & 0xFF) != 0 && (cfg & 0xFF) < 16) {
+		line = cfg & 0xFF;
+		kind = "line";
+		k_irq = device_intr_register(master_device, line, port,
+					     MACH_MSG_TYPE_MAKE_SEND);
+		slot = line;
+	}
+	k_map = KERN_INVALID_ARGUMENT;
+	if (nic_region.size != 0) {
+		k_map = device_mmio_map(master_device,
+					(vm_address_t)nic_region.base,
+					(vm_size_t)IQ_PAGE, mach_task_self(),
+					&uva);
+		if (k_map == KERN_SUCCESS)
+			before = page_mapped(uva);
+	}
+
+	k_rev = cap_revoke(tok.cap_id);
+	if (k_irq == KERN_SUCCESS)
+		k_unreg = device_intr_unregister(master_device, slot);
+	if (k_map == KERN_SUCCESS)
+		after = page_mapped(uva);
+
+	/* [19] The interrupt: given back by the revocation, so not here. */
+	if (k_irq != KERN_SUCCESS) {
+		printf("irq_claim_test: [19] NOT ASKED — the card took neither a "
+		       "message-signalled interrupt nor its line (kr=%d), so "
+		       "there was none to take back (#745)\n", (int)k_irq);
+		ok++;
+	} else if (k_rev != KERN_SUCCESS)
+		printf("irq_claim_test: [19] WRONG — revoking the new claim's "
+		       "capability answered %d, so nothing was taken back "
+		       "(#745)\n", (int)k_rev);
+	else if (k_unreg == KERN_INVALID_ARGUMENT) {
+		printf("irq_claim_test: [19] the card's %s %u, registered with "
+		       "the claim, was refused as nothing registered once its "
+		       "capability was revoked: the revocation gave it back "
+		       "(#745)\n", kind, slot);
+		ok++;
+	} else
+		printf("irq_claim_test: [19] WRONG — the card's %s %u, given "
+		       "back after its claim's capability was revoked, answered "
+		       "%d: %s (#745)\n", kind, slot, (int)k_unreg,
+		       k_unreg == KERN_SUCCESS
+		       ? "it was still this task's, and so were its "
+		       "notifications" : "not as a slot nobody holds");
+	release(port);
+
+	/* [20] The page: taken out of this task's map by the revocation. */
+	if (nic_region.size == 0) {
+		printf("irq_claim_test: [20] NOT ASKED — the card has no memory "
+		       "region to map (#745)\n");
+		ok++;
+	} else if (k_map != KERN_SUCCESS || !before)
+		printf("irq_claim_test: [20] WRONG — the card's first page, "
+		       "the control, %s (kr=%d) (#745)\n", k_map == KERN_SUCCESS
+		       ? "mapped and was not found in this task's map"
+		       : "would not map", (int)k_map);
+	else if (k_rev != KERN_SUCCESS)
+		printf("irq_claim_test: [20] WRONG — revoking the new claim's "
+		       "capability answered %d, so the page at 0x%llx was not "
+		       "asked about (#745)\n", (int)k_rev,
+		       (unsigned long long)uva);
+	else if (!after) {
+		printf("irq_claim_test: [20] the card's first page, mapped at "
+		       "0x%llx and found there, was gone from this task's map "
+		       "once the claim's capability was revoked (#745)\n",
+		       (unsigned long long)uva);
+		ok++;
+	} else {
+		printf("irq_claim_test: [20] WRONG — the card's first page was "
+		       "still mapped at 0x%llx after its claim's capability was "
+		       "revoked: the registers of a device this task no longer "
+		       "holds (#745)\n", (unsigned long long)uva);
+		(void) device_mmio_unmap(master_device, uva, (vm_size_t)IQ_PAGE,
+					 mach_task_self());
+	}
+
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1086,8 +1282,10 @@ main(int argc, char **argv)
 	passed += arm_five_an_interrupt_with_no_wire();
 	passed += arm_six_a_mapping_ends_with_its_region();
 	passed += arm_seven_the_card_rings();
-	passed += arm_eight_each_operation_its_own();	/* last: it narrows */
-	printf("irq_claim_test: %d of 11 message-signalled, mapping and "
-	       "operation arms passed\n", passed);
-	return passed == 11 ? 0 : 1;
+	passed += arm_eight_each_operation_its_own();	/* it narrows */
+	/* Last: it revokes, and the card is left unclaimed (#745). */
+	passed += arm_nine_a_revocation_takes_back_what_the_claim_made();
+	printf("irq_claim_test: %d of 14 message-signalled, mapping, operation "
+	       "and revocation arms passed\n", passed);
+	return passed == 14 ? 0 : 1;
 }

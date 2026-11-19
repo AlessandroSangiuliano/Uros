@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #745
+Takes out: the interrupts on revocation -- device_master_cap_revoked() drops the claim and leaves registered the line or the message-signalled slot taken under it, as it did; irq_claim_test's [19] must say WRONG when the card's interrupt, registered with a claim whose capability was revoked, is still this task's to give back
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[19\] WRONG — the card.s (line|message-signalled slot) [0-9]+, given back after its claim.s capability was revoked, answered 0:
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 04d9451e..3d0f8944 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -5135,7 +5135,8 @@ device_master_cap_revoked(uint64_t cap_id)
+ 		 * driver's are, so that the device stops being heard before its
+ 		 * memory is taken from under it.
+ 		 */
+-		(void) irq_forward_release_for(holder, bdf);
++		if (0)
++			(void) irq_forward_release_for(holder, bdf);
+ 		/*
+ 		 * #745: and the mappings of its regions, from every task they
+ 		 * were made in: a driver that keeps its BARs keeps programming

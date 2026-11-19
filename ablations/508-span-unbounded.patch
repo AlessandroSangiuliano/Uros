@@ -5,10 +5,10 @@ Run: --entry 14 600 -smp 4
 Expect: irq_claim_test: \[10\] WRONG
 
 diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
-index c52574d2..5d0a51ea 100644
+index 04d9451e..f84259bd 100644
 --- a/uros/src/mach_kernel/device/device_master.c
 +++ b/uros/src/mach_kernel/device/device_master.c
-@@ -695,6 +695,12 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
+@@ -752,6 +752,14 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len, natural_t *bdf_out)
  		return KERN_NO_ACCESS;
  	}
  
@@ -16,8 +16,10 @@ index c52574d2..5d0a51ea 100644
 +	 * #508: the first page only, as before the span was bounded, so that
 +	 * irq_claim_test's arm [10] can be seen noticing.
 +	 */
-+	if (mine)
++	if (mine) {
++		*bdf_out = my_bdf;
 +		return KERN_SUCCESS;
- 	if (mine && (uint64_t)phys + len <= end)
++	}
+ 	if (mine && (uint64_t)phys + len <= end) {
+ 		*bdf_out = my_bdf;		/* #745: whose mapping it is */
  		return KERN_SUCCESS;
- 

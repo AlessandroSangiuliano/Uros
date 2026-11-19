@@ -32,8 +32,11 @@ name irq_claim_test
 # first memory region and one page past it (#508), and [11] and [12] map its
 # registers to make it ring (#598) -- MMIO.  [13] allocates one DMA page for
 # it and gives it back, the control for [14] to [17], which give the three
-# up one at a time and are refused each (#621) -- DMA.  The card never moves
-# a byte: nothing here programs its DMA engine.
+# up one at a time and are refused each (#621) -- DMA.  [18] revokes the
+# claim's capability and claims the card afresh, and [19] and [20] register
+# its interrupt and map its first page and revoke again, to see both taken
+# back (#745).  The card never moves a byte: nothing here programs its DMA
+# engine.
 #
 # 🔥 This line said IRQ alone, and "this test does not map the card's
 # registers", after [9] to [12] had begun to: the kernel checked that the

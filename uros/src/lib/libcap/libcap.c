@@ -198,7 +198,8 @@ __attribute__((weak)) cap_subscribe_revoke(mach_port_t notify_port)
 }
 
 kern_return_t
-__attribute__((weak)) cap_verify(const struct uros_cap *token, uint64_t op, uint64_t resource_id)
+__attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource_type,
+                                 uint64_t op, uint64_t resource_id)
 {
     mach_port_t srv = cap_server_port();
     if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
@@ -209,7 +210,7 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint64_t op, uint
 
     return mig_cap_verify(srv, buf,
                           (mach_msg_type_number_t)sizeof(struct uros_cap),
-                          op, resource_id);
+                          resource_type, op, resource_id);
 }
 
 /*

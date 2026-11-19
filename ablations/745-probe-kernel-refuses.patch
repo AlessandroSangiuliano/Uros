@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #745
+Takes out: nothing -- a probe: cap_server answers the root of cap_test [48]'s tree with CAP_ERR_NO_MEMORY, as the kernel answers a revocation its table has no room for, in place of the trap; cap_server must say the kernel refused it, and answer the request with the refusal, which [48] says
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[48\] WRONG — the revocation of a capability with 20 children was answered 2411
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 7b0c681b..c52bda0c 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -610,7 +610,14 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
+          * verifying the token.  The rest of the tree is still revoked, and
+          * the request is answered with the first refusal.
+          */
+-        kr = urmach_cap_revoke(id);
++        /*
++         * #745's probe: the root of cap_test [48]'s tree is answered as the
++         * kernel answers a revocation its table has no room for, and the
++         * trap is not made for it.
++         */
++        kr = (e->token.resource_type == RESOURCE_BLK_DEVICE
++              && e->token.resource_id == 0x745 && e->token.depth == 0)
++             ? CAP_ERR_NO_MEMORY : urmach_cap_revoke(id);
+         if (kr != KERN_SUCCESS) {
+             printf("cap: the kernel refused the revocation of cap %llu "
+                    "(kr=%d) -- the trap still verifies it (#745)\n",

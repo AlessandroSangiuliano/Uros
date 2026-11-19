@@ -122,10 +122,15 @@ routine cap_revoke(
  *	AND the capability is not revoked/expired/exhausted.  Consumers
  *	should migrate to urmach_cap_verify once Issue B lands; this
  *	routine stays as a debugging/test entry point.
+ *
+ *	resource_type (#745): the kind of resource the token must be for,
+ *	as the trap has asked since #599.  Without it a token for one kind
+ *	passed for another whose ids matched.
  */
 routine cap_verify(
 		cap_server	: mach_port_t;
 	in	token		: cap_token_t;
+	in	resource_type	: cap_u32_t;
 	in	op		: cap_u64_t;
 	in	resource_id	: cap_u64_t);
 

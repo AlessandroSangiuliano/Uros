@@ -308,8 +308,8 @@ section is not.
 |---|---|---|
 | `cap_acquire(type, id, ops, lifetime) → token` | any task | policy check, then mint |
 | `cap_derive(parent, reduced_ops) → token` | a holder | delegate a weaker child |
-| `cap_revoke(cap_id)` | a holder / an authority | revoke it and its whole subtree |
-| `cap_verify(token, op, id)` | anyone | slow path; the trap is the fast one |
+| `cap_revoke(cap_id)` | a holder / an authority | revoke it and its whole subtree; answer the kernel's first refusal, if it refused any (#745) |
+| `cap_verify(token, type, op, id)` | anyone | slow path; the trap is the fast one, and both ask the type as well as the id (#745) |
 | `cap_subscribe_revoke(port)` | a task whose manifest grants `RESOURCE_REVOKE_NOTICES`, on its per-task port (#744) | receive `cap_revoke_notify`, sent without blocking |
 | `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy for the task its identity port names, return the principal port; refuse a port that carries more than identity (#938) |
 | `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`, for the child its identity port names (#938); refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
@@ -324,8 +324,8 @@ itself.
 
 | trap | slot | who | question |
 |---|---|---|---|
-| `urmach_cap_verify(token, op, id)` | 37 | any resource server | is this token good for this? |
-| `urmach_cap_use(token, op, id)` | 38 | ditto | …and consume one use |
+| `urmach_cap_verify(token, type, op, id)` | 37 | any resource server | is this token good for this? |
+| `urmach_cap_use(token, type, op, id)` | 38 | ditto | …and consume one use |
 | `urmach_cap_revoke(cap_id)` | 39 | cap_server only | mark it dead in the kernel |
 | `urmach_cap_register(setup)` | 40 | the task bootstrap named, once | hand the kernel the HMAC key |
 | `urmach_dma_region_owner(id, task)` | 43 | cap_server | does that task own this DMA buffer? |
@@ -399,10 +399,10 @@ port, and that right is control of the task already.
 ```
 holder ── presents token ──▶ resource server
                                │
-                     urmach_cap_verify(token, op, resource_id)   [trap]
+             urmach_cap_verify(token, type, op, resource_id)   [trap]
                                │
                         ┌──────┴──────┐
-                    HMAC good?   resource_id matches?
+                    HMAC good?   type and resource_id match?
                     ops cover the request?   token->revoked clear?
                                │
                      kernel revocation table: was cap_id revoked?
@@ -410,8 +410,14 @@ holder ── presents token ──▶ resource server
                           KERN_SUCCESS
 ```
 
-Four comparisons and a hash. The only table touched is the kernel's revocation
+Five comparisons and a hash. The only table touched is the kernel's revocation
 table, and only because that is the one fact a signed token cannot carry.
+
+⚠️ **The type as well as the id.** Ids are numbered per type, so a block
+device and a DMA buffer can share one: a check of the id alone takes a token
+for one of them as a token for the other. The trap has asked the type since
+#599; the RPC took no type until #745, so `cap_verify` said yes to a token of
+any kind whose id matched.
 
 ⚠️ `token->revoked` is in the **holder's copy** and proves nothing against a
 malicious holder. The kernel's table is the real defence.
@@ -421,7 +427,7 @@ malicious holder. The kernel's table is the real defence.
 ```
 somebody ── cap_revoke(cap_id) ──▶ cap_server
                                      │
-                    walk the delegation tree (by_parent), for each:
+          walk the delegation tree by its own links, for each:
                                      │
                      ┌───────────────┼────────────────┐
               mark own copy    urmach_cap_revoke  cap_revoke_notify
@@ -429,8 +435,25 @@ somebody ── cap_revoke(cap_id) ──▶ cap_server
                                      │
                         device_master_cap_revoked(cap_id)
                                      │
-                     drop the claim; leave the device BLOCKED
+            drop the claim; give back its lines and message-signalled
+            slots; take its register mappings out of every task;
+            leave the device BLOCKED
 ```
+
+🔑 **The walk has no bound but the tree (#745).** The tree is linked first
+child, next sibling, parent, and the walk follows those links down, across
+and back up, never past the root, so it needs no stack. It ran on a stack of
+seventeen entries, `CAP_MAX_DEPTH + 1`, and a capability with more than
+seventeen children waiting lost the rest of them with their subtrees: the
+revocation answered success and their holders kept their authority.
+`CAP_MAX_DEPTH` bounds how deep a tree goes, not how wide.
+
+🔴 **The kernel's answer is heard (#745).** `urmach_cap_revoke` refuses any
+caller but the cap_server that gave it the key, and a revocation its table
+has no room for. cap_server threw the answer away, so a refusal was counted
+and answered as done while the trap went on verifying the token. It says each
+refusal now, goes on with the rest of the tree, and answers the request with
+the first.
 
 🔴 **The trap is the half that cannot wait for a message.** Some authority is
 *materialised*: a capability for a PCI device becomes an IOMMU domain, which is
@@ -441,6 +464,21 @@ kernel is where that can happen immediately.
 🔴 **Blocked, not pass-through.** Restoring the entry the device started in
 would make the revocation *give* it all of memory: a widening dressed as a
 withdrawal, and one somebody trusted.
+
+🔴 **Everything the claim made, not only the domain (#745).** A claim
+materialises three things: the domain, the interrupts registered under it and
+the mappings of the device's registers. A revocation used to end the claim and
+the domain, and the holder kept hearing the device and kept programming it
+through registers still mapped: only its next call was refused. So the lines
+and message-signalled slots resting on the device are given back as an
+unregister gives them back -- a message-signalled slot is disarmed in the
+device's own table -- and every mapping of the device's memory is taken out
+of the task it was made in, by its frames (`vm_map_remove_frames()`, #599),
+before the domain goes. The kernel writes down each mapping it makes, and one
+it cannot write down it does not make: a mapping a revocation cannot find is
+one it cannot take back. A driver that dies gives its interrupts back the same
+way; it used to have them masked only, with the message-signalled slots left
+armed in the device and the lines held.
 
 🔑 **And the notice is not what stops a mediated use (#744).** A server that
 keeps a handle opened on a token — the block server does — reads
@@ -719,6 +757,10 @@ Stated so nobody reads this document as a description of a finished system.
   bootstrap, the file says only what they ask for: what they get is cut by
   their caller's `delegatable[]` (#743).
 - **Budgets do not exist.** `RESOURCE_BUDGET` is a reserved number.
+- **The kernel writes down at most 64 mappings of device memory at once**
+  (`MMIO_MAPPINGS_MAX`), and refuses the next one, since a revocation takes
+  back only the mappings it can find (#745). A table that grows waits for a
+  machine with more devices than that to map.
 
 ## 10. Where the checks can be seen to fail
 
@@ -759,6 +801,10 @@ this is where to look, and what to break to confirm it still works.
 | a derivation that keeps nothing takes no slot, and derived ports meet a family's bound and a quota | `cap_test [46]` | `ablations/937-empty-derivation-takes-a-slot`, `937-family-unbounded`, `937-quota-unbounded` (over the widen `937-widen-family-to-the-quota`) |
 | cap_server keeps a task's identity port and no task port, and the kernel's DMA owner check takes the identity port | `cap_test [47]`, `[12]` | `ablations/938-cap-server-takes-full-ports`, `938-cap-server-keeps-task-ports`, `938-dma-owner-wants-the-task-port` |
 | a forked child holds no per-task port, and cap_server answers its requests | `fork_cap_test [2]`, `[3]` | `ablations/945-child-keeps-the-parents-name`, `945-cap-server-port-not-copied` |
+| a revocation reaches every child, however many | `cap_test [48]` | `ablations/745-cascade-on-a-stack` |
+| a revocation the kernel refuses is said, and answered to the requester | `cap: the kernel refused the revocation of cap …`; `cap_test [48]` | `ablations/745-probe-kernel-refuses`, a probe |
+| `cap_verify` asks the type as well as the id | `cap_test [49]` | `ablations/745-verify-without-type` |
+| a revoked claim takes back its interrupts and its register mappings | `irq_claim_test [18]`, `[19]`, `[20]` | `ablations/745-irq-kept-on-revoke`, `745-mmio-kept-on-revoke` |
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers
