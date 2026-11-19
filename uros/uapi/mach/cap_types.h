@@ -284,6 +284,7 @@ _Static_assert(__builtin_offsetof(struct uros_cap, hmac) == 88,
 #define CAP_ERR_DERIVED_QUOTA     2418   /* #937: derived per-task ports hold their share of the table */
 #define CAP_ERR_LINEAGE_FULL      2419   /* #937: the caller's family holds as many derived ports as it may */
 #define CAP_ERR_TASK_NOT_IDENTITY 2420   /* #938: a task port handed over carries more than the task's identity */
+#define CAP_ERR_NOT_OWNER         2421   /* #747: presented by a task the capability was not issued to */
 
 /*
  * Manifest binary format (v2.1 / #216) lives in its own header so

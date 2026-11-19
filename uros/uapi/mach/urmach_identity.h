@@ -39,4 +39,32 @@ urmach_identity_of(security_token_t t)
 	return (uint64_t)t.val[0] | ((uint64_t)t.val[1] << 32);
 }
 
+/*
+ * The receive option that asks for the sender's identity: OR it into a
+ * server's receive -- mach_msg_server()'s options -- and every request comes
+ * with it in its trailer.
+ */
+#define	URMACH_RCV_SENDER						\
+	(MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |		\
+	 MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SENDER))
+
+/*
+ * Who sent a message received with URMACH_RCV_SENDER: the identity in its
+ * trailer, which follows the message at its rounded size.  0 for a message
+ * received without asking, which is no task's identity, so that a check
+ * against it refuses rather than passes.
+ */
+static __inline__ uint64_t
+urmach_msg_sender(const mach_msg_header_t *m)
+{
+	const mach_msg_format_0_trailer_t *t =
+	    (const mach_msg_format_0_trailer_t *)
+	    ((const char *)m + round_msg(m->msgh_size));
+
+	if (t->msgh_trailer_type != MACH_MSG_TRAILER_FORMAT_0 ||
+	    t->msgh_trailer_size < sizeof(mach_msg_security_trailer_t))
+		return 0;
+	return urmach_identity_of(t->msgh_sender);
+}
+
 #endif	/* _MACH_URMACH_IDENTITY_H_ */
