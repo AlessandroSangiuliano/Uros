@@ -33,8 +33,9 @@
 #   --limit N  how many of the latest completed runs to look at (default 30)
 #   --dir DIR  where ci-campaign.csv and ci/ live (default ~/uros-tests)
 #   --job DIR  only say of a job's directory -- job.sh's --out, or an artifact
-#              already kept -- whether it finished, as an import says it, with
-#              nothing listed, downloaded or appended (#951)
+#              already kept -- whether it finished, and its merge test's line,
+#              as an import says them, with nothing listed, downloaded or
+#              appended (#951)
 #
 # Exit status: 0 every new run imported, or none was new; with --job, each
 # directory said · 1 a run could not be listed, downloaded or read, and is
@@ -225,7 +226,14 @@ import() {	# run-id description artifacts-the-api-listed
 	echo "$id $(date +%F) $(wc -l < "$rows") rows, $(wc -l < "$abrows") A/B rows" >> "$DONE"
 	# The merge test's line, unless the run was an A/B and had none of its rows.
 	[ -s "$rows" ] || [ ! -s "$abrows" ] || return 0
-	awk -F, -v what="$what" -v jobs=${#jobs[@]} '
+	merge_line "$what" ${#jobs[@]} < "$rows"
+}
+
+# The merge test's line of a run, or of one job, from its rows on stdin: the
+# boots and the WRONG, the boots stopped counted apart, the trees and the
+# accelerators.
+merge_line() {	# description jobs
+	awk -F, -v what="$1" -v jobs="$2" '
 		$13 ~ /^stopped/ { s++; next }
 		{ n++; if ($13 ~ /^WRONG/) w++; acc[$9] = 1; tree[$6] = 1 }
 		END {
@@ -234,15 +242,18 @@ import() {	# run-id description artifacts-the-api-listed
 			printf "pull-results: %s: %d job(s), %d boots, %d WRONG%s; tree%s; accelerators%s\n",
 				what, jobs, n, w, (s ? sprintf(", %d stopped", s) : ""),
 				(t == "" ? " -" : t), (a == "" ? " -" : a)
-		}' "$rows"
+		}'
 }
 
-# --job: what an import says of a job, of directories already here (#951).
+# --job: what an import says of a job, of directories already here (#951) --
+# how it ended, and its merge test's line when it has the rows of one.
 if [ ${#ASK[@]} -gt 0 ]; then
 	for d in "${ASK[@]}"; do
 		[ -d "$d" ] || die 2 "--job takes a job's directory, and $d is not one"
 		if [ -f "$d/job.txt" ] || [ -f "$d/boots.csv" ] || [ -f "$d/ablate.csv" ]; then
 			job_end "$d" "${d%/}" here
+			[ ! -f "$d/boots.csv" ] ||
+				tail -n +2 "$d/boots.csv" | merge_line "here: job ${d%/}" 1
 		else
 			echo "pull-results: here: job ${d%/} has no job.txt and no rows"
 		fi
