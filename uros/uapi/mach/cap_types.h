@@ -20,8 +20,7 @@
  * Purpose: Uros capability token layout, resource types, op bitmasks,
  *          and error codes.  Shared between userspace (cap_server,
  *          libcap, client tasks) and the UrMach kernel fast-path
- *          (urmach_cap_verify / urmach_cap_use / urmach_cap_revoke /
- *          urmach_cap_register).
+ *          (urmach_cap_verify / urmach_cap_revoke / urmach_cap_register).
  *
  * Design: /home/slex/Documenti/uros_docs/Uros_tecnico_v6.pdf §2
  */
@@ -37,7 +36,6 @@
  * Size constants.
  */
 #define CAP_HMAC_SIZE        32      /* HMAC-SHA256 output */
-#define CAP_OWNER_NAME_LEN   64      /* stable task name */
 #define CAP_MAX_DEPTH        16      /* max delegation tree depth */
 #define CAP_TOKEN_MAX        256     /* MIG wire upper bound for cap_token_t */
 
@@ -182,31 +180,16 @@ struct uros_cap {
     /* rights */
     uint64_t  allowed_ops;
 
-    /* ownership & delegation */
-    mach_port_t owner;
-    char      owner_name[CAP_OWNER_NAME_LEN];
-
     /*
-     * 🔥 AN EXPLICIT HOLE, BECAUSE THE COMPILER WAS DIGGING A DIFFERENT ONE
-     * ON EACH TARGET (#415).
-     *
-     * owner_name ends at offset 100, and parent_cap_id below is a uint64_t.
-     * i386 aligns a 64-bit integer to FOUR bytes and x86-64 to EIGHT -- the
-     * one alignment rule the two disagree about -- so the compiler put
-     * parent_cap_id at 100 on one and 104 on the other, and every field after
-     * it moved with it, including the hmac.  A structure whose own comment
-     * three lines up calls its field order and sizes "wire-format" had a
-     * layout that was not the same on two machines, and nothing said so:
-     * padding is invisible, and sizeof() answering 188 in one build and 192
-     * in another is not something any compiler warns about.
-     *
-     * Named rather than removed by reordering, because the order is the
-     * format: moving a field to close the hole would change every offset
-     * rather than one, for a saving of four bytes in a token that is already
-     * signed with thirty-two.
+     * The task the token was issued to, by the identity the kernel gives a
+     * task when it creates it (#747).  It was a port name, MACH_PORT_NULL in
+     * every token, and a 64-byte name, empty in every token: a field nobody
+     * wrote, beside a hole the compiler dug in a different place on each
+     * target (#415).
      */
-    uint32_t  _pad_owner;
+    uint64_t  owner;
 
+    /* delegation */
     uint64_t  parent_cap_id;
     uint8_t   depth;
     uint8_t   delegable;
@@ -214,8 +197,6 @@ struct uros_cap {
 
     /* lifetime */
     uint64_t  expires;              /* 0 = never */
-    uint32_t  max_uses;              /* 0 = unlimited, 1 = use-once */
-    uint32_t  current_uses;          /* atomic fetch_add */
     uint8_t   revoked;
     uint8_t   is_generic;
     uint8_t   _pad2[6];
@@ -243,9 +224,24 @@ struct uros_cap {
  * is not a reason to update the number: it is a reason to decide whether the
  * change was intended and, if it was, to give the format a version.
  */
-_Static_assert(sizeof(struct uros_cap) == 192,
+/*
+ * 🔑 THE FORMAT'S VERSIONS, which these two lines hold:
+ *
+ *	1  192 bytes, the hmac at 160 (#415): a port name and a 64-byte name for
+ *	   the owner, neither ever written, and a use count nothing read.
+ *	2  120 bytes, the hmac at 88 (#747): the owner an identity of 64 bits,
+ *	   and no use count -- counting operations is the quota's, not the
+ *	   permission's.
+ *
+ * ⚠️ The version is said here and not carried in the token: within a boot one
+ * cap_server mints every token with that boot's key, so a field naming the
+ * format would only ever be compared with itself.  What these lines guard is
+ * the build -- every program built from one tree agreeing on where each field
+ * is.
+ */
+_Static_assert(sizeof(struct uros_cap) == 120,
 	       "the capability token is a wire format and its size has moved");
-_Static_assert(__builtin_offsetof(struct uros_cap, hmac) == 160,
+_Static_assert(__builtin_offsetof(struct uros_cap, hmac) == 88,
 	       "the signature covers every byte before the hmac, so the hmac's "
 	       "offset is part of the format");
 
@@ -273,7 +269,7 @@ _Static_assert(__builtin_offsetof(struct uros_cap, hmac) == 160,
 #define CAP_ERR_INVALID_TOKEN     2403
 #define CAP_ERR_EXPIRED           2404
 #define CAP_ERR_REVOKED           2405
-#define CAP_ERR_EXHAUSTED         2406   /* current_uses >= max_uses */
+/* 2406 was CAP_ERR_EXHAUSTED, the use count's, which #747 took out: not reused. */
 #define CAP_ERR_NOT_DELEGABLE     2407
 #define CAP_ERR_DEPTH_EXCEEDED    2408
 #define CAP_ERR_OP_NOT_ALLOWED    2409

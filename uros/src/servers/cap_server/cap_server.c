@@ -399,15 +399,12 @@ cap_acquire(mach_port_t             server,
     t->resource_type = resource_type;
     t->resource_id   = resource_id;
     t->allowed_ops   = ops;
-    t->owner         = MACH_PORT_NULL;  /* audit trailer not consulted in v1 */
-    t->owner_name[0] = '\0';
+    t->owner         = 0;   /* the task's identity: #747 writes it */
     t->parent_cap_id = 0;
     t->depth         = 0;
     t->delegable     = 1;
     t->expires       = 0;   /* v1: ignore lifetime_ms until clock wiring lands */
     (void)lifetime_ms;
-    t->max_uses      = 0;
-    t->current_uses  = 0;
     t->revoked       = 0;
     t->is_generic    = 0;
     t->first_child_cap_id = 0;

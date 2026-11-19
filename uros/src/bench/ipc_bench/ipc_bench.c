@@ -2768,7 +2768,7 @@ bench_cap_epoch(int iters)
 
 /*
  * #744: what gpu_server and char_server pay per RPC today, in the kernel --
- * urmach_cap_verify, which copies the 192-byte token in and computes its HMAC
+ * urmach_cap_verify, which copies the 120-byte token in and computes its HMAC
  * on every call.  #537's per-processor cache serves callers inside the kernel
  * only, not this trap.
  *
