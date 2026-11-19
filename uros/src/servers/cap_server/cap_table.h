@@ -51,6 +51,14 @@ struct cap_entry *cap_table_find_by_id(uint64_t cap_id);
 struct cap_entry *cap_table_find_children(uint64_t parent_id);
 
 /*
+ * Every entry, in no order (#747): the first for NULL, the one after `e'
+ * otherwise, and NULL after the last.  Marking an entry revoked moves none, so
+ * a walk may revoke as it goes; inserting one while walking may or may not be
+ * seen.
+ */
+struct cap_entry *cap_table_next(struct cap_entry *e);
+
+/*
  * Mark a single entry revoked (token.revoked = 1).  Callers iterate
  * the delegation tree themselves via cap_table_find_children() to
  * implement cascade revocation.

@@ -118,6 +118,21 @@ struct cap_entry *cap_table_find_children(uint64_t parent_id) {
      * (since a bucket may hold entries with different parents). */
 }
 
+/* #747: by the id buckets, each chain and then the next bucket that has one. */
+struct cap_entry *cap_table_next(struct cap_entry *e) {
+    unsigned b = 0;
+
+    if (e != NULL) {
+        if (e->next_by_id != NULL)
+            return e->next_by_id;
+        b = hash64(e->token.cap_id) + 1;
+    }
+    for (; b < CAP_BUCKETS; b++)
+        if (bucket_by_id[b] != NULL)
+            return bucket_by_id[b];
+    return NULL;
+}
+
 void cap_table_mark_revoked(struct cap_entry *e) {
     e->token.revoked = 1;
     /* Re-sign so the revoked=1 bit is part of the HMAC.  This lets a
