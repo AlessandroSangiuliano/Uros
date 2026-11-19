@@ -1762,6 +1762,216 @@ icache_check(struct mount_context *mnt)
 		       "inode-table read after the first round (#912)\n");
 }
 
+/*
+ * #912: every write of an inode-table block reaches the page cache, which
+ * read_inode reads those blocks through.  One arm for each writer, on files
+ * the check makes in / and takes away again:
+ *
+ * - a create: write_new_inode writes the new inode's slot into a block the
+ *   page cache holds, the block of the file made just before it;
+ * - a write that allocates a block: the inode, the group descriptors and the
+ *   superblock are dirty together, and the flush writes them as one batch;
+ * - a write inside that block: the inode alone is dirty, and write_inode
+ *   writes it.
+ *
+ * After each, the inode is read as read_inode reads it on a miss of the inode
+ * cache (ext2fs_itable_peek).  It must say what was written, and come from the
+ * page cache, with no read of the inode table: a copy the cache kept from
+ * before the write answers with the inode as it was.
+ *
+ * Run before the mount is registered, so that no client is beside it, and
+ * before the writeback thread starts, so that no flush runs but the check's.
+ */
+#define ITC_FILES	4		/* creates, until two share a block */
+#define ITC_BYTES	100u		/* written by each write arm */
+
+/* The inode of `path', or 0. */
+static ino_t
+itc_ino(struct device *dev, const char *path)
+{
+	fs_private_t	priv;
+	ino_t		ino;
+
+	if (ext2fs_open_file(dev, path, &priv) != 0)
+		return 0;
+	ino = ext2fs_file_ino(priv);
+	ext2fs_close_file(priv);
+	free(priv);
+	return ino;
+}
+
+/* ITC_BYTES at `off' of `path', and its dirty metadata flushed. */
+static int
+itc_write(struct device *dev, const char *path, vm_offset_t off)
+{
+	char		buf[ITC_BYTES];
+	fs_private_t	priv;
+	int		rc;
+
+	memset(buf, 'i', sizeof(buf));
+	rc = ext2fs_open_file(dev, path, &priv);
+	if (rc != 0)
+		return rc;
+	rc = ext2fs_write_file(priv, off, (vm_offset_t)buf, sizeof(buf));
+	if (rc == 0)
+		rc = ext2fs_flush_metadata(priv);
+	ext2fs_close_file(priv);
+	free(priv);
+	return rc;
+}
+
+/*
+ * `ino' as a miss of the inode cache reads it, into *in and its block into
+ * *blk; *reads is the inode-table reads it took.
+ */
+static int
+itc_peek(struct device *dev, ino_t ino, struct ext2_inode *in, daddr_t *blk,
+	 unsigned long *reads)
+{
+	unsigned long	hits, misses, r0, r1;
+	unsigned int	sets;
+	int		rc;
+
+	(void) ext2fs_icache_counts(dev, &hits, &misses, &r0, &sets);
+	rc = ext2fs_itable_peek(dev, ino, in, blk);
+	(void) ext2fs_icache_counts(dev, &hits, &misses, &r1, &sets);
+	*reads = r1 - r0;
+	return rc;
+}
+
+/* One write arm's line: inode `ino' must hold `want' bytes. */
+static void
+itc_size(const char *arm, struct device *dev, const char *path, ino_t ino,
+	 vm_offset_t off, unsigned int want)
+{
+	struct ext2_inode	in;
+	daddr_t			blk;
+	unsigned long		reads;
+	int			rc;
+
+	rc = itc_write(dev, path, off);
+	if (rc != 0) {
+		printf("ext2: inode table: WRONG -- %s: %u bytes at %lu of %s "
+		       "not written (rc=%d) (#912)\n", arm, ITC_BYTES,
+		       (unsigned long)off, path, rc);
+		return;
+	}
+	rc = itc_peek(dev, ino, &in, &blk, &reads);
+	if (rc != 0)
+		printf("ext2: inode table: WRONG -- %s: inode %lu could not be "
+		       "read back (rc=%d) (#912)\n", arm, (unsigned long)ino, rc);
+	else if (in.i_size != want)
+		printf("ext2: inode table: WRONG -- %s: inode %lu read back with "
+		       "%u bytes where %u were written, its block as it was "
+		       "before the flush (#912)\n", arm, (unsigned long)ino,
+		       (unsigned)in.i_size, want);
+	else if (reads != 0)
+		printf("ext2: inode table: WRONG -- %s: inode %lu was read from "
+		       "the inode table, not from the page cache (#912)\n", arm,
+		       (unsigned long)ino);
+	else
+		printf("ext2: inode table: %s -- inode %lu read back with %u "
+		       "bytes, from the page cache (#912)\n", arm,
+		       (unsigned long)ino, (unsigned)in.i_size);
+}
+
+static void
+itable_check(struct mount_context *mnt)
+{
+	struct device		*dev = &mnt->dev;
+	char			 path[ITC_FILES][32];
+	ino_t			 ino[ITC_FILES];
+	daddr_t			 blk[ITC_FILES];
+	struct ext2_inode	 in;
+	unsigned long		 hits, misses, reads;
+	unsigned int		 sets, made, k, asked = 0;
+	int			 rc = 0;
+
+	if (!ext2fs_icache_counts(dev, &hits, &misses, &reads, &sets)) {
+		printf("ext2: inode table NOT ASKED -- the root's mount has no "
+		       "state yet (#912)\n");
+		return;
+	}
+	for (k = 0; k < ITC_FILES; k++) {
+		snprintf(path[k], sizeof(path[k]), "/.itable-check-912-%u", k);
+		(void) ext2fs_unlink(dev, path[k]);	/* a check cut short */
+	}
+
+	/*
+	 * The create arm: each file made, then read back, which leaves its
+	 * block in the page cache; the next create is asked once it lands in
+	 * the block of the one before.
+	 */
+	for (made = 0; made < ITC_FILES && !asked; made++) {
+		rc = ext2fs_create(dev, path[made], 0644);
+		if (rc != 0) {
+			printf("ext2: inode table: the create NOT ASKED -- %s could "
+			       "not be made (rc=%d) (#912)\n", path[made], rc);
+			break;
+		}
+		ino[made] = itc_ino(dev, path[made]);
+		if (ino[made] == 0) {
+			printf("ext2: inode table: WRONG -- %s was made and could "
+			       "not be opened (#912)\n", path[made]);
+			made++;
+			break;
+		}
+		rc = itc_peek(dev, ino[made], &in, &blk[made], &reads);
+		if (rc != 0) {
+			printf("ext2: inode table: WRONG -- a create: inode %lu "
+			       "could not be read back (rc=%d) (#912)\n",
+			       (unsigned long)ino[made], rc);
+			made++;
+			break;
+		}
+		if (made == 0 || blk[made] != blk[made - 1])
+			continue;
+		asked = 1;
+		if ((in.i_mode & IFMT) != IFREG || in.i_links_count != 1)
+			printf("ext2: inode table: WRONG -- a create into a block "
+			       "the page cache held: inode %lu read back with mode "
+			       "0%o and %u link(s), its block as it was before the "
+			       "create (#912)\n", (unsigned long)ino[made],
+			       (unsigned)in.i_mode, (unsigned)in.i_links_count);
+		else if (reads != 0)
+			printf("ext2: inode table: WRONG -- a create into a block "
+			       "the page cache held: inode %lu was read from the "
+			       "inode table, not from the page cache (#912)\n",
+			       (unsigned long)ino[made]);
+		else
+			printf("ext2: inode table: a create into a block the page "
+			       "cache held -- inode %lu read back with mode 0%o and "
+			       "%u link(s), from the page cache (#912)\n",
+			       (unsigned long)ino[made], (unsigned)in.i_mode,
+			       (unsigned)in.i_links_count);
+	}
+	if (!asked && made == ITC_FILES)
+		printf("ext2: inode table: the create NOT ASKED -- %u creates, "
+		       "and none landed in the block of the one before (#912)\n",
+		       ITC_FILES);
+
+	/* The write arms, on the first file, its block held since its read */
+	if (made > 0 && ino[0] != 0) {
+		if (ext2fs_flush_batches(dev))
+			itc_size("a batched flush", dev, path[0], ino[0], 0,
+				 ITC_BYTES);
+		else
+			printf("ext2: inode table: a batched flush NOT ASKED -- "
+			       "this device takes no batch, so every flush writes "
+			       "the inode alone (#912)\n");
+		itc_size("a flush of one inode", dev, path[0], ino[0], ITC_BYTES,
+			 2 * ITC_BYTES);
+	} else {
+		printf("ext2: inode table: the flushes NOT ASKED -- no file was "
+		       "made (#912)\n");
+	}
+
+	for (k = 0; k < made; k++)
+		if ((rc = ext2fs_unlink(dev, path[k])) != 0)
+			printf("ext2: inode table: WRONG -- %s could not be taken "
+			       "away (rc=%d) (#912)\n", path[k], rc);
+}
+
 static int
 mount_partition(struct mount_context *mnt, const char *driver_name,
 		const char *service_name, const char *mount_path,
@@ -2007,8 +2217,10 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	}
 
 	/* #912: before the mount is registered, so no client reads beside it */
-	if (strcmp(mount_path, "/") == 0)
+	if (strcmp(mount_path, "/") == 0) {
 		icache_check(mnt);
+		itable_check(mnt);
+	}
 
 	/* Allocate per-mount receive port */
 	kr = mach_port_allocate(mach_task_self(),
