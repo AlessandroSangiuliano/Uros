@@ -814,6 +814,22 @@ must_report 'iommu fault records decoded' 'fault-log cases' \
 must_report '=== ext2 filesystem server' 'ext2: .*page-cache cases' \
 	'ext_server asks the page cache about small caches of its own (#599).  No line means it was never asked.'
 
+# #912: ext_server's checks of the root's inode cache and of the inode table's
+# writers, before it registers the mount: one line for each question, NOT
+# ASKED included -- an ext_server that mounts nothing at / says NOT ASKED of
+# both.  Nothing asked for them before, and a check that stopped printing would
+# have passed.
+must_report '=== ext2 filesystem server' 'ext2: inode cache\( NOT ASKED\|: .*walk\)' \
+	'ext_server asks its inode cache about /mach_servers/cow_test walked 2000 times (#912).  No line means it was never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode cache\( NOT ASKED\|: .*\(collisions\|inodes 2, 18\|could not be read in round\)\)' \
+	'ext_server asks its inode cache about inodes 2, 18, 34, 50, 66 and 82, which the old hash put in one slot (#912).  No line means they were never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode table\( NOT ASKED\|: .*\(create\|was made and could not be opened\)\)' \
+	'ext_server makes a file in / whose inode lands in an inode-table block the page cache holds, and reads it back as a miss of the inode cache reads it (#912).  No line means it was never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode table\( NOT ASKED\|: .*\(a batched flush\|the flushes NOT ASKED\)\)' \
+	'ext_server writes into that file so that its inode, the group descriptors and the superblock are flushed as one batch, and reads the inode back (#912).  No line means it was never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode table\( NOT ASKED\|: .*\(a flush of one inode\|the flushes NOT ASKED\)\)' \
+	'ext_server writes inside that file'"'"'s block so that its inode alone is flushed, and reads it back (#912).  No line means it was never asked.'
+
 # #921: the CD drive DISK_ARGS puts on ahci0's port 2 is told apart by its
 # signature.  A module that took it for a disk fails the board check as well,
 # with three disks for two; this pair is what says why.
