@@ -81,6 +81,13 @@ int                       char_core_dev_copy_all(struct char_device_info *out,
  * are rejected — char_server has no early-boot exception path
  * comparable to gpu_text_puts.
  */
+/*
+ * #747: who sent the request being served, by the identity the kernel stamped
+ * in its trailer -- the presenter of a token it carries.  Set by char_demux()
+ * around each request; one message loop, one request at a time.
+ */
+extern uint64_t char_request_sender;
+
 int char_core_cap_check(const char *token, unsigned int token_count,
 			uint64_t op, uint64_t resource_id);
 

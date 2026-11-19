@@ -185,7 +185,7 @@ wait_for_cap_server(void)
         return MACH_PORT_NULL;
     }
     memset(&bogus, 0x5A, sizeof(bogus));
-    kr = cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+    kr = cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
     /*
      * ⚠️ An answer FROM cap_server, which is one of its own codes.  A request
      * destroyed unanswered comes back MIG_SERVER_DIED, and a send that could
@@ -914,13 +914,13 @@ a_revocation_reaches_every_child(void)
         const struct uros_cap *t = i < CT48_CHILDREN ? &child[i]
                                  : &grand[i - CT48_CHILDREN];
 
-        if (urmach_cap_verify(t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+        if (urmach_cap_verify(t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
                               CT48_ID) != CAP_ERR_REVOKED) {
             trap_left++;
             if (first_left == CT48_CHILDREN)
                 first_left = i;
         }
-        if (cap_verify(t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+        if (cap_verify(t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
                        CT48_ID) != CAP_ERR_REVOKED)
             rpc_left++;
     }
@@ -971,9 +971,9 @@ cap_verify_asks_the_type(void)
                "about: %d (#745)\n", (int)kr);
         return 0;
     }
-    same  = cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT49_ID);
-    other = cap_verify(&t, RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ, CT49_ID);
-    trap  = urmach_cap_verify(&t, RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ,
+    same  = cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT49_ID);
+    other = cap_verify(&t, cap_self(), RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ, CT49_ID);
+    trap  = urmach_cap_verify(&t, cap_self(), RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ,
                               CT49_ID);
 
     if (same == KERN_SUCCESS && other == CAP_ERR_RESOURCE_MISMATCH &&
@@ -1054,9 +1054,9 @@ a_lifetime_is_kept(void)
         return 0;
     }
     ckr   = cap_derive(&t, CAP_OP_BLK_READ, 100 * CT50_MS, &child);
-    trap0 = urmach_cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+    trap0 = urmach_cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
                               CT50_ID);
-    rpc0  = cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
+    rpc0  = cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
     after = ct50_now(clk);
 
     if (before == 0 || after == 0) {
@@ -1082,14 +1082,14 @@ a_lifetime_is_kept(void)
     } while (now != 0 && now < t.expires + 20000000ULL && ++waits < 200);
     (void)mach_port_deallocate(mach_task_self(), clk);
 
-    trap1  = urmach_cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+    trap1  = urmach_cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
                                CT50_ID);
-    rpc1   = cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
+    rpc1   = cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
     ctrap1 = ckr == KERN_SUCCESS
-           ? urmach_cap_verify(&child, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+           ? urmach_cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
                                CT50_ID) : ckr;
     crpc1  = ckr == KERN_SUCCESS
-           ? cap_verify(&child, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID)
+           ? cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID)
            : ckr;
 
     ok = trap0 == KERN_SUCCESS && rpc0 == KERN_SUCCESS
@@ -1327,8 +1327,8 @@ a_capability_is_derived_to_a_named_task(void)
         kkr = cap_derive_for(&parent, CAP_OP_BLK_READ, 0, mach_task_self(),
                              &kid);
         rkr = cap_revoke(parent.cap_id);
-        vkr = urmach_cap_verify(&child, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
-                                CT53_ID);
+        vkr = urmach_cap_verify(&child, id_other, RESOURCE_BLK_DEVICE,
+                                CAP_OP_BLK_READ, CT53_ID);
     }
     (void)mach_port_deallocate(mach_task_self(), port);
     (void)task_terminate(other);
@@ -5785,7 +5785,7 @@ main(int argc, char **argv)
                 ctl_bad++;
 
             xmm_fill(pat);
-            kr = urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+            kr = urmach_cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
             xmm_read(got);
             if (kr != CAP_ERR_INTERNAL)
                 hmac_ran = 1;

@@ -130,6 +130,7 @@ routine cap_revoke(
 routine cap_verify(
 		cap_server	: mach_port_t;
 	in	token		: cap_token_t;
+	in	presenter	: cap_u64_t;	/* #747: who presents it */
 	in	resource_type	: cap_u32_t;
 	in	op		: cap_u64_t;
 	in	resource_id	: cap_u64_t);

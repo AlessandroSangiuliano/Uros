@@ -31,6 +31,7 @@
 #include <mach/mach_port.h>
 #include <mach_init.h>
 #include <mach/cap_types.h>
+#include <mach/urmach_identity.h>	/* #747: cap_self */
 #include <mach/mach_traps.h>	/* the cap traps, declared once (#426) */
 #include <mach/mach_host.h>	/* urmach_task_rights_port (#938) */
 #include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
@@ -232,8 +233,9 @@ __attribute__((weak)) cap_subscribe_revoke(mach_port_t notify_port)
 }
 
 kern_return_t
-__attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource_type,
-                                 uint64_t op, uint64_t resource_id)
+__attribute__((weak)) cap_verify(const struct uros_cap *token, uint64_t presenter,
+                                 uint32_t resource_type, uint64_t op,
+                                 uint64_t resource_id)
 {
     mach_port_t srv = cap_server_port();
     if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
@@ -244,7 +246,7 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource
 
     return mig_cap_verify(srv, buf,
                           (mach_msg_type_number_t)sizeof(struct uros_cap),
-                          resource_type, op, resource_id);
+                          presenter, resource_type, op, resource_id);
 }
 
 /*
@@ -258,12 +260,27 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource
 
 kern_return_t
 cap_verify_local(const struct uros_cap *token,
+                 uint64_t presenter,
                  uint32_t resource_type,
                  uint32_t op,
                  uint64_t resource_id)
 {
     if (token == NULL) return CAP_ERR_INVALID_TOKEN;
-    return urmach_cap_verify(token, resource_type, op, resource_id);
+    return urmach_cap_verify(token, presenter, resource_type, op, resource_id);
+}
+
+uint64_t
+cap_self(void)
+{
+    static uint64_t        self;
+    security_token_t       tok;
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+
+    if (self == 0 &&
+        task_info(mach_task_self(), TASK_SECURITY_TOKEN, (task_info_t)&tok,
+                  &n) == KERN_SUCCESS)
+        self = urmach_identity_of(tok);
+    return self;
 }
 
 /*

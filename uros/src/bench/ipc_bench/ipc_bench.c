@@ -2797,8 +2797,8 @@ bench_cap_verify(int iters)
      * refused at once in a bundle with no cap_server, which leaves the trap
      * below to say so.
      */
-    (void)cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
-    kr = urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+    (void)cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
+    kr = urmach_cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
     if (kr != CAP_ERR_INVALID_TOKEN) {
 	printf("  urmach_cap_verify (#744): NOT ASKED -- a garbage token came "
 	       "back %d, not CAP_ERR_INVALID_TOKEN(%d): no key installed, so "
@@ -2807,11 +2807,11 @@ bench_cap_verify(int iters)
     }
 
     for (i = 0; i < WARMUP_ITERS; i++)
-	(void)urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+	(void)urmach_cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
 
     get_time(&t0);
     for (i = 0; i < iters; i++)
-	(void)urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+	(void)urmach_cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
     get_time(&t1);
 
     print_result("urmach_cap_verify, copy+HMAC (#744)", elapsed_ns(&t0, &t1),

@@ -246,7 +246,8 @@ policy_allows_v1(mach_port_t sender,
  *   routine cap_derive(cap_server, parent; reduced_ops,
  *                      lifetime_ms; out child);
  *   routine cap_revoke(cap_server, cap_id);
- *   routine cap_verify(cap_server, token, resource_type, op, resource_id);
+ *   routine cap_verify(cap_server, token, presenter, resource_type, op,
+ *                      resource_id);
  *
  * MIG synthesizes the out/in array lengths as mach_msg_type_number_t.
  * ============================================================ */
@@ -1182,6 +1183,7 @@ kern_return_t
 cap_verify(mach_port_t             server,
            cap_token_t            token_buf,
            mach_msg_type_number_t  token_len,
+           uint64_t                presenter,
            uint32_t                resource_type,
            uint64_t                op,
            uint64_t                resource_id)
@@ -1196,6 +1198,12 @@ cap_verify(mach_port_t             server,
     if (!cap_verify_hmac(&token))           return CAP_ERR_INVALID_TOKEN;
     if (token.revoked)                      return CAP_ERR_REVOKED;
     if (cap_expired(&token) != KERN_SUCCESS) return CAP_ERR_EXPIRED; /* #747 */
+    /*
+     * #747: and presented by the task it was issued to.  The asker is the
+     * server verifying, so it says who presented the token, as it does to the
+     * trap: the identity in the trailer of the request that carried it.
+     */
+    if (presenter == 0 || token.owner != presenter) return CAP_ERR_NOT_OWNER;
     /* #745: the kind as well as the id, as the trap has since #599. */
     if (token.resource_type != resource_type) return CAP_ERR_RESOURCE_MISMATCH;
     if (token.resource_id != resource_id)   return CAP_ERR_RESOURCE_MISMATCH;

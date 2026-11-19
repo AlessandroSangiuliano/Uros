@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "gpu_server.h"
+#include <mach/urmach_identity.h>	/* #747 */
 #include "modload.h"
 #include "libcap.h"
 #include "cap_revoke_server.h"
@@ -86,9 +87,14 @@ cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
  * hal_server gets ported here too.
  * ================================================================ */
 
+uint64_t gpu_request_sender;
+
 static boolean_t
 gpu_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	/* #747: who sent it, for a token it may carry. */
+	gpu_request_sender = urmach_msg_sender(in);
+
 	if (gpu_server_server(in, out))
 		return TRUE;
 
@@ -340,7 +346,7 @@ main(int argc, char **argv)
 	printf("gpu_server: init complete, entering message loop\n");
 
 	mach_msg_server(gpu_demux, 8192, gpu_port_set,
-			MACH_MSG_OPTION_NONE);
+			URMACH_RCV_SENDER);	/* #747: who asks */
 
 	printf("gpu_server: mach_msg_server exited unexpectedly\n");
 	return 1;

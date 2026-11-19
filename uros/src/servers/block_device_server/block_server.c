@@ -51,6 +51,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "block_server.h"
+#include <mach/urmach_identity.h>	/* #747: who sent a request */
 #include "device_master.h"
 #include "device_server.h"
 #include "ahci_batch_server.h"
@@ -817,7 +818,7 @@ cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
 }
 
 static boolean_t
-blk_demux(mach_msg_header_t *in, mach_msg_header_t *out)
+blk_demux_one(mach_msg_header_t *in, mach_msg_header_t *out)
 {
 	/*
 	 * No-senders notifications are SEND_ONCE messages with a
@@ -851,6 +852,23 @@ blk_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	}
 
 	return FALSE;
+}
+
+uint64_t blk_request_sender;
+
+/*
+ * #747: each request with its sender, for the token it may carry: the
+ * receive asks for the sender's trailer element (URMACH_RCV_SENDER).
+ */
+static boolean_t
+blk_demux(mach_msg_header_t *in, mach_msg_header_t *out)
+{
+	boolean_t handled;
+
+	blk_request_sender = urmach_msg_sender(in);
+	handled = blk_demux_one(in, out);
+	blk_request_sender = 0;
+	return handled;
 }
 
 /* ================================================================
@@ -990,7 +1008,7 @@ main(int argc, char **argv)
 	       "entering message loop\n", n_partitions);
 
 	mach_msg_server(blk_demux, 8192, port_set,
-			MACH_MSG_OPTION_NONE);
+			URMACH_RCV_SENDER);	/* #747: who asks */
 
 	printf("blk: mach_msg_server exited unexpectedly\n");
 	return 1;

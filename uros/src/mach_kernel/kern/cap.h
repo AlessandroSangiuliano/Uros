@@ -73,6 +73,7 @@ extern kern_return_t cap_check_in_kernel(const struct uros_cap *token,
 extern boolean_t cap_id_revoked(uint64_t cap_id);
 
 extern kern_return_t urmach_cap_verify(const struct uros_cap *user_token,
+                                       uint64_t presenter,	/* #747 */
                                        uint32_t resource_type,
                                        uint32_t op,
                                        uint64_t resource_id);

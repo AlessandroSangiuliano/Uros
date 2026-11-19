@@ -99,6 +99,13 @@ int                      gpu_core_dev_copy_all(struct gpu_device_info *out,
  * cap_verify in #197.  Empty tokens (token_count == 0) are allowed
  * for the tokenless text_puts/query_devices entry points.
  */
+/*
+ * #747: who sent the request being served, by the identity the kernel stamped
+ * in its trailer -- the presenter of a token it carries.  Set by gpu_demux()
+ * around each request; one message loop, one request at a time.
+ */
+extern uint64_t gpu_request_sender;
+
 int gpu_core_cap_check(const char *token, unsigned int token_count,
 		       uint64_t op, uint64_t resource_id);
 

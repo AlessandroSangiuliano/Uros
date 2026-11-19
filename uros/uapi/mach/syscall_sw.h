@@ -134,7 +134,7 @@ kernel_trap(evc_wait,-17,1)
  *	for the handlers and cap_types.h for token layout.  38 was
  *	urmach_cap_use, which counted uses nothing asked for (#747).
  */
-kernel_trap(urmach_cap_verify,-37,5)
+kernel_trap(urmach_cap_verify,-37,7)
 kernel_trap(urmach_cap_revoke,-39,2)
 kernel_trap(urmach_cap_register,-40,1)
 
