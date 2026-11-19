@@ -59,8 +59,9 @@ add_custom_command(
 add_custom_target(netname_public_header DEPENDS ${_NETNAME_PUB}/netname.h)
 add_dependencies(mig_mach_public_headers netname_public_header)
 
-# Library only contains the user-side MIG stub
-add_library(libnetname STATIC ${NETNAME_USER_C})
+# The user-side MIG stub, and netname_wait(), which waits for a name on its
+# check-in (#696).
+add_library(libnetname STATIC ${NETNAME_USER_C} netname_wait.c)
 
 add_dependencies(libnetname mig_mach_public_headers)
 
@@ -89,10 +90,11 @@ set_target_properties(libnetname PROPERTIES
 )
 
 # PIC variant for the umbrella libc.so (#234 incr 2b).  Only Mach RPC stubs
-# (no libc-level types) → a plain PIC clone is ABI-safe; flags/includes
-# copied from the base target.
+# and netname_wait(), which calls Mach and nothing of libc's (no libc-level
+# types) → a plain PIC clone is ABI-safe; flags/includes copied from the base
+# target.
 if(UROS_BUILD_MUSL)
-  add_library(libnetname-pic STATIC ${NETNAME_USER_C})
+  add_library(libnetname-pic STATIC ${NETNAME_USER_C} netname_wait.c)
   add_dependencies(libnetname-pic mig_mach_public_headers)
   set_target_properties(libnetname-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_compile_options(libnetname-pic PRIVATE
