@@ -2414,6 +2414,31 @@ subsystem_name_is_not_a_pointer(void)
  * (#591).
  */
 /*
+ * #747: a buffer's capability goes to the block server as a child derived for
+ * it, named by the handle it reads through.  A capability is good for the task
+ * it was issued to, and the block server is the one that presents it to the
+ * kernel, for every page.  The parent stays this task's: revoking it revokes
+ * the child, and the mappings the child bought with it.
+ */
+static kern_return_t
+ct_lend(mach_port_t handle, const struct uros_cap *mine, struct uros_cap *lent)
+{
+    memset(lent, 0, sizeof(*lent));
+    return cap_derive_for(mine, mine->allowed_ops, 0, handle, lent);
+}
+
+static kern_return_t
+ct_register_dma(mach_port_t handle, const struct uros_cap *mine)
+{
+    struct uros_cap lent;
+    kern_return_t   kr = ct_lend(handle, mine, &lent);
+
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&lent, sizeof(lent));
+    return kr;
+}
+
+/*
  * ── [15] The master device port is a way around the manifest (#511) ──────
  *
  * 🔴 THIS TASK'S OWN POLICY FILE SAYS IT MAY NOT DRIVE PCI HARDWARE, and
@@ -2657,7 +2682,7 @@ a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
             goto out;
         }
 
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
         if (kr != KERN_SUCCESS) {
             printf("cap_test: [12] WRONG — the block server would not take "
                    "the capability (kr=%d)\n", (int)kr);
@@ -2932,7 +2957,7 @@ b2_hand(mach_port_t handle, uint64_t region, uint32_t type)
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
     if (kr != KERN_SUCCESS)
         return kr;
-    return device_register_dma(handle, (char *)&t, sizeof(t));
+    return ct_register_dma(handle, &t);
 }
 
 /* Fill the page with 0xA5, read 4 KiB into it: kr, and what +1080 holds. */
@@ -3079,7 +3104,7 @@ revoking_a_capability_takes_the_mapping_down(mach_port_t device_port,
        : cap_request(RESOURCE_DMA_BUFFER, r.region,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(h, (char *)&t, sizeof(t));
+        kr = ct_register_dma(h, &t);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [20] WRONG — %s is registered, and no page was "
                "handed over (kr=%d) (#591)\n", name, (int)kr);
@@ -3130,7 +3155,7 @@ a_handle_refuses_rather_than_evicts(mach_port_t device_port,
 {
     mach_port_t     h, h2;
     struct b2_page  r;
-    struct uros_cap t[5];
+    struct uros_cap t[5], lent[5];	/* #747: the same child, handed again */
     kern_return_t   kr[5], kr_again, kr_read, kr_new;
     unsigned        magic;
     int             intact, i, ok;
@@ -3149,15 +3174,17 @@ a_handle_refuses_rather_than_evicts(mach_port_t device_port,
                             CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
                             0, &t[i]);
         if (kr[i] == KERN_SUCCESS)
-            kr[i] = device_register_dma(h, (char *)&t[i], sizeof(t[i]));
+            kr[i] = ct_lend(h, &t[i], &lent[i]);
+        if (kr[i] == KERN_SUCCESS)
+            kr[i] = device_register_dma(h, (char *)&lent[i], sizeof(lent[i]));
     }
-    kr_again = device_register_dma(h, (char *)&t[0], sizeof(t[0]));
+    kr_again = device_register_dma(h, (char *)&lent[0], sizeof(lent[0]));
     kr_read = b2_read(h, &r, &magic, &intact);
     b2_close(h);
 
     h2 = b2_open(part_port, name);
     kr_new = h2 == MACH_PORT_NULL ? KERN_FAILURE
-           : device_register_dma(h2, (char *)&t[4], sizeof(t[4]));
+           : ct_register_dma(h2, &t[4]);
     b2_close(h2);
     b2_free(device_port, &r);
 
@@ -3253,7 +3280,7 @@ a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
        : cap_request(RESOURCE_DMA_BUFFER, r.region,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(h, (char *)&t, sizeof(t));
+        kr = ct_register_dma(h, &t);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [26] WRONG — %s is registered, and no page was "
                "handed over (kr=%d) (#591)\n", name, (int)kr);
@@ -3368,7 +3395,7 @@ ct27_buffer(mach_port_t device_port, mach_port_t handle, vm_address_t *kva,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
                      &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     return kr;
 }
 
@@ -3671,7 +3698,7 @@ ct36_buffer(mach_port_t device_port, mach_port_t handle, vm_address_t *kva,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
                      &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     return kr;
 }
 
@@ -3881,7 +3908,7 @@ many_pages_in_one_request(mach_port_t device_port, mach_port_t part_port,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
                      0, &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [25] WRONG — %s: the buffer was not handed over "
                "(kr=%d) (#591)\n", name, (int)kr);
@@ -4004,7 +4031,7 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
                      0, &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [14] WRONG — %s: the buffer was not handed "
                "over (kr=%d)\n", name, (int)kr);
@@ -4107,7 +4134,7 @@ ct14_write_and_put_back(mach_port_t device_port, mach_port_t handle,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
                      &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS)
         printf("cap_test: [14] WRONG — %s: the buffer was not handed over "
                "(kr=%d)\n", tname, (int)kr);
