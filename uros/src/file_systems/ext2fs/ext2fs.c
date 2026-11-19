@@ -149,6 +149,7 @@
 #include <mach.h>
 #include <mach/clock.h>		/* #290: BATTERY_CLOCK, clock_get_time */
 #include <mach/mach_traps.h>	/* #290: mach_host_self */
+#include <mach/mach_host.h>	/* #912: host_info, the inode cache's size */
 
 /*
  * MIG user stubs from ahci_batch.defs (subsystem 2950).
@@ -541,11 +542,27 @@ static int write_super(
  * ext2_get_mount().
  */
 
-#define ICACHE_SIZE	16		/* must be power of 2 */
-#define ICACHE_HASH(ino) ((ino) & (ICACHE_SIZE - 1))
+/*
+ * #912: the inode cache is set-associative, ICACHE_WAYS ways a set, the least
+ * recently used way replaced, and its set picked by a multiplicative hash.  It
+ * was 16 slots, one per ino & 15: on the root disk / is inode 2 and
+ * /mach_servers inode 18, so a walk through /mach_servers evicted each with
+ * the other, two disk reads of 1.5 ms per stat() under KVM, every time.
+ *
+ * A mount ext2_get_mount() makes for itself -- ext_server's, which last -- is
+ * given a table sized when its superblock is read: the smaller of 1/256 of
+ * the machine's memory and the filesystem's own inode count, about 15,000
+ * inodes on a 512 MB machine.  vm_allocate()'s memory is only backed where it
+ * is touched.  A mount the dispatch layer allocates (file_system.c) is freed
+ * whole when a probe fails, with no hook for what hangs off it, so it keeps
+ * the table inside the mount: ICACHE_SETS_MIN sets, four times the old one.
+ */
+#define ICACHE_WAYS	4
+#define ICACHE_SETS_MIN	16		/* a power of 2, at least 16 */
 
 struct icache_entry {
 	ino_t			ic_ino;		/* 0 = empty */
+	unsigned long long	ic_used;	/* m_icache_clock at the last use */
 	struct ext2_inode	ic_inode;	/* cached inode data */
 };
 
@@ -571,7 +588,21 @@ struct ext2_mount {
 	struct ext2_group_desc	*m_gd;
 	vm_size_t		 m_gd_size;
 	int			 m_nindir[NIADDR];
-	struct icache_entry	 m_icache[ICACHE_SIZE];
+	int			 m_own;		/* #912: ext2_get_mount() made it */
+	/*
+	 * #912: the inode cache, under ext2_icache_lock.  m_icache is
+	 * m_icache_sets * ICACHE_WAYS entries -- m_icache_min until the mount
+	 * is given a larger table -- and m_icache_shift is 32 less the log2 of
+	 * m_icache_sets.  The counters are this mount's since it was made.
+	 */
+	struct icache_entry	*m_icache;
+	unsigned int		 m_icache_sets;
+	unsigned int		 m_icache_shift;
+	unsigned long long	 m_icache_clock;
+	unsigned long		 m_icache_hits;
+	unsigned long		 m_icache_misses;
+	unsigned long		 m_itable_reads;	/* read_inode's disk reads */
+	struct icache_entry	 m_icache_min[ICACHE_SETS_MIN * ICACHE_WAYS];
 	struct ext2_vnode	 m_vnode_table[VNODE_TABLE_SIZE];
 	struct dcache_entry	 m_dcache[DCACHE_SIZE];
 };
@@ -606,6 +637,7 @@ ext2_get_mount(struct device *dev)
 			sizeof(struct ext2_mount), TRUE) != KERN_SUCCESS)
 		return NULL;
 
+	((struct ext2_mount *)dev->mount_data)->m_own = 1;	/* #912 */
 	return (struct ext2_mount *)dev->mount_data;
 }
 
@@ -623,18 +655,75 @@ ext2_get_mount(struct device *dev)
  */
 static unsigned int ext2_icache_gen;
 
+/*
+ * #912: the set `ino' hashes to, its first way; the mount's table, the one
+ * inside it until it is given another.  Under ext2_icache_lock.  The
+ * multiplicative hash takes the product's top bits (Knuth's 2654435761, the
+ * golden ratio of 2^32): consecutive numbers, and numbers 16 apart, fall in
+ * sets far from one another.
+ */
+static struct icache_entry *
+icache_set(struct ext2_mount *m, ino_t ino)
+{
+	unsigned int h;
+
+	if (m->m_icache == NULL) {
+		m->m_icache = m->m_icache_min;
+		m->m_icache_sets = ICACHE_SETS_MIN;
+		m->m_icache_shift = 32 - 4;	/* log2(ICACHE_SETS_MIN) */
+	}
+	h = (unsigned int)((unsigned int)ino * 2654435761u) >> m->m_icache_shift;
+	return &m->m_icache[(size_t)h * ICACHE_WAYS];
+}
+
+/* The way that holds `ino' in `set', or NULL.  Under ext2_icache_lock. */
+static struct icache_entry *
+icache_way(struct icache_entry *set, ino_t ino)
+{
+	int w;
+
+	for (w = 0; w < ICACHE_WAYS; w++)
+		if (set[w].ic_ino == ino)
+			return &set[w];
+	return NULL;
+}
+
+/* `ino' in its set: the way it holds, else an empty one, else the least
+ * recently used.  Under ext2_icache_lock. */
+static void
+icache_put(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
+{
+	struct icache_entry *set = icache_set(m, ino);
+	struct icache_entry *e = icache_way(set, ino);
+	int w;
+
+	if (e == NULL)
+		e = icache_way(set, 0);
+	if (e == NULL)
+		for (e = &set[0], w = 1; w < ICACHE_WAYS; w++)
+			if (set[w].ic_used < e->ic_used)
+				e = &set[w];
+	e->ic_ino = ino;
+	e->ic_inode = *inode;
+	e->ic_used = ++m->m_icache_clock;
+}
+
 static int
 icache_get(struct ext2_mount *m, ino_t ino, struct ext2_inode *out,
 	   unsigned int *gen)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+	struct icache_entry *e;
 	int hit = 0;
 
 	pthread_mutex_lock(&ext2_icache_lock);
-	if (e->ic_ino == ino) {
+	e = icache_way(icache_set(m, ino), ino);
+	if (e != NULL) {
 		*out = e->ic_inode;
+		e->ic_used = ++m->m_icache_clock;
+		m->m_icache_hits++;
 		hit = 1;
-	}
+	} else
+		m->m_icache_misses++;
 	*gen = ext2_icache_gen;
 	pthread_mutex_unlock(&ext2_icache_lock);
 	return hit;
@@ -645,13 +734,9 @@ static void
 icache_fill(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode,
 	    unsigned int gen)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
-
 	pthread_mutex_lock(&ext2_icache_lock);
-	if (gen == ext2_icache_gen) {
-		e->ic_ino = ino;
-		e->ic_inode = *inode;
-	}
+	if (gen == ext2_icache_gen)
+		icache_put(m, ino, inode);
 	pthread_mutex_unlock(&ext2_icache_lock);
 }
 
@@ -659,11 +744,8 @@ icache_fill(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode,
 static void
 icache_insert(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
-
 	pthread_mutex_lock(&ext2_icache_lock);
-	e->ic_ino = ino;
-	e->ic_inode = *inode;
+	icache_put(m, ino, inode);
 	ext2_icache_gen++;
 	pthread_mutex_unlock(&ext2_icache_lock);
 }
@@ -671,13 +753,91 @@ icache_insert(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
 static void
 icache_invalidate(struct ext2_mount *m, ino_t ino)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+	struct icache_entry *e;
 
 	pthread_mutex_lock(&ext2_icache_lock);
-	if (e->ic_ino == ino)
+	e = icache_way(icache_set(m, ino), ino);
+	if (e != NULL)
 		e->ic_ino = 0;
 	ext2_icache_gen++;
 	pthread_mutex_unlock(&ext2_icache_lock);
+}
+
+/*
+ * #912: a mount ext2_get_mount() made is given its table once its superblock
+ * is known, before any inode has been cached in the one inside it: the
+ * smaller of 1/256 of the machine's memory and the filesystem's inode count,
+ * rounded down to a power of 2 of sets.  A table no larger than the one
+ * inside, or one vm_allocate() refuses, leaves the mount with that one.
+ */
+static void
+icache_size(struct ext2_mount *m, unsigned int inodes)
+{
+	host_basic_info_data_t	info;
+	mach_msg_type_number_t	cnt = HOST_BASIC_INFO_COUNT;
+	mach_port_t		host = mach_host_self();
+	unsigned long long	budget, entries;
+	unsigned int		sets = ICACHE_SETS_MIN, shift = 32 - 4;
+	vm_address_t		table = 0;
+	kern_return_t		kr;
+
+	kr = host_info(host, HOST_BASIC_INFO, (host_info_t)&info, &cnt);
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (!m->m_own || kr != KERN_SUCCESS)
+		return;
+	budget = (unsigned long long)info.memory_size / 256u;
+	entries = budget / sizeof(struct icache_entry);
+	if (entries > inodes)
+		entries = inodes;
+	while ((unsigned long long)sets * 2u * ICACHE_WAYS <= entries &&
+	       shift > 1) {
+		sets *= 2;
+		shift--;
+	}
+	if (sets == ICACHE_SETS_MIN)
+		return;
+	if (vm_allocate(mach_task_self(), &table,
+			(vm_size_t)sets * ICACHE_WAYS * sizeof(struct icache_entry),
+			TRUE) != KERN_SUCCESS) {
+		printf("ext2: no room for an inode cache of %u sets; this mount "
+		       "keeps the %u of its own (#912)\n", sets,
+		       (unsigned)ICACHE_SETS_MIN);
+		return;
+	}
+	pthread_mutex_lock(&ext2_icache_lock);
+	m->m_icache = (struct icache_entry *)table;
+	m->m_icache_sets = sets;
+	m->m_icache_shift = shift;
+	ext2_icache_gen++;	/* a fill read before it would go to the old table */
+	pthread_mutex_unlock(&ext2_icache_lock);
+	printf("ext2: an inode cache of %u sets of %u ways, %llu KiB, for %u "
+	       "inodes (#912)\n", sets, (unsigned)ICACHE_WAYS,
+	       (unsigned long long)sets * ICACHE_WAYS *
+	       sizeof(struct icache_entry) / 1024u, inodes);
+}
+
+/*
+ * #912: what the inode cache has answered on the mount of `dev' since it was
+ * made -- hits, misses, and read_inode's disk reads of the inode table -- and
+ * its sets, for ext_server's check of it.  0 if `dev' has no mount yet.
+ */
+int
+ext2fs_icache_counts(struct device *dev, unsigned long *hits,
+		     unsigned long *misses, unsigned long *reads,
+		     unsigned int *sets)
+{
+	struct ext2_mount *m = (struct ext2_mount *)dev->mount_data;
+
+	if (m == NULL)
+		return 0;
+	pthread_mutex_lock(&ext2_icache_lock);
+	(void) icache_set(m, 0);	/* the table, if none was set yet */
+	*hits = m->m_icache_hits;
+	*misses = m->m_icache_misses;
+	*reads = m->m_itable_reads;
+	*sets = m->m_icache_sets;
+	pthread_mutex_unlock(&ext2_icache_lock);
+	return 1;
 }
 
 /*
@@ -875,6 +1035,14 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 			 &buf_size);
 	if (rc != KERN_SUCCESS)
 	    return (rc);
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m) {
+		pthread_mutex_lock(&ext2_icache_lock);
+		m->m_itable_reads++;			/* #912 */
+		pthread_mutex_unlock(&ext2_icache_lock);
+	}
+	}
 
 	{
 	    struct ext2_inode *raw_inode;
@@ -940,6 +1108,34 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	fp->f_inode_blk_size = buf_size;
 
 	return (0);
+}
+
+/*
+ * #912: inode `ino' of the mount of `dev', read as a path walk reads it --
+ * through the inode cache, on a handle of its own with no vnode, so that no
+ * open file's inode is touched -- and the handle's buffers freed.  For
+ * ext_server's check of the cache; the mount must have been opened before.
+ */
+int
+ext2fs_icache_read(struct device *dev, ino_t ino)
+{
+	struct ext2fs_file	*fp;
+	int			 rc;
+
+	if (dev->mount_data == NULL)
+		return FS_NO_ENTRY;
+	fp = (struct ext2fs_file *)malloc(sizeof(struct ext2fs_file));
+	if (fp == NULL)
+		return FS_NO_ENTRY;
+	memset(fp, 0, sizeof(*fp));
+	fp->f_dev = *dev;
+	fp->f_ic = &fp->f_ic_scratch;
+	rc = mount_fs(fp);
+	if (rc == 0)
+		rc = read_inode(ino, fp);
+	free_file_buffers(fp);
+	free(fp);
+	return rc;
 }
 
 /*
@@ -2154,6 +2350,7 @@ mount_fs(register struct ext2fs_file	*fp)
 		m->m_fs = fp->f_fs;
 		m->m_gd = fp->f_gd;
 		m->m_gd_size = fp->f_gd_size;
+		icache_size(m, (unsigned int)fp->f_fs->s_inodes_count); /* #912 */
 	}
 
 	{

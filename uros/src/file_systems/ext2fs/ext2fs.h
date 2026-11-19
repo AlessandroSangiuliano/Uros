@@ -160,6 +160,13 @@ extern int ext2fs_write_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
 extern int ext2fs_sync(fs_private_t);
 extern int ext2fs_flush_metadata(fs_private_t);
 
+/* #912: the inode cache of the mount of a device -- its counts, and one
+ * inode read on a handle of its own, for ext_server's check of it. */
+extern int ext2fs_icache_counts(struct device *, unsigned long *hits,
+				unsigned long *misses, unsigned long *reads,
+				unsigned int *sets);
+extern int ext2fs_icache_read(struct device *, ino_t);
+
 /* #284: mark the volume cleanly unmounted (set EXT2_VALID_FS + flush sb). */
 extern int ext2fs_mark_clean_dev(struct device *dev);
 
