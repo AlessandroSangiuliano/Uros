@@ -946,7 +946,8 @@ virtio_mod_write_sectors(void *priv, int disk, uint32_t lba,
  * permission check.
  *
  * The segment convention is AHCI's, because it is the caller's: one entry per
- * page, up to 4096 bytes each, the last one carrying the remainder.
+ * 4096 bytes of the transfer, each from its page of the list, the last one
+ * carrying the remainder.  Pages past the bytes are not used (#712).
  */
 static int
 virtio_submit_phys(struct virtio_state *st, uint32_t type, uint32_t lba,
@@ -955,20 +956,40 @@ virtio_submit_phys(struct virtio_state *st, uint32_t type, uint32_t lba,
 {
 	uint64_t	addr[VIRTIO_PHYS_SEGS_MAX];
 	unsigned int	len[VIRTIO_PHYS_SEGS_MAX];
-	unsigned int	i, left;
+	unsigned int	i, left, n_seg;
 
 	if (n_pa == 0 || total_bytes == 0)
 		return -1;
 
-	if (n_pa > VIRTIO_PHYS_SEGS_MAX) {
+	/*
+	 * #712: one descriptor per 4096 bytes of the transfer, never one per
+	 * page given.  A page past the bytes was a descriptor of length 0, and
+	 * QEMU marks a device broken at a zero-sized buffer (hw/virtio/virtio.c,
+	 * virtqueue_map_desc()): every request of every client then timed out.
+	 * The server trims the list (blk_phys_list()); this is the driver not
+	 * taking a longer one on trust, as AHCI already did not.
+	 *
+	 * ⚠️ And the pages have to account for the bytes.  A list too short for
+	 * what was asked would otherwise submit a chain that transfers less
+	 * than `total_bytes' and report success.
+	 */
+	n_seg = (unsigned int)(((uint64_t)total_bytes + 4095u) / 4096u);
+	if (n_pa < n_seg) {
+		printf("virtio: %u pages cover %llu bytes but %u were asked for "
+		       "— refusing\n", n_pa,
+		       (unsigned long long)n_pa * 4096u, total_bytes);
+		return -1;
+	}
+
+	if (n_seg > VIRTIO_PHYS_SEGS_MAX) {
 		printf("virtio: %u physical segments asked for and this driver "
 		       "carries %u — refusing rather than transferring part of "
-		       "the request\n", n_pa, VIRTIO_PHYS_SEGS_MAX);
+		       "the request\n", n_seg, VIRTIO_PHYS_SEGS_MAX);
 		return -1;
 	}
 
 	left = total_bytes;
-	for (i = 0; i < n_pa; i++) {
+	for (i = 0; i < n_seg; i++) {
 		unsigned int chunk = left > 4096u ? 4096u : left;
 
 		addr[i] = (uint64_t)phys_addrs[i];
@@ -976,18 +997,7 @@ virtio_submit_phys(struct virtio_state *st, uint32_t type, uint32_t lba,
 		left   -= chunk;
 	}
 
-	/*
-	 * ⚠️ The pages have to account for the bytes.  A list too short for
-	 * what was asked would otherwise submit a chain that transfers less
-	 * than `total_bytes' and report success.
-	 */
-	if (left != 0) {
-		printf("virtio: %u pages cover %u bytes but %u were asked for "
-		       "— refusing\n", n_pa, total_bytes - left, total_bytes);
-		return -1;
-	}
-
-	return virtio_blk_request_sg(st, type, (uint64_t)lba, addr, len, n_pa);
+	return virtio_blk_request_sg(st, type, (uint64_t)lba, addr, len, n_seg);
 }
 
 static int
