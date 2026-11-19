@@ -11,11 +11,12 @@
 # ~/uros-tests/ci-campaign.csv, where they accumulate with the home machines'
 # rows, and keeps each job's artifact under ~/uros-tests/ci/<run-id>/job<N>/.
 # A row's log column then names the local copy of a WRONG boot's log, or of a
-# boot stopped at the job's time limit, and is "-" for a boot that was as it
-# should be, whose log stayed on the runner.  Of each job it says whether it
-# finished, from its job.txt: or failed, and why, or stopped at its time limit,
-# or cut off before its summary, or a round short -- and the boots it got, of
-# those it planned where its job.txt says (#951).
+# boot stopped -- at the job's time limit, or by a SIGTERM from outside, as a
+# cancelled run's -- and is "-" for a boot that was as it should be, whose log
+# stayed on the runner.  Of each job it says whether it finished, from its
+# job.txt: or failed, and why, or stopped, and by what, or cut off before its
+# summary, or a round short -- and the boots it got, of those it planned where
+# its job.txt says (#951).
 # Times are the runner's, in UTC.  Compare rows within one job only: the
 # runner's clock is not ours to set.
 #
@@ -74,8 +75,12 @@ esac
 # Boots and WRONG by entry and accelerator, from rows on stdin.  An entry is its
 # number with the options and processors that make it a line of its own in the
 # merge test, so 14 at -smp 1 is not added into 14 at -smp 4.
-# #951: a boot stopped at a job's time limit has a row of its own, "stopped",
-# and is neither a boot nor a WRONG: it is listed, and counted apart.
+# #951: a boot stopped -- at a job's time limit, or by a SIGTERM from outside --
+# has a row of its own, "stopped", and is neither a boot nor a WRONG: it is
+# listed, and counted apart.  What stopped it is its job's to say, in job.txt:
+# the row does not hold it, so a count of them names no cause.  It said "at a
+# time limit" of the boot of a run cancelled by hand, 44345740779, whose job's
+# line said "by SIGTERM from outside".
 summary() {
 	awk -F, '
 	$13 ~ /^stopped/ {
@@ -99,7 +104,7 @@ summary() {
 			printf "  %-38s %6d boots %5d WRONG\n", k, n[k], w[k] + 0 | cmd
 		close(cmd)
 		printf "%s", list
-		printf "  in all: %d boots, %d WRONG%s\n", all, wrong, (stopped ? sprintf(", %d stopped at a time limit", stopped) : "")
+		printf "  in all: %d boots, %d WRONG%s\n", all, wrong, (stopped ? sprintf(", %d stopped", stopped) : "")
 	}'
 }
 
@@ -227,7 +232,7 @@ import() {	# run-id description artifacts-the-api-listed
 			a = ""; for (k in acc) a = a " " k
 			t = ""; for (k in tree) t = t " " k
 			printf "pull-results: %s: %d job(s), %d boots, %d WRONG%s; tree%s; accelerators%s\n",
-				what, jobs, n, w, (s ? sprintf(", %d stopped at a time limit", s) : ""),
+				what, jobs, n, w, (s ? sprintf(", %d stopped", s) : ""),
 				(t == "" ? " -" : t), (a == "" ? " -" : a)
 		}' "$rows"
 }
