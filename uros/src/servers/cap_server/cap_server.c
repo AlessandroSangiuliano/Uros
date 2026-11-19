@@ -46,6 +46,8 @@
 #include <mach/mach_traps.h>	/* urmach_cap_revoke (#432) */
 #include <mach/mach_host.h>	/* urmach_task_port_rights (#938) */
 #include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
+#include <mach/clock.h>		/* clock_get_time (#747) */
+#include <mach/clock_types.h>	/* URMACH_CAP_CLOCK (#747) */
 #include <mach_init.h>
 #include <sa_mach.h>
 #include <stdio.h>
@@ -233,10 +235,78 @@ policy_allows_v1(mach_port_t sender,
  *   routine cap_derive(cap_server, parent; reduced_ops,
  *                      lifetime_ms; out child);
  *   routine cap_revoke(cap_server, cap_id);
- *   routine cap_verify(cap_server, token, op, resource_id);
+ *   routine cap_verify(cap_server, token, resource_type, op, resource_id);
  *
  * MIG synthesizes the out/in array lengths as mach_msg_type_number_t.
  * ============================================================ */
+
+/*
+ * ── A token's deadline (#747) ─────────────────────────────────────────────
+ *
+ * cap_acquire and cap_derive took a lifetime and threw it away, `(void)
+ * lifetime_ms', writing every deadline 0: a caller that asked for 100 ms was
+ * told success and given a token that never ended.  The deadline is written on
+ * URMACH_CAP_CLOCK, nanoseconds since boot, the clock the kernel checks it
+ * against in the trap; its service port is asked for once and kept.
+ */
+static mach_port_t cap_clock_port = MACH_PORT_NULL;
+
+/* Now on the capability clock; 0 when it cannot be read. */
+static int
+cap_now_ns(uint64_t *now)
+{
+    tvalspec_t ts;
+
+    if (cap_clock_port == MACH_PORT_NULL) {
+        mach_port_t   host = mach_host_self();
+        kern_return_t kr = host_get_clock_service(host, URMACH_CAP_CLOCK,
+                                                  &cap_clock_port);
+
+        (void)mach_port_deallocate(mach_task_self(), host);
+        if (kr != KERN_SUCCESS) {
+            cap_clock_port = MACH_PORT_NULL;
+            return 0;
+        }
+    }
+    if (clock_get_time(cap_clock_port, &ts) != KERN_SUCCESS)
+        return 0;
+    *now = (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
+    return 1;
+}
+
+/*
+ * The deadline of a token asked for `lifetime_ms' from now, and never past
+ * `ceiling', its parent's deadline (0: none).  0 is no deadline.  A lifetime
+ * asked for when the clock cannot be read is refused, not dropped: -1.
+ */
+static int
+cap_deadline(unsigned int lifetime_ms, uint64_t ceiling, uint64_t *out)
+{
+    uint64_t now, d;
+
+    if (lifetime_ms == 0) {
+        *out = ceiling;
+        return 0;
+    }
+    if (!cap_now_ns(&now))
+        return -1;
+    d = now + (uint64_t)lifetime_ms * 1000000ULL;
+    *out = (ceiling != 0 && ceiling < d) ? ceiling : d;
+    return 0;
+}
+
+/* Is the token past its deadline?  One that cannot be read against is. */
+static kern_return_t
+cap_expired(const struct uros_cap *t)
+{
+    uint64_t now;
+
+    if (t->expires == 0)
+        return KERN_SUCCESS;
+    if (!cap_now_ns(&now) || now >= t->expires)
+        return CAP_ERR_EXPIRED;
+    return KERN_SUCCESS;
+}
 
 kern_return_t
 cap_acquire(mach_port_t             server,
@@ -390,6 +460,15 @@ cap_acquire(mach_port_t             server,
 
     }	/* resource_type < RESOURCE_TYPE_MAX */
 
+    uint64_t expires;
+
+    if (cap_deadline(lifetime_ms, 0, &expires) != 0) {
+        printf("cap: DENY port=0x%x: a lifetime of %u ms was asked for, and "
+               "the clock it would be kept on cannot be read (#747)\n",
+               (unsigned)g_request_local_port, lifetime_ms);
+        return CAP_ERR_INTERNAL;
+    }
+
     struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
     if (!e) return CAP_ERR_NO_MEMORY;
     memset(e, 0, sizeof(*e));
@@ -403,8 +482,7 @@ cap_acquire(mach_port_t             server,
     t->parent_cap_id = 0;
     t->depth         = 0;
     t->delegable     = 1;
-    t->expires       = 0;   /* v1: ignore lifetime_ms until clock wiring lands */
-    (void)lifetime_ms;
+    t->expires       = expires;		/* #747 */
     t->revoked       = 0;
     t->is_generic    = 0;
     t->first_child_cap_id = 0;
@@ -441,7 +519,6 @@ cap_derive(mach_port_t             server,
            mach_msg_type_number_t *child_len)
 {
     (void)server;
-    (void)lifetime_ms;
 
     if (parent_len != sizeof(struct uros_cap))
         return CAP_ERR_INVALID_TOKEN;
@@ -453,12 +530,19 @@ cap_derive(mach_port_t             server,
 
     if (!cap_verify_hmac(&parent)) return CAP_ERR_INVALID_TOKEN;
     if (parent.revoked)            return CAP_ERR_REVOKED;
+    if (cap_expired(&parent) != KERN_SUCCESS) return CAP_ERR_EXPIRED; /* #747 */
     if (!parent.delegable)         return CAP_ERR_NOT_DELEGABLE;
     if (parent.depth + 1 > CAP_MAX_DEPTH) return CAP_ERR_DEPTH_EXCEEDED;
     if ((reduced_ops & ~parent.allowed_ops) != 0) return CAP_ERR_OP_NOT_ALLOWED;
 
     struct cap_entry *parent_entry = cap_table_find_by_id(parent.cap_id);
     if (!parent_entry || parent_entry->token.revoked) return CAP_ERR_REVOKED;
+
+    /* #747: its own lifetime, and never past its parent's. */
+    uint64_t expires;
+
+    if (cap_deadline(lifetime_ms, parent.expires, &expires) != 0)
+        return CAP_ERR_INTERNAL;
 
     struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
     if (!e) return CAP_ERR_NO_MEMORY;
@@ -470,6 +554,7 @@ cap_derive(mach_port_t             server,
     t->allowed_ops   = reduced_ops;
     t->parent_cap_id = parent.cap_id;
     t->depth         = parent.depth + 1;
+    t->expires       = expires;		/* #747 */
     t->first_child_cap_id  = 0;
     t->next_sibling_cap_id = parent_entry->token.first_child_cap_id;
 
@@ -1025,6 +1110,7 @@ cap_verify(mach_port_t             server,
 
     if (!cap_verify_hmac(&token))           return CAP_ERR_INVALID_TOKEN;
     if (token.revoked)                      return CAP_ERR_REVOKED;
+    if (cap_expired(&token) != KERN_SUCCESS) return CAP_ERR_EXPIRED; /* #747 */
     /* #745: the kind as well as the id, as the trap has since #599. */
     if (token.resource_type != resource_type) return CAP_ERR_RESOURCE_MISMATCH;
     if (token.resource_id != resource_id)   return CAP_ERR_RESOURCE_MISMATCH;
