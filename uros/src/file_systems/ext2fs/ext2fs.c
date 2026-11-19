@@ -535,6 +535,13 @@ static void unmount_fs(
 static int write_super(
 		struct ext2fs_file *);
 
+static int ext2_fill(
+		void *,
+		daddr_t,
+		vm_offset_t,
+		vm_size_t,
+		vm_offset_t);
+
 /*
  * Per-mount filesystem state.
  * One instance per mounted partition, hung off struct device.mount_data.
@@ -979,23 +986,102 @@ free_file_buffers(register struct ext2fs_file *fp)
 	}
 }
 
+/* #912: the fill of an inode-table block, which says that it ran. */
+struct itable_fill_ctx {
+	struct ext2fs_file	*fp;
+	int			 filled;
+};
+
+static int
+itable_fill(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
+	    vm_offset_t phys)
+{
+	struct itable_fill_ctx *c = (struct itable_fill_ctx *)ctx;
+
+	c->filled = 1;
+	return ext2_fill(c->fp, block, data, size, phys);
+}
+
+/*
+ * #912: `len' bytes at `off' of inode-table block `disk_block', into `out' --
+ * through the page cache, so that an inode the inode cache let go is read from
+ * memory again while its block is held there.  It was read from the device on
+ * every miss.  Copied out under the cache's lock (page_cache_copyout): a flush
+ * on the writeback thread may be giving the cache that block at the same time
+ * (itable_wrote).  From the device when there is no cache, no slot to give, or
+ * the block was discarded while held.  m_itable_reads counts each read that
+ * went to the device.
+ */
+static int
+itable_read(struct ext2fs_file *fp, daddr_t disk_block, vm_size_t off,
+	    vm_size_t len, void *out)
+{
+	struct ext2_mount	*m = (struct ext2_mount *)fp->f_dev.mount_data;
+	struct itable_fill_ctx	 c;
+	struct page_cache_entry	*e = NULL;
+	vm_offset_t		 buf;
+	vm_size_t		 buf_size;
+	unsigned int		 reads = 0;
+	int			 rc = 0, got = 0;
+
+	c.fp = fp;
+	c.filled = 0;
+	if (fp->f_dev.cache) {
+		rc = page_cache_get(fp->f_dev.cache, disk_block, itable_fill,
+				    &c, &e);
+		if (rc != 0)
+			return rc;
+		reads += c.filled;
+		if (e != NULL) {
+			got = page_cache_copyout(fp->f_dev.cache, e, off, len,
+						 (vm_offset_t)out) ==
+			      KERN_SUCCESS;
+			page_cache_put(fp->f_dev.cache, e);
+		}
+	}
+	if (!got) {
+		rc = ext2_dev_read(&fp->f_dev,
+				   (recnum_t) dbtorec(&fp->f_dev,
+					ext2_fsbtodb(fp->f_fs, disk_block)),
+				   (int) EXT2_BLOCK_SIZE(fp->f_fs),
+				   (char **)&buf, &buf_size);
+		if (rc == KERN_SUCCESS) {
+			reads++;
+			if (off > buf_size || len > buf_size - off)
+				rc = FS_CORRUPT;
+			else
+				memcpy(out, (char *)buf + off, len);
+			(void) vm_deallocate(mach_task_self(), buf, buf_size);
+		}
+	}
+	if (m != NULL && reads != 0) {
+		pthread_mutex_lock(&ext2_icache_lock);
+		m->m_itable_reads += reads;
+		pthread_mutex_unlock(&ext2_icache_lock);
+	}
+	return rc;
+}
+
 /*
  * Read a new inode into a file structure.
  *
  * Checks the inode cache first; on hit, copies the cached inode
- * directly without any device I/O.  On miss, reads from disk and
- * populates the cache.
+ * directly without any device I/O.  On miss, reads its block through the
+ * page cache (itable_read, #912) and populates the inode cache.
  */
 static int
 read_inode(ino_t inumber, register struct ext2fs_file *fp)
 {
-	vm_offset_t		buf;
-	vm_size_t		buf_size;
+	struct ext2_inode	raw;
 	register
 	struct ext2_super_block	*fs;
 	daddr_t			disk_block;
 	kern_return_t		rc;
 	unsigned int		icache_gen = 0;
+
+	/* #912: the copy is the classic inode, the smallest one on a disk */
+	_Static_assert(sizeof(struct ext2_inode) == 128,
+		       "struct ext2_inode is not the 128-byte on-disk inode");
 
 #ifdef	DEBUG
 	int	i = inumber;
@@ -1028,41 +1114,29 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	}
 	}
 
-	/* Cache miss — read from disk */
+	/* Inode-cache miss: its block, through the page cache (#912) */
 	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 
-	rc = ext2_dev_read(&fp->f_dev,
-			 (recnum_t) dbtorec(&fp->f_dev,
-					    ext2_fsbtodb(fp->f_fs, disk_block)),
-			 (int) EXT2_BLOCK_SIZE(fs),
-			 (char **)&buf,
-			 &buf_size);
+	/*
+	 * Locate the inode within the block.  We cannot simply
+	 * use pointer arithmetic on (struct ext2_inode *) because
+	 * sizeof(struct ext2_inode) is 128, while modern ext2
+	 * filesystems may use 256-byte (or larger) inodes.
+	 * Instead we compute the byte offset using the actual
+	 * on-disk inode size from the superblock -- and copy out the
+	 * 128 bytes this structure reads.
+	 */
+	rc = itable_read(fp, disk_block,
+			 (vm_size_t)ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs),
+			 sizeof(raw), &raw);
 	if (rc != KERN_SUCCESS)
 	    return (rc);
-	{
-	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
-	if (m) {
-		pthread_mutex_lock(&ext2_icache_lock);
-		m->m_itable_reads++;			/* #912 */
-		pthread_mutex_unlock(&ext2_icache_lock);
-	}
-	}
 
 	{
-	    struct ext2_inode *raw_inode;
+	    struct ext2_inode *raw_inode = &raw;
 	    struct ext2_inode *inode;
 	    unsigned long block;
 
-	    /*
-	     * Locate the inode within the block.  We cannot simply
-	     * use pointer arithmetic on (struct ext2_inode *) because
-	     * sizeof(struct ext2_inode) is 128, while modern ext2
-	     * filesystems may use 256-byte (or larger) inodes.
-	     * Instead we compute the byte offset using the actual
-	     * on-disk inode size from the superblock.
-	     */
-	    raw_inode = (struct ext2_inode *)
-		((char *)buf + ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs));
 	    inode = fp->f_ic;
 
 	    inode->i_mode = le16_to_cpu(raw_inode->i_mode);
@@ -1097,19 +1171,13 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	}
 
 	/*
-	 * Clear out the old buffers (this also frees the previous
-	 * f_inode_blk, so we must cache the new block afterwards).
+	 * Clear out the old buffers.  #912: no raw inode block is kept for a
+	 * new vnode, as on a hit of the inode cache: every flush reads the
+	 * block afresh under ext2_itable_lock (vnode_inode_block, #599),
+	 * because a copy kept from here undid the inodes made in the same block
+	 * since (8563299e).
 	 */
 	free_file_buffers(fp);
-
-	/*
-	 * The raw inode block, handed to a new vnode or freed.  #599: NOT for
-	 * write-back -- every flush reads the block afresh under
-	 * ext2_itable_lock (vnode_inode_block), because a copy kept from
-	 * here undid the inodes made in the same block since (8563299e).
-	 */
-	fp->f_inode_blk = buf;
-	fp->f_inode_blk_size = buf_size;
 
 	return (0);
 }
