@@ -1800,6 +1800,13 @@ icache_check(struct mount_context *mnt)
 #define ITC_FILES	4		/* creates, until two share a block */
 #define ITC_BYTES	100u		/* written by each write arm */
 
+/*
+ * #912: set once icache_check and itable_check have run on the mount at /.
+ * An ext_server that mounts no / -- ext_server_log, with -p for /log -- says
+ * so for both, so that every ext_server says something of them.
+ */
+static int root_checked;
+
 /* The inode of `path', or 0. */
 static ino_t
 itc_ino(struct device *dev, const char *path)
@@ -2235,6 +2242,7 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	if (strcmp(mount_path, "/") == 0) {
 		icache_check(mnt);
 		itable_check(mnt);
+		root_checked = 1;
 	}
 
 	/* Allocate per-mount receive port */
@@ -2789,6 +2797,13 @@ main(int argc, char **argv)
 		}
 
 		printf("ext2: %d partition(s) mounted\n", n_mounts);
+	}
+
+	if (!root_checked) {
+		printf("ext2: inode cache NOT ASKED -- nothing is mounted at / "
+		       "here (#912)\n");
+		printf("ext2: inode table NOT ASKED -- nothing is mounted at / "
+		       "here (#912)\n");
 	}
 
 	/* Start background writeback thread */
