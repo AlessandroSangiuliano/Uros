@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the owner cap_server writes -- every capability is issued with owner 0, as before; cap_test's [52] must say WRONG when a capability this task asked for does not name it
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[52\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 5e14484a..c52dc24b 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -502,7 +502,7 @@ cap_acquire(mach_port_t             server,
+     t->resource_type = resource_type;
+     t->resource_id   = resource_id;
+     t->allowed_ops   = ops;
+-    t->owner         = g_request_sender;	/* #747 */
++    t->owner         = 0;
+     t->parent_cap_id = 0;
+     t->depth         = 0;
+     t->delegable     = 1;

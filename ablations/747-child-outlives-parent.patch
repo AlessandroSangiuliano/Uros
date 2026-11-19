@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the ceiling on a child's deadline -- cap_deadline() gives a child the lifetime it asks for whatever its parent's; cap_test's [50] must say WRONG for a child asking for a hundred times its parent's lifetime
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[50\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 5e14484a..30f065ff 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -303,7 +303,7 @@ cap_deadline(unsigned int lifetime_ms, uint64_t ceiling, uint64_t *out)
+     if (!cap_now_ns(&now))
+         return -1;
+     d = now + (uint64_t)lifetime_ms * 1000000ULL;
+-    *out = (ceiling != 0 && ceiling < d) ? ceiling : d;
++    *out = d;
+     return 0;
+ }
+ 

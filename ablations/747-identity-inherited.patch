@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #747
+Takes out: each task's own identity -- task_create_local() gives a task its parent's security token again, as it did; cap_test's [51] must say WRONG when a task made now has this task's identity
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[51\] WRONG
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+index a10d28d5..2057f2f9 100644
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -797,7 +797,8 @@ task_create_local(
+                 new_task->wired_ledger_port = ledger_copy(root_wired_ledger);
+                 new_task->paged_ledger_port = ledger_copy(root_paged_ledger);
+ 	}
+-	new_task->sec_token = task_identity_new();	/* #747: its own */
++	new_task->sec_token = parent_task != TASK_NULL ? parent_task->sec_token
++	    : task_identity_new();
+ 	new_task->itk_space->is_identity = urmach_identity_of(new_task->sec_token);
+ 	pset_lock(pset);
+ 	pset_add_task(pset, new_task);

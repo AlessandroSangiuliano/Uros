@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the sender on mach_msg's fast path -- a send and a receive in one call carry the template's KERNEL_SECURITY_TOKEN again; cap_test's [51] must say WRONG when a message this task sends itself in one call comes with the kernel's identity
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[51\] WRONG
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index b09e2e4a..fb7fda6d 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1550,8 +1550,6 @@ urmach_msg_overwrite_trap_call(
+ 		bcopy(  (char *)&trailer_template,
+ 			(char *)trailer,
+ 			sizeof(trailer_template));
+-		/* #747: the template says the kernel; the sender is this task. */
+-		trailer->msgh_sender = current_task()->sec_token;
+ 
+ 		/*
+ 		 * 🔥 #392: THE SEND-SIDE COPY, and half of the ceiling on what

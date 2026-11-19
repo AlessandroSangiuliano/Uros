@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the sender in the block server's open -- the presenter is taken from the token's own owner, so a token is good for whoever holds its bytes, as before; fork_cap_test's [4] must say WRONG when a forked child opens disk0a with its parent's capability
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: fork_cap_test: \[4\] WRONG
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index 49204a83..7c024b10 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -425,7 +425,7 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
+ 	 * #747: presented by the task that sent the open, by the identity in its
+ 	 * trailer, and kept with the handle for every check after this one.
+ 	 */
+-	uint64_t presenter = blk_request_sender;
++	uint64_t presenter = token.owner;
+ 	kern_return_t kr = blk_token_check(&token, presenter,
+ 					   RESOURCE_BLK_DEVICE, op,
+ 					   resource_id);	/* #599: typed */
