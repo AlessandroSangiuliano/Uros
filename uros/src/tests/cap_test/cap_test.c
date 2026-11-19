@@ -1402,6 +1402,117 @@ a_capability_is_derived_to_a_named_task(void)
 }
 
 /*
+ * Test [54]: a handle opened on a capability with a deadline stops at it
+ * (#747).
+ *
+ * The block server asks an open handle's capability again when the revocation
+ * epoch moves, and a deadline does not move it: a handle opened on a
+ * capability asked for with a lifetime went on reading past it.  A handle whose
+ * capability has a deadline asks it on every use now.  So a read before the
+ * deadline must succeed -- the control -- and one after it must be refused
+ * with KERN_NO_ACCESS.  As in [50] the clock is read here, so that a control
+ * that could not be asked in time says NOT ASKED and not WRONG.
+ */
+#define CT54_MS		300u
+
+static int
+a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
+{
+    struct uros_cap        tok;
+    security_token_t       null_sec = { { 0, 0 } };
+    char                   blob[CAP_TOKEN_MAX];
+    mach_port_t            host = mach_host_self(), clk = MACH_PORT_NULL;
+    mach_port_t            h = MACH_PORT_NULL;
+    io_buf_ptr_t           buf = NULL;
+    mach_msg_type_number_t got = 0;
+    kern_return_t          kr, okr, r1 = KERN_FAILURE, r2 = KERN_FAILURE;
+    uint64_t               before, after, now;
+    unsigned int           waits = 0;
+
+    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [54] WRONG — the capability clock could not be "
+               "asked for: %d (#747)\n", (int)kr);
+        return 0;
+    }
+    memset(&tok, 0, sizeof(tok));
+    before = ct50_now(clk);
+    kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
+                     CAP_OP_BLK_READ, CT54_MS, &tok);
+    okr = KERN_FAILURE;
+    if (kr == KERN_SUCCESS) {
+        memcpy(blob, &tok, sizeof(tok));
+        okr = device_open_cap(part_port, MACH_PORT_NULL, D_READ, null_sec,
+                              (char *)name, blob,
+                              (mach_msg_type_number_t)sizeof(tok), &h);
+    }
+    if (okr == KERN_SUCCESS) {
+        r1 = device_read(h, 0, 0, 512, &buf, &got);
+        if (r1 == KERN_SUCCESS && buf != NULL && got > 0)
+            (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf, got);
+    }
+    after = ct50_now(clk);
+
+    if (before == 0 || after == 0 ||
+        (kr == KERN_SUCCESS && okr == KERN_SUCCESS && r1 != KERN_SUCCESS &&
+         after - before >= CT54_MS * 1000000ULL)) {
+        if (before == 0 || after == 0)
+            printf("cap_test: [54] WRONG — the capability clock could not be "
+                   "read (#747)\n");
+        else
+            printf("cap_test: [54] NOT ASKED — %llu ms passed between asking "
+                   "for the capability and the first read, past its lifetime "
+                   "of %u ms (#747)\n",
+                   (unsigned long long)((after - before) / 1000000ULL),
+                   CT54_MS);
+        if (okr == KERN_SUCCESS) {
+            (void)device_close(h);
+            (void)mach_port_deallocate(mach_task_self(), h);
+        }
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return before != 0 && after != 0;
+    }
+    now = after;
+    if (okr == KERN_SUCCESS) {
+        /* Past the deadline, by the clock it is written on, and a tick more. */
+        do {
+            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+            now = ct50_now(clk);
+        } while (now != 0 && now < tok.expires + 20000000ULL && ++waits < 200);
+        if (now != 0) {
+            buf = NULL;
+            got = 0;
+            r2 = device_read(h, 0, 0, 512, &buf, &got);
+            if (r2 == KERN_SUCCESS && buf != NULL && got > 0)
+                (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf, got);
+        }
+        (void)device_close(h);
+        (void)mach_port_deallocate(mach_task_self(), h);
+    }
+    (void)mach_port_deallocate(mach_task_self(), clk);
+
+    if (now == 0) {
+        printf("cap_test: [54] WRONG — the capability clock could not be read "
+               "while waiting for the deadline (#747)\n");
+        return 0;
+    }
+    if (kr == KERN_SUCCESS && okr == KERN_SUCCESS && r1 == KERN_SUCCESS &&
+        r2 == KERN_NO_ACCESS) {
+        printf("cap_test: [54] %s: a handle opened on a capability asked for "
+               "with %u ms read before its deadline and was refused with "
+               "KERN_NO_ACCESS after it (#747)\n", name, CT54_MS);
+        return 1;
+    }
+    printf("cap_test: [54] WRONG — %s: a capability asked for with %u ms "
+           "(%d), the open %d, a read before its deadline %d and one after "
+           "it %d, where that one must be refused with KERN_NO_ACCESS(%d) "
+           "(#747)\n", name, CT54_MS, (int)kr, (int)okr, (int)r1, (int)r2,
+           (int)KERN_NO_ACCESS);
+    return 0;
+}
+
+/*
  * Test [41]: no task gives bootstrap a provisioning port (#743).
  *
  * cap_provision_task answers on one port, and bootstrap provisions through
@@ -6127,6 +6238,13 @@ main(int argc, char **argv)
             }
         }
     }
+
+    /* #747: and a handle ends with its capability's deadline. */
+    if (found_name == NULL)
+        printf("cap_test: [54] NOT ASKED — no partition in the name server "
+               "(#747)\n");
+    else if (!a_handle_ends_with_its_deadline(part_port, found_name))
+        pass = 0;
 
     if (!bad_descriptor_unwind())
         pass = 0;
