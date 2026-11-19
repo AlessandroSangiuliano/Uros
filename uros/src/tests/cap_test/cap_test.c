@@ -1406,14 +1406,19 @@ a_capability_is_derived_to_a_named_task(void)
  * (#747).
  *
  * The block server asks an open handle's capability again when the revocation
- * epoch moves, and a deadline does not move it: a handle opened on a
- * capability asked for with a lifetime went on reading past it.  A handle whose
- * capability has a deadline asks it on every use now.  So a read before the
- * deadline must succeed -- the control -- and one after it must be refused
- * with KERN_NO_ACCESS.  As in [50] the clock is read here, so that a control
- * that could not be asked in time says NOT ASKED and not WRONG.
+ * epoch moves, and a deadline moved nothing: a handle opened on a capability
+ * asked for with a lifetime went on reading past it.  cap_server revokes a
+ * capability when its deadline comes now, which moves the epoch and sends the
+ * block server its notice.  So a read before the deadline must succeed -- the
+ * control -- and the handle must be refused with KERN_NO_ACCESS once the
+ * deadline has passed: it is read every CT54_POLL_MS from then, for
+ * CT54_WAIT_MS at most, and how long the refusal took is said.  As in [50]
+ * the clock is read here, so that a control that could not be asked in time
+ * says NOT ASKED and not WRONG.
  */
 #define CT54_MS		300u
+#define CT54_POLL_MS	20u
+#define CT54_WAIT_MS	5000u
 
 static int
 a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
@@ -1428,6 +1433,7 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
     kern_return_t          kr, okr, r1 = KERN_FAILURE, r2 = KERN_FAILURE;
     uint64_t               before, after, now;
     unsigned int           waits = 0;
+    int                    asked = 0;
 
     kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
     (void)mach_port_deallocate(mach_task_self(), host);
@@ -1475,18 +1481,23 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
     }
     now = after;
     if (okr == KERN_SUCCESS) {
-        /* Past the deadline, by the clock it is written on, and a tick more. */
+        /* From the deadline on, by the clock it is written on, until refused. */
         do {
-            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+                                CT54_POLL_MS);
             now = ct50_now(clk);
-        } while (now != 0 && now < tok.expires + 20000000ULL && ++waits < 200);
-        if (now != 0) {
-            buf = NULL;
-            got = 0;
-            r2 = device_read(h, 0, 0, 512, &buf, &got);
-            if (r2 == KERN_SUCCESS && buf != NULL && got > 0)
-                (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf, got);
-        }
+            if (now != 0 && now >= tok.expires) {
+                buf = NULL;
+                got = 0;
+                r2 = device_read(h, 0, 0, 512, &buf, &got);
+                if (r2 == KERN_SUCCESS && buf != NULL && got > 0)
+                    (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf,
+                                        got);
+                asked = 1;
+            }
+        } while (now != 0 && (!asked || r2 == KERN_SUCCESS) &&
+                 now < tok.expires + (uint64_t)CT54_WAIT_MS * 1000000ULL &&
+                 ++waits < 2 * (CT54_MS + CT54_WAIT_MS) / CT54_POLL_MS);
         (void)device_close(h);
         (void)mach_port_deallocate(mach_task_self(), h);
     }
@@ -1498,17 +1509,19 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
         return 0;
     }
     if (kr == KERN_SUCCESS && okr == KERN_SUCCESS && r1 == KERN_SUCCESS &&
-        r2 == KERN_NO_ACCESS) {
+        asked && r2 == KERN_NO_ACCESS) {
         printf("cap_test: [54] %s: a handle opened on a capability asked for "
                "with %u ms read before its deadline and was refused with "
-               "KERN_NO_ACCESS after it (#747)\n", name, CT54_MS);
+               "KERN_NO_ACCESS within %llu ms after it (#747)\n", name,
+               CT54_MS, (unsigned long long)((now - tok.expires) / 1000000ULL));
         return 1;
     }
     printf("cap_test: [54] WRONG — %s: a capability asked for with %u ms "
-           "(%d), the open %d, a read before its deadline %d and one after "
-           "it %d, where that one must be refused with KERN_NO_ACCESS(%d) "
-           "(#747)\n", name, CT54_MS, (int)kr, (int)okr, (int)r1, (int)r2,
-           (int)KERN_NO_ACCESS);
+           "(%d), the open %d, a read before its deadline %d and the reads "
+           "after it, for %llu ms, %d the last, where one must be refused with "
+           "KERN_NO_ACCESS(%d) (#747)\n", name, CT54_MS, (int)kr, (int)okr,
+           (int)r1, asked ? (unsigned long long)((now - tok.expires) / 1000000ULL)
+           : 0ULL, asked ? (int)r2 : -1, (int)KERN_NO_ACCESS);
     return 0;
 }
 
