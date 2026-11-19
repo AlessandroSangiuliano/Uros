@@ -175,6 +175,40 @@ __attribute__((weak)) cap_derive(const struct uros_cap *parent,
     return KERN_SUCCESS;
 }
 
+/*
+ * #747: a child for another task, named by a port it receives on -- the
+ * child's owner is that task, so only it can present the child.  Weak, as the
+ * three above are: cap_server links this library and its routine of the same
+ * name is the one it means.
+ */
+kern_return_t
+__attribute__((weak)) cap_derive_for(const struct uros_cap *parent,
+               uint64_t reduced_ops,
+               uint32_t lifetime_ms,
+               mach_port_t delegate,
+               struct uros_cap *out)
+{
+    mach_port_t srv = cap_server_port();
+    if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
+    if (parent == NULL || out == NULL) return CAP_ERR_INVALID_TOKEN;
+
+    char in_buf[CAP_TOKEN_MAX];
+    char out_buf[CAP_TOKEN_MAX];
+    mach_msg_type_number_t out_len = CAP_TOKEN_MAX;
+
+    memcpy(in_buf, parent, sizeof(struct uros_cap));
+
+    kern_return_t kr = mig_cap_derive_for(srv, in_buf,
+                                          (mach_msg_type_number_t)sizeof(struct uros_cap),
+                                          reduced_ops, lifetime_ms, delegate,
+                                          out_buf, &out_len);
+    if (kr != KERN_SUCCESS) return kr;
+    if (out_len != sizeof(struct uros_cap)) return CAP_ERR_INVALID_TOKEN;
+
+    memcpy(out, out_buf, sizeof(struct uros_cap));
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 __attribute__((weak)) cap_revoke(uint64_t cap_id)
 {

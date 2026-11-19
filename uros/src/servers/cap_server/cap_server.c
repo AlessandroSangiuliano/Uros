@@ -532,17 +532,19 @@ cap_acquire(mach_port_t             server,
     return KERN_SUCCESS;
 }
 
-kern_return_t
-cap_derive(mach_port_t             server,
-           cap_token_t            parent_buf,
-           mach_msg_type_number_t  parent_len,
-           uint64_t                reduced_ops,
-           unsigned int            lifetime_ms,
-           cap_token_t            child_buf,
-           mach_msg_type_number_t *child_len)
+/*
+ * A child of `parent_buf' with `reduced_ops', issued to `owner' (#747): the
+ * requester itself for cap_derive, the task a port names for cap_derive_for.
+ */
+static kern_return_t
+cap_derive_to(cap_token_t            parent_buf,
+              mach_msg_type_number_t  parent_len,
+              uint64_t                reduced_ops,
+              unsigned int            lifetime_ms,
+              uint64_t                owner,
+              cap_token_t            child_buf,
+              mach_msg_type_number_t *child_len)
 {
-    (void)server;
-
     if (parent_len != sizeof(struct uros_cap))
         return CAP_ERR_INVALID_TOKEN;
     if (*child_len < sizeof(struct uros_cap))
@@ -586,6 +588,7 @@ cap_derive(mach_port_t             server,
     t->parent_cap_id = parent.cap_id;
     t->depth         = parent.depth + 1;
     t->expires       = expires;		/* #747 */
+    t->owner         = owner;		/* #747 */
     t->first_child_cap_id  = 0;
     t->next_sibling_cap_id = parent_entry->token.first_child_cap_id;
 
@@ -601,12 +604,63 @@ cap_derive(mach_port_t             server,
     memcpy(child_buf, t, sizeof(*t));
     *child_len = (mach_msg_type_number_t)sizeof(*t);
 
-    printf("cap: derived id=%llu from parent=%llu ops=0x%llx depth=%u\n",
+    printf("cap: derived id=%llu from parent=%llu ops=0x%llx depth=%u "
+           "for 0x%llx\n",
            (unsigned long long)t->cap_id,
            (unsigned long long)parent.cap_id,
            (unsigned long long)reduced_ops,
-           t->depth);
+           t->depth, (unsigned long long)owner);
     return KERN_SUCCESS;
+}
+
+kern_return_t
+cap_derive(mach_port_t             server,
+           cap_token_t            parent_buf,
+           mach_msg_type_number_t  parent_len,
+           uint64_t                reduced_ops,
+           unsigned int            lifetime_ms,
+           cap_token_t            child_buf,
+           mach_msg_type_number_t *child_len)
+{
+    (void)server;
+    return cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms,
+                         g_request_sender, child_buf, child_len);
+}
+
+/*
+ * #747: a child for another task, named by a port it receives on.  The kernel
+ * answers whose port it is; a port no task receives on -- the kernel's, one in
+ * transit, a dead one -- names nobody to issue the child to.  The request's
+ * right to the port is kept by nobody: given back here when the child is made,
+ * and with the request by mach_msg_server() when it is refused.
+ */
+kern_return_t
+cap_derive_for(mach_port_t             server,
+               cap_token_t            parent_buf,
+               mach_msg_type_number_t  parent_len,
+               uint64_t                reduced_ops,
+               unsigned int            lifetime_ms,
+               mach_port_t             delegate,
+               cap_token_t            child_buf,
+               mach_msg_type_number_t *child_len)
+{
+    mach_port_t       host = mach_host_self();
+    urmach_identity_t id = 0;
+    kern_return_t     kr;
+
+    (void)server;
+    kr = urmach_port_receiver(host, delegate, &id);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: DENY derive_for: no task receives on port 0x%x "
+               "(kr=%d) (#747)\n", (unsigned)delegate, (int)kr);
+        return CAP_ERR_NO_DELEGATE;
+    }
+    kr = cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms, id,
+                       child_buf, child_len);
+    if (kr == KERN_SUCCESS)
+        (void)mach_port_deallocate(mach_task_self(), delegate);
+    return kr;
 }
 
 /*

@@ -72,6 +72,18 @@ kern_return_t cap_derive(const struct uros_cap *parent,
                          struct uros_cap *out);
 
 /*
+ * cap_derive_for() — a child for another task, named by a port that task
+ * receives on (#747): the child's owner is that task, so only it can present
+ * the child.  CAP_ERR_NO_DELEGATE for a port no task receives on.  Only the
+ * parent's owner derives.
+ */
+kern_return_t cap_derive_for(const struct uros_cap *parent,
+                             uint64_t reduced_ops,
+                             uint32_t lifetime_ms,
+                             mach_port_t delegate,
+                             struct uros_cap *out);
+
+/*
  * cap_revoke() — revoke a capability and its whole subtree.
  */
 kern_return_t cap_revoke(uint64_t cap_id);

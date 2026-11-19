@@ -240,3 +240,20 @@ routine cap_slots(
 	out	quota		: natural_t;
 	out	family		: natural_t;
 	out	family_max	: natural_t);
+
+/*
+ *	cap_derive_for (#747) — derive a child for ANOTHER task, named by a
+ *	port that task receives on: the port the owner talks to it on, a
+ *	handle or a service port.  The child's owner is the identity the
+ *	kernel answers for that port (urmach_port_receiver), so that only the
+ *	delegate can present it; a port no task receives on is refused with
+ *	CAP_ERR_NO_DELEGATE.  Only the parent's owner derives, as for
+ *	cap_derive.  Appended: MIG numbers routines by position.
+ */
+routine cap_derive_for(
+		cap_server	: mach_port_t;
+	in	parent		: cap_token_t;
+	in	reduced_ops	: cap_u64_t;
+	in	lifetime_ms	: cap_u32_t;
+	in	delegate	: mach_port_t;
+	out	child		: cap_token_t);
