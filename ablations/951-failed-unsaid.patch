@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #951
+Takes out: the "failed:" line job.sh writes in job.txt when it ends on a failure once job.txt is begun -- the reason goes to stderr alone, as before #951: job.txt ends at its "plan:" line, and pull-results.sh says the job was cut off before writing its summary.  harness-lifecycle-check.sh's jobfail finds no failed: line in job.txt, and pull-results.sh --job saying "did NOT FINISH".
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: jobfail
+Expect: lifecycle: jobfail: .* -- WRONG
+Note: jobfail builds and boots nothing: its configure fails at once, in a build directory of its own; ablate.sh passes --kvm under KVM, and it changes nothing there
+
+diff --git a/scripts/ci/job.sh b/scripts/ci/job.sh
+index be95e080..df256dcc 100755
+--- a/scripts/ci/job.sh
++++ b/scripts/ci/job.sh
+@@ -120,7 +120,7 @@ PACKAGES=(gcc binutils cmake ninja make bison flex python git qemu-system-x86
+ JOBTXT=""
+ die() {
+ 	echo "job: $2" >&2
+-	[ -z "$JOBTXT" ] || echo "failed:   ${2//"$OUT/"/}" >> "$JOBTXT"
++	# 951-failed-unsaid: the reason on stderr alone, and nothing in job.txt
+ 	exit "$1"
+ }
+ 

@@ -11,11 +11,12 @@
 # ~/uros-tests/ci-campaign.csv, where they accumulate with the home machines'
 # rows, and keeps each job's artifact under ~/uros-tests/ci/<run-id>/job<N>/.
 # A row's log column then names the local copy of a WRONG boot's log, or of a
-# boot stopped at the job's time limit, and is "-" for a boot that was as it
-# should be, whose log stayed on the runner.  Of each job it says whether it
-# finished, from its job.txt: or stopped at its time limit, or cut off before
-# its summary, or a round short -- and the boots it got, of those it planned
-# where its job.txt says (#951).
+# boot stopped -- at the job's time limit, or by a SIGTERM from outside, as a
+# cancelled run's -- and is "-" for a boot that was as it should be, whose log
+# stayed on the runner.  Of each job it says whether it finished, from its
+# job.txt: or failed, and why, or stopped, and by what, or cut off before its
+# summary, or a round short -- and the boots it got, of those it planned where
+# its job.txt says (#951).
 # Times are the runner's, in UTC.  Compare rows within one job only: the
 # runner's clock is not ours to set.
 #
@@ -28,12 +29,18 @@
 # append and its record -- is recorded without being appended again.
 #
 # Usage:  scripts/ci/pull-results.sh [--limit N] [--dir DIR]
+#         scripts/ci/pull-results.sh --job DIR [--job DIR ...]
 #   --limit N  how many of the latest completed runs to look at (default 30)
 #   --dir DIR  where ci-campaign.csv and ci/ live (default ~/uros-tests)
+#   --job DIR  only say of a job's directory -- job.sh's --out, or an artifact
+#              already kept -- whether it finished, and its merge test's line,
+#              as an import says them, with nothing listed, downloaded or
+#              appended (#951)
 #
-# Exit status: 0 every new run imported, or none was new · 1 a run could not be
-# listed, downloaded or read, and is left for the next call · 2 the command
-# line is wrong, gh is missing, or ci-campaign.csv or ci-ablate.csv has a
+# Exit status: 0 every new run imported, or none was new; with --job, each
+# directory said · 1 a run could not be listed, downloaded or read, and is
+# left for the next call · 2 the command line is wrong, a --job is not a
+# directory, gh is missing, or ci-campaign.csv or ci-ablate.csv has a
 # header other than the one job.sh writes.
 set -u
 
@@ -42,6 +49,7 @@ HEADER=date,time,run_id,job,round,tree,cpu_model,mhz,accel,entry,smp,opt,verdict
 AB_HEADER=date,time,run_id,job,tree,cpu_model,mhz,patches,arm,boot,accel,run,harness_status,verdict,log
 LIMIT=30
 DIR=$HOME/uros-tests
+ASK=()
 
 die() {
 	echo "pull-results: $2" >&2
@@ -50,11 +58,12 @@ die() {
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--limit|--dir)
+	--limit|--dir|--job)
 		[ $# -ge 2 ] || die 2 "$1 needs a value"
 		case "$1" in
 		--limit)	LIMIT=$2 ;;
 		--dir)		DIR=$2 ;;
+		--job)		ASK+=("$2") ;;
 		esac
 		shift 2 ;;
 	-h|--help)	sed -n '/^# Usage:/,/^# header other than/p' "$0"; exit 0 ;;
@@ -64,33 +73,15 @@ done
 case "$LIMIT" in
 ''|*[!0-9]*|0)	die 2 "--limit takes a number of runs, not '$LIMIT'" ;;
 esac
-command -v gh >/dev/null 2>&1 || die 2 "gh is not installed, and the runs are reached through it"
-
-CSV=$DIR/ci-campaign.csv
-CI=$DIR/ci
-DONE=$CI/imported-runs
-mkdir -p "$CI" || die 2 "cannot create $CI"
-touch "$DONE"
-AB_CSV=$DIR/ci-ablate.csv
-for f in "$CSV:$HEADER" "$AB_CSV:$AB_HEADER"; do
-	file=${f%%:*}
-	head=${f#*:}
-	if [ -s "$file" ]; then
-		[ "$(head -n 1 "$file")" = "$head" ] ||
-			die 2 "$file has another header than the one job.sh writes: rows appended to it would not line up"
-	else
-		echo "$head" > "$file"
-	fi
-done
-# Downloads land beside the results, not in /tmp, and go once read.
-STAGE=$(mktemp -d "$CI/.incoming.XXXXXX") || die 2 "cannot create a directory in $CI"
-trap 'rm -rf "$STAGE"' EXIT
-
 # Boots and WRONG by entry and accelerator, from rows on stdin.  An entry is its
 # number with the options and processors that make it a line of its own in the
 # merge test, so 14 at -smp 1 is not added into 14 at -smp 4.
-# #951: a boot stopped at a job's time limit has a row of its own, "stopped",
-# and is neither a boot nor a WRONG: it is listed, and counted apart.
+# #951: a boot stopped -- at a job's time limit, or by a SIGTERM from outside --
+# has a row of its own, "stopped", and is neither a boot nor a WRONG: it is
+# listed, and counted apart.  What stopped it is its job's to say, in job.txt:
+# the row does not hold it, so a count of them names no cause.  It said "at a
+# time limit" of the boot of a run cancelled by hand, 44345740779, whose job's
+# line said "by SIGTERM from outside".
 summary() {
 	awk -F, '
 	$13 ~ /^stopped/ {
@@ -114,7 +105,7 @@ summary() {
 			printf "  %-38s %6d boots %5d WRONG\n", k, n[k], w[k] + 0 | cmd
 		close(cmd)
 		printf "%s", list
-		printf "  in all: %d boots, %d WRONG%s\n", all, wrong, (stopped ? sprintf(", %d stopped at a time limit", stopped) : "")
+		printf "  in all: %d boots, %d WRONG%s\n", all, wrong, (stopped ? sprintf(", %d stopped", stopped) : "")
 	}'
 }
 
@@ -122,12 +113,14 @@ summary() {
 # first boot; "boots:" once the merge test's rounds are over, and an A/B's
 # "ablate:" or a sweep's "sweep: N patches" once it has ended; "stopped:" when
 # it was stopped, at its time limit or by a SIGTERM -- before its first boot
-# too, when it has no rows at all; "short:" when a round came short.  A job.txt
-# without its summary or a "stopped:" line is a job cut off before writing
-# either, as every job GitHub's limit stopped was until #951.  The boots it got
-# are its rows, the stopped boot's not counted.
+# too, when it has no rows at all; "short:" when a round came short; "failed:"
+# when it ended on a failure, its build's for one, and why -- before its
+# summary, or after it, as an A/B that reported fewer boots than it was meant
+# to.  A job.txt with none of these is a job cut off before writing its
+# summary, as every job GitHub's limit stopped was until #951.  The boots it
+# got are its rows, the stopped boot's not counted.
 job_end() {	# artifact-dir job description
-	local d=$1 j=$2 what=$3 plan got=0 stop short
+	local d=$1 j=$2 what=$3 plan got=0 stop short fail
 	if [ -f "$d/boots.csv" ]; then
 		got=$(tail -n +2 "$d/boots.csv" | awk -F, '$13 !~ /^stopped/' | wc -l)
 	elif [ -f "$d/ablate.csv" ]; then
@@ -139,8 +132,11 @@ job_end() {	# artifact-dir job description
 	plan=${plan:+ of the $plan planned}
 	stop=$(sed -n 's/^stopped: *//p' "$d/job.txt" 2>/dev/null)
 	short=$(sed -n 's/^short: *//p' "$d/job.txt" 2>/dev/null)
+	fail=$(sed -n 's/^failed: *//p' "$d/job.txt" 2>/dev/null)
 	if [ ! -f "$d/job.txt" ]; then
 		echo "pull-results: $what: job $j left no job.txt; $got boots$plan"
+	elif [ -n "$fail" ]; then
+		echo "pull-results: $what: job $j FAILED: $fail; $got boots$plan"
 	elif [ -z "$stop" ] && ! grep -qE '^(boots:|ablate:   |sweep:    [0-9]+ patches of )' "$d/job.txt"; then
 		echo "pull-results: $what: job $j did NOT FINISH: its job.txt has no summary, so it was cut off before writing one; $got boots$plan"
 	elif [ -n "$stop" ]; then
@@ -230,17 +226,62 @@ import() {	# run-id description artifacts-the-api-listed
 	echo "$id $(date +%F) $(wc -l < "$rows") rows, $(wc -l < "$abrows") A/B rows" >> "$DONE"
 	# The merge test's line, unless the run was an A/B and had none of its rows.
 	[ -s "$rows" ] || [ ! -s "$abrows" ] || return 0
-	awk -F, -v what="$what" -v jobs=${#jobs[@]} '
+	merge_line "$what" ${#jobs[@]} < "$rows"
+}
+
+# The merge test's line of a run, or of one job, from its rows on stdin: the
+# boots and the WRONG, the boots stopped counted apart, the trees and the
+# accelerators.
+merge_line() {	# description jobs
+	awk -F, -v what="$1" -v jobs="$2" '
 		$13 ~ /^stopped/ { s++; next }
 		{ n++; if ($13 ~ /^WRONG/) w++; acc[$9] = 1; tree[$6] = 1 }
 		END {
 			a = ""; for (k in acc) a = a " " k
 			t = ""; for (k in tree) t = t " " k
 			printf "pull-results: %s: %d job(s), %d boots, %d WRONG%s; tree%s; accelerators%s\n",
-				what, jobs, n, w, (s ? sprintf(", %d stopped at a time limit", s) : ""),
+				what, jobs, n, w, (s ? sprintf(", %d stopped", s) : ""),
 				(t == "" ? " -" : t), (a == "" ? " -" : a)
-		}' "$rows"
+		}'
 }
+
+# --job: what an import says of a job, of directories already here (#951) --
+# how it ended, and its merge test's line when it has the rows of one.
+if [ ${#ASK[@]} -gt 0 ]; then
+	for d in "${ASK[@]}"; do
+		[ -d "$d" ] || die 2 "--job takes a job's directory, and $d is not one"
+		if [ -f "$d/job.txt" ] || [ -f "$d/boots.csv" ] || [ -f "$d/ablate.csv" ]; then
+			job_end "$d" "${d%/}" here
+			[ ! -f "$d/boots.csv" ] ||
+				tail -n +2 "$d/boots.csv" | merge_line "here: job ${d%/}" 1
+		else
+			echo "pull-results: here: job ${d%/} has no job.txt and no rows"
+		fi
+	done
+	exit 0
+fi
+
+command -v gh >/dev/null 2>&1 || die 2 "gh is not installed, and the runs are reached through it"
+
+CSV=$DIR/ci-campaign.csv
+CI=$DIR/ci
+DONE=$CI/imported-runs
+mkdir -p "$CI" || die 2 "cannot create $CI"
+touch "$DONE"
+AB_CSV=$DIR/ci-ablate.csv
+for f in "$CSV:$HEADER" "$AB_CSV:$AB_HEADER"; do
+	file=${f%%:*}
+	head=${f#*:}
+	if [ -s "$file" ]; then
+		[ "$(head -n 1 "$file")" = "$head" ] ||
+			die 2 "$file has another header than the one job.sh writes: rows appended to it would not line up"
+	else
+		echo "$head" > "$file"
+	fi
+done
+# Downloads land beside the results, not in /tmp, and go once read.
+STAGE=$(mktemp -d "$CI/.incoming.XXXXXX") || die 2 "cannot create a directory in $CI"
+trap 'rm -rf "$STAGE"' EXIT
 
 # gh finds the repository from the checkout's remote.
 cd "$REPO" || die 2 "cannot enter $REPO"

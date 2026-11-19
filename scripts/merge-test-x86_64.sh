@@ -433,8 +433,9 @@ fi
 # #951: a run sent SIGTERM stops the boot it is running, says so of that boot
 # in a verdict line whose result is "stopped", starts no other, prints its
 # totals as a whole run does, and dies of the signal.  ci/job.sh sends it at
-# its time limit: a campaign job that ran out of GitHub's minutes was cut off
-# in a boot, which left no row and no log, and its summary was never written.
+# its time limit, and when it is sent SIGTERM itself, as at a cancel: a
+# campaign job that ran out of GitHub's minutes was cut off in a boot, which
+# left no row and no log, and its summary was never written.
 # The trap passes the signal on to the boot, which run-x86_64.sh and
 # ush-x86_64.py stop as they stop for a Ctrl-C, their qemu stopped and the
 # lock given back.  So that it runs while a boot runs, the boot is a job

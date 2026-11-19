@@ -350,8 +350,8 @@ jobs:
           fi
 
       # Whatever the boots said: a WRONG boot is the reason to keep them, and a
-      # boot stopped at the time limit is kept as far as it got, in stopped/
-      # (#951).  The logs of the merge test's boots that were as they should be
+      # boot stopped, at the time limit or by a cancel, is kept as far as it
+      # got, in stopped/ (#951).  The logs of the merge test's boots that were as they should be
       # stay on the runner; an A/B keeps every boot's, few and all of them evidence.  Its
       # two worktrees go when ablate.sh ends, and are left out in case a
       # stopped job left them.
