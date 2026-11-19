@@ -63,9 +63,10 @@
 # The tree is the one this script is in.  GITHUB_RUN_ID and JOB_INDEX name the
 # run and the job in every row, and UROS_BUILD_DIR is honoured as by the
 # harness.  OUT/boots.csv gets one row per boot, its times in UTC; the logs of
-# every WRONG boot are copied to OUT/failed/rN/, and those of a boot stopped at
-# the time limit to OUT/stopped/rN/; OUT/job.txt says what the job ran on and
-# with which tools, how many boots it planned, and how it ended.  With
+# every WRONG boot are copied to OUT/failed/rN/, and those of a boot stopped --
+# at the time limit, or by a SIGTERM from outside -- to OUT/stopped/rN/;
+# OUT/job.txt says what the job ran on and with which tools, how many boots it
+# planned, and how it ended.  With
 # --ablate, OUT/ablate.csv gets the rows
 # instead, one per boot of either arm, and every boot's log stays in
 # OUT/ablate/, where ablate.sh works; with --sweep the same, one row per
@@ -589,8 +590,9 @@ stoppable() {	# out print|quiet hook|"" command...
 	echo "ninja:    $(ninja --version 2>&1 | head -n 1)"
 	echo "grub:     $(grub-mkimage --version 2>&1 | head -n 1)"
 	# #951: what the job means to boot, written before it boots anything,
-	# so that a job that ends short of it -- stopped at its time limit, or
-	# cut off by GitHub -- leaves the number beside the rows it wrote.
+	# so that a job that ends short of it -- stopped at its time limit or by
+	# a cancel, or cut off by GitHub -- leaves the number beside the rows it
+	# wrote.
 	if [ -n "$ABLATE" ]; then
 		echo "plan:     $AB_WANT boots, an A/B of ${PATCHES[*]##*/}"
 	elif [ -n "$SWEEP" ]; then
