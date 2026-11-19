@@ -43,6 +43,7 @@
 #include <mach/sync.h>		/* #552: semaphore_create/signal/wait */
 #include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
 #include <mach/clock.h>		/* #708: host_get_clock_service, clock_get_time */
+#include <mach/clock_types.h>	/* #747: URMACH_CAP_CLOCK, NSEC_PER_SEC */
 #include <mach/urmach_futex.h>	/* #708: the futex's three timed waits */
 #include <pthread.h>		/* #708: [31]'s sender */
 #include <mach/mach_traps.h>
@@ -987,6 +988,134 @@ cap_verify_asks_the_type(void)
            "cap_server and %d from the trap, where those two must be "
            "CAP_ERR_RESOURCE_MISMATCH(%d) (#745)\n", (int)same, (int)other,
            (int)trap, (int)CAP_ERR_RESOURCE_MISMATCH);
+    return 0;
+}
+
+/*
+ * Test [50]: a lifetime asked for is kept (#747).
+ *
+ * cap_acquire and cap_derive took a lifetime and threw it away, writing every
+ * deadline 0, so a capability asked for with a lifetime never ended.  One is
+ * asked for with CT50_MS here.  It must verify at once, by the trap and by
+ * cap_server -- the control -- with its deadline written CT50_MS after the
+ * request on the capability clock; and once that deadline has passed, both
+ * must refuse it with CAP_ERR_EXPIRED.  A child derived from it asking for a
+ * hundred times as long must be given its parent's deadline and end with it:
+ * a child never outlives its parent.
+ *
+ * 🔑 The clock is read here too, before the request and after the control, so
+ * that a control already refused as expired says which it was: a machine that
+ * took longer than the lifetime to ask, which could not pose the question
+ * (NOT ASKED), or a deadline written short, which is the defect (WRONG).
+ */
+#define CT50_ID		0x7470ULL
+#define CT50_MS		300u
+#define CT50_NS		((uint64_t)CT50_MS * 1000000ULL)
+
+/* Now on the clock a capability's deadline is written on; 0 if unreadable. */
+static uint64_t
+ct50_now(mach_port_t clk)
+{
+    tvalspec_t ts;
+
+    if (clk == MACH_PORT_NULL || clock_get_time(clk, &ts) != KERN_SUCCESS)
+        return 0;
+    return (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
+}
+
+static int
+a_lifetime_is_kept(void)
+{
+    struct uros_cap t, child;
+    mach_port_t     host = mach_host_self(), clk = MACH_PORT_NULL;
+    kern_return_t   kr, ckr, trap0, rpc0, trap1, rpc1, ctrap1, crpc1;
+    uint64_t        before, after, now;
+    unsigned int    waits = 0;
+    int             ok;
+
+    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [50] WRONG — the capability clock could not be "
+               "asked for: %d (#747)\n", (int)kr);
+        return 0;
+    }
+
+    memset(&t, 0, sizeof(t));
+    memset(&child, 0, sizeof(child));
+    before = ct50_now(clk);
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT50_ID, CAP_OP_BLK_READ, CT50_MS,
+                     &t);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [50] WRONG — no block-device capability with a "
+               "lifetime of %u ms: %d (#747)\n", CT50_MS, (int)kr);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    ckr   = cap_derive(&t, CAP_OP_BLK_READ, 100 * CT50_MS, &child);
+    trap0 = urmach_cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                              CT50_ID);
+    rpc0  = cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
+    after = ct50_now(clk);
+
+    if (before == 0 || after == 0) {
+        printf("cap_test: [50] WRONG — the capability clock could not be "
+               "read (#747)\n");
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    if ((trap0 == CAP_ERR_EXPIRED || rpc0 == CAP_ERR_EXPIRED) &&
+        after - before >= CT50_NS) {
+        printf("cap_test: [50] NOT ASKED — the capability expired before it "
+               "was verified once: %llu ms passed between asking for it and "
+               "verifying it, past its lifetime of %u ms (#747)\n",
+               (unsigned long long)((after - before) / 1000000ULL), CT50_MS);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 1;
+    }
+
+    /* Past the deadline, by the clock it is written on, and a tick more. */
+    do {
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        now = ct50_now(clk);
+    } while (now != 0 && now < t.expires + 20000000ULL && ++waits < 200);
+    (void)mach_port_deallocate(mach_task_self(), clk);
+
+    trap1  = urmach_cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                               CT50_ID);
+    rpc1   = cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
+    ctrap1 = ckr == KERN_SUCCESS
+           ? urmach_cap_verify(&child, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                               CT50_ID) : ckr;
+    crpc1  = ckr == KERN_SUCCESS
+           ? cap_verify(&child, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID)
+           : ckr;
+
+    ok = trap0 == KERN_SUCCESS && rpc0 == KERN_SUCCESS
+      && t.expires >= before + CT50_NS && t.expires <= after + CT50_NS
+      && ckr == KERN_SUCCESS && child.expires == t.expires
+      && trap1 == CAP_ERR_EXPIRED && rpc1 == CAP_ERR_EXPIRED
+      && ctrap1 == CAP_ERR_EXPIRED && crpc1 == CAP_ERR_EXPIRED;
+    if (ok) {
+        printf("cap_test: [50] a capability asked for with %u ms verified at "
+               "once, its deadline written %llu ms after the request, and once "
+               "past it was refused as expired by the trap and by cap_server; "
+               "a child asking for %u ms was given its parent's deadline and "
+               "refused with it (#747)\n", CT50_MS,
+               (unsigned long long)((t.expires - before) / 1000000ULL),
+               100 * CT50_MS);
+        return 1;
+    }
+    printf("cap_test: [50] WRONG — a capability asked for with %u ms: at "
+           "once the trap %d and cap_server %d, its deadline %lld ms after "
+           "the request, and past it %d and %d; a child asking for %u ms (%d) "
+           "with its deadline %lld ms after its parent's, and past it %d and "
+           "%d, where every one past must be CAP_ERR_EXPIRED(%d) (#747)\n",
+           CT50_MS, (int)trap0, (int)rpc0,
+           (long long)((int64_t)(t.expires - before) / 1000000LL),
+           (int)trap1, (int)rpc1, 100 * CT50_MS, (int)ckr,
+           (long long)((int64_t)(child.expires - t.expires) / 1000000LL),
+           (int)ctrap1, (int)crpc1, (int)CAP_ERR_EXPIRED);
     return 0;
 }
 
@@ -5343,6 +5472,9 @@ main(int argc, char **argv)
     if (!a_revocation_reaches_every_child())
         pass = 0;
     if (!cap_verify_asks_the_type())
+        pass = 0;
+    /* #747: a lifetime asked for is kept. */
+    if (!a_lifetime_is_kept())
         pass = 0;
 
     /*
