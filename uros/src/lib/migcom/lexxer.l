@@ -4,8 +4,15 @@
  * `defined but not used' (#569).  Asked of the generator rather than
  * suppressed at the compiler, for the same reason #504 fixed migcom instead
  * of its output: the file is rewritten on every build.
+ *
+ * 🔴 #960: and yywrap() unless told not to, which the lexer then calls at the
+ * end of its input, from libfl.  libfl is packaged apart from flex on Ubuntu,
+ * libfl-dev, only a Recommends: GitHub's runners have flex installed without
+ * it, and migcom failed to link there ("undefined reference to `yywrap'",
+ * dispatch 44603763023).  libfl's yywrap() answers 1, one input and no more,
+ * which is what noyywrap writes into the lexer itself.
  */
-%option nounput noinput
+%option nounput noinput noyywrap
 
 %k 10000
 %n 5000
