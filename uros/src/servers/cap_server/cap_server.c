@@ -716,26 +716,17 @@ cap_subtree_next(uint64_t root, struct cap_entry *e, int descend)
     return NULL;
 }
 
-kern_return_t
-cap_revoke(mach_port_t server, uint64_t cap_id)
+/*
+ * Revoke `root' and everything under it in the tree: each capability marked in
+ * this server's table and told to the kernel, which withdraws what it bought.
+ * The number revoked now goes in *count, and the kernel's first refusal is the
+ * answer; the rest of the tree is revoked all the same (#745).  cap_revoke asks
+ * it for a task that may revoke, and a deadline's sweep for itself (#747).
+ */
+static kern_return_t
+cap_revoke_tree(struct cap_entry *root, int *count)
 {
-    (void)server;
-
-    struct cap_entry *root = cap_table_find_by_id(cap_id);
-    if (!root) return CAP_ERR_INVALID_TOKEN;
-
-    /*
-     * #599: the revocation needed no authority at all, so any task could
-     * take any other's capability away -- ext_server's page-cache buffer,
-     * a driver's claim on its device.
-     */
-    if (!cap_revoke_authorised(root)) {
-        printf("cap: DENY revoke of cap %llu from port=0x%x — not the task "
-               "it was issued to, nor one it descends from\n",
-               (unsigned long long)cap_id, (unsigned)g_request_local_port);
-        return CAP_ERR_UNAUTHORIZED;
-    }
-
+    uint64_t cap_id = root->token.cap_id;
     struct cap_entry *e;
     int revoked = 0, descend = 1;
     kern_return_t kr, refused = KERN_SUCCESS;
@@ -788,23 +779,58 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
         }
     }
 
-    printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
-           revoked, (unsigned long long)cap_id);
+    *count = revoked;
+    return refused;
+}
 
-    /*
-     * Issue #183: notify every subscribed resource server so they can
-     * drop cap-gated state synchronously (e.g. block_device_server
-     * marks any blk_handle whose cap_id matches as revoked).  We fire
-     * one notification per cap in the cascade so a subscriber that
-     * only knows about a specific child can still react.
-     */
-    if (n_revoke_subscribers > 0 && revoked > 0) {
+/*
+ * Issue #183: notify every subscribed resource server so they can
+ * drop cap-gated state synchronously (e.g. block_device_server
+ * marks any blk_handle whose cap_id matches as revoked).  We fire
+ * one notification per cap in the cascade so a subscriber that
+ * only knows about a specific child can still react.  `count' is
+ * what cap_revoke_tree() revoked: none, and there is nothing to tell.
+ */
+static void
+cap_revoke_tell(struct cap_entry *root, int count)
+{
+    struct cap_entry *e;
+
+    if (n_revoke_subscribers > 0 && count > 0) {
         /* The same walk again, every node of the tree now revoked: a
          * notice for each, as there was for each before (#745). */
-        for (e = root; e != NULL; e = cap_subtree_next(cap_id, e, 1))
+        for (e = root; e != NULL;
+             e = cap_subtree_next(root->token.cap_id, e, 1))
             fanout_revoke_notify(e->token.cap_id);
     }
+}
 
+kern_return_t
+cap_revoke(mach_port_t server, uint64_t cap_id)
+{
+    (void)server;
+
+    struct cap_entry *root = cap_table_find_by_id(cap_id);
+    if (!root) return CAP_ERR_INVALID_TOKEN;
+
+    /*
+     * #599: the revocation needed no authority at all, so any task could
+     * take any other's capability away -- ext_server's page-cache buffer,
+     * a driver's claim on its device.
+     */
+    if (!cap_revoke_authorised(root)) {
+        printf("cap: DENY revoke of cap %llu from port=0x%x — not the task "
+               "it was issued to, nor one it descends from\n",
+               (unsigned long long)cap_id, (unsigned)g_request_local_port);
+        return CAP_ERR_UNAUTHORIZED;
+    }
+
+    int revoked;
+    kern_return_t refused = cap_revoke_tree(root, &revoked);
+
+    printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
+           revoked, (unsigned long long)cap_id);
+    cap_revoke_tell(root, revoked);
     return refused;
 }
 
