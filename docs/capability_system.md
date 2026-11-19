@@ -84,7 +84,7 @@ struct uros_cap {
     uint64_t  resource_id;           /* which one, per-type meaning        */
 
     uint64_t  allowed_ops;           /* bitmask, per-type namespace        */
-    /* … owner name, delegation tree links, expiry, max_uses, revoked …    */
+    /* … owner, delegation tree links, expiry, revoked …                    */
 
     uint8_t   hmac[32];              /* MUST be last: the input is every
                                         preceding byte, verbatim           */
@@ -325,11 +325,16 @@ itself.
 | trap | slot | who | question |
 |---|---|---|---|
 | `urmach_cap_verify(token, type, op, id)` | 37 | any resource server | is this token good for this? |
-| `urmach_cap_use(token, type, op, id)` | 38 | ditto | …and consume one use |
 | `urmach_cap_revoke(cap_id)` | 39 | cap_server only | mark it dead in the kernel |
 | `urmach_cap_register(setup)` | 40 | the task bootstrap named, once | hand the kernel the HMAC key |
 | `urmach_dma_region_owner(id, task)` | 43 | cap_server | does that task own this DMA buffer? |
 | `urmach_cap_epoch()` | 45 | a server that keeps verified handles | has anything been revoked since I last looked? |
+
+Slot 38 was `urmach_cap_use`, the verification that also counted a use against
+a token's `max_uses`. Nothing called it and every token was minted with no
+count, and counting operations is the quota's job, not the permission's
+(`uros_resource_model.md`): #747 took the count out of the token and the trap
+out of the table.
 
 And one routine on the privileged host port, `urmach_cap_server_set(host_priv,
 task)` (`mach_host.defs`), by which bootstrap names cap_server's task: the
