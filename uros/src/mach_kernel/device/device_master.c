@@ -4045,8 +4045,10 @@ ds_master_device_dma_table(
  * 🔑 A PORT IS AN IDENTITY THAT CANNOT BE FORGED.  Only the driver's own task
  * receives on the port it registered with, so this resolves that port to its
  * receiving space and compares it with the space of the task that made the
- * claim.  The security token would not have done: every task in this system
- * inherits DEFAULT_USER_SECURITY_TOKEN, so it tells nobody apart.
+ * claim.  The security token would not have done: every task inherited
+ * DEFAULT_USER_SECURITY_TOKEN, so it told nobody apart -- and since #747, when
+ * each task got its own, it names who SENT a message, where the question here
+ * is who receives on a port.
  *
  * ⚠️ `held' is 0 both for "no claim" and for "somebody else's claim", because
  * neither is permission to record a driver and the caller asking this does not
