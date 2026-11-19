@@ -44,6 +44,7 @@
 #include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
 #include <mach/clock.h>		/* #708: host_get_clock_service, clock_get_time */
 #include <mach/clock_types.h>	/* #747: URMACH_CAP_CLOCK, NSEC_PER_SEC */
+#include <mach/urmach_identity.h>	/* #747: urmach_identity_of */
 #include <mach/urmach_futex.h>	/* #708: the futex's three timed waits */
 #include <pthread.h>		/* #708: [31]'s sender */
 #include <mach/mach_traps.h>
@@ -1116,6 +1117,110 @@ a_lifetime_is_kept(void)
            (int)trap1, (int)rpc1, 100 * CT50_MS, (int)ckr,
            (long long)((int64_t)(child.expires - t.expires) / 1000000LL),
            (int)ctrap1, (int)crpc1, (int)CAP_ERR_EXPIRED);
+    return 0;
+}
+
+/*
+ * Test [51]: every task has an identity of its own, and what it sends carries
+ * it (#747).
+ *
+ * A task's security token was its parent's, or a default every user task
+ * shared, and the trailer of a message any task sent said KERNEL_SECURITY_TOKEN.
+ * So this task's identity must carry the task bit, a task made now must have
+ * another, and a message this task sends itself must arrive with this task's
+ * identity as its sender: once sent and received in two calls, which go
+ * through ipc_kmsg_get(), and once in one call, which takes the fast path's
+ * copy in mach_msg.c -- the two places the kernel writes it.
+ */
+static security_token_t
+ct51_sent_and_received(mach_port_t port, int one_call, kern_return_t *kr_out)
+{
+    struct {
+        mach_msg_header_t           h;
+        mach_msg_format_0_trailer_t t;
+    } m;
+    mach_msg_option_t rcv = MACH_RCV_MSG | MACH_RCV_TIMEOUT
+                          | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+                          | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SENDER);
+    kern_return_t kr;
+
+    memset(&m, 0, sizeof(m));
+    m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+    m.h.msgh_size = sizeof(m.h);
+    m.h.msgh_remote_port = port;
+    m.h.msgh_local_port = MACH_PORT_NULL;
+    m.h.msgh_id = 0x747;
+    if (one_call)
+        kr = mach_msg(&m.h, MACH_SEND_MSG | rcv, sizeof(m.h), sizeof(m),
+                      port, 1000, MACH_PORT_NULL);
+    else {
+        kr = mach_msg(&m.h, MACH_SEND_MSG, sizeof(m.h), 0, MACH_PORT_NULL,
+                      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        if (kr == KERN_SUCCESS)
+            kr = mach_msg(&m.h, rcv, 0, sizeof(m), port, 1000,
+                          MACH_PORT_NULL);
+    }
+    *kr_out = kr;
+    return m.t.msgh_sender;
+}
+
+static int
+every_task_has_its_own_identity(void)
+{
+    security_token_t       me, other = { { 0, 0 } }, two, one;
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+    mach_port_t            child = MACH_PORT_NULL;
+    mach_port_t            port = MACH_PORT_NULL;
+    kern_return_t          kr, kr_other = KERN_FAILURE, kr_two, kr_one;
+    uint64_t               id_me, id_other, id_two, id_one;
+
+    kr = task_info(mach_task_self(), TASK_SECURITY_TOKEN, (task_info_t)&me,
+                   &n);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [51] WRONG — this task's security token could not "
+               "be read: %d (#747)\n", (int)kr);
+        return 0;
+    }
+    if (task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                    &child) == KERN_SUCCESS) {
+        n = TASK_SECURITY_TOKEN_COUNT;
+        kr_other = task_info(child, TASK_SECURITY_TOKEN, (task_info_t)&other,
+                             &n);
+        (void)task_terminate(child);
+        (void)mach_port_deallocate(mach_task_self(), child);
+    }
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                           &port) != KERN_SUCCESS) {
+        printf("cap_test: [51] WRONG — no port to send to (#747)\n");
+        return 0;
+    }
+    two = ct51_sent_and_received(port, 0, &kr_two);
+    one = ct51_sent_and_received(port, 1, &kr_one);
+    (void)mach_port_mod_refs(mach_task_self(), port,
+                             MACH_PORT_RIGHT_RECEIVE, -1);
+
+    id_me    = urmach_identity_of(me);
+    id_other = urmach_identity_of(other);
+    id_two   = urmach_identity_of(two);
+    id_one   = urmach_identity_of(one);
+    if ((id_me & URMACH_IDENTITY_TASK_BIT) != 0 &&
+        kr_other == KERN_SUCCESS && (id_other & URMACH_IDENTITY_TASK_BIT) != 0 &&
+        id_other != id_me && kr_two == KERN_SUCCESS && id_two == id_me &&
+        kr_one == KERN_SUCCESS && id_one == id_me) {
+        printf("cap_test: [51] this task is 0x%llx and a task made now "
+               "0x%llx, and a message it sent itself came with 0x%llx as its "
+               "sender, in two calls and in one (#747)\n",
+               (unsigned long long)id_me, (unsigned long long)id_other,
+               (unsigned long long)id_me);
+        return 1;
+    }
+    printf("cap_test: [51] WRONG — this task is 0x%llx, a task made now "
+           "0x%llx (%d), and a message it sent itself came with 0x%llx in two "
+           "calls (%d) and 0x%llx in one (%d): each task's own, the task bit "
+           "set, and the sender's (#747)\n", (unsigned long long)id_me,
+           (unsigned long long)id_other, (int)kr_other,
+           (unsigned long long)id_two, (int)kr_two,
+           (unsigned long long)id_one, (int)kr_one);
     return 0;
 }
 
@@ -5473,8 +5578,10 @@ main(int argc, char **argv)
         pass = 0;
     if (!cap_verify_asks_the_type())
         pass = 0;
-    /* #747: a lifetime asked for is kept. */
+    /* #747: a lifetime asked for is kept, and every task is its own. */
     if (!a_lifetime_is_kept())
+        pass = 0;
+    if (!every_task_has_its_own_identity())
         pass = 0;
 
     /*
