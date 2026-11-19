@@ -114,11 +114,13 @@ blk_authed_handle(mach_port_t device)
 	 */
 	now = (uint32_t)urmach_cap_epoch();
 	/*
-	 * #747: and on every use while the token has a deadline.  A deadline
-	 * does not move the epoch, so a handle opened on a capability asked
-	 * for 300 ms read on past the 300 ms; the trap reads the clock.
+	 * #747: a deadline reaches the handle the same way.  cap_server revokes
+	 * a capability when its deadline comes, which moves the epoch and sends
+	 * the notice, and the trap, asked again, answers that the token is past
+	 * its deadline: a handle opened on a capability asked for 300 ms reads
+	 * up to its revocation, milliseconds after the 300 ms (cap_test [54]).
 	 */
-	if (h->cap_epoch != now || h->cap.expires != 0) {
+	if (h->cap_epoch != now) {
 		kr = blk_token_check(&h->cap, h->presenter,	/* #747 */
 				     RESOURCE_BLK_DEVICE, h->cap_op,
 				     h->cap_resource_id);
@@ -1455,9 +1457,8 @@ blk_xlate_held(struct blk_handle *h, unsigned int used,
 	for (i = 0; i < h->n_dma_caps; i++) {
 		struct blk_xlate *x = &h->dma_xlate[i];
 
-		/* #747: a token with a deadline is asked on every use. */
-		if (x->npages == 0 ||
-		    (x->epoch == now && h->dma_cap[i].expires == 0))
+		/* #747: a deadline moves the epoch too, by its revocation. */
+		if (x->npages == 0 || x->epoch == now)
 			continue;
 		r = blk_tsc();
 		why[i] = blk_token_check(&h->dma_cap[i], cap_self(),
