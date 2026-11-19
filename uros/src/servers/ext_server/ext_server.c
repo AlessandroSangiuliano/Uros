@@ -1673,6 +1673,95 @@ ext_server_demux(mach_msg_header_t *in, mach_msg_header_t *out)
  * blk_open_try() returns immediately with NULL if the driver hasn't
  * registered — used for optional/extra partitions.
  */
+/*
+ * #912: the inode cache, on the root disk's own inodes, with the counts the
+ * mount keeps (ext2fs_icache_counts).  One line for each question:
+ *
+ * - /mach_servers/cow_test walked 2000 times reads the inode table in the
+ *   first walk only.  With the 16 slots of ino & 15, / (inode 2) and
+ *   /mach_servers (18) evicted each other: two disk reads every walk, 1.5 ms
+ *   each under KVM.
+ * - Inodes 2, 18, 34, 50, 66 and 82, which that hash put in one slot, read in
+ *   turn 50 times read the table in the first round only.
+ *
+ * Run before the mount is registered, so that no client's read is counted.
+ */
+static void
+icache_check(struct mount_context *mnt)
+{
+	static const ino_t	coll[] = { 2, 18, 34, 50, 66, 82 };
+	const char		*walk = "/mach_servers/cow_test";
+	unsigned long		hits, misses, first, after;
+	unsigned int		sets, i, k, round;
+	fs_private_t		priv;
+	int			rc;
+
+	if (!ext2fs_icache_counts(&mnt->dev, &hits, &misses, &first, &sets)) {
+		printf("ext2: inode cache NOT ASKED -- the root's mount has no "
+		       "state yet (#912)\n");
+		return;
+	}
+
+	rc = ext2fs_open_file(&mnt->dev, walk, &priv);
+	if (rc != 0)
+		printf("ext2: inode cache: the walk NOT ASKED -- %s is not on "
+		       "this disk (rc=%d) (#912)\n", walk, rc);
+	else {
+		ext2fs_close_file(priv);
+		free(priv);
+		(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &first,
+					    &sets);
+		for (i = 1; i < 2000 && rc == 0; i++) {
+			rc = ext2fs_open_file(&mnt->dev, walk, &priv);
+			if (rc == 0) {
+				ext2fs_close_file(priv);
+				free(priv);
+			}
+		}
+		(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &after,
+					    &sets);
+		if (rc != 0)
+			printf("ext2: inode cache: WRONG -- walk %u of 2000 of %s "
+			       "failed (rc=%d) (#912)\n", i, walk, rc);
+		else if (after != first)
+			printf("ext2: inode cache: WRONG -- %s walked 2000 times "
+			       "read the inode table %lu times after the first "
+			       "walk: its inodes evict one another (#912)\n", walk,
+			       after - first);
+		else
+			printf("ext2: inode cache: %s walked 2000 times, %lu "
+			       "inode-table reads, all in the first walk; %lu hits "
+			       "and %lu misses since the mount, %u sets of 4 ways "
+			       "(#912)\n", walk, first, hits, misses, sets);
+	}
+
+	rc = 0;
+	for (round = 0; round < 50 && rc == 0; round++) {
+		if (round == 1)
+			(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses,
+						    &first, &sets);
+		for (k = 0; k < sizeof(coll) / sizeof(coll[0]) && rc == 0; k++)
+			rc = ext2fs_icache_read(&mnt->dev, coll[k]);
+	}
+	(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &after, &sets);
+	if (rc == FS_CORRUPT)
+		printf("ext2: inode cache: the collisions NOT ASKED -- this "
+		       "filesystem has fewer than 82 inodes (#912)\n");
+	else if (rc != 0)
+		printf("ext2: inode cache: WRONG -- inode %lu could not be read "
+		       "in round %u (rc=%d) (#912)\n", (unsigned long)coll[k - 1],
+		       round - 1, rc);
+	else if (after != first)
+		printf("ext2: inode cache: WRONG -- inodes 2, 18, 34, 50, 66 and "
+		       "82 read in turn 50 times read the inode table %lu times "
+		       "after the first round: they evict one another (#912)\n",
+		       after - first);
+	else
+		printf("ext2: inode cache: inodes 2, 18, 34, 50, 66 and 82, which "
+		       "ino & 15 put in one slot, read in turn 50 times: no "
+		       "inode-table read after the first round (#912)\n");
+}
+
 static int
 mount_partition(struct mount_context *mnt, const char *driver_name,
 		const char *service_name, const char *mount_path,
@@ -1916,6 +2005,10 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 			       "enabled%s\n", mnt->dev.cache->pc_max_entries,
 			       mnt->dev.cache->pc_dma_pool ? ", DMA-backed" : "");
 	}
+
+	/* #912: before the mount is registered, so no client reads beside it */
+	if (strcmp(mount_path, "/") == 0)
+		icache_check(mnt);
 
 	/* Allocate per-mount receive port */
 	kr = mach_port_allocate(mach_task_self(),
