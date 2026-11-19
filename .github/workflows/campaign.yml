@@ -319,10 +319,13 @@ jobs:
           # the container's step above, and the runner's signals are passed on
           # to it, here directly, as SIGTERM.
           stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
+          # #960: the packages are job.sh's own, by their Ubuntu names, from
+          # the table the container's list comes from: this step's list of its
+          # own had nothing for the 32-bit glibc and libgcc the -m32 host
+          # tests are built with.
+          packages=$(scripts/ci/job.sh --packages ubuntu)
           sudo apt-get update -q
-          sudo apt-get install -y -q gcc binutils cmake ninja-build make bison flex \
-            python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
-            iproute2 gdb
+          sudo apt-get install -y -q $packages
           if [ -n "$SWEEP" ]; then
             what=(--sweep "$SWEEP" --share "$SHARE")
           elif [ -n "$ABLATE" ]; then
