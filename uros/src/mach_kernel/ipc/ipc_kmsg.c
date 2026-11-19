@@ -954,7 +954,15 @@ ipc_kmsg_get(
 	 * the cases where no implicit data is requested.
 	 */
 	trailer = (mach_msg_format_0_trailer_t *) ((vm_offset_t)&kmsg->ikm_header + size);
-	trailer->msgh_sender = KERNEL_SECURITY_TOKEN;
+	/*
+	 * 🔴 #747: THE SENDER, WHICH THIS SAID WAS THE KERNEL.  Every message a
+	 * task sent carried KERNEL_SECURITY_TOKEN here, so a receiver asking for
+	 * the sender's trailer element was told the kernel had sent it.  It is
+	 * the sending task's identity (<mach/urmach_identity.h>), as the fast
+	 * path in mach_msg.c stamps it too; ipc_kmsg_get_from_kernel() below
+	 * keeps the kernel's own, for what the kernel sends.
+	 */
+	trailer->msgh_sender = current_task()->sec_token;
 	trailer->msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
 	trailer->msgh_trailer_size = MACH_MSG_TRAILER_MINIMUM_SIZE;
 
