@@ -6,12 +6,12 @@ Run: --entry 14 600 -smp 4
 Expect: cap_test: \[48\] WRONG — after its parent was revoked, [0-9]+ of the 22 still verified by the kernel.s trap
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
-index 7b0c681b..a260a505 100644
+index b3b60661..e9f62d6f 100644
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -569,19 +569,16 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
-     }
- 
+@@ -762,19 +762,16 @@ cap_revoke_tree(struct cap_entry *root, int *count)
+ {
+     uint64_t cap_id = root->token.cap_id;
      struct cap_entry *e;
 -    int revoked = 0, descend = 1;
 +    int revoked = 0;
@@ -37,7 +37,7 @@ index 7b0c681b..a260a505 100644
  
          cap_table_mark_revoked(e);
          revoked++;
-@@ -618,6 +615,14 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
+@@ -811,6 +808,14 @@ cap_revoke_tree(struct cap_entry *root, int *count)
              if (refused == KERN_SUCCESS)
                  refused = kr;
          }
@@ -51,4 +51,4 @@ index 7b0c681b..a260a505 100644
 +        }
      }
  
-     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
+     *count = revoked;

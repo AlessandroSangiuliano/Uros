@@ -6,13 +6,13 @@ Run: --entry 14 600 -smp 4
 Expect: cap_test: \[49\] WRONG — a block-device capability asked as one
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
-index 7b0c681b..57f976a0 100644
+index b3b60661..884d8402 100644
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -1028,8 +1028,7 @@ cap_verify(mach_port_t             server,
- 
-     if (!cap_verify_hmac(&token))           return CAP_ERR_INVALID_TOKEN;
-     if (token.revoked)                      return CAP_ERR_REVOKED;
+@@ -1422,8 +1422,7 @@ cap_verify(mach_port_t             server,
+      * trap: the identity in the trailer of the request that carried it.
+      */
+     if (presenter == 0 || token.owner != presenter) return CAP_ERR_NOT_OWNER;
 -    /* #745: the kind as well as the id, as the trap has since #599. */
 -    if (token.resource_type != resource_type) return CAP_ERR_RESOURCE_MISMATCH;
 +    (void)resource_type;

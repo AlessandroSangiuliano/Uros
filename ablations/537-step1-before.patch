@@ -5,10 +5,10 @@ Run: --entry 14 1200 -smp 4
 Measure: the whole ask and the kernel's part in the block server's per-page split, its line "in the kernel, over all N asks since boot" (#537 at 1.4 GHz: the whole ask 42 554 - 43 408 cycles on i386 against 15 953 - 16 039 with step 1, and 37 170 - 38 083 on x86-64 without an IOMMU against 12 571 - 12 766); against the same tree without the patch, under KVM; on x86-64 the asks reach 1024 pages only with UROS_BUNDLE_IPC_BENCH=ON and UROS_BUNDLE_IPC_BENCH_SUITES=disk
 
 diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
-index d2d53b67..1e87f05c 100644
+index d123123b..11a52b51 100644
 --- a/uros/src/mach_kernel/device/device_master.c
 +++ b/uros/src/mach_kernel/device/device_master.c
-@@ -1754,6 +1754,10 @@ dma_region_page(const struct dma_region *r, vm_offset_t pa)
+@@ -1801,6 +1801,10 @@ dma_region_page(const struct dma_region *r, vm_offset_t pa)
  {
  	unsigned int lo = 0, hi = r->npages;
  
@@ -20,10 +20,10 @@ index d2d53b67..1e87f05c 100644
  		unsigned int mid = lo + (hi - lo) / 2;
  
 diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
-index 424d5b88..afe514ca 100644
+index a07704f6..1efb58f5 100644
 --- a/uros/src/mach_kernel/kern/cap.c
 +++ b/uros/src/mach_kernel/kern/cap.c
-@@ -171,6 +171,21 @@ cap_state_get_or_create(uint64_t cap_id)
+@@ -175,6 +175,21 @@ cap_state_get_or_create(uint64_t cap_id)
      return e;
  }
  
@@ -45,16 +45,17 @@ index 424d5b88..afe514ca 100644
  /*
   * #537: the HMAC with the key made ready once, and the one made ready for each
   * message, against the answer RFC 4231 publishes (test case 2) -- so a check
-@@ -236,6 +251,22 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
+@@ -241,6 +256,23 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
   */
- static kern_return_t cap_fields_check(const struct uros_cap *, uint32_t,
-                                       uint32_t, uint64_t);
-+static kern_return_t cap_rest_locked(const struct uros_cap *, uint32_t,
-+                                     uint32_t, uint64_t);
+ static kern_return_t cap_fields_check(const struct uros_cap *, uint64_t,
+                                       uint32_t, uint32_t, uint64_t);
++static kern_return_t cap_rest_locked(const struct uros_cap *, uint64_t,
++                                     uint32_t, uint32_t, uint64_t);
 +
 +/* All of it, the MAC included.  Must be called with cap_lock held. */
 +static kern_return_t
 +cap_check_locked(const struct uros_cap *t,
++                 uint64_t presenter,
 +                 uint32_t resource_type,
 +                 uint32_t op,
 +                 uint64_t resource_id)
@@ -63,12 +64,12 @@ index 424d5b88..afe514ca 100644
 +        return CAP_ERR_INTERNAL;
 +    if (!cap_hmac_check(t))
 +        return CAP_ERR_INVALID_TOKEN;
-+    return cap_rest_locked(t, resource_type, op, resource_id);
++    return cap_rest_locked(t, presenter, resource_type, op, resource_id);
 +}
  
  /* The fields, and the look-up among the revoked.  Must be called with cap_lock held. */
  static kern_return_t
-@@ -272,7 +303,7 @@ static kern_return_t
+@@ -313,7 +345,7 @@ static kern_return_t
  cap_mac_check_unlocked(const struct uros_cap *t)
  {
      const size_t signed_len = sizeof(*t) - CAP_HMAC_SIZE;
@@ -77,7 +78,7 @@ index 424d5b88..afe514ca 100644
      uint8_t expected[HMAC_SHA256_SIZE];
      boolean_t set;
      int ok = 0;
-@@ -280,16 +311,17 @@ cap_mac_check_unlocked(const struct uros_cap *t)
+@@ -321,16 +353,17 @@ cap_mac_check_unlocked(const struct uros_cap *t)
      simple_lock(&cap_lock);
      set = cap_key_set;
      if (set)
@@ -98,20 +99,23 @@ index 424d5b88..afe514ca 100644
      return ok ? KERN_SUCCESS : CAP_ERR_INVALID_TOKEN;
  }
  
-@@ -302,11 +334,8 @@ cap_check_unlocked(const struct uros_cap *t,
+@@ -344,14 +377,11 @@ cap_check_unlocked(const struct uros_cap *t,
  {
      kern_return_t kr;
  
 -    kr = cap_mac_check_unlocked(t);
 -    if (kr != KERN_SUCCESS)
 -        return kr;
+     kr = cap_deadline_check(t);		/* #747 */
+     if (kr != KERN_SUCCESS)
+         return kr;
      simple_lock(&cap_lock);
--    kr = cap_rest_locked(t, resource_type, op, resource_id);
-+    kr = cap_check_locked(t, resource_type, op, resource_id);
+-    kr = cap_rest_locked(t, presenter, resource_type, op, resource_id);
++    kr = cap_check_locked(t, presenter, resource_type, op, resource_id);
      simple_unlock(&cap_lock);
      return kr;
  }
-@@ -374,45 +403,10 @@ cap_check_in_kernel(const struct uros_cap *token,
+@@ -431,51 +461,12 @@ cap_check_in_kernel(const struct uros_cap *token,
                      uint32_t op,
                      uint64_t resource_id)
  {
@@ -120,6 +124,8 @@ index 424d5b88..afe514ca 100644
 -    const uint8_t *a, *b;
 -    uint8_t diff = 0;
      kern_return_t kr;
+     /* #747: inside the kernel the presenter is the task calling it. */
+     uint64_t presenter = urmach_identity_of(current_task()->sec_token);
  
 -    /*
 -     * #537: the token this processor verified last, in this epoch?  Every
@@ -136,11 +142,15 @@ index 424d5b88..afe514ca 100644
 -    if (v->valid && v->epoch == epoch && diff == 0) {
 -        v->hits++;
 -        enable_preemption();
--        return cap_fields_check(token, resource_type, op, resource_id);
+-        kr = cap_deadline_check(token);		/* #747: never cached */
+-        if (kr != KERN_SUCCESS)
+-            return kr;
+-        return cap_fields_check(token, presenter, resource_type, op,
+-                                resource_id);
 -    }
 -    enable_preemption();
 -
-     kr = cap_check_unlocked(token, resource_type, op, resource_id);
+     kr = cap_check_unlocked(token, presenter, resource_type, op, resource_id);
  
 -    /*
 -     * Kept with the epoch read BEFORE the check: a revocation during it moves
@@ -157,7 +167,7 @@ index 424d5b88..afe514ca 100644
      return kr;
  }
  
-@@ -582,7 +576,7 @@ cap_probe_run(void)
+@@ -647,7 +638,7 @@ cap_probe_drive(int me)
      }
      printf("cap: probe -- one checker alone: %llu cycles a check; %u together, "
             "one a processor: %llu-%llu cycles a check, %u refused; the MAC "
@@ -166,7 +176,7 @@ index 424d5b88..afe514ca 100644
             (unsigned long long)lo, (unsigned long long)hi,
             refused + cap_probe_refused);
  }
-@@ -632,7 +626,10 @@ cap_cache_selftest(void)
+@@ -714,7 +705,10 @@ cap_cache_selftest(void)
             "%llu from the cache; revoked, its next check answers %d -- %s "
             "(#537)\n", first, second, (unsigned long long)(hits1 - hits0),
             after,
@@ -178,18 +188,3 @@ index 424d5b88..afe514ca 100644
             ? "WRONG, a valid token was refused"
             : hits1 - hits0 != 1 ? "WRONG, the second check did not hit"
             : after != CAP_ERR_REVOKED ? "WRONG, the cache outlived the revocation"
-@@ -700,13 +697,8 @@ urmach_cap_use(const struct uros_cap *user_token,
-     if (kr != KERN_SUCCESS)
-         return kr;
- 
--    /* #537: the MAC outside the lock; the revocation look-up and the use
--     * counted in one hold, as before. */
--    kr = cap_mac_check_unlocked(&t);
--    if (kr != KERN_SUCCESS)
--        return kr;
-     simple_lock(&cap_lock);
--    kr = cap_rest_locked(&t, resource_type, op, resource_id);
-+    kr = cap_check_locked(&t, resource_type, op, resource_id);
-     if (kr != KERN_SUCCESS) {
-         simple_unlock(&cap_lock);
-         return kr;

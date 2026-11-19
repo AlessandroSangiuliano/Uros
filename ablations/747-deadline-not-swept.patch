@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #747
+Takes out: the sweep's revocation -- the waiter rings when a deadline comes, and cap_server revokes nothing, so a claim made with a capability that has a deadline keeps its card and its mapping past it, and a handle opened with one reads on; irq_claim_test's [21] and cap_test's [54] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[21\] WRONG
+Expect: cap_test: \[54\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index b3b60661..6ebb64ba 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -966,7 +966,6 @@ cap_expiry_sweep(void)
+ {
+     struct cap_entry *e;
+     uint64_t          now, next = 0;
+-    int               n;
+ 
+     if (!cap_now_ns(&now)) {
+         printf("cap: the capability clock could not be read, so no deadline "
+@@ -982,14 +981,6 @@ cap_expiry_sweep(void)
+                 next = e->token.expires;
+             continue;
+         }
+-        /* A refusal by the kernel is said by cap_revoke_tree(). */
+-        (void)cap_revoke_tree(e, &n);
+-        printf("cap: cap %llu reached its deadline %llu ms ago and was "
+-               "revoked, %d cap(s) with its tree (#747)\n",
+-               (unsigned long long)e->token.cap_id,
+-               (unsigned long long)((now - e->token.expires) / 1000000ULL),
+-               n);
+-        cap_revoke_tell(e, n);
+     }
+     pthread_mutex_lock(&cap_expiry_lock);
+     cap_expiry_due = next;

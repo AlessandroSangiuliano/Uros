@@ -6,11 +6,11 @@ Run: --entry 14 600 -smp 4
 Expect: cap_test: \[50\] WRONG
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
-index 5e14484a..30f065ff 100644
+index b3b60661..2bec0cee 100644
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -303,7 +303,7 @@ cap_deadline(unsigned int lifetime_ms, uint64_t ceiling, uint64_t *out)
-     if (!cap_now_ns(&now))
+@@ -333,7 +333,7 @@ cap_deadline(unsigned int lifetime_ms, uint64_t ceiling, uint64_t *out)
+     if (!cap_expiry_running || !cap_now_ns(&now))
          return -1;
      d = now + (uint64_t)lifetime_ms * 1000000ULL;
 -    *out = (ceiling != 0 && ceiling < d) ? ceiling : d;
