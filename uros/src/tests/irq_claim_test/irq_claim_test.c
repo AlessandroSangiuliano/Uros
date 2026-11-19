@@ -94,6 +94,7 @@
 #include <mach/clock.h>		/* host_get_clock_service, clock_get_time (#747) */
 #include <mach/clock_types.h>	/* URMACH_CAP_CLOCK, NSEC_PER_SEC (#747) */
 #include <servers/netname.h>
+#include <servers/netname_wait.h>	/* netname_wait (#696) */
 #include <string.h>
 
 /*
@@ -366,7 +367,6 @@ arm_four_what_is_refused(void)
  * would have made this a test of QEMU's defaults.
  */
 #define IQ_NET_CLASS	0x020000u
-#define IQ_HAL_TRIES	200
 
 /*
  * ── The device this test owns, named by the HAL (#511) ───────────────────
@@ -399,16 +399,17 @@ own_the_network_card(natural_t *bdf_out)
 	kern_return_t		kr;
 	natural_t		bdf = 0;
 	unsigned int		class_rev = 0;
-	int			found = 0, tries;
+	int			found = 0;
 
-	for (tries = 0; tries < IQ_HAL_TRIES; tries++) {
-		if (netname_look_up(name_server_port, "", (char *)"hal",
-				    &hal_port) == KERN_SUCCESS)
-			break;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
-	}
-	if (hal_port == MACH_PORT_NULL) {
-		printf("irq_claim_test: the HAL never appeared\n");
+	/*
+	 * #696: on the HAL's check-in.  Two hundred depressed yields ran out
+	 * before it in 19 of 60 boots under KVM at four processors on 19/11,
+	 * and no arm past [6] ran in them -- [18] to [21] among them.
+	 */
+	kr = netname_wait(name_server_port, "hal", &hal_port);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: the HAL's name could not be waited for "
+		       "(kr=%d)\n", (int)kr);
 		return 0;
 	}
 
