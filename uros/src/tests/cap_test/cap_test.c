@@ -3533,11 +3533,40 @@ ct14_list_shape(mach_port_t device_port, mach_port_t handle, const char *name)
                    "(kr=%d, %u bytes): the controller stopped after it "
                    "(#712)\n", name, (int)kr2, (unsigned)again);
         else {
+            io_buf_ptr_t           data = NULL;
+            mach_msg_type_number_t cnt = 0;
+            kern_return_t          n1, n2, n3;
+
             printf("cap_test: [14] %s read 4096 bytes through a list one page "
                    "longer than them, from the first page, and answered the "
                    "next read — the list is trimmed to the bytes (#712)\n",
                    name);
-            ok = 1;
+
+            /*
+             * And a count of -1, on the paths whose count is signed: rounded
+             * up in unsigned arithmetic it was 0 sectors, which every range
+             * passes (#711).  device_write's and the batch's counts are MIG's
+             * own, unsigned.
+             */
+            n1 = device_read(handle, D_READ, 0, (io_buf_len_t)-1, &data, &cnt);
+            if (n1 == KERN_SUCCESS && data != NULL && cnt != 0)
+                (void)vm_deallocate(mach_task_self(), (vm_address_t)data, cnt);
+            n2 = device_read_phys(handle, D_READ, 0, (io_buf_len_t)-1, pages,
+                                  1, &got);
+            n3 = device_write_phys(handle, D_WRITE, 0, (io_buf_len_t)-1, pages,
+                                   1, &got);
+            if (n1 != D_INVALID_SIZE || n2 != D_INVALID_SIZE
+                || n3 != D_INVALID_SIZE)
+                printf("cap_test: [14] WRONG — %s answered a count of -1 with "
+                       "kr=%d (device_read), %d (device_read_phys) and %d "
+                       "(device_write_phys), not D_INVALID_SIZE on each "
+                       "(#712)\n", name, (int)n1, (int)n2, (int)n3);
+            else {
+                printf("cap_test: [14] %s refused a count of -1 on "
+                       "device_read, device_read_phys and device_write_phys, "
+                       "D_INVALID_SIZE each (#712)\n", name);
+                ok = 1;
+            }
         }
     }
 
