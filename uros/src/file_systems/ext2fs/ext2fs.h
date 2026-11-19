@@ -238,8 +238,6 @@ struct ext2fs_file {
 	daddr_t			f_blkno[NIADDR];
 						/* disk address of block in
 						   buffer */
-	vm_offset_t		f_inode_blk;	/* cached raw inode block (scratch) */
-	vm_size_t		f_inode_blk_size;
 	daddr_t			f_ra_last_block;/* last logical block read (readahead) */
 	unsigned int		f_gen;		/* #384: v_gen this handle's
 						   f_blk[] caches match */

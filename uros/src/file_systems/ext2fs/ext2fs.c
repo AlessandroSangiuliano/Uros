@@ -973,17 +973,6 @@ free_file_buffers(register struct ext2fs_file *fp)
 	}
 
 	fp->f_ra_last_block = -1;
-
-	/*
-	 * Free the cached inode block
-	 */
-	if (fp->f_inode_blk != 0) {
-	    (void) vm_deallocate(mach_task_self(),
-				 fp->f_inode_blk,
-				 fp->f_inode_blk_size);
-	    fp->f_inode_blk = 0;
-	    fp->f_inode_blk_size = 0;
-	}
 }
 
 /* #912: the fill of an inode-table block, which says that it ran. */
@@ -2708,23 +2697,12 @@ ext2fs_open_file_into(
 			ext2fs_close_file((fs_private_t)fp);
 			return FS_NO_RESOURCES;
 		}
-		if (vn->v_refcount == 1) {
-			/* New vnode — populate from scratch */
+		/*
+		 * New vnode — populate from scratch.  Its inode block stays 0
+		 * until its first flush reads one (vnode_inode_block, #599).
+		 */
+		if (vn->v_refcount == 1)
 			vn->v_ic = fp->f_ic_scratch;
-			vn->v_inode_blk = fp->f_inode_blk;
-			vn->v_inode_blk_size = fp->f_inode_blk_size;
-			fp->f_inode_blk = 0;
-			fp->f_inode_blk_size = 0;
-		} else {
-			/* Existing vnode — discard scratch data */
-			if (fp->f_inode_blk) {
-				vm_deallocate(mach_task_self(),
-					      fp->f_inode_blk,
-					      fp->f_inode_blk_size);
-				fp->f_inode_blk = 0;
-				fp->f_inode_blk_size = 0;
-			}
-		}
 		fp->f_vnode = vn;
 		fp->f_ic = &vn->v_ic;
 		fp->f_gen = vn->v_gen;
@@ -3859,10 +3837,11 @@ vnode_inode_block(struct ext2fs_file *fp, ino_t inumber, daddr_t disk_block)
 	 * 🔑 The cause is that a READ optimisation disabled the WRITE-BACK.
 	 * read_inode() checks the inode cache first and, on a hit, "copies the
 	 * cached inode directly without any device I/O" -- which is its whole
-	 * value.  But the first thing that path does is free_file_buffers(),
-	 * which clears f_inode_blk, and it returns without ever reading the
-	 * block that HOLDS the inode.  The vnode then inherits a zero, and
-	 * every flush of that inode fails for the life of the mount.
+	 * value.  But the first thing that path did was free_file_buffers(),
+	 * which cleared the raw block the handle kept (f_inode_blk, gone since
+	 * #912: no read keeps one now), and it returned without ever reading
+	 * the block that HOLDS the inode.  The vnode then inherited a zero, and
+	 * every flush of that inode failed for the life of the mount.
 	 *
 	 * ⚠️ Read HERE and not on the cache hit.  Reading it there would undo
 	 * exactly the I/O the cache exists to avoid, on every open of every
