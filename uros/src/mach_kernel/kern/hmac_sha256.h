@@ -18,8 +18,8 @@
 /*
  * File:    kern/hmac_sha256.h
  * Purpose: Kernel-side HMAC-SHA256 (RFC 2104).  Used by urmach_cap_verify
- *          and urmach_cap_use to validate capability tokens against the
- *          cap_hmac_key installed by cap_server at boot.
+ *          and the kernel's own checks to validate capability tokens against
+ *          the cap_hmac_key installed by cap_server at boot.
  */
 
 #ifndef _KERN_HMAC_SHA256_H_

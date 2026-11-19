@@ -333,7 +333,7 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(not_implemented, 0),		/* 35: was mach_rpc_trap */
 	MACH_TRAP(not_implemented, 0),		/* 36: was mach_rpc_return_trap */
 	MACH_TRAP(urmach_cap_verify, 5),	/* 37: + type, #599 */
-	MACH_TRAP(urmach_cap_use, 5),		/* 38: + type, #599 */
+	MACH_TRAP(not_implemented, 0),		/* 38: was urmach_cap_use, #747 */
 	MACH_TRAP(urmach_cap_revoke, 2),	/* 39 */
 
 	MACH_TRAP(urmach_cap_register, 1),	/* 40 */

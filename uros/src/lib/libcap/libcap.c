@@ -214,8 +214,7 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource
 }
 
 /*
- * ⚠️ The declarations of urmach_cap_verify and urmach_cap_use used to be
- * HERE, with a comment saying no kernel-facing header shipped them.  That was
+ * ⚠️ The declarations of the capability traps used to be HERE, with a comment saying no kernel-facing header shipped them.  That was
  * true and it was the problem: a token is a pointer, the other half of these
  * calls is an assembly stub that carries no types, and nothing anywhere
  * compared this file's idea of them with the kernel's.  They are declared in
@@ -231,16 +230,6 @@ cap_verify_local(const struct uros_cap *token,
 {
     if (token == NULL) return CAP_ERR_INVALID_TOKEN;
     return urmach_cap_verify(token, resource_type, op, resource_id);
-}
-
-kern_return_t
-cap_use_local(const struct uros_cap *token,
-              uint32_t resource_type,
-              uint32_t op,
-              uint64_t resource_id)
-{
-    if (token == NULL) return CAP_ERR_INVALID_TOKEN;
-    return urmach_cap_use(token, resource_type, op, resource_id);
 }
 
 /*

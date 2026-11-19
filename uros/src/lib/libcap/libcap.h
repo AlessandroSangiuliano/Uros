@@ -110,17 +110,6 @@ kern_return_t cap_verify_local(const struct uros_cap *token,
                               uint64_t resource_id);
 
 /*
- * cap_use_local() — fast path for consume-one-use tokens.  Equivalent
- * to cap_verify_local() plus atomic bookkeeping: when the token was
- * issued with max_uses != 0, the kernel decrements a per-cap_id use
- * counter and returns CAP_ERR_EXHAUSTED once it hits zero.
- */
-kern_return_t cap_use_local(const struct uros_cap *token,
-                              uint32_t resource_type, /* #599 */
-                              uint32_t op,
-                              uint64_t resource_id);
-
-/*
  * cap_provision() — bootstrap-side wrapper around the
  * cap_provision_task RPC (#216 v2.1).  Hands cap_server a manifest
  * blob and the receive of a per-task cap_port the child task will

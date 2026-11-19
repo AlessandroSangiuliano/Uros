@@ -78,17 +78,6 @@ extern kern_return_t urmach_cap_verify(const struct uros_cap *user_token,
                                        uint64_t resource_id);
 
 /*
- * Same as urmach_cap_verify, plus atomic bookkeeping for bounded-use
- * tokens: if max_uses != 0 the kernel consumes one use from its own
- * table (cap_id keyed) and returns CAP_ERR_EXHAUSTED once the budget
- * is gone.
- */
-extern kern_return_t urmach_cap_use(const struct uros_cap *user_token,
-                                    uint32_t resource_type,
-                                    uint32_t op,
-                                    uint64_t resource_id);
-
-/*
  * Add `cap_id` to the revocation set.  Only the cap_server task (the
  * one bootstrap named, urmach_cap_server_set()) may call this; others get
  * CAP_ERR_UNAUTHORIZED.

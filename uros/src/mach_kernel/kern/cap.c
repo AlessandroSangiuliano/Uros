@@ -73,13 +73,11 @@
 #define CAP_STATE_BUCKETS       256
 
 #define CAP_FLAG_REVOKED        0x1
-#define CAP_FLAG_CONSUMED       0x2
 
 struct cap_state_entry {
     struct cap_state_entry *next;
     uint64_t  cap_id;
     uint32_t  flags;
-    uint32_t  uses_left;     /* meaningful only when max_uses != 0 */
 };
 
 static struct cap_state_entry *cap_state_table[CAP_STATE_BUCKETS];
@@ -168,7 +166,6 @@ cap_state_get_or_create(uint64_t cap_id)
 
     e->cap_id    = cap_id;
     e->flags     = 0;
-    e->uses_left = 0;
     unsigned b = cap_bucket(cap_id);
     e->next = cap_state_table[b];
     cap_state_table[b] = e;
@@ -231,11 +228,10 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
 }
 
 /*
- * Core validation shared by urmach_cap_verify and urmach_cap_use:
+ * Core validation, urmach_cap_verify's and the kernel's own:
  *   - HMAC must match
- *   - resource_id must match
+ *   - resource type and id must match
  *   - op must be a subset of allowed_ops
- *   - not expired (for v1 `expires` is unused and must be 0)
  *   - not revoked
  */
 static kern_return_t cap_fields_check(const struct uros_cap *, uint32_t,
@@ -705,55 +701,6 @@ urmach_cap_verify(const struct uros_cap *user_token,
         return kr;
 
     return cap_check_unlocked(&t, resource_type, op, resource_id);
-}
-
-kern_return_t
-urmach_cap_use(const struct uros_cap *user_token,
-               uint32_t resource_type,
-               uint32_t op,
-               uint64_t resource_id)
-{
-    struct uros_cap t;
-    kern_return_t kr = cap_copyin_token(user_token, &t);
-    if (kr != KERN_SUCCESS)
-        return kr;
-
-    /* #537: the MAC outside the lock; the revocation look-up and the use
-     * counted in one hold, as before. */
-    kr = cap_mac_check_unlocked(&t);
-    if (kr != KERN_SUCCESS)
-        return kr;
-    simple_lock(&cap_lock);
-    kr = cap_rest_locked(&t, resource_type, op, resource_id);
-    if (kr != KERN_SUCCESS) {
-        simple_unlock(&cap_lock);
-        return kr;
-    }
-
-    if (t.max_uses != 0) {
-        struct cap_state_entry *e = cap_state_get_or_create(t.cap_id);
-        if (e == NULL) {
-            simple_unlock(&cap_lock);
-            return CAP_ERR_NO_MEMORY;
-        }
-        /* re-check revoked state after the potentially-dropped lock */
-        if (e->flags & CAP_FLAG_REVOKED) {
-            simple_unlock(&cap_lock);
-            return CAP_ERR_REVOKED;
-        }
-        if (!(e->flags & CAP_FLAG_CONSUMED)) {
-            e->uses_left = t.max_uses;
-            e->flags |= CAP_FLAG_CONSUMED;
-        }
-        if (e->uses_left == 0) {
-            simple_unlock(&cap_lock);
-            return CAP_ERR_EXHAUSTED;
-        }
-        e->uses_left--;
-    }
-
-    simple_unlock(&cap_lock);
-    return KERN_SUCCESS;
 }
 
 /*

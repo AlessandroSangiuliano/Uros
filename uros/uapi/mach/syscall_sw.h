@@ -129,12 +129,12 @@ kernel_trap(mach_thread_set_name,-16,1)
 kernel_trap(evc_wait,-17,1)
 
 /*
- *	UrMach capability fast-path traps (slots 37-40).  These replace
- *	the RPC to cap_server for the hot verify/use paths; see kern/cap.c
- *	for the handlers and cap_types.h for token layout.
+ *	UrMach capability fast-path traps (slots 37, 39 and 40).  These
+ *	replace the RPC to cap_server for the hot verify path; see kern/cap.c
+ *	for the handlers and cap_types.h for token layout.  38 was
+ *	urmach_cap_use, which counted uses nothing asked for (#747).
  */
 kernel_trap(urmach_cap_verify,-37,5)
-kernel_trap(urmach_cap_use,-38,5)
 kernel_trap(urmach_cap_revoke,-39,2)
 kernel_trap(urmach_cap_register,-40,1)
 
