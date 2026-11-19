@@ -1295,6 +1295,8 @@ a_capability_is_derived_to_a_named_task(void)
     struct uros_cap        parent, child, kid;
     kern_return_t          kr, dkr = KERN_FAILURE, kkr = KERN_FAILURE;
     kern_return_t          rkr = KERN_FAILURE, vkr = KERN_FAILURE;
+    kern_return_t          okr = KERN_FAILURE, ntrap = KERN_FAILURE;
+    kern_return_t          nrpc = KERN_FAILURE;
     uint64_t               id_other;
 
     memset(&parent, 0, sizeof(parent));
@@ -1326,6 +1328,17 @@ a_capability_is_derived_to_a_named_task(void)
         dkr = cap_derive_for(&parent, CAP_OP_BLK_READ, 0, port, &child);
         kkr = cap_derive_for(&parent, CAP_OP_BLK_READ, 0, mach_task_self(),
                              &kid);
+        /*
+         * The child is the other task's: it verifies as presented by it --
+         * the control -- and is refused as presented by this task, which
+         * holds its bytes, by the trap and by cap_server.
+         */
+        okr   = urmach_cap_verify(&child, id_other, RESOURCE_BLK_DEVICE,
+                                  CAP_OP_BLK_READ, CT53_ID);
+        ntrap = urmach_cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE,
+                                  CAP_OP_BLK_READ, CT53_ID);
+        nrpc  = cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE,
+                           CAP_OP_BLK_READ, CT53_ID);
         rkr = cap_revoke(parent.cap_id);
         vkr = urmach_cap_verify(&child, id_other, RESOURCE_BLK_DEVICE,
                                 CAP_OP_BLK_READ, CT53_ID);
@@ -1336,21 +1349,28 @@ a_capability_is_derived_to_a_named_task(void)
 
     if (kr == KERN_SUCCESS && dkr == KERN_SUCCESS && child.owner == id_other &&
         child.allowed_ops == CAP_OP_BLK_READ && kkr == CAP_ERR_NO_DELEGATE &&
+        okr == KERN_SUCCESS && ntrap == CAP_ERR_NOT_OWNER &&
+        nrpc == CAP_ERR_NOT_OWNER &&
         rkr == KERN_SUCCESS && vkr == CAP_ERR_REVOKED) {
         printf("cap_test: [53] a child derived for a task named by its port "
-               "names it, 0x%llx, carries READ alone, and was refused as "
+               "names it, 0x%llx, carries READ alone, verifies as presented "
+               "by it and is refused with CAP_ERR_NOT_OWNER as presented by "
+               "this task, by the trap and by cap_server, and was refused as "
                "revoked with its parent; this task's own task port, which the "
                "kernel receives on, was refused with CAP_ERR_NO_DELEGATE "
                "(#747)\n", (unsigned long long)id_other);
         return 1;
     }
     printf("cap_test: [53] WRONG — the parent %d; the child derived for task "
-           "0x%llx (%d) names 0x%llx with operations 0x%llx, and after its "
-           "parent's revocation (%d) answered %d; derived for this task's own "
-           "task port, %d, where it must be CAP_ERR_NO_DELEGATE(%d) (#747)\n",
+           "0x%llx (%d) names 0x%llx with operations 0x%llx; presented by "
+           "its owner %d, by this task %d to the trap and %d to cap_server "
+           "(CAP_ERR_NOT_OWNER is %d); after its parent's revocation (%d) "
+           "answered %d; derived for this task's own task port, %d, where it "
+           "must be CAP_ERR_NO_DELEGATE(%d) (#747)\n",
            (int)kr, (unsigned long long)id_other, (int)dkr,
            (unsigned long long)child.owner,
-           (unsigned long long)child.allowed_ops, (int)rkr, (int)vkr,
+           (unsigned long long)child.allowed_ops, (int)okr, (int)ntrap,
+           (int)nrpc, (int)CAP_ERR_NOT_OWNER, (int)rkr, (int)vkr,
            (int)kkr, (int)CAP_ERR_NO_DELEGATE);
     return 0;
 }
