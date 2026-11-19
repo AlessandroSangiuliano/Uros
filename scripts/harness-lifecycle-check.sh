@@ -40,7 +40,9 @@
 #   jobstop    ci/job.sh, sent TERM during a boot of its merge test's, writes
 #              in job.txt where it stopped and the boot it stopped, that boot's
 #              row and logs, and exits 3, leaving neither the boot's qemu nor
-#              the lock: a cancelled campaign run (#951)
+#              the lock; and ci/pull-results.sh --job says it stopped short by
+#              that SIGTERM, its boot counted as stopped and nothing more: a
+#              cancelled campaign run (#951)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
@@ -697,7 +699,11 @@ fi
 # stopped -- "stopped: by SIGTERM from outside, ..., in round 1, at boot 1 of
 # 2: entry 1 ..." -- the boot's row as stopped and its logs in stopped/r1/,
 # and exits 3, the boot's qemu gone and the lock given back: what a cancelled
-# campaign run now does, its step passing the runner's signal on.  job.sh runs
+# campaign run now does, its step passing the runner's signal on.  And what an
+# import says of that job, asked of it with pull-results.sh --job: "STOPPED
+# SHORT, by SIGTERM from outside", and its merge test's line "0 boots, 0 WRONG,
+# 1 stopped", which named the time limit as the cause of every stop, a cancel's
+# too, until #951 had it name none.  job.sh runs
 # with this build, configured again from the preset, which leaves a configured
 # build as it is, and built; it asks whether the patches apply, and its merge
 # test boots entries 1 and 5.  The signal goes as soon as entry 1's qemu is
@@ -756,10 +762,15 @@ if wanted jobstop; then
 				left="$left; the stopped boot's log is not in stopped/r1/"
 			[ "$ended" = "exit 3" ] ||
 				left="$left; it ended by ${ended:-nothing said}, not exit 3"
+			said=$("$REPO/scripts/ci/pull-results.sh" --job "$OUT/jobstop" 2>&1)
+			grep -qF "pull-results: here: job $OUT/jobstop STOPPED SHORT, by SIGTERM from outside, " <<< "$said" ||
+				left="$left; pull-results.sh --job did not say it stopped short by SIGTERM from outside: $(sed -n 1p <<< "$said")"
+			grep -qF "pull-results: here: job $OUT/jobstop: 1 job(s), 0 boots, 0 WRONG, 1 stopped; " <<< "$said" ||
+				left="$left; pull-results.sh --job did not count its boot as stopped and nothing more: $(sed -n 2p <<< "$said")"
 			if [ -n "$left" ]; then
 				say jobstop "sent SIGTERM with its merge test's qemu (pid $q) up$left" WRONG
 			else
-				say jobstop "sent SIGTERM with its merge test's qemu (pid $q) up, it wrote in job.txt where it stopped and the boot it stopped, that boot's row and logs, and exited 3, the qemu gone and the lock given back" PASS
+				say jobstop "sent SIGTERM with its merge test's qemu (pid $q) up, it wrote in job.txt where it stopped and the boot it stopped, that boot's row and logs, and exited 3, the qemu gone and the lock given back; pull-results.sh --job says it stopped short by SIGTERM from outside, its boot counted as stopped and nothing more" PASS
 			fi
 		fi
 	fi
