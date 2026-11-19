@@ -8,12 +8,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <signal.h>
 #include <execinfo.h>
 #include <unistd.h>
 #include <string.h>
 
 typedef size_t (*fwrite_fn_t)(const void *, size_t, size_t, FILE *);
+
+/* A diagnostic goes to stderr with write(2), never through stdio: an fprintf
+ * here could call the fwrite() this file defines.  It is written whole -- a
+ * short write is continued, an interrupted one retried -- and an error ends
+ * it, there being nowhere left to say it.  #960: each write()'s result is
+ * used.  Ubuntu's GCC defines _FORTIFY_SOURCE, glibc then declares write()
+ * warn_unused_result, and a (void) cast does not satisfy GCC: the campaign's
+ * Ubuntu build stopped here, under -Werror. */
+static void
+say(const char *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(STDERR_FILENO, buf, len);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return;
+        buf += n;
+        len -= (size_t)n;
+    }
+}
 
 size_t
 fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
@@ -30,7 +52,11 @@ fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
         }
     }
 
-    if (env && env[0] == '1' && ptr != NULL && size > 0 && nmemb > 0) {
+    /* #960: ptr is not compared to NULL.  GCC knows fwrite() as a builtin
+     * whose first argument may not be null, GCC 15 says so of the comparison
+     * (-Wnonnull-compare, an error under -Werror), and an fwrite() of a null
+     * buffer with size and nmemb above 0 is undefined in the C library too. */
+    if (env && env[0] == '1' && size > 0 && nmemb > 0) {
         size_t bytes = size * nmemb;
         const unsigned char *b = (const unsigned char *)ptr;
         size_t i;
@@ -42,7 +68,7 @@ fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                 char hdr[256];
                 int n = snprintf(hdr, sizeof(hdr), "[fwrite-hook] non-ASCII byte 0x%02x at offset %zu (size=%zu,nmemb=%zu)\n",
                                  c, i, size, nmemb);
-                if (n > 0) write(STDERR_FILENO, hdr, (size_t)n);
+                if (n > 0) say(hdr, (size_t)n);
 
                 /* Dump a small surrounding hex context */
                 size_t start = (i > 64) ? i - 64 : 0;
@@ -57,7 +83,7 @@ fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
                         off += snprintf(line + off, linebuf - off, " %02x", (unsigned int)b[j]);
                     }
                     off += snprintf(line + off, linebuf - off, "\n");
-                    write(STDERR_FILENO, line, off);
+                    say(line, off);
                     free(line);
                 }
 
@@ -107,7 +133,7 @@ write(int fd, const void *buf, size_t count)
                 char hdr[256];
                 int n = snprintf(hdr, sizeof(hdr), "[write-hook] non-ASCII byte 0x%02x at offset %zu (fd=%d,count=%zu)\n",
                                  c, i, fd, count);
-                if (n > 0) (void)real_write(STDERR_FILENO, hdr, (size_t)n);
+                if (n > 0) say(hdr, (size_t)n);	/* in_hook: write() passes it on */
 
                 size_t start = (i > 64) ? i - 64 : 0;
                 size_t end = (i + 192 < count) ? i + 192 : count;
@@ -121,7 +147,7 @@ write(int fd, const void *buf, size_t count)
                         off += snprintf(line + off, linebuf - off, " %02x", (unsigned int)b[j]);
                     }
                     off += snprintf(line + off, linebuf - off, "\n");
-                    (void)real_write(STDERR_FILENO, line, off);
+                    say(line, off);
                     free(line);
                 }
 
@@ -170,7 +196,7 @@ writev(int fd, const struct iovec *iov, int iovcnt)
                     char hdr[256];
                     int n = snprintf(hdr, sizeof(hdr), "[writev-hook] non-ASCII byte 0x%02x in iov[%d] offset %zu (fd=%d)\n",
                                      c, k, i, fd);
-                    if (n > 0) (void)write(STDERR_FILENO, hdr, (size_t)n);
+                    if (n > 0) say(hdr, (size_t)n);
                     {
                         void *bt[32]; int cnt = backtrace(bt, 32);
                         backtrace_symbols_fd(bt, cnt, STDERR_FILENO);
@@ -212,7 +238,7 @@ pwrite(int fd, const void *buf, size_t count, off_t offset)
                 char hdr[256];
                 int n = snprintf(hdr, sizeof(hdr), "[pwrite-hook] non-ASCII byte 0x%02x at offset %zu (fd=%d)\n",
                                  c, i, fd);
-                if (n > 0) (void)write(STDERR_FILENO, hdr, (size_t)n);
+                if (n > 0) say(hdr, (size_t)n);
                 {
                     void *bt[32]; int cnt = backtrace(bt, 32);
                     backtrace_symbols_fd(bt, cnt, STDERR_FILENO);

@@ -9,16 +9,17 @@ This document describes how to build the OSFMK project using CMake presets.
 - **GCC** or **Clang** compiler
 - **Flex** and **Bison** for lexer/parser generation
 
-### Installing dependencies (Arch Linux)
+### Installing dependencies
+
+Every tool the build and the boots call, as the campaign installs them: `scripts/ci/job.sh` keeps the one list, by each tool's name in both distributions (#960). From the repository's root:
 
 ```bash
-sudo pacman -S cmake ninja gcc flex bison
-```
+# Arch Linux.  lib32-glibc and lib32-gcc-libs, for the -m32 host tests,
+# come from [multilib], which /etc/pacman.conf must have enabled.
+sudo pacman -S --needed $(scripts/ci/job.sh --packages arch)
 
-### Installing dependencies (Debian/Ubuntu)
-
-```bash
-sudo apt install cmake ninja-build gcc flex bison
+# Debian/Ubuntu.  gcc-multilib brings the same for -m32.
+sudo apt install $(scripts/ci/job.sh --packages ubuntu)
 ```
 
 ---
