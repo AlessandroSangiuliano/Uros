@@ -1272,6 +1272,90 @@ a_capability_names_its_owner(void)
 }
 
 /*
+ * Test [53]: a capability is derived to another task, named by a port that
+ * task receives on (#747).
+ *
+ * Delegating was copying a token's bytes.  cap_derive_for names the delegate
+ * by a port it receives on, and the kernel answers whose port it is.  For a
+ * task made now, with a port of its own: the child must name that task as its
+ * owner and carry only the operation it was cut to, and must be refused once
+ * its parent is revoked.  This task's own task port, which the kernel receives
+ * on, names no task, and must be refused with CAP_ERR_NO_DELEGATE.
+ */
+#define CT53_ID		0x7473ULL
+
+static int
+a_capability_is_derived_to_a_named_task(void)
+{
+    mach_port_t            other = MACH_PORT_NULL, name = MACH_PORT_NULL;
+    mach_port_t            port = MACH_PORT_NULL;
+    mach_msg_type_name_t   type = 0;
+    security_token_t       tok = { { 0, 0 } };
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+    struct uros_cap        parent, child, kid;
+    kern_return_t          kr, dkr = KERN_FAILURE, kkr = KERN_FAILURE;
+    kern_return_t          rkr = KERN_FAILURE, vkr = KERN_FAILURE;
+    uint64_t               id_other;
+
+    memset(&parent, 0, sizeof(parent));
+    memset(&child, 0, sizeof(child));
+    memset(&kid, 0, sizeof(kid));
+    kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                     &other);
+    if (kr == KERN_SUCCESS)
+        kr = task_info(other, TASK_SECURITY_TOKEN, (task_info_t)&tok, &n);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_allocate(other, MACH_PORT_RIGHT_RECEIVE, &name);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_extract_right(other, name, MACH_MSG_TYPE_MAKE_SEND,
+                                     &port, &type);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [53] WRONG — no task with a port of its own to "
+               "derive for: %d (#747)\n", (int)kr);
+        if (MACH_PORT_VALID(other)) {
+            (void)task_terminate(other);
+            (void)mach_port_deallocate(mach_task_self(), other);
+        }
+        return 0;
+    }
+    id_other = urmach_identity_of(tok);
+
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT53_ID,
+                     CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &parent);
+    if (kr == KERN_SUCCESS) {
+        dkr = cap_derive_for(&parent, CAP_OP_BLK_READ, 0, port, &child);
+        kkr = cap_derive_for(&parent, CAP_OP_BLK_READ, 0, mach_task_self(),
+                             &kid);
+        rkr = cap_revoke(parent.cap_id);
+        vkr = urmach_cap_verify(&child, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                                CT53_ID);
+    }
+    (void)mach_port_deallocate(mach_task_self(), port);
+    (void)task_terminate(other);
+    (void)mach_port_deallocate(mach_task_self(), other);
+
+    if (kr == KERN_SUCCESS && dkr == KERN_SUCCESS && child.owner == id_other &&
+        child.allowed_ops == CAP_OP_BLK_READ && kkr == CAP_ERR_NO_DELEGATE &&
+        rkr == KERN_SUCCESS && vkr == CAP_ERR_REVOKED) {
+        printf("cap_test: [53] a child derived for a task named by its port "
+               "names it, 0x%llx, carries READ alone, and was refused as "
+               "revoked with its parent; this task's own task port, which the "
+               "kernel receives on, was refused with CAP_ERR_NO_DELEGATE "
+               "(#747)\n", (unsigned long long)id_other);
+        return 1;
+    }
+    printf("cap_test: [53] WRONG — the parent %d; the child derived for task "
+           "0x%llx (%d) names 0x%llx with operations 0x%llx, and after its "
+           "parent's revocation (%d) answered %d; derived for this task's own "
+           "task port, %d, where it must be CAP_ERR_NO_DELEGATE(%d) (#747)\n",
+           (int)kr, (unsigned long long)id_other, (int)dkr,
+           (unsigned long long)child.owner,
+           (unsigned long long)child.allowed_ops, (int)rkr, (int)vkr,
+           (int)kkr, (int)CAP_ERR_NO_DELEGATE);
+    return 0;
+}
+
+/*
  * Test [41]: no task gives bootstrap a provisioning port (#743).
  *
  * cap_provision_task answers on one port, and bootstrap provisions through
@@ -5631,6 +5715,8 @@ main(int argc, char **argv)
     if (!every_task_has_its_own_identity())
         pass = 0;
     if (!a_capability_names_its_owner())
+        pass = 0;
+    if (!a_capability_is_derived_to_a_named_task())
         pass = 0;
 
     /*
