@@ -280,6 +280,19 @@ int page_cache_modify(struct page_cache *pc, struct page_cache_entry *e,
 	__attribute__((warn_unused_result));
 
 /*
+ * #912: copy `len' bytes at `off' out of a block the caller holds pinned
+ * (page_cache_get) into `data', in one hold of the cache's lock.  A pin guards
+ * identity, not content: page_cache_wrote and page_cache_modify copy into the
+ * slot under the lock, so bytes read out of it with no lock held may be half
+ * the old block and half the new one.  Copied here, they are all one or all
+ * the other.  KERN_INVALID_ARGUMENT past the end of the slot, with nothing
+ * copied; KERN_ABORTED if the block stopped being a cached block while pinned.
+ */
+int page_cache_copyout(struct page_cache *pc, struct page_cache_entry *e,
+		       vm_size_t off, vm_size_t len, vm_offset_t data)
+	__attribute__((warn_unused_result));
+
+/*
  * #599: readahead's way in.  Take a ticket before reading the disk, then
  * offer each block read with it.  page_cache_install copies `data' into a
  * free or clean slot and caches it clean -- it never waits, never writes a
