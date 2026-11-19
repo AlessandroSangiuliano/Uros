@@ -43,12 +43,17 @@
 #              the lock; and ci/pull-results.sh --job says it stopped short by
 #              that SIGTERM, its boot counted as stopped and nothing more: a
 #              cancelled campaign run (#951)
+#   jobfail    ci/job.sh, whose configure fails, says why in job.txt, in its
+#              "failed:" line, and exits 3, and ci/pull-results.sh --job says
+#              it FAILED, and why, not that it was cut off: a campaign job
+#              whose build fails, as the Ubuntu jobs of 18/11 (#951)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
 # under KVM before a signal could come, so a run to be signalled or killed
 # boots with its guest paused (#801).  mtstop's boot is the merge test's own,
-# entry 1's, which it gives no -S.
+# entry 1's, which it gives no -S.  jobfail boots nothing: its configure fails
+# before the build.
 #
 # Usage:  harness-lifecycle-check.sh [--kvm] [--only CHECK[,CHECK...]] [--out DIR]
 # Exit:   0 every check PASS · 1 a check WRONG · 2 it could not be run (the
@@ -77,7 +82,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -771,6 +776,60 @@ if wanted jobstop; then
 				say jobstop "sent SIGTERM with its merge test's qemu (pid $q) up$left" WRONG
 			else
 				say jobstop "sent SIGTERM with its merge test's qemu (pid $q) up, it wrote in job.txt where it stopped and the boot it stopped, that boot's row and logs, and exited 3, the qemu gone and the lock given back; pull-results.sh --job says it stopped short by SIGTERM from outside, its boot counted as stopped and nothing more" PASS
+			fi
+		fi
+	fi
+fi
+
+# ── jobfail ───────────────────────────────────────────────────────────
+# #951: ci/job.sh, whose configure fails once job.txt is begun, writes why in
+# it -- "failed:   the configure failed: configure.log" -- and exits 3; and
+# pull-results.sh --job says of it "FAILED: the configure failed:
+# configure.log; 0 boots of the 2 planned".  The Ubuntu jobs of 18/11, whose
+# build failed, ended with their reason on stderr alone, and pull-results.sh
+# said of them that they were cut off before writing their summary.  The
+# configure is made to fail in a build directory of the check's own, whose
+# cache names another source tree: cmake refuses it at once, saying it "does
+# not match the source", and nothing is built or booted.  A log that does not
+# say so is a configure that failed for another reason, or did not fail, and
+# the check was not posed.
+if wanted jobfail; then
+	rm -rf "$OUT/jobfail" "$OUT/jobfail-build" "$OUT/jobfail.ended" "$OUT/jobfail.ended.pid"
+	mkdir -p "$OUT/jobfail-build"
+	echo "CMAKE_HOME_DIRECTORY:INTERNAL=/nonexistent/jobfail" > "$OUT/jobfail-build/CMakeCache.txt"
+	UROS_BUILD_DIR=$OUT/jobfail-build python3 -I "$REPO/scripts/ended-by.py" "$OUT/jobfail.ended" -- \
+		"$REPO/scripts/ci/job.sh" --no-install --entries "1 5" --accel tcg --rounds 1 \
+		--out "$OUT/jobfail" > "$OUT/jobfail.out" 2>&1 &
+	JOB=$!
+	for i in $(seq 1 100); do
+		[ -s "$OUT/jobfail.ended.pid" ] && break
+		sleep 0.05
+	done
+	JS=$(cat "$OUT/jobfail.ended.pid" 2>/dev/null)
+	STARTED+=(${JS:+"$JS"} "$JOB")
+	if ! ended_within "$JOB" 120; then
+		kill -s TERM "$JS" 2>/dev/null
+		ended_within "$JOB" 30 || kill -KILL "$JS" 2>/dev/null
+		wait "$JOB" 2>/dev/null
+		say jobfail "job.sh had not ended 120 s after it started: its configure did not fail as it was made to ($OUT/jobfail.out)" "NOT ASKED"
+	else
+		wait "$JOB"
+		ended=$(cat "$OUT/jobfail.ended" 2>/dev/null)
+		if ! grep -aq "does not match the source" "$OUT/jobfail/configure.log" 2>/dev/null; then
+			say jobfail "its configure did not fail as it was made to: no configure.log says the cache \"does not match the source\" (job.sh ended by ${ended:-nothing said}, $OUT/jobfail.out)" "NOT ASKED"
+		else
+			left=""
+			grep -aqxF "failed:   the configure failed: configure.log" "$OUT/jobfail/job.txt" 2>/dev/null ||
+				left="$left; job.txt does not say why it ended: $(grep -a '^failed:' "$OUT/jobfail/job.txt" 2>/dev/null || echo "it has no failed: line, and its last is: $(tail -n 1 "$OUT/jobfail/job.txt" 2>/dev/null)")"
+			[ "$ended" = "exit 3" ] ||
+				left="$left; it ended by ${ended:-nothing said}, not exit 3"
+			said=$("$REPO/scripts/ci/pull-results.sh" --job "$OUT/jobfail" 2>&1)
+			grep -qxF "pull-results: here: job $OUT/jobfail FAILED: the configure failed: configure.log; 0 boots of the 2 planned" <<< "$said" ||
+				left="$left; pull-results.sh --job said: $(sed -n 1p <<< "$said")"
+			if [ -n "$left" ]; then
+				say jobfail "its configure failed$left" WRONG
+			else
+				say jobfail "its configure failed, job.txt says so in its failed: line, job.sh exited 3, and pull-results.sh --job says it FAILED, and why, with 0 boots of the 2 planned" PASS
 			fi
 		fi
 	fi
