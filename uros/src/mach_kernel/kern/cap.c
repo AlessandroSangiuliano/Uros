@@ -48,6 +48,8 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/cpu_data.h>	/* #537: disable_preemption */
+#include <kern/clock.h>		/* #747: the clock a deadline is read on */
+#include <mach/clock_types.h>	/* #747: URMACH_CAP_CLOCK */
 #include <kern/cpu_number.h>
 #include <cpus.h>		/* NCPUS */
 
@@ -230,6 +232,7 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
 /*
  * Core validation, urmach_cap_verify's and the kernel's own:
  *   - HMAC must match
+ *   - not past its deadline (cap_deadline_check, #747)
  *   - resource type and id must match
  *   - op must be a subset of allowed_ops
  *   - not revoked
@@ -254,6 +257,40 @@ cap_rest_locked(const struct uros_cap *t,
         return CAP_ERR_REVOKED;
 
     return KERN_SUCCESS;
+}
+
+/*
+ * #747: is the token past its deadline?  `expires' is nanoseconds since boot on
+ * URMACH_CAP_CLOCK, written by cap_server from that clock when it issued the
+ * token, and 0 for a token asked for with no lifetime.  It was written 0 in
+ * every token and read nowhere, so a lifetime asked for was dropped and the
+ * token never ended.
+ *
+ * 🔑 Checked on every call and never cached: it is the one field whose answer
+ * changes while the token's bytes do not, so #537's per-processor cache, which
+ * skips what cannot change, must not skip it.  And outside cap_lock, so that no
+ * clock is read under a lock every verification on every processor takes.
+ *
+ * ⚠️ A deadline that cannot be read against is not kept, and a token that has
+ * one is refused: a clock that did not configure would otherwise make every
+ * lifetime endless, which is the defect this check ends.
+ */
+static kern_return_t
+cap_deadline_check(const struct uros_cap *t)
+{
+    clock_t clock;
+    tvalspec_t now;
+    uint64_t ns;
+
+    if (t->expires == 0)
+        return KERN_SUCCESS;
+    if (URMACH_CAP_CLOCK >= clock_count)
+        return CAP_ERR_EXPIRED;
+    clock = &clock_list[URMACH_CAP_CLOCK];
+    if (clock->cl_ops == 0 || (*clock->cl_ops->c_gettime)(&now) != KERN_SUCCESS)
+        return CAP_ERR_EXPIRED;
+    ns = (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
+    return ns < t->expires ? KERN_SUCCESS : CAP_ERR_EXPIRED;
 }
 
 /*
@@ -303,6 +340,9 @@ cap_check_unlocked(const struct uros_cap *t,
     kern_return_t kr;
 
     kr = cap_mac_check_unlocked(t);
+    if (kr != KERN_SUCCESS)
+        return kr;
+    kr = cap_deadline_check(t);		/* #747 */
     if (kr != KERN_SUCCESS)
         return kr;
     simple_lock(&cap_lock);
@@ -395,6 +435,9 @@ cap_check_in_kernel(const struct uros_cap *token,
     if (v->valid && v->epoch == epoch && diff == 0) {
         v->hits++;
         enable_preemption();
+        kr = cap_deadline_check(token);		/* #747: never cached */
+        if (kr != KERN_SUCCESS)
+            return kr;
         return cap_fields_check(token, resource_type, op, resource_id);
     }
     enable_preemption();

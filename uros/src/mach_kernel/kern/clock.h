@@ -130,6 +130,13 @@ typedef struct clock	clock_data_t;
 #define CLOCK_NULL	(clock_t)0
 
 /*
+ * The machine's clocks, indexed by clock id, and how many there are: defined in
+ * the machine's conf.c, declared here once for every file that reads one.
+ */
+extern struct clock	clock_list[];
+extern int		clock_count;
+
+/*
  * Configure the clock system.
  */
 extern void		clock_config(void);

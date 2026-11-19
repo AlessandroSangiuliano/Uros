@@ -77,8 +77,6 @@ int             tick = (1000000 / HZ);  /* GET RID OF THIS !!! */
 
 /* external declarations */
 extern	clock_t		port_name_to_clock(mach_port_t clock_name);
-extern	struct clock	clock_list[];
-extern	int		clock_count;
 
 /* local clock subroutines */
 void	FlushAlarms(
