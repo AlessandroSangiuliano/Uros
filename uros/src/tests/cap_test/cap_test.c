@@ -1225,6 +1225,53 @@ every_task_has_its_own_identity(void)
 }
 
 /*
+ * Test [52]: a capability is issued to the task that asked for it (#747).
+ *
+ * Its owner was a port name written MACH_PORT_NULL in every token, so a token
+ * was good for whoever held its bytes.  cap_server writes the identity the
+ * kernel stamped on the request now: a token this task asks for must name this
+ * task, and so must a child it derives from it.
+ */
+#define CT52_ID		0x7472ULL
+
+static int
+a_capability_names_its_owner(void)
+{
+    security_token_t       me;
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+    struct uros_cap        t, child;
+    kern_return_t          kr, ckr = KERN_FAILURE;
+    uint64_t               id_me;
+
+    memset(&t, 0, sizeof(t));
+    memset(&child, 0, sizeof(child));
+    kr = task_info(mach_task_self(), TASK_SECURITY_TOKEN, (task_info_t)&me,
+                   &n);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [52] WRONG — this task's identity could not be "
+               "read: %d (#747)\n", (int)kr);
+        return 0;
+    }
+    id_me = urmach_identity_of(me);
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT52_ID, CAP_OP_BLK_READ, 0, &t);
+    if (kr == KERN_SUCCESS)
+        ckr = cap_derive(&t, CAP_OP_BLK_READ, 0, &child);
+    if (kr == KERN_SUCCESS && t.owner == id_me &&
+        ckr == KERN_SUCCESS && child.owner == id_me) {
+        printf("cap_test: [52] a capability this task asked for names it, "
+               "0x%llx, as its owner, and so does the child it derived from "
+               "it (#747)\n", (unsigned long long)id_me);
+        return 1;
+    }
+    printf("cap_test: [52] WRONG — this task is 0x%llx; a capability it asked "
+           "for (%d) names 0x%llx, and the child it derived (%d) 0x%llx "
+           "(#747)\n", (unsigned long long)id_me, (int)kr,
+           (unsigned long long)t.owner, (int)ckr,
+           (unsigned long long)child.owner);
+    return 0;
+}
+
+/*
  * Test [41]: no task gives bootstrap a provisioning port (#743).
  *
  * cap_provision_task answers on one port, and bootstrap provisions through
@@ -5582,6 +5629,8 @@ main(int argc, char **argv)
     if (!a_lifetime_is_kept())
         pass = 0;
     if (!every_task_has_its_own_identity())
+        pass = 0;
+    if (!a_capability_names_its_owner())
         pass = 0;
 
     /*
