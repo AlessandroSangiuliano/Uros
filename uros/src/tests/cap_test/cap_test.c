@@ -1128,10 +1128,20 @@ a_lifetime_is_kept(void)
  * shared, and the trailer of a message any task sent said KERNEL_SECURITY_TOKEN.
  * So this task's identity must carry the task bit, a task made now must have
  * another, and a message this task sends itself must arrive with this task's
- * identity as its sender: once sent and received in two calls, which go
- * through ipc_kmsg_get(), and once in one call, which takes the fast path's
- * copy in mach_msg.c -- the two places the kernel writes it.
+ * identity as its sender: sent and received in two calls, which go through
+ * ipc_kmsg_get(), and in one call, which goes through the hot path's copy in
+ * mach_msg.c -- the two places the kernel writes it.
+ *
+ * The hot path takes a call whose options are MACH_SEND_MSG|MACH_RCV_MSG and
+ * the trailer's bits, and nothing else: a receive timeout sends the call the
+ * slow way, through ipc_kmsg_get(), so the call in one has none.  It cannot
+ * wait: its message is on the port before its receive looks.  And the hot
+ * path copies into a buffer its processor keeps, and goes the slow way when
+ * there is none; a message received leaves its buffer behind, so the call in
+ * one is made CT51_ONE_CALLS times, and every one must carry the sender.
  */
+#define CT51_ONE_CALLS 8
+
 static security_token_t
 ct51_sent_and_received(mach_port_t port, int one_call, kern_return_t *kr_out)
 {
@@ -1139,9 +1149,9 @@ ct51_sent_and_received(mach_port_t port, int one_call, kern_return_t *kr_out)
         mach_msg_header_t           h;
         mach_msg_format_0_trailer_t t;
     } m;
-    mach_msg_option_t rcv = MACH_RCV_MSG | MACH_RCV_TIMEOUT
-                          | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
-                          | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SENDER);
+    mach_msg_option_t trailer =
+        MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+        | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SENDER);
     kern_return_t kr;
 
     memset(&m, 0, sizeof(m));
@@ -1151,14 +1161,15 @@ ct51_sent_and_received(mach_port_t port, int one_call, kern_return_t *kr_out)
     m.h.msgh_local_port = MACH_PORT_NULL;
     m.h.msgh_id = 0x747;
     if (one_call)
-        kr = mach_msg(&m.h, MACH_SEND_MSG | rcv, sizeof(m.h), sizeof(m),
-                      port, 1000, MACH_PORT_NULL);
+        kr = mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG | trailer,
+                      sizeof(m.h), sizeof(m), port, MACH_MSG_TIMEOUT_NONE,
+                      MACH_PORT_NULL);
     else {
         kr = mach_msg(&m.h, MACH_SEND_MSG, sizeof(m.h), 0, MACH_PORT_NULL,
                       MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
         if (kr == KERN_SUCCESS)
-            kr = mach_msg(&m.h, rcv, 0, sizeof(m), port, 1000,
-                          MACH_PORT_NULL);
+            kr = mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT | trailer, 0,
+                          sizeof(m), port, 1000, MACH_PORT_NULL);
     }
     *kr_out = kr;
     return m.t.msgh_sender;
@@ -1173,6 +1184,7 @@ every_task_has_its_own_identity(void)
     mach_port_t            port = MACH_PORT_NULL;
     kern_return_t          kr, kr_other = KERN_FAILURE, kr_two, kr_one;
     uint64_t               id_me, id_other, id_two, id_one;
+    int                    calls;
 
     kr = task_info(mach_task_self(), TASK_SECURITY_TOKEN, (task_info_t)&me,
                    &n);
@@ -1181,6 +1193,7 @@ every_task_has_its_own_identity(void)
                "be read: %d (#747)\n", (int)kr);
         return 0;
     }
+    id_me = urmach_identity_of(me);
     if (task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
                     &child) == KERN_SUCCESS) {
         n = TASK_SECURITY_TOKEN_COUNT;
@@ -1195,32 +1208,39 @@ every_task_has_its_own_identity(void)
         return 0;
     }
     two = ct51_sent_and_received(port, 0, &kr_two);
-    one = ct51_sent_and_received(port, 1, &kr_one);
+    id_one = 0;
+    kr_one = KERN_FAILURE;
+    for (calls = 1; calls <= CT51_ONE_CALLS; calls++) {
+        one = ct51_sent_and_received(port, 1, &kr_one);
+        id_one = urmach_identity_of(one);
+        if (kr_one != KERN_SUCCESS || id_one != id_me)
+            break;
+    }
+    if (calls > CT51_ONE_CALLS)
+        calls = CT51_ONE_CALLS;
     (void)mach_port_mod_refs(mach_task_self(), port,
                              MACH_PORT_RIGHT_RECEIVE, -1);
 
-    id_me    = urmach_identity_of(me);
     id_other = urmach_identity_of(other);
     id_two   = urmach_identity_of(two);
-    id_one   = urmach_identity_of(one);
     if ((id_me & URMACH_IDENTITY_TASK_BIT) != 0 &&
         kr_other == KERN_SUCCESS && (id_other & URMACH_IDENTITY_TASK_BIT) != 0 &&
         id_other != id_me && kr_two == KERN_SUCCESS && id_two == id_me &&
         kr_one == KERN_SUCCESS && id_one == id_me) {
         printf("cap_test: [51] this task is 0x%llx and a task made now "
                "0x%llx, and a message it sent itself came with 0x%llx as its "
-               "sender, in two calls and in one (#747)\n",
+               "sender, in two calls and in one, %d times (#747)\n",
                (unsigned long long)id_me, (unsigned long long)id_other,
-               (unsigned long long)id_me);
+               (unsigned long long)id_me, calls);
         return 1;
     }
     printf("cap_test: [51] WRONG — this task is 0x%llx, a task made now "
            "0x%llx (%d), and a message it sent itself came with 0x%llx in two "
-           "calls (%d) and 0x%llx in one (%d): each task's own, the task bit "
-           "set, and the sender's (#747)\n", (unsigned long long)id_me,
-           (unsigned long long)id_other, (int)kr_other,
-           (unsigned long long)id_two, (int)kr_two,
-           (unsigned long long)id_one, (int)kr_one);
+           "calls (%d) and 0x%llx in one (%d), the last of %d such calls: each "
+           "task's own, the task bit set, and the sender's (#747)\n",
+           (unsigned long long)id_me, (unsigned long long)id_other,
+           (int)kr_other, (unsigned long long)id_two, (int)kr_two,
+           (unsigned long long)id_one, (int)kr_one, calls);
     return 0;
 }
 
