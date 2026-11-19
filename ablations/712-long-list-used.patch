@@ -1,0 +1,51 @@
+Kind: ablation
+Issue: #712
+Takes out: both halves of the rule for a list longer than its bytes, as the defect was -- the server hands the whole list over, and virtio builds a descriptor for every page given, of length 0 past the bytes, at which QEMU marks the device broken.  cap_test [14] finds virtio_blk0a failing the long list, or answering no read after it.  Either half alone is a whole guard: the other one would hide its absence.
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[14\] WRONG — virtio_blk0a (did not serve 4096 bytes through a list one page longer|served a list one page longer than its bytes, and then did not answer)
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index c9d48745..c4c811e2 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -1078,7 +1078,7 @@ blk_phys_list(const vm_address_t *pages, mach_msg_type_number_t *npages,
+ 		       (unsigned long long)((uint64_t)*npages * 4096u));
+ 		return 0;
+ 	}
+-	*npages = (mach_msg_type_number_t)need;
++	/* 712-long-list-used: the list is used as long as it comes */
+ 
+ 	for (k = 0; k < *npages; k++)
+ 		if (pages[k] & 4095u) {
+diff --git a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
+index f97e7a71..24449a52 100644
+--- a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
++++ b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
+@@ -981,15 +981,15 @@ virtio_submit_phys(struct virtio_state *st, uint32_t type, uint32_t lba,
+ 		return -1;
+ 	}
+ 
+-	if (n_seg > VIRTIO_PHYS_SEGS_MAX) {
++	if (n_pa > VIRTIO_PHYS_SEGS_MAX) {
+ 		printf("virtio: %u physical segments asked for and this driver "
+ 		       "carries %u — refusing rather than transferring part of "
+-		       "the request\n", n_seg, VIRTIO_PHYS_SEGS_MAX);
++		       "the request\n", n_pa, VIRTIO_PHYS_SEGS_MAX);
+ 		return -1;
+ 	}
+ 
+ 	left = total_bytes;
+-	for (i = 0; i < n_seg; i++) {
++	for (i = 0; i < n_pa; i++) {	/* 712-long-list-used */
+ 		unsigned int chunk = left > 4096u ? 4096u : left;
+ 
+ 		addr[i] = (uint64_t)phys_addrs[i];
+@@ -997,7 +997,7 @@ virtio_submit_phys(struct virtio_state *st, uint32_t type, uint32_t lba,
+ 		left   -= chunk;
+ 	}
+ 
+-	return virtio_blk_request_sg(st, type, (uint64_t)lba, addr, len, n_seg);
++	return virtio_blk_request_sg(st, type, (uint64_t)lba, addr, len, n_pa);
+ }
+ 
+ static int

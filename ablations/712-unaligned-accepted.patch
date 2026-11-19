@@ -1,0 +1,36 @@
+Kind: ablation
+Issue: #712
+Takes out: the page alignment asked of a physical list's addresses -- an address 0x800 into its page is taken, the kernel validates the page that contains it, and the driver programs 4096 bytes from it, the last 0x800 of them in the next physical page.  cap_test [14] finds the read accepted, and the page after its buffer's first changed.
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[14\] WRONG — [a-z_0-9]+ answered kr=[-0-9]+ \([0-9]+ bytes read\) to an address 0x800 into its page
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index c9d48745..eb4b7843 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -1070,7 +1070,6 @@ blk_phys_list(const vm_address_t *pages, mach_msg_type_number_t *npages,
+ 	      unsigned int total, const char *what)
+ {
+ 	uint64_t need = ((uint64_t)total + 4095u) / 4096u;
+-	mach_msg_type_number_t k;
+ 
+ 	if ((uint64_t)*npages < need) {
+ 		printf("blk: %s of %u bytes refused — %u page(s) hold %llu\n",
+@@ -1080,16 +1079,7 @@ blk_phys_list(const vm_address_t *pages, mach_msg_type_number_t *npages,
+ 	}
+ 	*npages = (mach_msg_type_number_t)need;
+ 
+-	for (k = 0; k < *npages; k++)
+-		if (pages[k] & 4095u) {
+-			printf("blk: %s of %u bytes refused — page %u of the "
+-			       "list, 0x%llx, is not page-aligned, and the last "
+-			       "%u of its 4096 bytes would land in the next "
+-			       "physical page (#712)\n", what, total, (unsigned)k,
+-			       (unsigned long long)pages[k],
+-			       (unsigned)(pages[k] & 4095u));
+-			return 0;
+-		}
++	/* 712-unaligned-accepted: an address is taken as it comes */
+ 	return 1;
+ }
+ 
