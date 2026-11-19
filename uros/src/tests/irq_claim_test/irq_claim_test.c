@@ -91,6 +91,8 @@
 #include <libcap.h>		/* cap_request (#511) */
 #include <mach_init.h>		/* name_server_port */
 #include <mach/thread_switch.h>
+#include <mach/clock.h>		/* host_get_clock_service, clock_get_time (#747) */
+#include <mach/clock_types.h>	/* URMACH_CAP_CLOCK, NSEC_PER_SEC (#747) */
 #include <servers/netname.h>
 #include <string.h>
 
@@ -1232,6 +1234,161 @@ arm_nine_a_revocation_takes_back_what_the_claim_made(void)
 	return ok;
 }
 
+/*
+ * [21]: a claim made with a capability that has a deadline ends at it, and
+ * takes back what it made (#747).
+ *
+ * 🔴 A DEADLINE ENDED THE CAPABILITY AND NOTHING IT HAD BOUGHT.  Past it the
+ * token was refused wherever it was presented, and a claim made with it before
+ * then went on: the card stayed claimed and its registers mapped for as long
+ * as the holder lived.  cap_server revokes a capability when its deadline
+ * comes now, and the revocation takes back what [18] to [20] show it takes
+ * back.
+ *
+ * 🔑 So the card is claimed with a capability asked for IQ_DEADLINE_MS, its
+ * first page mapped and found in place -- the control -- and nothing is asked
+ * of cap_server again: by the deadline alone, the page must go from this
+ * task's map, and the card's configuration space must be refused, as in [18].
+ * The page is looked at every IQ_POLL_MS once the deadline has passed, for
+ * IQ_WAIT_MS at most, with nothing printed meanwhile, so that nothing else
+ * comes to rest at its address; how long it took is said.
+ *
+ * ⚠️ After [18] to [20], which leave the card unclaimed.  A claim not made and
+ * mapped inside the lifetime, on a machine slow enough, is NOT ASKED: the
+ * question needs the claim made before the deadline.
+ */
+#define IQ_DEADLINE_MS	300u
+#define IQ_POLL_MS	20u
+#define IQ_WAIT_MS	5000u
+
+/* Now on the clock a capability's deadline is written on; 0 if unreadable. */
+static uint64_t
+iq_now(mach_port_t clk)
+{
+	tvalspec_t	ts;
+
+	if (clk == MACH_PORT_NULL || clock_get_time(clk, &ts) != KERN_SUCCESS)
+		return 0;
+	return (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
+}
+
+static int
+arm_ten_a_deadline_takes_back_what_the_claim_made(void)
+{
+	natural_t	bus = nic_bdf >> 8, dev = (nic_bdf >> 3) & 0x1F;
+	natural_t	fn = nic_bdf & 0x7, cfg = 0;
+	struct uros_cap	tok;
+	vm_address_t	uva = 0;
+	mach_port_t	host = mach_host_self(), clk = MACH_PORT_NULL;
+	kern_return_t	k_tok, k_claim = KERN_FAILURE, k_map = KERN_FAILURE;
+	kern_return_t	k_cfg = KERN_FAILURE;
+	uint64_t	mapped, now = 0, gone = 0;
+	unsigned int	polls = 0;
+	int		before = 0, after = 1;
+
+	if (!nic_owned || nic_region.size == 0) {
+		printf("irq_claim_test: [21] NOT ASKED — %s (#747)\n",
+		       !nic_owned ? "no owned card, so no claim to end"
+		       : "the card has no memory region to map");
+		(void) mach_port_deallocate(mach_task_self(), host);
+		return 1;
+	}
+	if (host_get_clock_service(host, URMACH_CAP_CLOCK, &clk)
+	    != KERN_SUCCESS)
+		clk = MACH_PORT_NULL;
+	(void) mach_port_deallocate(mach_task_self(), host);
+
+	memset(&tok, 0, sizeof(tok));
+	k_tok = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)nic_class,
+			    CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+			    | CAP_OP_PCI_IRQ, IQ_DEADLINE_MS, &tok);
+	if (k_tok == KERN_SUCCESS)
+		k_claim = device_claim(master_device, nic_bdf, (char *)&tok,
+				       sizeof(tok));
+	if (k_claim == KERN_SUCCESS)
+		k_map = device_mmio_map(master_device,
+					(vm_address_t)nic_region.base,
+					(vm_size_t)IQ_PAGE, mach_task_self(),
+					&uva);
+	if (k_map == KERN_SUCCESS)
+		before = page_mapped(uva);
+	mapped = iq_now(clk);
+
+	if (mapped == 0 || k_tok != KERN_SUCCESS || tok.expires == 0
+	    || k_claim != KERN_SUCCESS || !before) {
+		if (mapped == 0)
+			printf("irq_claim_test: [21] WRONG — the capability "
+			       "clock could not be read (#747)\n");
+		else if (k_tok == KERN_SUCCESS && tok.expires != 0
+			 && mapped >= tok.expires)
+			printf("irq_claim_test: [21] NOT ASKED — the claim and "
+			       "its page were not done before the deadline of "
+			       "%u ms (#747)\n", IQ_DEADLINE_MS);
+		else
+			printf("irq_claim_test: [21] WRONG — a capability asked "
+			       "for with %u ms (%d, its deadline %s), the claim "
+			       "%d, and the card's first page %s (%d) (#747)\n",
+			       IQ_DEADLINE_MS, (int)k_tok,
+			       tok.expires != 0 ? "written" : "not written",
+			       (int)k_claim, before ? "mapped"
+			       : "not found in this task's map", (int)k_map);
+		if (k_map == KERN_SUCCESS)
+			(void) device_mmio_unmap(master_device, uva,
+						 (vm_size_t)IQ_PAGE,
+						 mach_task_self());
+		if (k_tok == KERN_SUCCESS)
+			(void) cap_revoke(tok.cap_id);
+		if (clk != MACH_PORT_NULL)
+			(void) mach_port_deallocate(mach_task_self(), clk);
+		return mapped != 0 && k_tok == KERN_SUCCESS && tok.expires != 0
+		       && mapped >= tok.expires;
+	}
+
+	/* Past the deadline, the page looked at: nothing printed meanwhile. */
+	do {
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+				     IQ_POLL_MS);
+		now = iq_now(clk);
+		if (now != 0 && now >= tok.expires) {
+			after = page_mapped(uva);
+			if (!after)
+				gone = now;
+		}
+	} while (now != 0 && after
+		 && now < tok.expires + (uint64_t)IQ_WAIT_MS * 1000000ULL
+		 && ++polls < 2 * (IQ_DEADLINE_MS + IQ_WAIT_MS) / IQ_POLL_MS);
+	k_cfg = device_pci_config_read(master_device, bus, dev, fn, 0x00,
+				       &cfg);
+	(void) mach_port_deallocate(mach_task_self(), clk);
+
+	if (now != 0 && !after && k_cfg == KERN_NO_ACCESS) {
+		printf("irq_claim_test: [21] a claim made with a capability "
+		       "asked for with %u ms had the card's first page, mapped "
+		       "at 0x%llx and found there, taken from this task's map "
+		       "within %llu ms of the deadline, and its configuration "
+		       "space refused with KERN_NO_ACCESS, with nothing revoked "
+		       "by this task: the deadline ended the claim (#747)\n",
+		       IQ_DEADLINE_MS, (unsigned long long)uva,
+		       (unsigned long long)((gone - tok.expires) / 1000000ULL));
+		return 1;
+	}
+	printf("irq_claim_test: [21] WRONG — a claim made with a capability "
+	       "asked for with %u ms: %s, the card's first page %s at 0x%llx "
+	       "%u ms past the deadline, and its configuration space answered "
+	       "%d, where the page must be gone and the space refused with "
+	       "KERN_NO_ACCESS(%d) (#747)\n", IQ_DEADLINE_MS,
+	       now == 0 ? "the clock could not be read while waiting"
+	       : "the clock read past the deadline",
+	       after ? "still mapped" : "gone", (unsigned long long)uva,
+	       IQ_WAIT_MS, (int)k_cfg, (int)KERN_NO_ACCESS);
+	if (after)
+		(void) device_mmio_unmap(master_device, uva, (vm_size_t)IQ_PAGE,
+					 mach_task_self());
+	if (k_cfg == KERN_SUCCESS)
+		(void) cap_revoke(tok.cap_id);
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1283,9 +1440,11 @@ main(int argc, char **argv)
 	passed += arm_six_a_mapping_ends_with_its_region();
 	passed += arm_seven_the_card_rings();
 	passed += arm_eight_each_operation_its_own();	/* it narrows */
-	/* Last: it revokes, and the card is left unclaimed (#745). */
+	/* It revokes, and the card is left unclaimed (#745). */
 	passed += arm_nine_a_revocation_takes_back_what_the_claim_made();
-	printf("irq_claim_test: %d of 14 message-signalled, mapping, operation "
-	       "and revocation arms passed\n", passed);
-	return passed == 14 ? 0 : 1;
+	/* Last: it claims the card again, until a deadline (#747). */
+	passed += arm_ten_a_deadline_takes_back_what_the_claim_made();
+	printf("irq_claim_test: %d of 15 message-signalled, mapping, operation, "
+	       "revocation and deadline arms passed\n", passed);
+	return passed == 15 ? 0 : 1;
 }
