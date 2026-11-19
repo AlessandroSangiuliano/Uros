@@ -47,10 +47,12 @@
 #include <mach/mach_host.h>	/* urmach_task_port_rights (#938) */
 #include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
 #include <mach/clock.h>		/* clock_get_time (#747) */
+#include <mach/thread_switch.h>	/* the waiter's pause (#747) */
 #include <mach/clock_types.h>	/* URMACH_CAP_CLOCK (#747) */
 #include <mach/urmach_identity.h>	/* the requester's identity (#747) */
 #include <mach_init.h>
 #include <sa_mach.h>
+#include <pthread.h>		/* a deadline's waiter (#747) */
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -94,6 +96,14 @@ static mach_port_t provision_port;
 static mach_port_t cap_port_set;
 
 /*
+ * #747: the port in the set that a deadline's waiter rings when one comes.
+ * No other task holds a right to it; see "A deadline is a revocation at that
+ * time" below.
+ */
+static mach_port_t cap_sweep_port = MACH_PORT_NULL;
+static void cap_expiry_sweep(void);
+
+/*
  * Single-threaded snapshot of the receive port the current request
  * arrived on.  Set by cap_demux before dispatching the MIG server,
  * cleared after.  Used by the policy gate in cap_acquire to decide
@@ -133,6 +143,16 @@ cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
     if (in->msgh_id == MACH_NOTIFY_NO_SENDERS &&
         in->msgh_bits == MACH_MSGH_BITS(0, MACH_MSG_TYPE_PORT_SEND_ONCE)) {
         cap_task_port_gone(in->msgh_local_port);
+        return TRUE;
+    }
+
+    /*
+     * #747: the waiter's ring -- a deadline has come.  Only this task holds a
+     * right to the port, so only the waiter rings it.  No reply.
+     */
+    if (cap_sweep_port != MACH_PORT_NULL &&
+        in->msgh_local_port == cap_sweep_port) {
+        cap_expiry_sweep();
         return TRUE;
     }
 
@@ -287,9 +307,19 @@ cap_now_ns(uint64_t *now)
 }
 
 /*
+ * #747: whether a deadline's waiter is running, and a deadline written, for it
+ * -- "A deadline is a revocation at that time", below.
+ */
+static int  cap_expiry_running;
+static void cap_expiry_note(uint64_t due);
+
+/*
  * The deadline of a token asked for `lifetime_ms' from now, and never past
  * `ceiling', its parent's deadline (0: none).  0 is no deadline.  A lifetime
- * asked for when the clock cannot be read is refused, not dropped: -1.
+ * asked for when the clock cannot be read is refused, not dropped: -1.  So is
+ * one asked for with no waiter running: a deadline revokes what it bought, and
+ * nothing would.  Every deadline begins as a lifetime asked for, so without
+ * the waiter there is none.
  */
 static int
 cap_deadline(unsigned int lifetime_ms, uint64_t ceiling, uint64_t *out)
@@ -300,7 +330,7 @@ cap_deadline(unsigned int lifetime_ms, uint64_t ceiling, uint64_t *out)
         *out = ceiling;
         return 0;
     }
-    if (!cap_now_ns(&now))
+    if (!cap_expiry_running || !cap_now_ns(&now))
         return -1;
     d = now + (uint64_t)lifetime_ms * 1000000ULL;
     *out = (ceiling != 0 && ceiling < d) ? ceiling : d;
@@ -488,8 +518,10 @@ cap_acquire(mach_port_t             server,
     }
     if (cap_deadline(lifetime_ms, 0, &expires) != 0) {
         printf("cap: DENY port=0x%x: a lifetime of %u ms was asked for, and "
-               "the clock it would be kept on cannot be read (#747)\n",
-               (unsigned)g_request_local_port, lifetime_ms);
+               "%s (#747)\n", (unsigned)g_request_local_port, lifetime_ms,
+               cap_expiry_running
+               ? "the clock it would be kept on cannot be read"
+               : "no waiter runs to revoke it at its deadline");
         return CAP_ERR_INTERNAL;
     }
 
@@ -522,6 +554,7 @@ cap_acquire(mach_port_t             server,
      */
     e->sender = g_request_local_port;
     cap_table_insert(e);
+    cap_expiry_note(t->expires);		/* #747 */
 
     memcpy(token, t, sizeof(*t));
     *token_len = (mach_msg_type_number_t)sizeof(*t);
@@ -596,6 +629,7 @@ cap_derive_to(cap_token_t            parent_buf,
     cap_sign(t);
     e->sender = g_request_local_port;	/* #599: see cap_acquire */
     cap_table_insert(e);
+    cap_expiry_note(t->expires);		/* #747 */
 
     /* Link as new first child of parent (re-sign parent since
      * first_child_cap_id changed). */
@@ -803,6 +837,164 @@ cap_revoke_tell(struct cap_entry *root, int count)
              e = cap_subtree_next(root->token.cap_id, e, 1))
             fanout_revoke_notify(e->token.cap_id);
     }
+}
+
+/*
+ * ── A deadline is a revocation at that time (#747) ─────────────────────────
+ *
+ * A token past its deadline is refused when it is presented, by the trap and
+ * by this server, and what it had bought before then was kept: a claim made
+ * with it, with the interrupts and the register mappings the claim had made,
+ * and the pages of a buffer lent with it, in the device's IOMMU domain.  A
+ * revocation takes all of that back (#745), and a deadline took none of it.
+ * So a capability is revoked when its deadline comes, as cap_revoke revokes
+ * it -- the kernel told of it and of its tree, and so withdrawing what they
+ * bought, and the subscribers given their notices -- by this server, which
+ * writes every deadline and so knows each one.
+ *
+ * The table is the receive loop's, and the waiting is a thread's of its own:
+ * all they share is cap_expiry_due, under cap_expiry_lock.  The loop lowers it
+ * when it writes a deadline earlier than it, and after a sweep sets it to the
+ * earliest one left, and rings cap_expiry_port either way, so that the waiter
+ * looks again.  The waiter waits on that port until the deadline comes, then
+ * rings cap_sweep_port, which is in the loop's port set, every
+ * CAP_EXPIRY_AGAIN_MS until a sweep has moved the deadline: a ring lost is
+ * rung again, and one that finds a queue full finds a ring already there.
+ *
+ * ⚠️ The revocation follows the deadline by a wake-up and a message.  The
+ * deadline itself holds at the instant it passes, by the clock, in the trap's
+ * checks and this server's; what the revocation adds is what those cannot
+ * do, taking back what was bought.
+ */
+#define CAP_EXPIRY_RING_ID	7470	/* a ring's id, for whoever reads one */
+#define CAP_EXPIRY_AGAIN_MS	100	/* a ring unanswered, or a clock unread */
+#define CAP_EXPIRY_LONGEST_MS	3600000	/* a far deadline, looked at hourly */
+
+static pthread_mutex_t cap_expiry_lock;	/* made ready in main() */
+static uint64_t        cap_expiry_due;		/* the next deadline; 0: none */
+static mach_port_t     cap_expiry_port = MACH_PORT_NULL;	/* the waiter's */
+
+/* An empty message to a port this task receives on.  It never waits. */
+static void
+cap_expiry_ring(mach_port_t port)
+{
+    mach_msg_header_t h;
+
+    memset(&h, 0, sizeof(h));
+    h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+    h.msgh_size = sizeof(h);
+    h.msgh_remote_port = port;
+    h.msgh_id = CAP_EXPIRY_RING_ID;
+    /* Unsent: the waiter rings again, or a ring is already queued. */
+    (void)mach_msg(&h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(h), 0,
+                   MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/* A deadline written: the waiter is told of it if it is the earliest. */
+static void
+cap_expiry_note(uint64_t due)
+{
+    int earlier = 0;
+
+    if (due == 0)
+        return;
+    pthread_mutex_lock(&cap_expiry_lock);
+    if (cap_expiry_due == 0 || due < cap_expiry_due) {
+        cap_expiry_due = due;
+        earlier = 1;
+    }
+    pthread_mutex_unlock(&cap_expiry_lock);
+    if (earlier)
+        cap_expiry_ring(cap_expiry_port);
+}
+
+/* The waiter, a thread of its own: it rings the loop when a deadline comes. */
+static void *
+cap_expiry_waiter(void *arg)
+{
+    struct {
+        mach_msg_header_t           h;
+        mach_msg_format_0_trailer_t t;
+    } m;
+    mach_msg_option_t  opt;
+    mach_msg_timeout_t ms;
+    mach_msg_return_t  mr;
+    uint64_t           due, now, wait;
+
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&cap_expiry_lock);
+        due = cap_expiry_due;
+        pthread_mutex_unlock(&cap_expiry_lock);
+
+        opt = MACH_RCV_MSG;
+        ms = MACH_MSG_TIMEOUT_NONE;
+        if (due != 0) {
+            opt |= MACH_RCV_TIMEOUT;
+            ms = CAP_EXPIRY_AGAIN_MS;
+            if (cap_now_ns(&now)) {
+                if (now >= due)
+                    cap_expiry_ring(cap_sweep_port);
+                else {
+                    wait = (due - now + 999999ULL) / 1000000ULL;
+                    ms = wait < CAP_EXPIRY_LONGEST_MS
+                       ? (mach_msg_timeout_t)wait : CAP_EXPIRY_LONGEST_MS;
+                }
+            }
+        }
+        mr = mach_msg(&m.h, opt, 0, sizeof(m), cap_expiry_port, ms,
+                      MACH_PORT_NULL);
+        if (mr != MACH_MSG_SUCCESS && mr != MACH_RCV_TIMED_OUT) {
+            printf("cap: the deadlines' waiter could not receive (0x%x); it "
+                   "tries again in %u ms (#747)\n", (unsigned)mr,
+                   (unsigned)CAP_EXPIRY_AGAIN_MS);
+            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+                                CAP_EXPIRY_AGAIN_MS);
+        }
+    }
+    return NULL;
+}
+
+/*
+ * The waiter rang: every capability past its deadline is revoked, with its
+ * tree, and the waiter is given the earliest deadline left.  A tree's
+ * deadlines are never past its root's, so its capabilities have all come to
+ * theirs too.
+ */
+static void
+cap_expiry_sweep(void)
+{
+    struct cap_entry *e;
+    uint64_t          now, next = 0;
+    int               n;
+
+    if (!cap_now_ns(&now)) {
+        printf("cap: the capability clock could not be read, so no deadline "
+               "was swept; the waiter rings again in %u ms (#747)\n",
+               (unsigned)CAP_EXPIRY_AGAIN_MS);
+        return;
+    }
+    for (e = cap_table_next(NULL); e != NULL; e = cap_table_next(e)) {
+        if (e->token.revoked || e->token.expires == 0)
+            continue;
+        if (e->token.expires > now) {
+            if (next == 0 || e->token.expires < next)
+                next = e->token.expires;
+            continue;
+        }
+        /* A refusal by the kernel is said by cap_revoke_tree(). */
+        (void)cap_revoke_tree(e, &n);
+        printf("cap: cap %llu reached its deadline %llu ms ago and was "
+               "revoked, %d cap(s) with its tree (#747)\n",
+               (unsigned long long)e->token.cap_id,
+               (unsigned long long)((now - e->token.expires) / 1000000ULL),
+               n);
+        cap_revoke_tell(e, n);
+    }
+    pthread_mutex_lock(&cap_expiry_lock);
+    cap_expiry_due = next;
+    pthread_mutex_unlock(&cap_expiry_lock);
+    cap_expiry_ring(cap_expiry_port);
 }
 
 kern_return_t
@@ -1370,6 +1562,41 @@ main(int argc, char **argv)
      * with the [cap] tag.  Startup chatter above stays serial-only.
      */
     (void)gpu_console_init_async("cap", 100u, 50u);
+
+    /*
+     * #747: the deadlines' waiter, and the port it rings, in the set.  The
+     * clock's port is asked for first, here, so that the two threads never
+     * both ask for it.  Without the waiter a lifetime is refused, since
+     * nothing would revoke a capability at its deadline: cap_deadline().
+     */
+    {
+        pthread_t waiter;
+        uint64_t  now;
+
+        kr = cap_now_ns(&now) ? KERN_SUCCESS : KERN_FAILURE;
+        if (kr == KERN_SUCCESS &&
+            pthread_mutex_init(&cap_expiry_lock, NULL) != 0)
+            kr = KERN_FAILURE;
+        if (kr == KERN_SUCCESS)
+            kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                                    &cap_sweep_port);
+        if (kr == KERN_SUCCESS)
+            kr = mach_port_move_member(mach_task_self(), cap_sweep_port,
+                                       cap_port_set);
+        if (kr == KERN_SUCCESS)
+            kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                                    &cap_expiry_port);
+        if (kr == KERN_SUCCESS &&
+            pthread_create(&waiter, NULL, cap_expiry_waiter, NULL) != 0)
+            kr = KERN_FAILURE;
+        if (kr == KERN_SUCCESS) {
+            cap_expiry_running = 1;
+            printf("cap: the deadlines' waiter runs: a capability is revoked "
+                   "when its deadline comes (#747)\n");
+        } else
+            printf("cap: the deadlines' waiter did not start (%d), so a "
+                   "lifetime is refused (#747)\n", kr);
+    }
 
     bootstrap_completed(bootstrap_port, mach_task_self());
 
