@@ -48,6 +48,7 @@
 #include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
 #include <mach/clock.h>		/* clock_get_time (#747) */
 #include <mach/clock_types.h>	/* URMACH_CAP_CLOCK (#747) */
+#include <mach/urmach_identity.h>	/* the requester's identity (#747) */
 #include <mach_init.h>
 #include <sa_mach.h>
 #include <stdio.h>
@@ -102,6 +103,14 @@ static mach_port_t cap_port_set;
 static mach_port_t g_request_local_port;
 
 /*
+ * #747: and the task that sent it, by the identity the kernel stamped in the
+ * request's trailer -- the one a capability is issued to, and the only one
+ * that may derive from it.  Set and cleared with g_request_local_port; 0 for a
+ * request received without its sender, which owns nothing.
+ */
+static uint64_t g_request_sender;
+
+/*
  * Dispatcher: snapshot the receive port for the policy gate, then
  * hand off to the MIG-generated cap_server_server.  Anything that
  * doesn't match subsystem 3500 gets a MIG_BAD_ID reply.
@@ -128,8 +137,10 @@ cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
     }
 
     g_request_local_port = in->msgh_local_port;
+    g_request_sender = urmach_msg_sender(in);		/* #747 */
     handled = cap_server_server(in, out);
     g_request_local_port = MACH_PORT_NULL;
+    g_request_sender = 0;
     return handled;
 }
 
@@ -462,6 +473,18 @@ cap_acquire(mach_port_t             server,
 
     uint64_t expires;
 
+    /*
+     * #747: issued to the task that asked, by the identity the kernel stamped
+     * on its request.  The owner was a port name written MACH_PORT_NULL, "audit
+     * trailer not consulted in v1", so a token was good for whoever held its
+     * bytes.
+     */
+    if (g_request_sender == 0) {
+        printf("cap: DENY port=0x%x: the request came without its sender's "
+               "identity, so there is nobody to issue it to (#747)\n",
+               (unsigned)g_request_local_port);
+        return CAP_ERR_INTERNAL;
+    }
     if (cap_deadline(lifetime_ms, 0, &expires) != 0) {
         printf("cap: DENY port=0x%x: a lifetime of %u ms was asked for, and "
                "the clock it would be kept on cannot be read (#747)\n",
@@ -478,7 +501,7 @@ cap_acquire(mach_port_t             server,
     t->resource_type = resource_type;
     t->resource_id   = resource_id;
     t->allowed_ops   = ops;
-    t->owner         = 0;   /* the task's identity: #747 writes it */
+    t->owner         = g_request_sender;	/* #747 */
     t->parent_cap_id = 0;
     t->depth         = 0;
     t->delegable     = 1;
@@ -529,6 +552,14 @@ cap_derive(mach_port_t             server,
     memcpy(&parent, parent_buf, sizeof(parent));
 
     if (!cap_verify_hmac(&parent)) return CAP_ERR_INVALID_TOKEN;
+    /* #747: only the task it was issued to derives from it. */
+    if (parent.owner != g_request_sender || g_request_sender == 0) {
+        printf("cap: DENY derive from cap %llu: asked by 0x%llx, issued to "
+               "0x%llx (#747)\n", (unsigned long long)parent.cap_id,
+               (unsigned long long)g_request_sender,
+               (unsigned long long)parent.owner);
+        return CAP_ERR_NOT_OWNER;
+    }
     if (parent.revoked)            return CAP_ERR_REVOKED;
     if (cap_expired(&parent) != KERN_SUCCESS) return CAP_ERR_EXPIRED; /* #747 */
     if (!parent.delegable)         return CAP_ERR_NOT_DELEGABLE;
@@ -1283,7 +1314,7 @@ main(int argc, char **argv)
      * one grows.
      */
     mach_msg_server(cap_demux, CAP_MANIFEST_MAX_BYTES + 2048, cap_port_set,
-                    MACH_MSG_OPTION_NONE);
+                    URMACH_RCV_SENDER);		/* #747: who asks */
 
     printf("cap: mach_msg_server exited unexpectedly\n");
     return 1;
