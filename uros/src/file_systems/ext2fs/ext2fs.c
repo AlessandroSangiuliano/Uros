@@ -1200,6 +1200,62 @@ ext2fs_icache_read(struct device *dev, ino_t ino)
 }
 
 /*
+ * #912: inode `ino' of the mount of `dev' as read_inode reads it on a miss of
+ * the inode cache -- the cache's entry for it let go first, then read on a
+ * handle of its own, through the page cache -- into `out', and the
+ * inode-table block that holds it into `blk'.  For ext_server's check that
+ * every write of an inode-table block reaches the page cache.
+ */
+int
+ext2fs_itable_peek(struct device *dev, ino_t ino, struct ext2_inode *out,
+		   daddr_t *blk)
+{
+	struct ext2_mount	*m = (struct ext2_mount *)dev->mount_data;
+	struct ext2fs_file	*fp;
+	int			 rc;
+
+	if (m == NULL)
+		return FS_NO_ENTRY;
+	fp = (struct ext2fs_file *)malloc(sizeof(struct ext2fs_file));
+	if (fp == NULL)
+		return FS_NO_ENTRY;
+	memset(fp, 0, sizeof(*fp));
+	fp->f_dev = *dev;
+	fp->f_ic = &fp->f_ic_scratch;
+	rc = mount_fs(fp);
+	if (rc == 0) {
+		icache_invalidate(m, ino);
+		rc = read_inode(ino, fp);
+	}
+	if (rc == 0) {
+		*out = *fp->f_ic;
+		*blk = ext2_ino2blk(fp->f_fs, fp->f_gd, ino);
+	}
+	free_file_buffers(fp);
+	free(fp);
+	return rc;
+}
+
+/* #912: the inode an open file is. */
+ino_t
+ext2fs_file_ino(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+
+	return fp->f_vnode != NULL ? fp->f_vnode->v_ino : fp->f_ino;
+}
+
+/*
+ * #912: does a flush of more than one dirty item on `dev' go out as one
+ * batch (flush_metadata_taken), or item by item through write_inode?
+ */
+int
+ext2fs_flush_batches(struct device *dev)
+{
+	return ext2_dev_has_batch(dev);
+}
+
+/*
  * Given an offset in a file, find the disk block number that
  * contains that block.
  */
