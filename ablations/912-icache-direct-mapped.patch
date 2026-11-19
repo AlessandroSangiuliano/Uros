@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #912
-Takes out: the set-associative inode cache -- one way a set, and the 16 slots of ino & 15 it had, whatever table the mount was given: / (inode 2) and /mach_servers (18) evict each other in every walk.  ext_server's check finds /mach_servers/cow_test walked 2000 times reading the inode table after the first walk, and inodes 2, 18, 34, 50, 66 and 82 reading it after the first round.
+Takes out: the set-associative inode cache -- one way a set, and the 16 slots of ino & 15 it had, whatever table the mount was given: / (inode 2) and /mach_servers (18) evict each other in every walk.  ext_server's check finds inodes 2, 18, 34, 50, 66 and 82 missing the inode cache after the first round, all six in one slot; on today's image the walk of /mach_servers/cow_test does not collide (inodes 2, 22 and 23).  Asked of the inode cache's misses: over the page cache, a miss whose block is held there reads nothing from the disk (#912's second step).
 Run: --entry 14 600 -smp 4
-Expect: ext2: inode cache: WRONG -- (/mach_servers/cow_test walked 2000 times read the inode table|inodes 2, 18, 34, 50, 66 and 82 read in turn 50 times read the inode table)
+Expect: ext2: inode cache: WRONG -- (/mach_servers/cow_test walked 2000 times missed the inode cache|inodes 2, 18, 34, 50, 66 and 82 read in turn 50 times missed the inode cache)
 
 diff --git a/uros/src/file_systems/ext2fs/ext2fs.c b/uros/src/file_systems/ext2fs/ext2fs.c
 index 07782631..c266a5d0 100644

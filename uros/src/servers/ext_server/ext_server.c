@@ -1677,12 +1677,20 @@ ext_server_demux(mach_msg_header_t *in, mach_msg_header_t *out)
  * #912: the inode cache, on the root disk's own inodes, with the counts the
  * mount keeps (ext2fs_icache_counts).  One line for each question:
  *
- * - /mach_servers/cow_test walked 2000 times reads the inode table in the
- *   first walk only.  With the 16 slots of ino & 15, / (inode 2) and
- *   /mach_servers (18) evicted each other: two disk reads every walk, 1.5 ms
- *   each under KVM.
+ * - /mach_servers/cow_test walked 2000 times misses the inode cache in the
+ *   first walk only, and reads the inode table there only.  With the 16 slots
+ *   of ino & 15, / (inode 2) and /mach_servers (18) evicted each other: two
+ *   disk reads every walk, 1.5 ms each under KVM.
  * - Inodes 2, 18, 34, 50, 66 and 82, which that hash put in one slot, read in
- *   turn 50 times read the table in the first round only.
+ *   turn 50 times miss it in the first round only.
+ *
+ * Asked of the inode cache's own misses.  Since read_inode reads an inode's
+ * block through the page cache (itable_read), a miss whose block is held
+ * there reads nothing from the disk, and a cache that evicted its inodes at
+ * every walk would read the table no more than one that keeps them: over the
+ * page cache, 912-icache-direct-mapped read it once after the first round,
+ * for a block the page cache had not been asked for yet, where it had read it
+ * 294 times.  The table's reads are printed beside, read.
  *
  * Run before the mount is registered, so that no client's read is counted.
  */
@@ -1691,12 +1699,12 @@ icache_check(struct mount_context *mnt)
 {
 	static const ino_t	coll[] = { 2, 18, 34, 50, 66, 82 };
 	const char		*walk = "/mach_servers/cow_test";
-	unsigned long		hits, misses, first, after;
+	unsigned long		hits, misses, reads, m0, r0;
 	unsigned int		sets, i, k, round;
 	fs_private_t		priv;
 	int			rc;
 
-	if (!ext2fs_icache_counts(&mnt->dev, &hits, &misses, &first, &sets)) {
+	if (!ext2fs_icache_counts(&mnt->dev, &hits, &misses, &reads, &sets)) {
 		printf("ext2: inode cache NOT ASKED -- the root's mount has no "
 		       "state yet (#912)\n");
 		return;
@@ -1709,8 +1717,7 @@ icache_check(struct mount_context *mnt)
 	else {
 		ext2fs_close_file(priv);
 		free(priv);
-		(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &first,
-					    &sets);
+		(void) ext2fs_icache_counts(&mnt->dev, &hits, &m0, &r0, &sets);
 		for (i = 1; i < 2000 && rc == 0; i++) {
 			rc = ext2fs_open_file(&mnt->dev, walk, &priv);
 			if (rc == 0) {
@@ -1718,32 +1725,38 @@ icache_check(struct mount_context *mnt)
 				free(priv);
 			}
 		}
-		(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &after,
+		(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &reads,
 					    &sets);
 		if (rc != 0)
 			printf("ext2: inode cache: WRONG -- walk %u of 2000 of %s "
 			       "failed (rc=%d) (#912)\n", i, walk, rc);
-		else if (after != first)
+		else if (misses != m0)
+			printf("ext2: inode cache: WRONG -- %s walked 2000 times "
+			       "missed the inode cache %lu times after the first "
+			       "walk: its inodes evict one another (#912)\n", walk,
+			       misses - m0);
+		else if (reads != r0)
 			printf("ext2: inode cache: WRONG -- %s walked 2000 times "
 			       "read the inode table %lu times after the first "
-			       "walk: its inodes evict one another (#912)\n", walk,
-			       after - first);
+			       "walk, with no miss of the inode cache (#912)\n",
+			       walk, reads - r0);
 		else
-			printf("ext2: inode cache: %s walked 2000 times, %lu "
-			       "inode-table reads, all in the first walk; %lu hits "
-			       "and %lu misses since the mount, %u sets of 4 ways "
-			       "(#912)\n", walk, first, hits, misses, sets);
+			printf("ext2: inode cache: %s walked 2000 times, no miss "
+			       "and no inode-table read after the first walk; %lu "
+			       "inode-table reads, %lu hits and %lu misses since "
+			       "the mount, %u sets (#912)\n", walk, reads, hits,
+			       misses, sets);
 	}
 
 	rc = 0;
 	for (round = 0; round < 50 && rc == 0; round++) {
 		if (round == 1)
-			(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses,
-						    &first, &sets);
+			(void) ext2fs_icache_counts(&mnt->dev, &hits, &m0, &r0,
+						    &sets);
 		for (k = 0; k < sizeof(coll) / sizeof(coll[0]) && rc == 0; k++)
 			rc = ext2fs_icache_read(&mnt->dev, coll[k]);
 	}
-	(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &after, &sets);
+	(void) ext2fs_icache_counts(&mnt->dev, &hits, &misses, &reads, &sets);
 	if (rc == FS_CORRUPT)
 		printf("ext2: inode cache: the collisions NOT ASKED -- this "
 		       "filesystem has fewer than 82 inodes (#912)\n");
@@ -1751,15 +1764,17 @@ icache_check(struct mount_context *mnt)
 		printf("ext2: inode cache: WRONG -- inode %lu could not be read "
 		       "in round %u (rc=%d) (#912)\n", (unsigned long)coll[k - 1],
 		       round - 1, rc);
-	else if (after != first)
+	else if (misses != m0)
 		printf("ext2: inode cache: WRONG -- inodes 2, 18, 34, 50, 66 and "
-		       "82 read in turn 50 times read the inode table %lu times "
-		       "after the first round: they evict one another (#912)\n",
-		       after - first);
+		       "82 read in turn 50 times missed the inode cache %lu "
+		       "times after the first round, and read the inode table "
+		       "%lu times: they evict one another (#912)\n",
+		       misses - m0, reads - r0);
 	else
 		printf("ext2: inode cache: inodes 2, 18, 34, 50, 66 and 82, which "
-		       "ino & 15 put in one slot, read in turn 50 times: no "
-		       "inode-table read after the first round (#912)\n");
+		       "ino & 15 put in one slot, read in turn 50 times: no miss "
+		       "of the inode cache after the first round, and %lu "
+		       "inode-table reads (#912)\n", reads - r0);
 }
 
 /*
