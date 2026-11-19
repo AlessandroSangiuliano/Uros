@@ -387,7 +387,7 @@ net_driver_alias(
 	    if (i == 0)
 		break;
 	}
-	printf(pp);
+	printf("%s", pp);
 	dev_set_indirection(pp, &net_devops, netp->net_generic);
 	kfree((vm_offset_t)pp, l);
 
