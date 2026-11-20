@@ -1704,12 +1704,12 @@ expected_reports() {
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+		'chora_test: started'   'chora_test: [0-9]* of [0-9]* arms passed' \
+		'@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
 		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
-		'chora_test: started'   'chora_test: [0-9]* of [0-9]* arms passed' \
-		'@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='
 }
 
