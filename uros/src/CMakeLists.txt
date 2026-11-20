@@ -319,6 +319,8 @@ endif()
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libdl)
   add_subdirectory(lib/libmodload)
+  # #963: what a module of chora is written against.
+  add_subdirectory(lib/libdriver)
   # And what proves it, which crosses WITH it (#423).  A loader that builds is
   # not a loader that relocates: the three relocation types the driver plug-ins
   # use are checked one at a time, each by a wrong ANSWER rather than a fault.
@@ -629,6 +631,15 @@ endif()
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/exec_server)
   add_subdirectory(tests/hello_exec)
+  # #963: images of another machine, which exec_server must refuse, and a
+  # position-independent one that names no dynamic linker, which it relocates.
+  add_subdirectory(tests/elf32_probe)
+  add_subdirectory(tests/hello_pie)
+  # #963: chora, one program for every device, which exec_server starts on
+  # the device whoever found it names, its first module, and the test that
+  # starts it.
+  add_subdirectory(servers/chora)
+  add_subdirectory(tests/chora_test)
 endif()
 
 # The textbook program, static against musl, the first of the kind on this

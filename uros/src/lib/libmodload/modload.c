@@ -198,6 +198,52 @@ fetch_class(const char *class)
 	return added;
 }
 
+/*
+ * Fetch one module of a class into the cache (#963).  0 when it is there
+ * already or now; -1, said, otherwise.  A name that does not fit a pool's
+ * name is refused, not cut: a cut name is another module's name.
+ */
+static int
+fetch_one(const char *class, const char *name)
+{
+	kern_return_t kr;
+	module_name_t class_buf, name_buf;
+	vm_offset_t data = 0;
+	mach_msg_type_number_t data_count = 0;
+	struct cached_module *cm;
+
+	if (strlen(class) >= sizeof(class_buf) ||
+	    strlen(name) >= sizeof(name_buf)) {
+		printf("%s: module \"%s/%s\": a name longer than %u "
+		       "characters is no pool's\n", log_tag, class, name,
+		       (unsigned)(sizeof(name_buf) - 1));
+		return -1;
+	}
+	if (find_cached_module(name) != NULL)
+		return 0;
+	if (n_cached_modules >= MAX_CACHED_MODULES) {
+		printf("%s: module cache full, \"%s\" not fetched\n",
+		       log_tag, name);
+		return -1;
+	}
+
+	strcpy(class_buf, class);
+	strcpy(name_buf, name);
+	kr = bootstrap_get_module(bootstrap_port, class_buf, name_buf,
+				  &data, &data_count);
+	if (kr != KERN_SUCCESS) {
+		printf("%s: bootstrap_get_module(\"%s\", \"%s\") failed: "
+		       "0x%x\n", log_tag, class, name, kr);
+		return -1;
+	}
+
+	cm = &cached_modules[n_cached_modules++];
+	strcpy(cm->name, name);
+	cm->data = data;
+	cm->size = data_count;
+	return 0;
+}
+
 /* ================================================================
  * Public API
  * ================================================================ */
@@ -298,4 +344,12 @@ modload_load_module(const char *name, const char *sym_suffix)
 	printf("%s: loaded module \"%s\" (sym %s)\n",
 	       log_tag, name, sym_buf);
 	return ops;
+}
+
+void *
+modload_load_named(const char *class, const char *name, const char *sym_suffix)
+{
+	if (fetch_one(class, name) != 0)
+		return NULL;
+	return modload_load_module(name, sym_suffix);
 }

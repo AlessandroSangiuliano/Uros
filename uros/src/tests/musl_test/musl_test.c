@@ -3565,6 +3565,75 @@ arm_default_actions(void)
 		"to go on" : "SIGURG and SIGWINCH left theirs to go on");
 }
 
+/*
+ * ── [51] A program, or a dynamic linker, of another machine is refused (#963)
+ *
+ * exec_server runs this machine's programs only, and loads this machine's
+ * dynamic linkers only.  /elf32_probe is an i386 program, and /interp_probe an
+ * x86-64 one whose PT_INTERP names /elf32_ldso_probe, an i386 one.  The one
+ * right answer to an execve of either is ENOEXEC.  A server that started one
+ * leaves a child killed by the fault its first instruction is, and any other
+ * errno is a refusal for another reason: the child exits with that errno,
+ * which the line prints.
+ */
+#define E32_REFUSED	200	/* [51]'s child's status when execve said ENOEXEC */
+
+/* The status an execve of `path' left its child with, or -1 with no child. */
+static int
+exec_status(const char *path)
+{
+	char	*argv[2];
+	char	*envp[1];
+	pid_t	pid;
+	int	status = 0;
+
+	argv[0] = (char *)path;
+	argv[1] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid < 0)
+		return -1;
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(errno == ENOEXEC ? E32_REFUSED : (errno & 0x7f));
+	}
+	if (waitpid(pid, &status, 0) != pid)
+		return -1;
+	return status;
+}
+
+static void
+arm_other_machine(void)
+{
+	int	program, ldso;
+
+	if (!program_is_there(51, "/elf32_probe")
+	    || !program_is_there(51, "/interp_probe")
+	    || !program_is_there(51, "/elf32_ldso_probe"))
+		return;
+	program = exec_status("/elf32_probe");
+	ldso = exec_status("/interp_probe");
+	if (program == -1 && ldso == -1) {
+		not_asked(51, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(51, program != -1 && WIFEXITED(program)
+		&& WEXITSTATUS(program) == E32_REFUSED && ldso != -1
+		&& WIFEXITED(ldso) && WEXITSTATUS(ldso) == E32_REFUSED,
+		"an execve of an i386 program left status %#x, and of a program "
+		"whose dynamic linker is i386 %#x; %#x is ENOEXEC's",
+		(unsigned)program, (unsigned)ldso, (unsigned)(E32_REFUSED << 8));
+}
+
+/*
+ * ── [52] A position-independent program that names no dynamic linker (#963)
+ *
+ * exec_server relocates it.  /hello_pie checks four of its own pointers and
+ * says what it read on lines of its own, which run-x86_64.sh holds it to; here
+ * it is started and killed as hello_exec is in [15], and a child that ended
+ * by itself before it was killed -- refused, or a fault -- is a WRONG.
+ */
+
 int
 main(int argc, char **argv)
 {
@@ -3660,6 +3729,9 @@ main(int argc, char **argv)
 	arm_wait_killed_rusage();
 	/* #953: the default action of the signals no arm above sends. */
 	arm_default_actions();
+	/* #963: what exec_server will not run, and what it relocates. */
+	arm_other_machine();
+	arm_parked_program(52, "/hello_pie");
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;

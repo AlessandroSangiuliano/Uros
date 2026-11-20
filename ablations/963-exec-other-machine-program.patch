@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #963
+Takes out: exec_do_load's question of whose machine the program is: an i386 image is mapped and started as x86-64 code, as it was.  musl_test's arm fifty-one asks for /elf32_probe and gets a child killed by the fault of its one instruction, not ENOEXEC.
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[51\] WRONG -- an execve of an i386 program left status 0x[0-9a-f]*, and of a program whose dynamic linker is i386 0xc800
+
+diff --git a/uros/src/servers/exec_server/exec_load.c b/uros/src/servers/exec_server/exec_load.c
+index f577bccd..550519a5 100644
+--- a/uros/src/servers/exec_server/exec_load.c
++++ b/uros/src/servers/exec_server/exec_load.c
+@@ -737,15 +737,7 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
+             return EXEC_ERR_NOT_STATIC;
+         }
+     }
+-    if (!image_is_this_machine(&img)) {
+-        printf("exec: %s is an image of another machine (machine %u, "
+-               "%d-bit): this server runs %s images only\n", path,
+-               (unsigned)elf_machine(&img), elf_is_64bit(&img) ? 64 : 32,
+-               ELF_TARGET_NAME);
+-        elf_close(&img);
+-        free(file_buf);
+-        return EXEC_ERR_PARSE;
+-    }
++    /* 963-exec-other-machine-program: whose machine the program is goes unasked */
+ 
+     /*
+      * 3. The task is the caller's, made empty by the caller (#926): this

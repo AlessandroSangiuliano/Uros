@@ -185,9 +185,12 @@ __start_mach_c(unsigned long entry_sp)
 	/*
 	 * Say who we are, before main() (#425).
 	 *
-	 * struct task has no name, so a kernel report that lists tasks can only
-	 * give their addresses -- and when the machine wedges, a log naming five
-	 * live user tasks as five pointers cannot say which program stopped.
+	 * struct task had no name, so a kernel report that listed tasks could
+	 * only give their addresses -- and when the machine wedges, a log naming
+	 * five live user tasks as five pointers cannot say which program stopped.
+	 * ⚠️ It has had one since #963, but only a task given a name has one --
+	 * chora names its task after its device -- so for every other task this
+	 * is still what names it.
 	 * That happened twice in one afternoon: the census printed
 	 * `task=0xffffc000004d83a0 susp=2' and the answer had to be guessed from
 	 * which test had failed to report.  The debugger was no better; its

@@ -1074,18 +1074,12 @@ user_bootstrap(void)
     dprintf("task loaded:");
 
     /*
-     * Issue #186: if a stage-1 bundle (mod[1]) was provided, vm_allocate
-     * a region inside the bootstrap task's address space, copy the
-     * bundle bytes into it, and inject "--bundle=<va>,<size>" right
-     * after argv[0] so the bootstrap server can find it via parse_args.
-     */
-    /*
      * Issue #186: if mod[1] is a stage-1 bundle, vm_allocate a region
      * inside the bootstrap task's address space, copyout the bundle
-     * bytes, and publish "<argv0>\0--bundle=ADDR,SIZE\0" via
-     * boot_args_start/boot_args_size — that's the channel
-     * do_bootstrap_arguments() answers from, which crt0's
-     * __get_arguments() reads at startup.
+     * bytes, and publish "<argv0>\0--bundle=ADDR,SIZE\0" and then the
+     * task's other arguments (#963) via boot_args_start/boot_args_size --
+     * that's the channel do_bootstrap_arguments() answers from, which
+     * crt0's __get_arguments() reads at startup.
      */
     if (exec_size > 0 && exec_start != 0) {
 	vm_offset_t uaddr = 0x40000000;	/* hint: avoid VA 0 (null page) */
@@ -1115,10 +1109,29 @@ user_bootstrap(void)
 	    int a0len = (int) strlen(argv0);
 	    vm_size_t  bsz = a0len + 1 + alen + 1;
 	    vm_offset_t bbuf = 0;
+	    int ai;
+
+	    /*
+	     * 🔴 AND THE WORDS AFTER THE PROGRAM'S NAME (#963).  These were the
+	     * task's arguments, and with a bundle loaded they were dropped:
+	     * `bootstrap -f chora.conf' reached bootstrap as `bootstrap'.  They
+	     * follow the bundle's, in their order; bootstrap takes --bundle= out
+	     * of argv wherever it is, and reads the rest as its options.
+	     */
+	    for (ai = 1; info->argv && info->argv[ai]; ai++)
+		bsz += strlen(info->argv[ai]) + 1;
 	    kr = kmem_alloc(kernel_map, &bbuf, round_page(bsz));
 	    if (kr == KERN_SUCCESS) {
+		vm_size_t at = a0len + 1 + alen + 1;
+
 		bcopy(argv0, (char *)bbuf, a0len + 1);
 		bcopy(bundle_arg, (char *)bbuf + a0len + 1, alen + 1);
+		for (ai = 1; info->argv && info->argv[ai]; ai++) {
+		    vm_size_t len = strlen(info->argv[ai]) + 1;
+
+		    bcopy(info->argv[ai], (char *)bbuf + at, len);
+		    at += len;
+		}
 		boot_args_start = bbuf;
 		boot_args_size  = bsz;
 		dprintf("bundle: mapped 0x%lx bytes at user VA 0x%lx, arg='%s'\n",
@@ -1622,16 +1635,33 @@ bootstrap_create(void)
     {
 	static const char	directives[] = " $(task-create) $(task-resume)";
 	const char		*modstr = machine_boot_module_string(0);
-	const char		*slash;
-	size_t			namelen;
+	const char		*slash, *word_end, *name;
+	size_t			namelen, restlen;
 
 	/*
 	 * A loader that gave no string keeps the historical name rather than
 	 * an empty one: an unnamed task is worse than a conventionally named
 	 * one, and this is the case where there is nothing better to say.
 	 */
+	while (*modstr == ' ' || *modstr == '\t')
+		modstr++;
 	if (modstr[0] == '\0')
 		modstr = "/mach_servers/bootstrap";
+
+	/*
+	 * 🔑 THE FIRST WORD IS THE PROGRAM, AND THE REST ARE ITS ARGUMENTS (#963).
+	 *
+	 * GRUB writes the whole of `module2 /boot/bootstrap bootstrap -f
+	 * chora.conf' after the path, and the boot script below takes the words
+	 * after the first as the task's arguments.  The name was taken from the
+	 * whole string, so a second word was part of the name, and a slash in
+	 * an argument cut the name at the argument.  The name is now the first
+	 * word's, and the rest goes on as it came.
+	 */
+	for (word_end = modstr;
+	     *word_end != '\0' && *word_end != ' ' && *word_end != '\t';
+	     word_end++)
+		continue;
 
 	/*
 	 * The last component, and this is measured rather than tidiness.
@@ -1648,22 +1678,27 @@ bootstrap_create(void)
 	 * that means the same thing from both loaders and inside the system,
 	 * and it is the program's name, which is what argv[0] is for.
 	 */
-	for (slash = modstr; *slash != '\0'; slash++)
+	name = modstr;
+	for (slash = modstr; slash < word_end; slash++)
 		if (*slash == '/')
-			modstr = slash + 1;
+			name = slash + 1;
+	namelen = (size_t) (word_end - name);
 
-	if (modstr[0] == '\0')		/* a string ending in a slash */
-		modstr = "bootstrap";
+	if (namelen == 0) {		/* a first word ending in a slash */
+		name = "bootstrap";
+		namelen = strlen(name);
+	}
 
-	namelen = strlen(modstr);
-	if (namelen + sizeof directives > sizeof boot_args_buf)
+	restlen = strlen(word_end);
+	if (namelen + restlen + sizeof directives > sizeof boot_args_buf)
 		panic("boot module 0 command line is %d bytes, and the boot "
 		      "task's argument buffer holds %d (#488)",
-		      (int) (namelen + sizeof directives),
+		      (int) (namelen + restlen + sizeof directives),
 		      (int) sizeof boot_args_buf);
 
-	bcopy(modstr, boot_args_buf, namelen);
-	bcopy(directives, boot_args_buf + namelen, sizeof directives);
+	bcopy(name, boot_args_buf, namelen);
+	bcopy(word_end, boot_args_buf + namelen, restlen);
+	bcopy(directives, boot_args_buf + namelen + restlen, sizeof directives);
 
 	/*
 	 * And the same name on its own, for whoever has to check what the
@@ -1673,10 +1708,10 @@ bootstrap_create(void)
 	 */
 	if (namelen >= sizeof boot_task_name)
 		namelen = sizeof boot_task_name - 1;
-	bcopy(modstr, boot_task_name, namelen);
+	bcopy(name, boot_task_name, namelen);
 	boot_task_name[namelen] = '\0';
 
-	printf("bootstrap: boot task is \"%s\"\n", modstr);
+	printf("bootstrap: boot task is \"%s\"\n", boot_task_name);
     }
 
     err = boot_script_parse_line(boot_start, boot_size, boot_args_buf);

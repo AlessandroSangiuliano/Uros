@@ -631,6 +631,16 @@ must_report 'hello_exec: hello from exec_server' 'hello_exec: AUXV AT_PAGESZ (ta
 	'exec_server started it and the initial stack did not say what a page is, in words of this target: a layout of the wrong width reads the tag from one place and the value from another (#421).' \
 	hello_exec
 
+must_report 'chora_test: started' 'chora_test: [0-9]* of [0-9]* arms passed' \
+	'It starts chora on the network card twice and waits for each, every wait bounded at 30 s, so silence is a stop inside exec_load(), inside the HAL or inside the kernel it asks about the claim (#963).  It is the last line of chora.conf and its count ends the run.'
+
+must_report '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
+	'A chora claimed its device and never said whether its module took it.  It says so either way, so a stop here is a module that did not come back from attaching to its device -- a wait for an interrupt with no bound, or a fault (#963).' \
+	chora
+
+must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
+	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
+
 must_report 'musl_test: started' 'musl_test: [0-9]* of [0-9]* arms passed' \
 	'A static C program with musl under it, asking for threads, memory, signals and files through the system calls of this target (#414).  It started and did not reach its last line, which is a stop inside the personality or a thread that never came back.'
 
@@ -1114,7 +1124,7 @@ done
 # as one that answers it, so each arm that can decline names `NOT ASKED' beside
 # its own PASS — and NOT as a bare alternative, which would let the FIRST test
 # to decline, hundreds of lines early, be read as the end of the boot.
-DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|chora_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
 
 # 🔑 A BOOT THAT RESTARTS ITSELF ENDS AT THE RESTART (#373).  With -b the
 # kernel resets the machine after the quiet census, on reset_after='s deadline
@@ -1694,6 +1704,8 @@ expected_reports() {
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+		'chora_test: started'   'chora_test: [0-9]* of [0-9]* arms passed' \
+		'@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \

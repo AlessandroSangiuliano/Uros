@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #963
+Takes out: what chora_test may hand on: the AHCI class instead of the network class.  chora asks for any PCI class and holds what its parent hands on, so it holds the AHCI class, cap_server refuses it the network card's, and it never claims it: its authority is its parent's to give.
+Run: --iommu intel --entry 68 600 -smp 4
+Expect: @[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: no capability for class 0x020000: cap_request 0x
+Expect: chora_test: \[2\] WRONG -- a chora started on the card, and 30 s on the kernel says nobody claims it
+
+diff --git a/uros/src/tests/chora_test/chora_test.manifest b/uros/src/tests/chora_test/chora_test.manifest
+index 440ae873..64404381 100644
+--- a/uros/src/tests/chora_test/chora_test.manifest
++++ b/uros/src/tests/chora_test/chora_test.manifest
+@@ -10,4 +10,4 @@
+ # first holds, not by a capability it lacks.
+ 
+ name chora_test
+-delegatable 5 0x020000 0x7
++delegatable 5 0x010601 0x7

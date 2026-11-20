@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #963
+Takes out: the debugger's task listing's own name for a task that has one: it prints the task's first named thread again, as before 1913ae7f, and chora's row says "chora", the program, where it said its device.  ddb-chora.py finds no row of the listing that carries chora's task name.
+Script: scripts/ddb-chora.py
+Expect: ddb-chora: WRONG -- 0 rows of the debugger's task listing name "[^"]*@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", where one should
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/ddb.c b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+index 37143d4e..dba9318e 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/ddb.c
++++ b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+@@ -1519,7 +1519,7 @@ static void list_tasks(void)
+ 		cons_puts("  ");
+ 		cons_putdec((uint64_t) acts);
+ 		cons_puts(" activations");
+-		if (t->name[0] != '\0') {
++		if (0 && t->name[0] != '\0') {	/* 963-ddb-task-name-not-printed */
+ 			unsigned	i;
+ 
+ 			/*
