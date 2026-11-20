@@ -291,6 +291,7 @@ SKIPPED="
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
 62: -d asks only of a build whose master tick calls the dispatch probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
 66: -z asks only of a build whose thread_doassign() calls the window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
+69: -r with chora.conf is for scripts/ddb-chora.py, which opens the debugger once chora drives the card and reads its task listing; nothing here writes to the serial line (#963)
 "
 
 # A boot's name: what its two logs are called, and what ci/job.sh's row()
