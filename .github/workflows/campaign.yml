@@ -30,9 +30,9 @@
 # schedule ran master's copy, which lacked the udev settle below, and its jobs
 # booted without KVM, all of them from 11/11.
 #
-# master's copy differs from this one in one line: its push.branches names
-# the epic alone, so that a push to master runs nothing while the epic lives.
-# This copy names master too, which takes effect on the day it is master's.
+# The two copies differ in push.branches alone.  master's names the epic, so
+# that a push to master runs nothing while the epic lives; the epic's names
+# master too, which takes effect on the day it is master's.
 # ⚠️ A public repository's runs are public, their logs and artifacts included.
 name: campaign
 
