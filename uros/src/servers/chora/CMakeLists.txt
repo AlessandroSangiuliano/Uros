@@ -1,0 +1,123 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+cmake_minimum_required(VERSION 3.16)
+project(chora C)
+
+# chora, one program for every device, and its first module (#963).
+
+set(CHORA_INCLUDE_DIRS
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/lib/libdriver
+  ${CMAKE_SOURCE_DIR}/src/lib/libmodload
+  ${CMAKE_SOURCE_DIR}/src/lib/libdl
+  ${CMAKE_BINARY_DIR}/generated/include
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${UROS_LIBPTHREADS_MD}
+  ${CMAKE_SOURCE_DIR}/uapi
+  ${UROS_ARCH_INCLUDE}
+  ${CMAKE_SOURCE_DIR}/src/mach_kernel
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
+  ${CMAKE_SOURCE_DIR}/include)
+
+# ===========================================================================
+# The program
+# ===========================================================================
+#
+# 🔑 A PIE that exports its symbols, as block_device_server is: a module is a
+# shared object linked against nothing, and resolves libdriver's calls, and
+# libmach's, against this program's own .dynsym (libmodload.c).  So libdriver
+# goes in whole -- a call a module makes and chora does not is still there to
+# be found -- and the program is exec'd, so exec_server relocates it (#963).
+
+add_executable(chora_bin chora.c)
+
+target_compile_options(chora_bin PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC
+  -mstack-protector-guard=global -include stdint.h)
+
+target_compile_definitions(chora_bin PRIVATE MACH_IPC_COMPAT=0)
+
+target_include_directories(chora_bin PRIVATE ${CHORA_INCLUDE_DIRS})
+
+target_link_libraries(chora_bin PRIVATE
+  -Wl,--start-group
+  -Wl,--whole-archive libdriver -Wl,--no-whole-archive
+  libmodload
+  libdl
+  libpthreads
+  libmach
+  libnetname
+  libcap
+  -Wl,--end-group)
+
+target_link_options(chora_bin PRIVATE
+  ${UROS_ARCH_FLAGS} -pie -nostdlib
+  -Wl,-e,__start_mach
+  -Wl,--no-dynamic-linker
+  -Wl,--export-dynamic
+  -Wl,--hash-style=sysv
+  -Wl,--build-id=none)
+
+add_dependencies(chora_bin libdriver libmodload libdl libpthreads libmach
+                 mig_mach_public_headers mkmanifest chora_probe_module)
+
+set_target_properties(chora_bin PROPERTIES
+  OUTPUT_NAME "chora"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin")
+
+# Its manifest goes into the program, as hello_exec's does: exec_server reads
+# it there and derives the task's port from the parent's (#743).  The link
+# depends on the manifest, so that a manifest edited alone is not left out.
+set(CHORA_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/chora.manifest)
+set(CHORA_CMF ${CMAKE_CURRENT_BINARY_DIR}/chora.cmf)
+set_property(TARGET chora_bin APPEND PROPERTY LINK_DEPENDS ${CHORA_MANIFEST_SRC})
+
+add_custom_command(TARGET chora_bin POST_BUILD
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${CHORA_CMF} ${CHORA_MANIFEST_SRC}
+  COMMAND ${CMAKE_OBJCOPY} --add-section .uros_manifest=${CHORA_CMF}
+            --set-section-flags .uros_manifest=noload,readonly,contents
+            $<TARGET_FILE:chora_bin>
+  COMMENT "embed .uros_manifest into chora"
+  VERBATIM)
+
+# ===========================================================================
+# chora_probe: the test module for the network card, in the class `net'
+# ===========================================================================
+#
+# No stack protector: its guard and its failure call are the program's to
+# give, and a module this small has nothing to protect that is worth a stub.
+
+add_library(chora_probe_module SHARED chora_probe/chora_probe.c)
+
+add_dependencies(chora_probe_module mig_mach_public_headers)
+
+target_compile_options(chora_probe_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(chora_probe_module PRIVATE MACH_IPC_COMPAT=0)
+
+target_include_directories(chora_probe_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(chora_probe_module PROPERTIES
+  OUTPUT_NAME "chora_probe"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/net")

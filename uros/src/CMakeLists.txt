@@ -635,6 +635,9 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   # position-independent one that names no dynamic linker, which it relocates.
   add_subdirectory(tests/elf32_probe)
   add_subdirectory(tests/hello_pie)
+  # #963: chora, one program for every device, which exec_server starts on
+  # the device whoever found it names, and its first module.
+  add_subdirectory(servers/chora)
 endif()
 
 # The textbook program, static against musl, the first of the kind on this
