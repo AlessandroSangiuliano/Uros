@@ -264,8 +264,17 @@ jobs:
           fi
           ls -l /dev/kvm 2>&1 || true
           echo "available=$available" >> "$GITHUB_OUTPUT"
-          echo "::notice::job ${{ matrix.job }}: KVM available: $available"
-          echo "job ${{ matrix.job }}: KVM available: $available" >> "$GITHUB_STEP_SUMMARY"
+          # #961: a job without it is a fault, said as one.  Every job of the
+          # epic's runs has had it since 16/10; the nightly's from 11/11 to
+          # 18/11 had none, and said so by a word in a notice.  Its boots still
+          # run, under TCG alone, and pull-results.sh says the same of it.
+          if [ "$available" = yes ]; then
+            echo "::notice::job ${{ matrix.job }}: KVM available: yes"
+            echo "job ${{ matrix.job }}: KVM available: yes" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::job ${{ matrix.job }}: KVM NOT available -- /dev/kvm cannot be written, and every boot of this job runs under TCG alone (#961)"
+            echo "**job ${{ matrix.job }}: KVM NOT available**, so every boot of this job runs under TCG alone (#961)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # The workspace is mounted, so what job.sh writes in ci-out is where the
       # upload looks for it.  The device is passed only where it can be
