@@ -461,6 +461,11 @@ check_master_port(ipc_port_t port)
  *
  * ⚠️ The same shape as dma_region's `owner' three hundred lines down, which has
  * held a reference since #432 for exactly this reason.
+ *
+ * #963: and since the entry holds that reference, the claim's task is read
+ * once more than it is compared: its name, copied by task_name_for_message()
+ * for the line that refuses another task the device -- under
+ * device_table_lock, while the entry names it, never after the lock goes.
  */
 #define	DEVICE_MAX_CLAIMS	16
 
@@ -4838,6 +4843,8 @@ ds_master_device_claim(
 	for (i = 0; i < device_nclaims; i++)
 		if (device_claim[i].bdf == bdf) {
 			task_t holder = device_claim[i].task;
+			char me_name[URMACH_TASK_NAME_MAX];
+			char holder_name[URMACH_TASK_NAME_MAX];
 
 			if (holder == me) {
 				was = device_claim[i].ops;
@@ -4846,13 +4853,21 @@ ds_master_device_claim(
 				claim_narrowed_say(bdf, me, was, was & ops);
 				return KERN_SUCCESS;
 			}
+			/*
+			 * #963: both tasks by name, the holder's copied while
+			 * the lock is held -- its claim holds a reference on
+			 * it, and once the lock goes the claim can go with it.
+			 */
+			task_name_for_message(holder, holder_name);
 			mutex_unlock(&device_table_lock);
-			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
-			       "it is claimed by task 0x%lx (entry %u of %u)\n",
+			task_name_for_message(me, me_name);
+			printf("device: %02x:%02x.%u REFUSED to task 0x%lx (%s) — "
+			       "it is claimed by task 0x%lx (%s) (entry %u of %u)\n",
 			       (unsigned)(bdf >> 8),
 			       (unsigned)((bdf >> 3) & 0x1F),
-			       (unsigned)(bdf & 7), (unsigned long)me,
-			       (unsigned long)holder, i, device_nclaims);
+			       (unsigned)(bdf & 7), (unsigned long)me, me_name,
+			       (unsigned long)holder, holder_name, i,
+			       device_nclaims);
 			return KERN_NO_ACCESS;
 		}
 	mutex_unlock(&device_table_lock);
@@ -4883,6 +4898,8 @@ ds_master_device_claim(
 	for (i = 0; i < device_nclaims; i++)
 		if (device_claim[i].bdf == bdf) {
 			task_t holder = device_claim[i].task;
+			char me_name[URMACH_TASK_NAME_MAX];
+			char holder_name[URMACH_TASK_NAME_MAX];
 
 			if (holder == me) {	/* another thread of this task */
 				was = device_claim[i].ops;
@@ -4892,15 +4909,18 @@ ds_master_device_claim(
 				claim_narrowed_say(bdf, me, was, was & ops);
 				return KERN_SUCCESS;
 			}
+			/* #963: the holder's name while its claim holds it */
+			task_name_for_message(holder, holder_name);
 			mutex_unlock(&device_table_lock);
+			task_name_for_message(me, me_name);
 			task_deallocate(me);
-			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
-			       "task 0x%lx claimed it while this one was "
+			printf("device: %02x:%02x.%u REFUSED to task 0x%lx (%s) — "
+			       "task 0x%lx (%s) claimed it while this one was "
 			       "measuring it (#538)\n",
 			       (unsigned)(bdf >> 8),
 			       (unsigned)((bdf >> 3) & 0x1F),
-			       (unsigned)(bdf & 7), (unsigned long)me,
-			       (unsigned long)holder);
+			       (unsigned)(bdf & 7), (unsigned long)me, me_name,
+			       (unsigned long)holder, holder_name);
 			return KERN_NO_ACCESS;
 		}
 
