@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #963
+Takes out: the task's name: libdriver keeps MODULE@BB:DD.F for chora's lines and does not give it to the task.  chora_test reads the first chora's name back empty, and the kernel's refusal of the second names neither task.
+Run: --iommu intel --entry 68 600 -smp 4
+Expect: chora_test: \[3\] WRONG -- that task's name reads "" \(kr 0x0\)
+
+diff --git a/uros/src/lib/libdriver/libdriver.c b/uros/src/lib/libdriver/libdriver.c
+index e447c42b..7cdc07ce 100644
+--- a/uros/src/lib/libdriver/libdriver.c
++++ b/uros/src/lib/libdriver/libdriver.c
+@@ -94,8 +94,7 @@ name_the_task(struct driver *d, const char *module)
+ 		       (unsigned)(URMACH_TASK_NAME_MAX - 1));
+ 		return -1;
+ 	}
+-	kr = urmach_task_set_name(mach_task_self(), d->name,
+-				  (mach_msg_type_number_t)n);
++	kr = KERN_SUCCESS;	/* 963-chora-task-unnamed: the name is kept for the lines, not given */
+ 	if (kr != KERN_SUCCESS) {
+ 		driver_log(d, "the kernel would not name this task: 0x%x", kr);
+ 		return -1;
