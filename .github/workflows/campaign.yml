@@ -15,9 +15,24 @@
 # `sweep`, the jobs share out the patches and run each once, the ablated arm
 # alone: whether every patch still applies, builds and is caught (#643).
 #
-# ⚠️ schedule and workflow_dispatch run only from a workflow file on the default
-# branch, master, and whether this file lives there is the repository owner's
-# decision.  Until it does, it runs on pushes to the epic, from the epic's copy.
+# ── Where this file lives, and which copy each run takes (#961) ─────────
+#
+# It is on master and on the epic.  A push runs the copy of the branch pushed,
+# and a dispatch the copy at the ref it is started at -- but GitHub dispatches
+# only a workflow whose file the default branch, master, has as well.  That is
+# why master keeps a copy, with workflow_dispatch and no schedule.
+#
+# 🔑 The nightly is not this file's.  master's nightly.yml has the schedule,
+# and dispatches this file at the branch the repository variable NIGHTLY_REF
+# names -- the epic while one lives -- with `nightly' set.  So the nightly
+# runs the epic's copy of these steps on the epic's tree, and a difference
+# between the two copies cannot reach it.  It did: from 06/10 to 18/11 the
+# schedule ran master's copy, which lacked the udev settle below, and its jobs
+# booted without KVM, all of them from 11/11.
+#
+# master's copy differs from this one in one line: its push.branches names
+# the epic alone, so that a push to master runs nothing while the epic lives.
+# This copy names master too, which takes effect on the day it is master's.
 # ⚠️ A public repository's runs are public, their logs and artifacts included.
 name: campaign
 
@@ -60,18 +75,21 @@ on:
         description: "Minutes the boots' step may run, 10 to 330; the merge test's rounds stop 5 before (empty: 330)"
         type: string
         required: false
+      nightly:
+        description: "Set by master's nightly.yml, which dispatches the nightly (#961): by hand, leave it off"
+        type: boolean
+        required: false
+        default: false
   push:
     branches:
-      - epic/v0.3.0-x86-64    # the branch EPIC below names
-  schedule:
-    - cron: "23 1 * * *"
+      - epic/v0.3.0-x86-64
+      # #961: master as well, which takes effect once this copy is master's,
+      # the day the epic is merged into it.  master's own copy names the epic
+      # alone until then.
+      - master
 
 permissions:
   contents: read
-
-env:
-  # The tree a nightly run boots: a scheduled run starts on master.
-  EPIC: epic/v0.3.0-x86-64
 
 jobs:
   plan:
@@ -89,10 +107,11 @@ jobs:
       jobs: ${{ steps.plan.outputs.jobs }}
       minutes: ${{ steps.plan.outputs.minutes }}
       job_minutes: ${{ steps.plan.outputs.job_minutes }}
+      kind: ${{ steps.plan.outputs.kind }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || (github.event_name == 'schedule' && env.EPIC) || github.sha }}
+          ref: ${{ inputs.ref || github.sha }}
 
       # The tree is resolved once, here, so that every job boots the same one
       # even if the branch moves while they start.  The defaults live here and
@@ -109,7 +128,14 @@ jobs:
           BOOTS: ${{ inputs.boots }}
           SWEEP: ${{ inputs.sweep }}
           MINUTES: ${{ inputs.minutes }}
+          NIGHTLY: ${{ inputs.nightly }}
+          EVENT: ${{ github.event_name }}
         run: |
+          # #961: what started the run, for job.txt and pull-results.sh: the
+          # nightly is a dispatch as one started by hand is, and only the input
+          # nightly.yml sets tells the two apart.
+          kind=$EVENT
+          [ "$NIGHTLY" = true ] && kind=nightly
           # Which toolchain builds and boots: ours, from Arch, in a container,
           # or Ubuntu's own, GCC and qemu several versions older -- both side
           # by side is how the first run decides whether the container is
@@ -194,7 +220,9 @@ jobs:
             echo "jobs=$jobs"
             echo "minutes=$minutes"
             echo "job_minutes=$((minutes + 15))"
+            echo "kind=$kind"
           } >> "$GITHUB_OUTPUT"
+          echo "the run is a $kind run, at $(git rev-parse --short=8 HEAD)" >> "$GITHUB_STEP_SUMMARY"
 
   boot:
     needs: plan
@@ -269,6 +297,7 @@ jobs:
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
           KVM: ${{ steps.kvm.outputs.available }}
           MINUTES: ${{ needs.plan.outputs.minutes }}
+          CAMPAIGN_KIND: ${{ needs.plan.outputs.kind }}
         run: |
           stop_at=$(( $(date +%s) + (MINUTES - 5) * 60 ))
           kvm=()
@@ -286,7 +315,7 @@ jobs:
           trap 'docker kill --signal=TERM "$name" > /dev/null 2>&1' INT TERM
           docker run --rm --init --name "$name" "${kvm[@]}" \
             -v "$GITHUB_WORKSPACE:/work" -w /work \
-            -e GITHUB_RUN_ID -e JOB_INDEX \
+            -e GITHUB_RUN_ID -e JOB_INDEX -e CAMPAIGN_KIND \
             archlinux:latest \
             scripts/ci/job.sh "${what[@]}" --stop-at "$stop_at" --out ci-out &
           pid=$!
@@ -314,6 +343,7 @@ jobs:
           SWEEP: ${{ needs.plan.outputs.sweep }}
           SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
           MINUTES: ${{ needs.plan.outputs.minutes }}
+          CAMPAIGN_KIND: ${{ needs.plan.outputs.kind }}
         run: |
           # #951: the job stops five minutes before this step's limit, as in
           # the container's step above, and the runner's signals are passed on
