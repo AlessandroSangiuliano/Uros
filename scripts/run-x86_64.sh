@@ -631,6 +631,9 @@ must_report 'hello_exec: hello from exec_server' 'hello_exec: AUXV AT_PAGESZ (ta
 	'exec_server started it and the initial stack did not say what a page is, in words of this target: a layout of the wrong width reads the tag from one place and the value from another (#421).' \
 	hello_exec
 
+must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
+	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
+
 must_report 'musl_test: started' 'musl_test: [0-9]* of [0-9]* arms passed' \
 	'A static C program with musl under it, asking for threads, memory, signals and files through the system calls of this target (#414).  It started and did not reach its last line, which is a stop inside the personality or a thread that never came back.'
 

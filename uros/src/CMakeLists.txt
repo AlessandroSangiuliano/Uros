@@ -629,8 +629,10 @@ endif()
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/exec_server)
   add_subdirectory(tests/hello_exec)
-  # #963: an image of another machine, which exec_server must refuse.
+  # #963: images of another machine, which exec_server must refuse, and a
+  # position-independent one that names no dynamic linker, which it relocates.
   add_subdirectory(tests/elf32_probe)
+  add_subdirectory(tests/hello_pie)
 endif()
 
 # The textbook program, static against musl, the first of the kind on this

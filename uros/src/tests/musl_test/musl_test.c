@@ -3625,6 +3625,15 @@ arm_other_machine(void)
 		(unsigned)program, (unsigned)ldso, (unsigned)(E32_REFUSED << 8));
 }
 
+/*
+ * ── [52] A position-independent program that names no dynamic linker (#963)
+ *
+ * exec_server relocates it.  /hello_pie checks four of its own pointers and
+ * says what it read on lines of its own, which run-x86_64.sh holds it to; here
+ * it is started and killed as hello_exec is in [15], and a child that ended
+ * by itself before it was killed -- refused, or a fault -- is a WRONG.
+ */
+
 int
 main(int argc, char **argv)
 {
@@ -3720,8 +3729,9 @@ main(int argc, char **argv)
 	arm_wait_killed_rusage();
 	/* #953: the default action of the signals no arm above sends. */
 	arm_default_actions();
-	/* #963: what exec_server will not run. */
+	/* #963: what exec_server will not run, and what it relocates. */
 	arm_other_machine();
+	arm_parked_program(52, "/hello_pie");
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
