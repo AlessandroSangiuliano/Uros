@@ -311,7 +311,9 @@ uros_other_qemus() {
 		done
 		[ "$_mine" = 1 ] && continue
 		_cmd=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null) || continue
-		[ -n "$_cmd" ] && echo "pid $_pid: ${_cmd% }"
+		# #960: printf, as uros_conditions_block does -- dash's echo would
+		# read a backslash in a command line as an escape.
+		[ -n "$_cmd" ] && printf 'pid %s: %s\n' "$_pid" "${_cmd% }"
 	done
 	return 0
 }
@@ -583,8 +585,14 @@ uros_conditions_block() {
 	echo "=== run conditions (#516) ==="
 	echo "  target:       $_target"
 	echo "  accelerator:  $_accel"
+	# A field may hold several lines -- run-x86_64.sh's other qemus, one a
+	# line (#618, #960) -- and each is printed as a fact of its own.  printf
+	# and not echo: dash's echo reads a backslash in the text as an escape.
 	for _f in "$@"; do
-		[ -n "$_f" ] && echo "  $_f"
+		[ -n "$_f" ] || continue
+		printf '%s\n' "$_f" | while IFS= read -r _l; do
+			printf '  %s\n' "$_l"
+		done
 	done
 	# 🔴 WHICH MACHINE, because a baseline belongs to one and no saved log in
 	# this project could say which.  #564 asks whether the other AMD laptop's
