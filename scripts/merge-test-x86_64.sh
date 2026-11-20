@@ -163,6 +163,12 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             reached the thread it named, and that thread ran elsewhere when
 #             a thread above it took its waker's processor; NOT ASKED on one
 #             processor (#777, #954)
+#   chora     the harness's verdict, of entry 68, where bootstrap reads
+#             chora.conf: bootstrap's line that -f chose it, the first chora's
+#             three lines -- the claim, its registers mapped, an interrupt
+#             taken -- the second chora's refused claim, and the kernel's line
+#             refusing it, which names both tasks; chora_test's count is the
+#             note (#963)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -269,6 +275,8 @@ ENTRIES="
 65 harness - 1
 67 wakee
 67 wakee - 1
+68 chora --iommu_intel
+68 chora --iommu_intel 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -740,6 +748,24 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		*)	alone_ok "$n" "$h" "$f" 'wakee_test: NOT ASKED — 1 processor(s)' ||
 			{ out=${out#*wakee_test: }; NOTE="wakee_test said ${out%% —*}"; false; } ;;
 		esac ;;
+	# #963: chora on the network card, from chora.conf.  The harness passes a
+	# boot whose chora_test answered with nothing unexplained, and the lines
+	# #963's boxes are about are asked for here because nothing else asks:
+	# bootstrap read chora.conf, the first chora claimed the card, mapped
+	# its registers and took an interrupt, and the second chora's claim was
+	# refused -- by the kernel, in a line that names each task, and the two
+	# names are the same because the name is the device's.  A boot with no
+	# card answers NOT ASKED in chora_test and fails here, since this entry
+	# exists to ask.
+	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: mapped region 0, ' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: took an interrupt, ' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the claim on .* was refused' "$f" &&
+		grep -aqE 'REFUSED to task 0x[0-9a-f]+ \(chora_probe@[^)]*\) .*claimed by task 0x[0-9a-f]+ \(chora_probe@' "$f" &&
+		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
+		[ -n "$out" ] && NOTE=$out ;;
 	esac
 }
 
