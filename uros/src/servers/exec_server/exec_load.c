@@ -144,9 +144,18 @@ image_is_this_machine(const elf_image_t *img)
 /*  Relocation of a position-independent image                         */
 /* ------------------------------------------------------------------ */
 
-#if !ELF_RELA_HAS_ADDEND
-#error "relocate_pie() writes bias + addend: a REL machine keeps the addend in the slot"
-#endif
+/*
+ * A refusal of relocate_pie(), said once with the program's name.
+ */
+static int
+pie_refused(const char *path, const char *why)
+{
+    printf("exec: %s is position-independent and names no dynamic linker, "
+           "and is not relocated: %s (#963)\n", path, why);
+    return EXEC_ERR_PARSE;
+}
+
+#if ELF_RELA_HAS_ADDEND
 
 /* The gABI's packed relative relocations, which <mach/elf.h> does not name;
  * the number is the one in musl's <elf.h>.  A program linked with
@@ -182,17 +191,6 @@ file_bytes_at(void *file_buf, const elf_image_t *img, uint64_t va,
         return (unsigned char *)file_buf + ph.offset + into;
     }
     return NULL;
-}
-
-/*
- * A refusal of relocate_pie(), said once with the program's name.
- */
-static int
-pie_refused(const char *path, const char *why)
-{
-    printf("exec: %s is position-independent and names no dynamic linker, "
-           "and is not relocated: %s (#963)\n", path, why);
-    return EXEC_ERR_PARSE;
 }
 
 /*
@@ -324,6 +322,28 @@ relocate_pie(void *file_buf, const elf_image_t *img, vm_address_t bias,
            path, (unsigned long)applied, (unsigned long)bias);
     return EXEC_OK;
 }
+
+#else	/* a REL machine */
+
+/*
+ * ⚠️ i386 keeps a relocation's addend in its slot, and applying one is
+ * `*slot += bias' -- a different loop, which nothing there has needed: its
+ * position-independent programs name a dynamic linker, and no test would run
+ * the loop.  So such an image that names none is refused there, saying why,
+ * where it used to run with the linker's addresses.
+ */
+static int
+relocate_pie(void *file_buf, const elf_image_t *img, vm_address_t bias,
+             const char *path)
+{
+    (void)file_buf;
+    (void)img;
+    (void)bias;
+    return pie_refused(path, "this machine's relocations are REL, which "
+                       "this server does not apply");
+}
+
+#endif	/* ELF_RELA_HAS_ADDEND */
 
 /* ------------------------------------------------------------------ */
 /*  Segment installation in the new task                               */
