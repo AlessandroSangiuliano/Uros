@@ -48,7 +48,7 @@ table on the checking path.
 
 | actor | holds | does |
 |---|---|---|
-| **kernel** (`kern/cap.c`) | the HMAC key, which task may install it, a revocation table and its epoch, the facts about resources it created | verifies tokens; answers ownership questions; tears down materialised authority on revocation |
+| **kernel** (`kern/cap.c`) | the HMAC key, which task may install it, a revocation table and its epoch, the facts about resources it created | verifies tokens; answers ownership questions; tears down materialised authority on revocation; gives every task an identity of its own and stamps it in the trailer of what the task sends (#747) |
 | **cap_server** | the issuance table (by id / by owner / by parent), the per-task manifests | draws the key; applies policy and mints tokens; cascades revocation |
 | **bootstrap** | the boot bundle, cap_server's port | makes cap_server's port and names its task to the kernel; installs each task's manifest before the task runs |
 | **name server** | the names, the mount registry | publishes "cap_server" for bootstrap's port; checks a mount in only on a capability for its prefix |
@@ -84,7 +84,8 @@ struct uros_cap {
     uint64_t  resource_id;           /* which one, per-type meaning        */
 
     uint64_t  allowed_ops;           /* bitmask, per-type namespace        */
-    /* … owner, delegation tree links, expiry, revoked …                    */
+    uint64_t  owner;                 /* the task it was issued to (#747)   */
+    /* … delegation tree links, expiry, revoked …                           */
 
     uint8_t   hmac[32];              /* MUST be last: the input is every
                                         preceding byte, verbatim           */
@@ -94,7 +95,24 @@ struct uros_cap {
 `hmac[]` is last because the HMAC input is the bytes before it. Field order is
 wire format: the blob crosses MIG as `cap_token_t`, an opaque
 `array[*:CAP_TOKEN_MAX] of char`, so the struct can evolve without regenerating
-every stub.
+every stub. It is format 2 (#747), 120 bytes with the hmac at 88 on both
+targets; the two static assertions in `cap_types.h` name the versions.
+
+🔑 **A token is good for the task it was issued to, until its deadline (#747).**
+- `owner` is the identity the kernel gave that task when it made it
+  (`<mach/urmach_identity.h>`): never inherited, never set, and stamped in the
+  trailer of every message the task sends. A token presented by any other task
+  is refused with `CAP_ERR_NOT_OWNER` -- one passed on in a message, one read
+  out of another task's memory, one a forked child finds in its copy of its
+  parent's. Handing a capability on is a derivation (§6.4), not a copy.
+- `expires` is a deadline in nanoseconds since boot on `URMACH_CAP_CLOCK`,
+  written by cap_server from the lifetime asked for, and 0 for none. A token
+  past it is refused with `CAP_ERR_EXPIRED`, and when it comes cap_server
+  revokes the token as `cap_revoke` would, so that what it bought -- a claim,
+  with its interrupts and register mappings, and a lent buffer's pages -- is
+  taken back too (§6.5). A child's deadline is never past its parent's.
+- There is no use count. Counting operations is the quota's job
+  (`uros_resource_model.md`), not the permission's.
 
 ### Resource types and what `resource_id` means
 
@@ -306,10 +324,11 @@ section is not.
 
 | routine | who calls it | what it does |
 |---|---|---|
-| `cap_acquire(type, id, ops, lifetime) → token` | any task | policy check, then mint |
-| `cap_derive(parent, reduced_ops) → token` | a holder | delegate a weaker child |
+| `cap_acquire(type, id, ops, lifetime) → token` | any task | policy check, then mint: issued to the requester, whose identity is the request's trailer, with a deadline `lifetime` ms on (#747) |
+| `cap_derive(parent, reduced_ops, lifetime) → token` | the parent's owner | a weaker child for the owner itself, never outliving its parent |
+| `cap_derive_for(parent, reduced_ops, lifetime, delegate) → token` | the parent's owner | a weaker child for the task that receives on the port `delegate` (#747); `CAP_ERR_NO_DELEGATE` for a port no task receives on |
 | `cap_revoke(cap_id)` | a holder / an authority | revoke it and its whole subtree; answer the kernel's first refusal, if it refused any (#745) |
-| `cap_verify(token, type, op, id)` | anyone | slow path; the trap is the fast one, and both ask the type as well as the id (#745) |
+| `cap_verify(token, presenter, type, op, id)` | anyone | slow path; the trap is the fast one, and both ask the type as well as the id (#745) and who presents it (#747) |
 | `cap_subscribe_revoke(port)` | a task whose manifest grants `RESOURCE_REVOKE_NOTICES`, on its per-task port (#744) | receive `cap_revoke_notify`, sent without blocking |
 | `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy for the task its identity port names, return the principal port; refuse a port that carries more than identity (#938) |
 | `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`, for the child its identity port names (#938); refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
@@ -324,7 +343,7 @@ itself.
 
 | trap | slot | who | question |
 |---|---|---|---|
-| `urmach_cap_verify(token, type, op, id)` | 37 | any resource server | is this token good for this? |
+| `urmach_cap_verify(token, presenter, type, op, id)` | 37 | any resource server | is this token good for this, presented by this task? |
 | `urmach_cap_revoke(cap_id)` | 39 | cap_server only | mark it dead in the kernel |
 | `urmach_cap_register(setup)` | 40 | the task bootstrap named, once | hand the kernel the HMAC key |
 | `urmach_dma_region_owner(id, task)` | 43 | cap_server | does that task own this DMA buffer? |
@@ -335,6 +354,12 @@ a token's `max_uses`. Nothing called it and every token was minted with no
 count, and counting operations is the quota's job, not the permission's
 (`uros_resource_model.md`): #747 took the count out of the token and the trap
 out of the table.
+
+And on the host port, `urmach_port_receiver(host, port) → identity`
+(`mach_host.defs`, #747): the identity of the task that receives on a port, which
+cap_server asks for `cap_derive_for`. It is read from the receiving space's copy
+of its task's identity, and only while the port is in a space: a port in
+transit, a dead one and the kernel's own are answered `KERN_INVALID_ARGUMENT`.
 
 And one routine on the privileged host port, `urmach_cap_server_set(host_priv,
 task)` (`mach_host.defs`), by which bootstrap names cap_server's task: the
@@ -353,7 +378,7 @@ only when neither answers from the TSC, which it prints as guessable (#744).
 ### 6.1 Issuing
 
 ```
-client ── cap_acquire(type, id, ops) ──▶ cap_server
+client ── cap_acquire(type, id, ops, lifetime) ──▶ cap_server
                                           │
                           which port did this arrive on?
                                           │
@@ -373,10 +398,17 @@ client ── cap_acquire(type, id, ops) ──▶ cap_server
         both must say yes
                             │
                     mint, sign, record in cap_table
+                    owner = the request's sender (#747)
+                    expires = now + lifetime on URMACH_CAP_CLOCK
                             │
                             ▼
                         token to the client
 ```
+
+🔑 **The owner is the request's sender, as the kernel stamped it (#747).**
+cap_server receives with `URMACH_RCV_SENDER`, and the trailer of every request
+carries the sending task's identity, which no task can choose. A request that
+came without one is refused: there would be nobody to issue the token to.
 
 🔑 **Why the DMA-buffer branch exists.** A manifest can name a device class or a
 mount point because those exist before the policy is written. It cannot name a
@@ -404,10 +436,11 @@ port, and that right is control of the task already.
 ```
 holder ── presents token ──▶ resource server
                                │
-             urmach_cap_verify(token, type, op, resource_id)   [trap]
+             urmach_cap_verify(token, presenter, type, op, resource_id)   [trap]
                                │
                         ┌──────┴──────┐
-                    HMAC good?   type and resource_id match?
+                    HMAC good?   past its deadline?   presented by its owner?
+                    type and resource_id match?
                     ops cover the request?   token->revoked clear?
                                │
                      kernel revocation table: was cap_id revoked?
@@ -415,8 +448,27 @@ holder ── presents token ──▶ resource server
                           KERN_SUCCESS
 ```
 
-Five comparisons and a hash. The only table touched is the kernel's revocation
-table, and only because that is the one fact a signed token cannot carry.
+Seven comparisons and a hash: the deadline, who presents it, the type and the
+id, the operations and the revoked flag, then the kernel's revocation table,
+the only table touched, because a revocation is the one fact a signed token
+cannot carry.
+
+🔴 **Who presents it (#747).** A resource server cannot know from the token who
+handed it over, and the trap cannot know either -- its caller is the server.
+So the server reads the presenter from the trailer of the request that carried
+the token (`urmach_msg_sender()`, receiving with `URMACH_RCV_SENDER`) and passes
+it: the block server at an open, keeping it with the handle for every check
+after; char_server, gpu_server, and the name server for a mount. Inside the
+kernel -- a device claim, the foreign DMA maps -- the presenter is the calling
+task. A task asking about its own token passes its own identity, `cap_self()`.
+
+⚠️ **The deadline is never taken from the cache.** #537's per-processor cache
+skips what cannot change while a token's bytes do not; the deadline's answer
+changes while the bytes stay the same, so it is asked on every check, outside
+`cap_lock`. A token with a deadline is refused when the clock cannot be read,
+rather than made endless. An open handle and a lent buffer's kept translation,
+which the block server asks again only when the revocation epoch moves, meet
+the deadline by its revocation (§6.5), which moves the epoch.
 
 ⚠️ **The type as well as the id.** Ids are numbered per type, so a block
 device and a DMA buffer can share one: a check of the id alone takes a token
@@ -492,6 +544,69 @@ has moved, so a revocation reaches the handle whether or not a notice does.
 cap_server sends `cap_revoke_notify` without blocking (`MACH_SEND_TIMEOUT` 0)
 and says when one was not delivered: a subscriber that does not read cannot
 hold the revocation up, and a notice is an early word, not the guard.
+
+### 6.4 Delegating
+
+```
+owner ── cap_derive_for(parent, ops, lifetime, port) ──▶ cap_server
+                                                            │
+                                  is the asker the parent's owner?
+                                                            │
+                          urmach_port_receiver(host, port)  [kernel]
+                                  who receives on it?
+                                                            │
+                     child: ops ⊆ parent's, deadline ≤ parent's,
+                     owner = that task, linked under the parent
+```
+
+🔑 **A capability is handed on by deriving it for the task that will present
+it (#747).** The owner names that task by a port it receives on -- the port it
+talks to it on -- and the kernel, not the owner, says whose port it is. The
+child is the delegate's alone; revoking the parent revokes it, and everything
+it bought. A client's DMA buffer is the case that exists today: the block
+server presents the buffer's capability to the kernel for every page it maps
+for its disk, so the client (ext_server's page cache, cap_test's arms) derives a
+child for it, named by the handle, and hands over the child.
+
+### 6.5 A deadline is a revocation at that time
+
+```
+cap_acquire / cap_derive* ── a deadline written ──▶ cap_expiry_due, lowered
+                                                         │ ring
+                                  the waiter (a thread of cap_server's)
+                                  waits until cap_expiry_due comes
+                                                         │ ring
+                     the receive loop: every token past its deadline,
+                     with its tree, revoked as cap_revoke revokes it;
+                     cap_expiry_due set to the earliest left
+```
+
+🔴 **A deadline took back nothing a token had bought (#747).** Past it the
+token was refused wherever it was presented, by the trap and by cap_server,
+and a claim made with it before then went on: the card stayed claimed, its
+interrupts registered and its registers mapped, and a buffer lent with it
+stayed in the device's IOMMU domain. A revocation takes all of that back
+(§6.3), so cap_server, which writes every deadline, revokes each capability
+when its deadline comes: the kernel told of it and of its tree, and the
+subscribers given their notices.
+
+🔑 **The table is the receive loop's.** The waiting is a thread of its own,
+which shares one value with the loop, the next deadline, under a mutex: the
+loop lowers it when it writes an earlier one, and after a sweep sets it to the
+earliest left, and rings the waiter either way so that it looks again. The
+waiter rings a port in the loop's set when the deadline comes, and again every
+100 ms until a sweep has moved it, so a ring lost to a full queue or to no
+memory is rung again. A tree's deadlines are never past its root's, so a sweep
+that revokes a tree finds all of it due.
+
+⚠️ **The deadline holds at its instant; the revocation follows it.** The
+trap's checks and cap_server's refuse the token from the deadline on, by the
+clock. The revocation comes a wake-up and a message later -- 0 to 14 ms after
+it in eleven boots under KVM on 19/11, at one processor and at four: an open
+block handle reads up to it (`cap_test [54]`), and a claim keeps its page that
+long (`irq_claim_test [21]`). Without the waiter a
+lifetime is refused, since nothing would take back what the capability
+bought.
 
 ---
 
@@ -810,6 +925,31 @@ this is where to look, and what to break to confirm it still works.
 | a revocation the kernel refuses is said, and answered to the requester | `cap: the kernel refused the revocation of cap …`; `cap_test [48]` | `ablations/745-probe-kernel-refuses`, a probe |
 | `cap_verify` asks the type as well as the id | `cap_test [49]` | `ablations/745-verify-without-type` |
 | a revoked claim takes back its interrupts and its register mappings | `irq_claim_test [18]`, `[19]`, `[20]` | `ablations/745-irq-kept-on-revoke`, `745-mmio-kept-on-revoke` |
+| a lifetime asked for is kept, and a child's never passes its parent's | `cap_test [50]` | `ablations/747-deadline-unchecked`, `747-deadline-unchecked-rpc`, `747-child-outlives-parent` |
+| every task has an identity of its own, and what it sends carries it | `cap_test [51]` | `ablations/747-identity-inherited`, `747-trailer-says-kernel`, `747-fast-trailer-says-kernel` |
+| a capability is issued to the task that asked for it | `cap_test [52]` | `ablations/747-owner-not-written` |
+| a capability is good for its owner alone, and is derived to a named task | `cap_test [53]` | `ablations/747-owner-unchecked`, `747-owner-unchecked-rpc`, `747-kernel-port-is-a-delegate`, `747-delegate-ignored` |
+| a forked child holding its parent's capability is refused it, and cannot derive from it | `fork_cap_test [4]`, `[5]` | `ablations/747-blk-trusts-the-token`, `747-derive-by-anyone` |
+| a capability is revoked when its deadline comes: a claim made with it gives back its page and the card, and a block handle opened with it ends | `irq_claim_test [21]`, `cap_test [54]` | `ablations/747-deadline-not-swept`, `747-deadline-not-told` |
+
+⚠️ Five guards of #747 have no arm yet. The deadline on #537's cache path
+(`cap_check_in_kernel()`): [50] asks the trap, which has no cache, and no arm
+presents a token with a deadline to the kernel's own checks. The port in transit
+in `urmach_port_receiver()`: a port is in transit only while a message carries
+it, which no arm holds still. cap_server's refusal of a request without its
+sender: every request arrives with one, since cap_server asks for it. The
+waiter's ring again every 100 ms: a ring is lost only to a full queue or to no
+memory, which no arm brings about. And a lifetime refused when the waiter did
+not start: it always starts.
+
+⚠️ `cap_test [54]` alone can pass with the sweep taken out: any other
+revocation moves the epoch, and the block server then asks the handle's token
+again and is told it is past its deadline -- in three ablated boots on 19/11,
+2 092, 2 095 and 2 134 ms after it, where eleven fixed ones said 0 to 37 ms.
+`irq_claim_test [21]` cannot: only the revocation of that token takes the
+claim's page back, and it caught both of the sweep's ablations. [21] waits for
+the HAL's name on its check-in (`netname_wait()`, #696); it waited two hundred
+yields, and in 19 of 60 boots on 19/11 it did not run.
 
 ⚠️ One guard has no arm: bootstrap refusing cap_server a second provisioning
 port. Only cap_server can offer one, on its own bootstrap port, and it offers
