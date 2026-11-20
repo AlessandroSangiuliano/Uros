@@ -319,6 +319,8 @@ endif()
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libdl)
   add_subdirectory(lib/libmodload)
+  # #963: what a module of chora is written against.
+  add_subdirectory(lib/libdriver)
   # And what proves it, which crosses WITH it (#423).  A loader that builds is
   # not a loader that relocates: the three relocation types the driver plug-ins
   # use are checked one at a time, each by a wrong ANSWER rather than a fault.
