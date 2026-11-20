@@ -4178,6 +4178,178 @@ arm_fifty_seven_dead_space(void)
 }
 
 /*
+ * Arm fifty-eight: a task carries a name (#963).
+ *
+ * urmach_task_set_name names a task and urmach_task_get_name reads the name
+ * back, whole: a driver task is to be named after its device.  Asked of this
+ * task, and of a child made the way fork() makes one after this task was
+ * named -- which must be born with no name, since a child of a driver is not
+ * the device.  Then what may not be a name:
+ *
+ *  - 32 characters, sent without a terminator so that they reach the kernel,
+ *    and a name with a tab, and one with DEL: KERN_INVALID_ARGUMENT, with the
+ *    name before left as it was -- nothing is cut;
+ *  - 40 characters and their terminator: MIG's own stub refuses them before
+ *    sending, MIG_ARRAY_TOO_LARGE, and the name is still the one before.
+ *
+ * And the edges of what may: 31 characters, the most a name holds; a name
+ * sent without its terminator, which is the bytes sent; and an empty one,
+ * which takes the name away.  Every name read back is printed as it was read.
+ */
+#define	ARM58_NAME	"act_test@58"
+#define	ARM58_CHILD	"child@58"
+#define	ARM58_LONGEST	"0123456789abcdefghijklmnopqrstu"	/* 31 */
+#define	ARM58_TOO_LONG	"0123456789abcdefghijklmnopqrstuv"	/* 32 */
+#define	ARM58_FAR_TOO_LONG "0123456789abcdefghijklmnopqrstuvwxyz0123" /* 40 */
+#define	ARM58_NO_NUL	"nonul@58"
+
+/* `task''s name into `out' (URMACH_TASK_NAME_MAX bytes), terminated. */
+static kern_return_t
+arm58_get(mach_port_t task, char *out)
+{
+	urmach_task_name_data_t		buf;
+	mach_msg_type_number_t		cnt = URMACH_TASK_NAME_MAX;
+	kern_return_t			kr;
+
+	memset(buf, 0, sizeof buf);
+	out[0] = '\0';
+	kr = urmach_task_get_name(task, buf, &cnt);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (cnt > URMACH_TASK_NAME_MAX)
+		return KERN_FAILURE;
+	memcpy(out, buf, cnt);
+	out[cnt < URMACH_TASK_NAME_MAX ? cnt : URMACH_TASK_NAME_MAX - 1] = '\0';
+	return KERN_SUCCESS;
+}
+
+/* Name `task' with the `cnt' bytes at `name'. */
+static kern_return_t
+arm58_set(mach_port_t task, const char *name, mach_msg_type_number_t cnt)
+{
+	return urmach_task_set_name(task, (char *) name, cnt);
+}
+
+/* Is `task''s name `want'?  Says WRONG, with what was read, if not. */
+static int
+arm58_is(mach_port_t task, const char *who, const char *after,
+	 const char *want)
+{
+	char		got[URMACH_TASK_NAME_MAX];
+	kern_return_t	kr = arm58_get(task, got);
+
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [58] %s's name could not be read after %s "
+		       "(0x%x) — WRONG\n", who, after, kr);
+		return 0;
+	}
+	if (strcmp(got, want) != 0) {
+		printf("act_test: [58] after %s, %s's name reads \"%s\", not "
+		       "\"%s\" — WRONG\n", after, who, got, want);
+		return 0;
+	}
+	return 1;
+}
+
+/* A name that must be refused with `want', leaving this task's as it was. */
+static int
+arm58_refused(const char *what, const char *name, mach_msg_type_number_t cnt,
+	      kern_return_t want)
+{
+	kern_return_t kr = arm58_set(mach_task_self(), name, cnt);
+
+	if (kr != want) {
+		printf("act_test: [58] %s answered 0x%x, not 0x%x — WRONG\n",
+		       what, kr, want);
+		return 0;
+	}
+	return arm58_is(mach_task_self(), "this task", what, ARM58_NAME);
+}
+
+static int
+arm_fifty_eight_task_name(void)
+{
+	mach_port_t	me = mach_task_self();
+	mach_port_t	child = MACH_PORT_NULL;
+	char		got[URMACH_TASK_NAME_MAX];
+	kern_return_t	kr;
+	int		ok = 1;
+
+	kr = arm58_set(me, ARM58_NAME, sizeof ARM58_NAME);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [58] naming this task \"%s\" answered 0x%x — "
+		       "WRONG\n", ARM58_NAME, kr);
+		return 0;
+	}
+	if (!arm58_is(me, "this task", "naming it", ARM58_NAME))
+		return 0;
+
+	kr = task_create(me, NULL, 0, TRUE, &child);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [58] a child could not be made (0x%x) — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+	ok &= arm58_is(child, "a child made after this task was named",
+		       "its birth", "");
+	kr = arm58_set(child, ARM58_CHILD, sizeof ARM58_CHILD);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [58] naming the child through its port "
+		       "answered 0x%x — WRONG\n", kr);
+		ok = 0;
+	} else
+		ok &= arm58_is(child, "the child", "naming it", ARM58_CHILD);
+	(void) task_terminate(child);
+	(void) mach_port_deallocate(me, child);
+
+	ok &= arm58_refused("a name of 32 characters",
+			    ARM58_TOO_LONG, sizeof ARM58_TOO_LONG - 1,
+			    KERN_INVALID_ARGUMENT);
+	ok &= arm58_refused("a name with a tab", "act\ttest", 9,
+			    KERN_INVALID_ARGUMENT);
+	ok &= arm58_refused("a name with DEL", "act\177test", 9,
+			    KERN_INVALID_ARGUMENT);
+	ok &= arm58_refused("a name of 40 characters", ARM58_FAR_TOO_LONG,
+			    sizeof ARM58_FAR_TOO_LONG, MIG_ARRAY_TOO_LARGE);
+
+	kr = arm58_set(me, ARM58_LONGEST, sizeof ARM58_LONGEST);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [58] a name of 31 characters answered 0x%x — "
+		       "WRONG\n", kr);
+		ok = 0;
+	} else
+		ok &= arm58_is(me, "this task", "a name of 31 characters",
+			       ARM58_LONGEST);
+	kr = arm58_set(me, ARM58_NO_NUL, sizeof ARM58_NO_NUL - 1);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [58] a name sent without its terminator "
+		       "answered 0x%x — WRONG\n", kr);
+		ok = 0;
+	} else
+		ok &= arm58_is(me, "this task", "a name sent without its "
+			       "terminator", ARM58_NO_NUL);
+	kr = arm58_set(me, "", 1);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [58] an empty name answered 0x%x — WRONG\n",
+		       kr);
+		ok = 0;
+	} else
+		ok &= arm58_is(me, "this task", "an empty name", "");
+
+	if (!ok)
+		return 0;
+	(void) arm58_get(me, got);
+	printf("act_test: [58] this task was named \"%s\" and read back so, a "
+	       "child made after it was born with no name and took \"%s\" "
+	       "through its port; 32 characters, a tab and DEL were refused "
+	       "and 40 refused by the stub, each leaving the name as it was; "
+	       "31 characters and a name without its terminator were taken "
+	       "whole, and an empty name took it away (\"%s\" now) (#963)\n",
+	       ARM58_NAME, ARM58_CHILD, got);
+	return 1;
+}
+
+/*
  * Arm twenty: thread_activation_create() makes nothing (#783).
  *
  * It made an empty activation -- no thread behind it -- in a port's thread
@@ -10480,6 +10652,8 @@ main(int argc, char **argv)
 	passed += timed(55, arm_fifty_five_created_while_suspended);
 	arms++;		/* arm fifty-four, #935 */
 	passed += timed(54, arm_fifty_four_create_on_a_dying_task);
+	arms++;		/* arm fifty-eight, #963 */
+	passed += timed(58, arm_fifty_eight_task_name);
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
