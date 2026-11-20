@@ -3565,6 +3565,46 @@ arm_default_actions(void)
 		"to go on" : "SIGURG and SIGWINCH left theirs to go on");
 }
 
+/*
+ * ── [51] A program of another machine is refused (#963) ─────────────────
+ *
+ * exec_server runs this machine's programs only, and /elf32_probe is an i386
+ * one.  The one right answer to an execve of it is ENOEXEC.  A server that
+ * started it leaves a child killed by the fault its first instruction is, and
+ * any other errno is a refusal for another reason: the child exits with that
+ * errno, which the line prints.
+ */
+#define E32_REFUSED	200	/* [51]'s child's status when execve said ENOEXEC */
+
+static void
+arm_other_machine(void)
+{
+	char	*argv[2];
+	char	*envp[1];
+	pid_t	pid, got;
+	int	status = 0;
+
+	if (!program_is_there(51, "/elf32_probe"))
+		return;
+	argv[0] = (char *)"/elf32_probe";
+	argv[1] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid < 0) {
+		not_asked(51, "fork refused: no process server on this boot");
+		return;
+	}
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(errno == ENOEXEC ? E32_REFUSED : (errno & 0x7f));
+	}
+	got = waitpid(pid, &status, 0);
+	verdict(51, got == pid && WIFEXITED(status)
+		&& WEXITSTATUS(status) == E32_REFUSED, "an execve of an i386 "
+		"program left status %#x, and %#x is ENOEXEC's", (unsigned)status,
+		(unsigned)(E32_REFUSED << 8));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3660,6 +3700,8 @@ main(int argc, char **argv)
 	arm_wait_killed_rusage();
 	/* #953: the default action of the signals no arm above sends. */
 	arm_default_actions();
+	/* #963: what exec_server will not run. */
+	arm_other_machine();
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
