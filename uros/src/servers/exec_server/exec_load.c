@@ -123,6 +123,23 @@ slurp_binary(const char *path, void **out, vm_size_t *out_size)
     return EXEC_OK;
 }
 
+/*
+ * Whether `img' is a program for the machine this server runs on (#963): the
+ * class and the machine <mach/elf.h> names as this one's.
+ *
+ * 🔴 libelf answers a different question.  It reads both classes, each with
+ * its own machine, because it is a reader, and libelf.h says that a loader
+ * has to ask for itself whether it can RUN what was read.  This one did not:
+ * an i386 image was mapped, and its first thread started on its entry as
+ * x86-64 code.
+ */
+static int
+image_is_this_machine(const elf_image_t *img)
+{
+    return elf_machine(img) == ELF_TARGET_MACHINE &&
+           elf_is_64bit(img) == (ELF_TARGET_CLASS == ELFCLASS64);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Segment installation in the new task                               */
 /* ------------------------------------------------------------------ */
@@ -232,6 +249,15 @@ load_interp(mach_port_t new_task, const char *interp_path,
         return rc;
     }
     if (elf_open(ibuf, (size_t)isz, &iimg) != ELF_OK) {
+        free(ibuf);
+        return EXEC_ERR_PARSE;
+    }
+    if (!image_is_this_machine(&iimg)) {
+        printf("exec: interpreter \"%s\" is an image of another machine "
+               "(machine %u, %d-bit): this server runs %s images only\n",
+               interp_path, (unsigned)elf_machine(&iimg),
+               elf_is_64bit(&iimg) ? 64 : 32, ELF_TARGET_NAME);
+        elf_close(&iimg);
         free(ibuf);
         return EXEC_ERR_PARSE;
     }
@@ -524,6 +550,15 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
             free(file_buf);
             return EXEC_ERR_NOT_STATIC;
         }
+    }
+    if (!image_is_this_machine(&img)) {
+        printf("exec: %s is an image of another machine (machine %u, "
+               "%d-bit): this server runs %s images only\n", path,
+               (unsigned)elf_machine(&img), elf_is_64bit(&img) ? 64 : 32,
+               ELF_TARGET_NAME);
+        elf_close(&img);
+        free(file_buf);
+        return EXEC_ERR_PARSE;
     }
 
     /*
