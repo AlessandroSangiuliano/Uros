@@ -148,9 +148,10 @@ DISK_SERVERS="cow_test"
 # and a dynamic C program, as the two mach_error programs are (#917);
 # static_lc_test is linked as a build that is not ours would link it (#929).
 # fork_tty_test is typed at ush, the one place with a controlling terminal (#948).
-# elf32_probe is an i386 image, which musl_test asks exec_server to run and must
-# be refused (#963).
-ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test mach_error_dyn static_lc_test fork_tty_test elf32_probe"
+# elf32_probe is an i386 program and interp_probe an x86-64 one whose dynamic
+# linker is elf32_ldso_probe, an i386 one: musl_test asks exec_server to run
+# the two programs, and must be refused each time (#963).
+ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test mach_error_dyn static_lc_test fork_tty_test elf32_probe elf32_ldso_probe interp_probe"
 
 # The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
 # libc.so under the name musl gives it for this target.

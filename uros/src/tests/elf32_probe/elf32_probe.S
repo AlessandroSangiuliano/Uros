@@ -17,14 +17,19 @@
  */
 
 /*
- * elf32_probe -- an i386 program on the x86-64 root disk, for exec_server to
- * refuse (#963).
+ * Three images for exec_server to refuse (#963), all made from this file:
  *
- * exec_server runs this machine's images only, and musl_test's arm [51] asks
- * it for this one and must be told ENOEXEC.  It is not meant to run, and it
- * does nothing that could pass for success if it did: its first instruction
- * is UD2, which faults in either mode, so a server that started it leaves a
- * child killed by a signal and not one that exited.
+ *   elf32_probe       an i386 program;
+ *   elf32_ldso_probe  an i386 shared object, as a dynamic linker;
+ *   interp_probe      an x86-64 program whose PT_INTERP names that one.
+ *
+ * exec_server runs this machine's images only, and the dynamic linker it
+ * loads for a program has to be this machine's too.  musl_test's arm [51]
+ * asks it for the two programs and must be told ENOEXEC for each.  None of
+ * them is meant to run, and none does anything that could pass for success
+ * if it did: the one instruction is UD2, which faults in either mode, so a
+ * server that started one leaves a child killed by a signal and not one that
+ * exited.
  */
 	.text
 	.globl	_start

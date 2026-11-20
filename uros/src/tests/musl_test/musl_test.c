@@ -3566,43 +3566,63 @@ arm_default_actions(void)
 }
 
 /*
- * ── [51] A program of another machine is refused (#963) ─────────────────
+ * ── [51] A program, or a dynamic linker, of another machine is refused (#963)
  *
- * exec_server runs this machine's programs only, and /elf32_probe is an i386
- * one.  The one right answer to an execve of it is ENOEXEC.  A server that
- * started it leaves a child killed by the fault its first instruction is, and
- * any other errno is a refusal for another reason: the child exits with that
- * errno, which the line prints.
+ * exec_server runs this machine's programs only, and loads this machine's
+ * dynamic linkers only.  /elf32_probe is an i386 program, and /interp_probe an
+ * x86-64 one whose PT_INTERP names /elf32_ldso_probe, an i386 one.  The one
+ * right answer to an execve of either is ENOEXEC.  A server that started one
+ * leaves a child killed by the fault its first instruction is, and any other
+ * errno is a refusal for another reason: the child exits with that errno,
+ * which the line prints.
  */
 #define E32_REFUSED	200	/* [51]'s child's status when execve said ENOEXEC */
 
-static void
-arm_other_machine(void)
+/* The status an execve of `path' left its child with, or -1 with no child. */
+static int
+exec_status(const char *path)
 {
 	char	*argv[2];
 	char	*envp[1];
-	pid_t	pid, got;
+	pid_t	pid;
 	int	status = 0;
 
-	if (!program_is_there(51, "/elf32_probe"))
-		return;
-	argv[0] = (char *)"/elf32_probe";
+	argv[0] = (char *)path;
 	argv[1] = NULL;
 	envp[0] = NULL;
 	pid = fork();
-	if (pid < 0) {
-		not_asked(51, "fork refused: no process server on this boot");
-		return;
-	}
+	if (pid < 0)
+		return -1;
 	if (pid == 0) {
 		(void)execve(argv[0], argv, envp);
 		_exit(errno == ENOEXEC ? E32_REFUSED : (errno & 0x7f));
 	}
-	got = waitpid(pid, &status, 0);
-	verdict(51, got == pid && WIFEXITED(status)
-		&& WEXITSTATUS(status) == E32_REFUSED, "an execve of an i386 "
-		"program left status %#x, and %#x is ENOEXEC's", (unsigned)status,
-		(unsigned)(E32_REFUSED << 8));
+	if (waitpid(pid, &status, 0) != pid)
+		return -1;
+	return status;
+}
+
+static void
+arm_other_machine(void)
+{
+	int	program, ldso;
+
+	if (!program_is_there(51, "/elf32_probe")
+	    || !program_is_there(51, "/interp_probe")
+	    || !program_is_there(51, "/elf32_ldso_probe"))
+		return;
+	program = exec_status("/elf32_probe");
+	ldso = exec_status("/interp_probe");
+	if (program == -1 && ldso == -1) {
+		not_asked(51, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(51, program != -1 && WIFEXITED(program)
+		&& WEXITSTATUS(program) == E32_REFUSED && ldso != -1
+		&& WIFEXITED(ldso) && WEXITSTATUS(ldso) == E32_REFUSED,
+		"an execve of an i386 program left status %#x, and of a program "
+		"whose dynamic linker is i386 %#x; %#x is ENOEXEC's",
+		(unsigned)program, (unsigned)ldso, (unsigned)(E32_REFUSED << 8));
 }
 
 int
