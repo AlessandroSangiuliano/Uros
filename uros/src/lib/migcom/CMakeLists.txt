@@ -103,13 +103,8 @@ target_include_directories(migcom PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR} # for parser.h
 )
 
-# link libfl or libl if available
-find_library(LEX_LIB NAMES fl l)
-if(LEX_LIB)
-  target_link_libraries(migcom PRIVATE ${LEX_LIB})
-else()
-  message(WARNING "libfl/libl not found; if you get link errors, install flex or adjust linking")
-endif()
+# No libfl: the lexer is generated with noyywrap (lexxer.l, #960), and libfl
+# held nothing else migcom calls.
 
 # Link libdl for in-process fwrite hook (dlsym)
 find_library(DL_LIB NAMES dl)
