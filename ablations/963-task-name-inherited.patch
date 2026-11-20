@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #963
+Takes out: a task's birth with no name: task_create_local copies its parent's, so that a fork's child carries its parent's name -- a child of a driver would stand for the device.  act_test's arm fifty-eight names its task, makes a child, and reads the child's name back as its own.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[58\] after its birth, a child made after this task was named's name reads "act_test@58", not ""
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+index b2361186..a7d003da 100644
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -711,6 +711,8 @@ task_create_local(
+ 	new_task->user_data = 0;
+ 	/* #963: born with no name -- a fork's child does not take its parent's */
+ 	bzero(new_task->name, sizeof new_task->name);
++	if (parent_task != TASK_NULL)	/* 963-task-name-inherited */
++		bcopy(parent_task->name, new_task->name, sizeof new_task->name);
+ 
+ 	new_task->res_act_count = 0;	/* used unconditionally */
+ #if	TASK_SWAPPER
