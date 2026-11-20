@@ -121,3 +121,30 @@ set_target_properties(chora_probe_module PROPERTIES
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/net")
+
+# ===========================================================================
+# chora_absent: a module of the class `net' that no chora is told to load
+# ===========================================================================
+#
+# With one module in a class, a chora that fetched its whole class would look
+# like one that fetched its module; with this beside chora_probe it would load
+# this one too, and modload says each module it loads (#963).
+
+add_library(chora_absent_module SHARED chora_absent/chora_absent.c)
+
+add_dependencies(chora_absent_module mig_mach_public_headers)
+
+target_compile_options(chora_absent_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(chora_absent_module PRIVATE MACH_IPC_COMPAT=0)
+
+target_include_directories(chora_absent_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(chora_absent_module PROPERTIES
+  OUTPUT_NAME "chora_absent"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/net")

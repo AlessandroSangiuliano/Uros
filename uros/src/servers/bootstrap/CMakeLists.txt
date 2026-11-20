@@ -835,10 +835,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
-            # #963: the test that starts chora, and chora's test module in
-            # the pool of its class.
+            # #963: the test that starts chora, chora's test module in the
+            # pool of its class, and a module of that class no chora is told
+            # to load, which a chora that loaded its class would load too.
             chora_test:${_SBIN}/chora_test
             modules/net/chora_probe.so:${_MOD}/net/chora_probe.so
+            modules/net/chora_absent.so:${_MOD}/net/chora_absent.so
             ${_CHAR_FILES}
             ${_MUSL_FILES}
             ${_IPC_BENCH_FILE}
@@ -865,7 +867,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # #963: chora is on the disk, which make-disk-x86_64.sh refuses
             # without it, and run-x86_64.sh builds the bundle, not ALL.
             ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
-            chora_probe_module chora_bin
+            chora_probe_module chora_absent_module chora_bin
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
