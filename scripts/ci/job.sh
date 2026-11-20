@@ -119,6 +119,11 @@ JOB=${JOB_INDEX:-0}
 # with nothing for lib32-glibc and lib32-gcc-libs: past fwrite_hook.c, the
 # Ubuntu jobs of 18/11 would have stopped on the -m32 host tests.  In Ubuntu
 # both come with gcc-multilib.  BUILD.md asks for the same lists.
+#
+# 🔴 #960: and sfdisk is util-linux's in Arch and fdisk's in Ubuntu, where
+# util-linux holds none.  GitHub's runner image has fdisk installed, so its
+# jobs never missed it; an Ubuntu installed from the list did, and stopped at
+# make-disk-x86_64.sh's "sfdisk not found" (20/11, in a chroot of 26.04.1).
 PACKAGE_TABLE='
 gcc		gcc
 binutils	binutils
@@ -132,7 +137,7 @@ git		git
 qemu-system-x86	qemu-system-x86
 grub		grub-common,grub-pc-bin
 e2fsprogs	e2fsprogs
-util-linux	util-linux
+util-linux	util-linux,fdisk
 iproute2	iproute2
 gdb		gdb
 lib32-glibc	gcc-multilib
