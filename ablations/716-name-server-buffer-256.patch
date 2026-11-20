@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #716
-Takes out: the name server's buffer sized by MIG (38486a64, 7fb4dc98) -- it receives into 256 bytes again, and the kernel destroys a longer request unread: a mount's check-in with its capability, and a long path's look-up
+Takes out: the name server's buffer sized by MIG (38486a64, 7fb4dc98) -- it receives into 256 bytes again, and the kernel destroys a longer request unread: a long path's look-up, mount_test's [12]; a mount's check-in with its capability no longer, since #747 made the token 120 bytes from 192
 Run: --entry 14 1200 -smp 1
-Expect: ext2: netname_check_in_mount\(/\) failed \(kr=-308\)
+Expect: mount_test: \[12\] WRONG — a look-up of a 1023-byte path: -308
 
 diff --git a/uros/src/servers/name_server/netname.c b/uros/src/servers/name_server/netname.c
 index e42a4688..0c7635b7 100644
