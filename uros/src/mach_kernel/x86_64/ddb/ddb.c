@@ -1309,12 +1309,13 @@ static void list_threads(void)
 		cons_puts("  ");
 		cons_puthex64(addr);
 		/*
-		 * The name, when there is one (#425).  struct task has none, so
-		 * this is what says WHICH PROGRAM a thread belongs to: crt0 puts
-		 * argv[0] here before main(), and thread_create_in() passes it
-		 * to every thread the task makes afterwards.  Without it this
-		 * listing is a column of addresses that cannot be told apart --
-		 * which is how two wedges in one afternoon went unattributed.
+		 * The name, when there is one (#425).  This is what says WHICH
+		 * PROGRAM a thread belongs to: crt0 puts argv[0] here before
+		 * main(), and thread_create_in() passes it to every thread the
+		 * task makes afterwards.  Without it this listing is a column of
+		 * addresses that cannot be told apart -- which is how two wedges
+		 * in one afternoon went unattributed.  A task's own name, which
+		 * struct task has had since #963, is in the task listing.
 		 */
 		if (t->name[0] != '\0') {
 			cons_puts("  \"");
@@ -1493,13 +1494,16 @@ static void list_tasks(void)
 			acts++;
 
 			/*
-			 * Which program is this task?  struct task cannot say
-			 * -- it has no name -- so take the first named thread
-			 * it has (#425).  crt0 names the main thread from
-			 * argv[0] and thread_create_in() hands that on inside
-			 * the task, so any live task that reached main() has
-			 * one.  A task still between task_create and its own
-			 * crt0 has none, and prints unnamed rather than wrong.
+			 * Which program is this task?  Its own name says so
+			 * when it was given one (#963, urmach_task_set_name:
+			 * a driver task is named after its device), and is
+			 * printed below.  Otherwise take the first named
+			 * thread it has (#425).  crt0 names the main thread
+			 * from argv[0] and thread_create_in() hands that on
+			 * inside the task, so any live task that reached
+			 * main() has one.  A task still between task_create
+			 * and its own crt0 has none, and prints unnamed rather
+			 * than wrong.
 			 */
 			act = (const struct thread_activation *)(uintptr_t) a;
 			if (name == 0 && act->thread != 0
@@ -1515,7 +1519,20 @@ static void list_tasks(void)
 		cons_puts("  ");
 		cons_putdec((uint64_t) acts);
 		cons_puts(" activations");
-		if (name != 0) {
+		if (t->name[0] != '\0') {
+			unsigned	i;
+
+			/*
+			 * #963: the task's own name, at most the field's
+			 * characters even if the memory under it is not what
+			 * urmach_task_set_name left -- this is the debugger.
+			 */
+			cons_puts("  task \"");
+			for (i = 0; i < URMACH_TASK_NAME_MAX - 1
+				    && t->name[i] != '\0'; i++)
+				cons_putc(t->name[i]);
+			cons_puts("\"");
+		} else if (name != 0) {
 			cons_puts("  \"");
 			cons_puts(name);
 			cons_puts("\"");

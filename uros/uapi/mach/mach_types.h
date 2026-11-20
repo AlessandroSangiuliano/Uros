@@ -230,6 +230,16 @@ typedef mach_port_t    		ledger_port_t;
 typedef char			*user_subsystem_t;
 
 /*
+ * #963: a task's name, urmach_task_set_name and urmach_task_get_name in
+ * mach.defs, as `type urmach_task_name_t = array[*:URMACH_TASK_NAME_MAX] of
+ * char' -- a varying array, as task_info_t is, with its count beside it:
+ * urmach_task_name_data_t is the storage for one.
+ */
+#include <mach/task_name.h>
+typedef char			*urmach_task_name_t;	/* varying array of char */
+typedef char			urmach_task_name_data_t[URMACH_TASK_NAME_MAX];
+
+/*
  *	Backwards compatibility, for those programs written
  *	before mach/{std,mach}_types.{defs,h} were set up.
  */

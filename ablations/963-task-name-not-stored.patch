@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #963
+Takes out: urmach_task_set_name's store: it answers KERN_SUCCESS and keeps nothing.  act_test's arm fifty-eight names its own task and reads the name back empty.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[58\] after naming it, this task's name reads "", not "act_test@58"
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+index b2361186..4cb41638 100644
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1658,7 +1658,7 @@ urmach_task_set_name(
+ 	bzero(buf, sizeof buf);
+ 	bcopy(name, buf, len);
+ 	task_lock(task);
+-	bcopy(buf, task->name, sizeof task->name);
++	(void) buf;	/* 963-task-name-not-stored: the name is not kept */
+ 	task_unlock(task);
+ 	return KERN_SUCCESS;
+ }

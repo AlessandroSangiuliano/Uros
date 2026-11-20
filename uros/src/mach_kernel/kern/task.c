@@ -709,6 +709,8 @@ task_create_local(
 	new_task->active = TRUE;
 	new_task->kernel_loaded = kernel_loaded;
 	new_task->user_data = 0;
+	/* #963: born with no name -- a fork's child does not take its parent's */
+	bzero(new_task->name, sizeof new_task->name);
 
 	new_task->res_act_count = 0;	/* used unconditionally */
 #if	TASK_SWAPPER
@@ -1602,6 +1604,116 @@ task_set_info(
 		return (KERN_INVALID_ARGUMENT);
 	}
 	return (KERN_SUCCESS);
+}
+
+/*
+ * #963: is the name in the `count' bytes at `name' one a task may carry?  The
+ * name is the bytes up to the first NUL, or all of them if there is none:
+ * at most URMACH_TASK_NAME_MAX - 1, each a printable ASCII character.  Its
+ * length in *len if so.  Only the bytes the sender sent are read -- MIG has
+ * checked `count' against the message's size, and nothing past it is the
+ * sender's.  Nothing longer is cut: two devices cut to the same characters
+ * could not be told apart.  Nothing that does not print gets into a log line
+ * that names the task.
+ */
+static boolean_t
+task_name_valid(
+	const char		*name,
+	mach_msg_type_number_t	count,
+	vm_size_t		*len)
+{
+	vm_size_t	n;
+
+	for (n = 0; n < count && name[n] != '\0'; n++) {
+		unsigned char c = (unsigned char) name[n];
+
+		if (c < 0x20 || c > 0x7e)
+			return FALSE;
+	}
+	if (n > URMACH_TASK_NAME_MAX - 1)
+		return FALSE;
+	*len = n;
+	return TRUE;
+}
+
+/*
+ * #963: name `task', or take its name away with an empty one.  Whoever holds
+ * the task's port may: the task itself, or whoever made it -- the HAL, for a
+ * driver task (#964).  KERN_INVALID_ARGUMENT for a name task_name_valid()
+ * refuses, and the old name stays.
+ */
+kern_return_t
+urmach_task_set_name(
+	task_t			task,
+	urmach_task_name_t	name,
+	mach_msg_type_number_t	nameCnt)
+{
+	char		buf[URMACH_TASK_NAME_MAX];
+	vm_size_t	len;
+
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (!task_name_valid(name, nameCnt, &len))
+		return KERN_INVALID_ARGUMENT;
+	bzero(buf, sizeof buf);
+	bcopy(name, buf, len);
+	task_lock(task);
+	bcopy(buf, task->name, sizeof task->name);
+	task_unlock(task);
+	return KERN_SUCCESS;
+}
+
+/*
+ * #963: `task''s name and its terminator, read whole under the task's lock
+ * -- "" for none.  *nameCnt says on the way in how much room the caller
+ * gave, and on the way out how much was written; room for less than the name
+ * and its terminator is KERN_INVALID_ARGUMENT, with nothing written.
+ */
+kern_return_t
+urmach_task_get_name(
+	task_t			task,
+	urmach_task_name_t	name,
+	mach_msg_type_number_t	*nameCnt)
+{
+	char		buf[URMACH_TASK_NAME_MAX];
+	vm_size_t	len;
+
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+	task_lock(task);
+	bcopy(task->name, buf, sizeof buf);
+	task_unlock(task);
+	buf[URMACH_TASK_NAME_MAX - 1] = '\0';
+	len = strlen(buf) + 1;
+	if (*nameCnt < len)
+		return KERN_INVALID_ARGUMENT;
+	bcopy(buf, name, len);
+	*nameCnt = (mach_msg_type_number_t) len;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #963: `task''s name into `buf' (URMACH_TASK_NAME_MAX bytes) for a message
+ * that names the task, and TRUE; "-" and FALSE for a task with none.  With no
+ * lock taken, since the messages that call it are printed under locks of
+ * their own, or at a fault.  A rename at that moment can show part of each
+ * name -- each printable, as the field never holds anything else -- and the
+ * copy is terminated whatever it read.
+ */
+boolean_t
+task_name_for_message(
+	task_t		task,
+	char		*buf)
+{
+	if (task != TASK_NULL)
+		bcopy(task->name, buf, URMACH_TASK_NAME_MAX);
+	if (task == TASK_NULL || buf[0] == '\0') {
+		buf[0] = '-';
+		buf[1] = '\0';
+		return FALSE;
+	}
+	buf[URMACH_TASK_NAME_MAX - 1] = '\0';
+	return TRUE;
 }
 
 kern_return_t

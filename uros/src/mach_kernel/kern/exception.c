@@ -1218,7 +1218,20 @@ exception_no_server(
 	 * One printf per line (#644): a line made of a printf for its head, one
 	 * per code and one for the newline let another processor's line land
 	 * between them.  There are at most EXCEPTION_CODE_MAX codes, two.
+	 *
+	 * #963: a named task -- a driver, named after its device -- is said by
+	 * name on a line of its own, before the one below.  That line is read
+	 * by run-x86_64.sh and suite-i386.sh, and to the character by
+	 * 414-no-auxv's Expect, which a name inside it would no longer match;
+	 * a task with no name prints exactly what it did.
 	 */
+	{
+		char name[URMACH_TASK_NAME_MAX];
+
+		if (task_name_for_message(self->top_act->task, name))
+			printf("exception_no_server: task %p is \"%s\"\n",
+			       (void *)self->top_act->task, name);
+	}
 	switch (codeCnt) {
 	case 0:
 		printf("exception_no_server: terminating task %p — exception "
