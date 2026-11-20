@@ -1,0 +1,57 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# The nightly (#961): a schedule, and one step, which dispatches campaign.yml
+# at the branch the repository variable NIGHTLY_REF names -- the epic while one
+# lives -- so that the nightly runs that branch's copy of the campaign on that
+# branch's tree.
+#
+# 🔴 A scheduled run takes the workflow file of the default branch, master.
+# campaign.yml's own schedule therefore ran master's copy, which nothing kept
+# the same as the epic's: from 06/10 to 18/11 it lacked a step's udev settle,
+# and its jobs booted without KVM, every one of them from 11/11.  So this file
+# holds no step of the campaign, and a dispatch runs the copy at its ref.
+#
+# An empty NIGHTLY_REF, or one that names no branch of the repository,
+# dispatches at master, and the run says so.  At the end of the epic: merge it
+# into master, delete it, and empty the variable; the nightly then runs on
+# master.  A next epic is one value of the variable.
+#
+# A run's GITHUB_TOKEN starts no workflow by the events it causes, except
+# workflow_dispatch and repository_dispatch, which always create a run
+# (GitHub's documentation on triggering a workflow from a workflow).
+name: nightly
+
+on:
+  schedule:
+    - cron: "23 1 * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch the campaign at NIGHTLY_REF
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WANT: ${{ vars.NIGHTLY_REF }}
+        run: |
+          ref=$WANT
+          why=""
+          if [ -z "$ref" ]; then
+            why="NIGHTLY_REF is empty"
+          elif ! git ls-remote --exit-code --heads "https://github.com/$REPO.git" "refs/heads/$ref" > /dev/null; then
+            why="NIGHTLY_REF names $ref, which is not a branch of this repository"
+          fi
+          if [ -n "$why" ]; then
+            ref=master
+            echo "::warning::$why: the nightly is dispatched at master (#961)"
+            echo "**$why**: the nightly is dispatched at master (#961)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          gh workflow run campaign.yml --repo "$REPO" --ref "$ref" -f nightly=true
+          echo "the nightly: campaign.yml dispatched at $ref, with nightly set (#961)" >> "$GITHUB_STEP_SUMMARY"
