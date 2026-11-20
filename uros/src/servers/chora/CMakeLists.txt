@@ -128,7 +128,8 @@ set_target_properties(chora_probe_module PROPERTIES
 #
 # With one module in a class, a chora that fetched its whole class would look
 # like one that fetched its module; with this beside chora_probe it would load
-# this one too, and modload says each module it loads (#963).
+# this one too (#963).  -init names the function libdl runs when it loads the
+# file, which says WRONG: libdl calls DT_INIT and not .init_array.
 
 add_library(chora_absent_module SHARED chora_absent/chora_absent.c)
 
@@ -146,5 +147,5 @@ set_target_properties(chora_absent_module PROPERTIES
   OUTPUT_NAME "chora_absent"
   PREFIX ""
   SUFFIX ".so"
-  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv -Wl,-init,chora_absent_loaded"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/net")

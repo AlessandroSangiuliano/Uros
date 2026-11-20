@@ -24,13 +24,31 @@
  * device must not hold the code of the other drivers of its class.  With one
  * module in a class, a chora that fetched the whole class would look exactly
  * like one that fetched its module; with this one beside chora_probe it would
- * load this too, and modload says every module it loads.  It drives nothing:
- * a chora that was told to attach it would have been told wrongly, and says
- * so.
+ * load this too.  It drives nothing: a chora that was told to attach it
+ * would have been told wrongly, and says so.
+ *
+ * 🔑 AND IT SAYS SO WHEN IT IS LOADED, NOT WHEN SOMEBODY LOOKS.  modload says
+ * each module it loads, but a line that only a reader looking for it would
+ * find is not a check: a chora that fetched its class drove the card, its
+ * test passed and the boot passed.  So libdl runs chora_absent_loaded() when
+ * it loads this file -- DT_INIT, which the link names, since libdl calls
+ * DT_INIT and not .init_array, where a constructor would go -- and the WRONG
+ * it prints fails the boot, whichever program loaded it.
  */
+
+#include <stdio.h>
 
 #include "libdriver.h"
 #include "chora_module.h"
+
+void	chora_absent_loaded(void);
+
+void
+chora_absent_loaded(void)
+{
+	printf("chora_absent: WRONG -- loaded, and no chora is ever told to "
+	       "load it\n");
+}
 
 static int
 absent_attach(struct driver *d)
