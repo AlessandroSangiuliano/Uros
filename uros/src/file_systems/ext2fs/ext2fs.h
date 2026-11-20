@@ -167,6 +167,15 @@ extern int ext2fs_icache_counts(struct device *, unsigned long *hits,
 				unsigned int *sets);
 extern int ext2fs_icache_read(struct device *, ino_t);
 
+/* #912: an inode as read_inode reads it on a miss of the inode cache, with
+ * the inode-table block that holds it; the inode an open file is; and whether
+ * a flush of several items goes out as one batch -- for ext_server's check
+ * that every write of an inode-table block reaches the page cache. */
+extern int ext2fs_itable_peek(struct device *, ino_t, struct ext2_inode *,
+			      daddr_t *);
+extern ino_t ext2fs_file_ino(fs_private_t);
+extern int ext2fs_flush_batches(struct device *);
+
 /* #284: mark the volume cleanly unmounted (set EXT2_VALID_FS + flush sb). */
 extern int ext2fs_mark_clean_dev(struct device *dev);
 
@@ -238,8 +247,6 @@ struct ext2fs_file {
 	daddr_t			f_blkno[NIADDR];
 						/* disk address of block in
 						   buffer */
-	vm_offset_t		f_inode_blk;	/* cached raw inode block (scratch) */
-	vm_size_t		f_inode_blk_size;
 	daddr_t			f_ra_last_block;/* last logical block read (readahead) */
 	unsigned int		f_gen;		/* #384: v_gen this handle's
 						   f_blk[] caches match */

@@ -389,6 +389,24 @@ page_cache_modify(struct page_cache *pc, struct page_cache_entry *e,
 	return KERN_SUCCESS;
 }
 
+/* #912: see page_cache.h. */
+int
+page_cache_copyout(struct page_cache *pc, struct page_cache_entry *e,
+		   vm_size_t off, vm_size_t len, vm_offset_t data)
+{
+	if (off > e->pc_size || len > e->pc_size - off)
+		return KERN_INVALID_ARGUMENT;
+
+	pthread_mutex_lock(&pc->pc_lock);
+	if (e->pc_state != PC_VALID) {
+		pthread_mutex_unlock(&pc->pc_lock);
+		return KERN_ABORTED;
+	}
+	memcpy((void *)data, (void *)(e->pc_data + off), len);
+	pthread_mutex_unlock(&pc->pc_lock);
+	return KERN_SUCCESS;
+}
+
 uint64_t
 page_cache_ticket(struct page_cache *pc)
 {

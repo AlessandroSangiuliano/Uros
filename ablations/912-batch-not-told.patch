@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #912
+Takes out: the batched flush's itable_wrote: a flush of the inode, the group descriptors and the superblock together writes the inode's block in one batch, and the page cache keeps the copy it held from before.  ext_server's check writes 100 bytes into an empty file it made, which allocates a block, and reads the inode back from the page cache with no bytes.
+Run: --entry 14 600 -smp 4
+Expect: ext2: inode table: WRONG -- a batched flush: inode [0-9]+ read back with 0 bytes where 100 were written
+
+diff --git a/uros/src/file_systems/ext2fs/ext2fs.c b/uros/src/file_systems/ext2fs/ext2fs.c
+index 04030025..e1ec03ed 100644
+--- a/uros/src/file_systems/ext2fs/ext2fs.c
++++ b/uros/src/file_systems/ext2fs/ext2fs.c
+@@ -4873,9 +4873,7 @@ flush_metadata_taken(struct ext2fs_file *fp, int w_inode, int w_gd,
+ 		}
+ 
+ 		if (itable) {
+-			if (rc == KERN_SUCCESS)				/* #912 */
+-				itable_wrote(fp, inode_disk_block,
+-					     vn->v_inode_blk);
++			/* 912-batch-not-told: the page cache is not given the block */
+ 			pthread_mutex_unlock(&ext2_itable_lock);
+ 			icache_follow(fp, rc);		/* #599 */
+ 		}
