@@ -152,8 +152,9 @@ DISK_SERVERS="cow_test"
 # linker is elf32_ldso_probe, an i386 one: musl_test asks exec_server to run
 # the two programs, and must be refused each time; hello_pie is a
 # position-independent program that names no dynamic linker, which it must
-# relocate (#963).
-ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test mach_error_dyn static_lc_test fork_tty_test elf32_probe elf32_ldso_probe interp_probe hello_pie"
+# relocate (#963).  chora is the program for every device, which exec_server
+# starts on a device when whoever found it asks (#963).
+ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test mach_error_dyn static_lc_test fork_tty_test elf32_probe elf32_ldso_probe interp_probe hello_pie chora"
 
 # The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
 # libc.so under the name musl gives it for this target.

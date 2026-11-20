@@ -728,10 +728,24 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # and without it /proc was never registered.
   set(_PROC_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/proc_server.cmf")
+  # #963: chora_test's own list, which the GRUB entry that gives bootstrap
+  # `-f chora.conf' reads.  Every other bundle entry reads bootstrap.conf,
+  # where irq_claim_test owns the network card.  This one runs what a chora
+  # needs -- cap_server for its port, the HAL to name the card, the disk and
+  # the root that chora is read from, exec_server to start it -- and
+  # chora_test last, so that its last line ends the run (run-x86_64.sh).
+  # chora itself is on the root disk and not in the bundle: exec_server reads
+  # the programs it starts through libvfs.
+  set(_CHORA_CONF ${CMAKE_CURRENT_BINARY_DIR}/chora.conf)
+  file(GENERATE OUTPUT ${_CHORA_CONF}
+       CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-D chora_test chora_test\n")
+  set(_CHORA_TEST_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/chora_test.cmf")
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
             bootstrap.conf:${_CONF}
+            chora.conf:${_CHORA_CONF}
             cap_test.cmf:${_CAPTEST_CMF}
             dma_reclaim_test.cmf:${_DMARECLAIM_CMF}
             block_device_server.cmf:${_BDS_CMF}
@@ -741,6 +755,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             ext_server.cmf:${_EXT_CMF}
             mount_test.cmf:${_MOUNT_TEST_CMF}
             proc_server.cmf:${_PROC_CMF}
+            chora_test.cmf:${_CHORA_TEST_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             boot_ports_test:${_SBIN}/boot_ports_test
@@ -820,6 +835,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
+            # #963: the test that starts chora, and chora's test module in
+            # the pool of its class.
+            chora_test:${_SBIN}/chora_test
+            modules/net/chora_probe.so:${_MOD}/net/chora_probe.so
             ${_CHAR_FILES}
             ${_MUSL_FILES}
             ${_IPC_BENCH_FILE}
@@ -843,6 +862,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             exec_server_bin proc_server_bin pipe_server_bin sig_test_bin
             ${_IPC_BENCH_DEP}
             ${_CONF}
+            # #963: chora is on the disk, which make-disk-x86_64.sh refuses
+            # without it, and run-x86_64.sh builds the bundle, not ALL.
+            ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
+            chora_probe_module chora_bin
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
