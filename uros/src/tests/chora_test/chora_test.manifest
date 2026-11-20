@@ -1,0 +1,13 @@
+# chora_test's manifest (#963).
+#
+# It holds nothing itself: it finds the network card through the HAL, asks
+# the kernel whether the card is claimed, and starts chora on it twice.
+#
+# 🔑 What it MAY HAND ON is the whole of it.  A chora it starts asks for any
+# PCI class, and exec_load() cuts that to this line (#743): the network
+# class, with DMA, registers and the interrupt.  So both choras hold the
+# card's class and no other, and the second is refused by the claim the
+# first holds, not by a capability it lacks.
+
+name chora_test
+delegatable 5 0x020000 0x7

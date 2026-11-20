@@ -636,8 +636,10 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/elf32_probe)
   add_subdirectory(tests/hello_pie)
   # #963: chora, one program for every device, which exec_server starts on
-  # the device whoever found it names, and its first module.
+  # the device whoever found it names, its first module, and the test that
+  # starts it.
   add_subdirectory(servers/chora)
+  add_subdirectory(tests/chora_test)
 endif()
 
 # The textbook program, static against musl, the first of the kind on this
