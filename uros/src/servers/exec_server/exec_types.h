@@ -111,7 +111,7 @@ typedef pointer_t       exec_blob_t;
 #define EXEC_OK                  0
 #define EXEC_ERR_NOT_FOUND      -1   /* binary path not resolvable */
 #define EXEC_ERR_READ           -2   /* vfs_read failed */
-#define EXEC_ERR_PARSE          -3   /* libelf rejected the image, or it is another machine's (#963) */
+#define EXEC_ERR_PARSE          -3   /* libelf rejected the image, it is another machine's, or a PIE it cannot relocate (#963) */
 #define EXEC_ERR_NOT_STATIC     -4   /* PT_INTERP present (v0.2.0 needed) */
 #define EXEC_ERR_TASK_CREATE    -5   /* no longer returned: the caller makes the task (#926) */
 #define EXEC_ERR_VM_SETUP       -6   /* vm_allocate / vm_write / vm_protect */
