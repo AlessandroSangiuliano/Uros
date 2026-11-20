@@ -64,8 +64,9 @@
 #                      names in D, arch or ubuntu, and do nothing else (#960)
 #
 # The tree is the one this script is in.  GITHUB_RUN_ID and JOB_INDEX name the
-# run and the job in every row, and UROS_BUILD_DIR is honoured as by the
-# harness.  OUT/boots.csv gets one row per boot, its times in UTC; the logs of
+# run and the job in every row, CAMPAIGN_KIND what started the run -- nightly,
+# push or workflow_dispatch, which campaign.yml passes and job.txt says
+# (#961) -- and UROS_BUILD_DIR is honoured as by the harness.  OUT/boots.csv gets one row per boot, its times in UTC; the logs of
 # every WRONG boot are copied to OUT/failed/rN/, and those of a boot stopped --
 # at the time limit, or by a SIGTERM from outside -- to OUT/stopped/rN/;
 # OUT/job.txt says what the job ran on and with which tools, how many boots it
@@ -101,6 +102,7 @@ HEADER=date,time,run_id,job,round,tree,cpu_model,mhz,accel,entry,smp,opt,verdict
 AB_HEADER=date,time,run_id,job,tree,cpu_model,mhz,patches,arm,boot,accel,run,harness_status,verdict,log
 RUN_ID=${GITHUB_RUN_ID:-local}
 JOB=${JOB_INDEX:-0}
+KIND=${CAMPAIGN_KIND:-}
 
 # What the build and the boots call that the image may not have.  gcc,
 # binutils, cmake and ninja build; make builds musl, whose own build it is
@@ -640,6 +642,9 @@ stoppable() {	# out print|quiet hook|"" command...
 {
 	echo "tree:     $TREE"
 	echo "run:      $RUN_ID, job $JOB"
+	# #961: the nightly is a dispatch as one started by hand is, and only
+	# this line tells pull-results.sh which it was.
+	[ -z "$KIND" ] || echo "kind:     $KIND"
 	echo "cpu:      $CPU, $NPROC processors"
 	echo "kvm:      /dev/kvm $KVM; accelerators: $ACCS"
 	echo "gcc:      $(gcc --version 2>&1 | head -n 1)"

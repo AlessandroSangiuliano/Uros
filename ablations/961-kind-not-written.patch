@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #961
+Takes out: job.txt's kind: line, from CAMPAIGN_KIND: the nightly and a dispatch started by hand are the same to pull-results.sh again.  harness-lifecycle-check.sh's jobfail, which runs job.sh with CAMPAIGN_KIND=nightly, finds no kind: line in its job.txt.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: jobfail
+Expect: lifecycle: jobfail: its configure failed; job.txt does not say it was a nightly job, which CAMPAIGN_KIND said: it has no kind: line -- WRONG
+
+diff --git a/scripts/ci/job.sh b/scripts/ci/job.sh
+index c4186653..d8c32461 100755
+--- a/scripts/ci/job.sh
++++ b/scripts/ci/job.sh
+@@ -644,7 +644,7 @@ stoppable() {	# out print|quiet hook|"" command...
+ 	echo "run:      $RUN_ID, job $JOB"
+ 	# #961: the nightly is a dispatch as one started by hand is, and only
+ 	# this line tells pull-results.sh which it was.
+-	[ -z "$KIND" ] || echo "kind:     $KIND"
++	: "$KIND"	# 961-kind-not-written: what started the run goes unsaid
+ 	echo "cpu:      $CPU, $NPROC processors"
+ 	echo "kvm:      /dev/kvm $KVM; accelerators: $ACCS"
+ 	echo "gcc:      $(gcc --version 2>&1 | head -n 1)"

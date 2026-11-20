@@ -16,7 +16,8 @@
 # stayed on the runner.  Of each job it says whether it finished, from its
 # job.txt: or failed, and why, or stopped, and by what, or cut off before its
 # summary, or a round short -- and the boots it got, of those it planned where
-# its job.txt says (#951).
+# its job.txt says (#951).  A job that could not open /dev/kvm is said as a
+# fault, on a line of its own, and the nightly is called so (#961).
 # Times are the runner's, in UTC.  Compare rows within one job only: the
 # runner's clock is not ours to set.
 #
@@ -148,6 +149,24 @@ job_end() {	# artifact-dir job description
 	fi
 }
 
+# #961: a job of a run on GitHub that could not open /dev/kvm is a fault, and
+# is said as one, on a line of its own.  Every job of the epic's runs has
+# opened it since 16/10.  The nightly's from 11/11 to 18/11 could not, ran
+# every boot under TCG alone, and this script said so by one word at the end
+# of the run's line: "accelerators tcg".  A job run here, "run: local", may
+# lack /dev/kvm for reasons of its own, and is not one.
+kvm_fault() {	# artifact-dir job description
+	local d=$1 j=$2 what=$3 run kvm
+	[ -f "$d/job.txt" ] || return 0
+	run=$(sed -n 's/^run: *\([0-9][0-9]*\),.*/\1/p' "$d/job.txt")
+	kvm=$(sed -n 's/^kvm: *//p' "$d/job.txt")
+	[ -n "$run" ] || return 0
+	case "$kvm" in
+	"/dev/kvm cannot be opened"*)
+		echo "pull-results: $what: job $j BOOTED WITHOUT KVM, a fault: its /dev/kvm could not be opened, and every boot ran under TCG alone" ;;
+	esac
+}
+
 # An A/B's boots by patches, processor, arm, accelerator and verdict, from rows
 # on stdin: a defect only some runners show is read off the processor column.
 ab_summary() {
@@ -163,6 +182,11 @@ import() {	# run-id description artifacts-the-api-listed
 	local id=$1 what=$2 listed=$3 d j rows=$STAGE/$1.rows abrows=$STAGE/$1.abrows jobs=()
 	: > "$rows"
 	: > "$abrows"
+	# #961: the nightly is a dispatch, as a run started by hand is, and its
+	# jobs' job.txt say which it was.
+	if grep -qx 'kind: *nightly' "$STAGE/$id"/campaign-job-*/job.txt 2>/dev/null; then
+		what=${what/(workflow_dispatch,/(nightly,}
+	fi
 	for d in "$STAGE/$id"/campaign-job-*/; do
 		[ -d "$d" ] || continue
 		jobs+=("$d")
@@ -208,6 +232,7 @@ import() {	# run-id description artifacts-the-api-listed
 		[ -f "$d/boots.csv" ] || [ -f "$d/ablate.csv" ] ||
 			echo "pull-results: $what: job $j left no rows; what it left is in $CI/$id/job$j"
 		job_end "$d" "$j" "$what"
+		kvm_fault "$d" "$j" "$what"
 	done
 	if grep -q "^[^,]*,[^,]*,$id," "$CSV"; then
 		echo "pull-results: $what: its rows are already in $CSV, from an import stopped before its record; recorded, not appended again"
@@ -252,6 +277,7 @@ if [ ${#ASK[@]} -gt 0 ]; then
 		[ -d "$d" ] || die 2 "--job takes a job's directory, and $d is not one"
 		if [ -f "$d/job.txt" ] || [ -f "$d/boots.csv" ] || [ -f "$d/ablate.csv" ]; then
 			job_end "$d" "${d%/}" here
+			kvm_fault "$d" "${d%/}" here
 			[ ! -f "$d/boots.csv" ] ||
 				tail -n +2 "$d/boots.csv" | merge_line "here: job ${d%/}" 1
 		else

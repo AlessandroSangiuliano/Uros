@@ -46,7 +46,12 @@
 #   jobfail    ci/job.sh, whose configure fails, says why in job.txt, in its
 #              "failed:" line, and exits 3, and ci/pull-results.sh --job says
 #              it FAILED, and why, not that it was cut off: a campaign job
-#              whose build fails, as the Ubuntu jobs of 18/11 (#951)
+#              whose build fails, as the Ubuntu jobs of 18/11 (#951); and
+#              job.txt says the run's kind CAMPAIGN_KIND gives it (#961)
+#   jobnokvm   ci/pull-results.sh --job says a job of a run on GitHub that
+#              could not open /dev/kvm as a fault, on a line of its own, and
+#              nothing of the kind of one that opened it, nor of a job run
+#              here: the nightly's jobs of 11/11 to 18/11 (#961)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
@@ -82,7 +87,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -797,7 +802,8 @@ if wanted jobfail; then
 	rm -rf "$OUT/jobfail" "$OUT/jobfail-build" "$OUT/jobfail.ended" "$OUT/jobfail.ended.pid"
 	mkdir -p "$OUT/jobfail-build"
 	echo "CMAKE_HOME_DIRECTORY:INTERNAL=/nonexistent/jobfail" > "$OUT/jobfail-build/CMakeCache.txt"
-	UROS_BUILD_DIR=$OUT/jobfail-build python3 -I "$REPO/scripts/ended-by.py" "$OUT/jobfail.ended" -- \
+	UROS_BUILD_DIR=$OUT/jobfail-build CAMPAIGN_KIND=nightly \
+		python3 -I "$REPO/scripts/ended-by.py" "$OUT/jobfail.ended" -- \
 		"$REPO/scripts/ci/job.sh" --no-install --entries "1 5" --accel tcg --rounds 1 \
 		--out "$OUT/jobfail" > "$OUT/jobfail.out" 2>&1 &
 	JOB=$!
@@ -823,15 +829,56 @@ if wanted jobfail; then
 				left="$left; job.txt does not say why it ended: $(grep -a '^failed:' "$OUT/jobfail/job.txt" 2>/dev/null || echo "it has no failed: line, and its last is: $(tail -n 1 "$OUT/jobfail/job.txt" 2>/dev/null)")"
 			[ "$ended" = "exit 3" ] ||
 				left="$left; it ended by ${ended:-nothing said}, not exit 3"
+			# #961: the kind of run it was given, which tells pull-results.sh
+			# the nightly from a dispatch started by hand.
+			grep -aqxF "kind:     nightly" "$OUT/jobfail/job.txt" 2>/dev/null ||
+				left="$left; job.txt does not say it was a nightly job, which CAMPAIGN_KIND said: $(grep -a '^kind:' "$OUT/jobfail/job.txt" 2>/dev/null || echo 'it has no kind: line')"
 			said=$("$REPO/scripts/ci/pull-results.sh" --job "$OUT/jobfail" 2>&1)
 			grep -qxF "pull-results: here: job $OUT/jobfail FAILED: the configure failed: configure.log; 0 boots of the 2 planned" <<< "$said" ||
 				left="$left; pull-results.sh --job said: $(sed -n 1p <<< "$said")"
 			if [ -n "$left" ]; then
 				say jobfail "its configure failed$left" WRONG
 			else
-				say jobfail "its configure failed, job.txt says so in its failed: line, job.sh exited 3, and pull-results.sh --job says it FAILED, and why, with 0 boots of the 2 planned" PASS
+				say jobfail "its configure failed, job.txt says so in its failed: line and that it was a nightly job, job.sh exited 3, and pull-results.sh --job says it FAILED, and why, with 0 boots of the 2 planned" PASS
 			fi
 		fi
+	fi
+fi
+
+# ── jobnokvm ──────────────────────────────────────────────────────────
+# #961: ci/pull-results.sh says a job of a run on GitHub that could not open
+# /dev/kvm as a fault, on a line of its own: the nightly's jobs from 11/11 to
+# 18/11 ran every boot under TCG alone, and the only sign of it was a word at
+# the end of a line.  Three job directories are made here as an artifact would
+# hold them, job.txt and the header of the rows, and nothing is booted: one of
+# run 4242424242 whose /dev/kvm could not be opened, which must be said as a
+# fault; one of the same run whose /dev/kvm could, and one run here, "run:
+# local", whose could not -- of which nothing of the kind may be said.  A
+# guard that also fired for those two would be no guard.
+if wanted jobnokvm; then
+	left=""
+	for c in "4242424242:cannot be opened:fault" "4242424242:can be opened:none" "local:cannot be opened:none"; do
+		run=${c%%:*}; rest=${c#*:}; k=${rest%%:*}; want=${rest#*:}
+		d=$OUT/jobnokvm-$run-${k// /-}
+		rm -rf "$d"
+		mkdir -p "$d"
+		printf '%s\n' "tree:     00000000" "run:      $run, job 1-arch" \
+			"kvm:      /dev/kvm $k; accelerators: tcg" \
+			"plan:     2 boots, 1 round(s) of 2" "boots:    0" > "$d/job.txt"
+		echo "date,time,run_id,job,round,tree,cpu_model,mhz,accel,entry,smp,opt,verdict,log" > "$d/boots.csv"
+		said=$("$REPO/scripts/ci/pull-results.sh" --job "$d" 2>&1)
+		line="pull-results: here: job $d BOOTED WITHOUT KVM, a fault: its /dev/kvm could not be opened, and every boot ran under TCG alone"
+		if [ "$want" = fault ]; then
+			grep -qxF "$line" <<< "$said" ||
+				left="$left; of run $run's job whose /dev/kvm $k it said: $(tr '\n' '|' <<< "$said")"
+		elif grep -q "WITHOUT KVM" <<< "$said"; then
+			left="$left; of the job of run $run whose /dev/kvm $k it said a fault: $(grep 'WITHOUT KVM' <<< "$said")"
+		fi
+	done
+	if [ -n "$left" ]; then
+		say jobnokvm "pull-results.sh --job${left}" WRONG
+	else
+		say jobnokvm "pull-results.sh --job says the job of run 4242424242 that could not open /dev/kvm BOOTED WITHOUT KVM, a fault, and nothing of the kind of the one that could, nor of a job run here" PASS
 	fi
 fi
 
