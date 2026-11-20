@@ -954,5 +954,37 @@ routine	etap_trace_thread(
 		trace_status	: boolean_t);
 
 /*
- *	There is no more room in this interface for additional calls.
+ * #963: a task's name -- the device a driver task serves, "ahci@00:1f.2".
+ *
+ * 🔴 IN CODA, and only here: MIG numbers a routine by its position from the
+ * subsystem's base, and one put anywhere else would move every id after it.
+ * mach is 2000 on, and memory_object begins at 2200: these are 2103 and 2104,
+ * after etap_trace_thread's 2102 -- read from the stubs MIG generates, since a
+ * count of this file's routines takes both arms of its #if blocks.  This file
+ * used to end saying there was no more room in it, which was true of a
+ * numbering this tree no longer has.
+ *
+ * Set by whoever holds the task's port, the task itself included; read by
+ * whoever holds even its inspect port, as task_info is (#927).  At most
+ * URMACH_TASK_NAME_MAX - 1 characters, each a printable ASCII one; anything
+ * else is KERN_INVALID_ARGUMENT, and nothing is cut.  An empty name takes the
+ * name away.  A task is born with none, a fork's child too.
+ *
+ * 🔴 A varying array of char with its count, and not a c_string.  MIG's user
+ * stub copies a c_string with mig_strncpy, which cuts a long name before it is
+ * sent -- the kernel could not refuse what it never saw -- and a c_string
+ * reaches the kernel without its count, so a sender that left out the
+ * terminator would have had the kernel read on past the bytes it sent.  The
+ * name is the bytes up to the first NUL, or all of them if there is none.
  */
+#include <mach/task_name.h>
+
+type urmach_task_name_t = array[*:URMACH_TASK_NAME_MAX] of char;
+
+routine	urmach_task_set_name(
+		target_task	: task_t;
+		name		: urmach_task_name_t);
+
+routine	urmach_task_get_name(
+		target_task	: task_inspect_t;
+	out	name		: urmach_task_name_t, CountInOut);

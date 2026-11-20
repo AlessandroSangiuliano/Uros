@@ -199,6 +199,7 @@
 #include <mach/message.h>
 #include <mach/mach_param.h>
 #include <mach/task_info.h>
+#include <mach/task_name.h>		/* #963: URMACH_TASK_NAME_MAX */
 #include <mach/exception.h>
 #include <mach_prof.h>
 #include <kern/kern_types.h>
@@ -305,6 +306,15 @@ typedef struct task {
 	vm_offset_t	fast_tas_base;
 	vm_offset_t	fast_tas_end;
 #endif	/* FAST_TAS */
+
+	/*
+	 * #963: the task's name, "" for none -- a driver task is named after
+	 * its device.  Under the task's lock, read and written whole;
+	 * printable ASCII and terminated within the field, as
+	 * urmach_task_set_name lets in nothing else.  A task is born with
+	 * none: task_create_internal empties it, a fork's child included.
+	 */
+	char		name[URMACH_TASK_NAME_MAX];
 	MACHINE_TASK
 } Task;
 
@@ -360,6 +370,15 @@ extern void		task_unfreeze(
 #endif	/* MACH_HOST */
 
 extern void		consider_task_collect(void);
+
+/*
+ * #963: a task's name into `buf' (URMACH_TASK_NAME_MAX bytes) for a message
+ * that names the task, and TRUE; "-" and FALSE for none.  Takes no lock
+ * (task.c says why).
+ */
+extern boolean_t	task_name_for_message(
+				task_t		task,
+				char		*buf);
 
 extern task_t		kernel_task;
 
