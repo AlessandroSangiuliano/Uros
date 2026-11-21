@@ -18,14 +18,15 @@
 
 /*
  * chora_test -- starts chora on the network card twice, as a driver's parent
- * does (#963).
+ * does (#963), and once on QEMU's educational device where the board has one
+ * (#977).
  *
  * bootstrap starts it from chora.conf, a list of its own, in a GRUB entry of
  * its own: every other bundle entry reads bootstrap.conf, where
  * irq_claim_test owns the card.  Its line has -D, so that a chora it starts
  * inherits the master device port with its bootstrap port; and its manifest
- * may hand on the network class and nothing else, so that what a chora holds
- * is what this task may give (#743).
+ * may hand on the network class and edu's and nothing else, so that what a
+ * chora holds is what this task may give (#743).
  *
  *   [1] the HAL names the network card;
  *   [2] a chora started on it with exec_load() claims it: the kernel says the
@@ -33,7 +34,13 @@
  *   [3] that task carries the card's name, read back with
  *       urmach_task_get_name(): chora_probe@BB:DD.F;
  *   [4] a second chora on the same card ends within 30 s, and the card is
- *       still claimed -- the claim refused it.
+ *       still claimed -- the claim refused it;
+ *   [5] the HAL names QEMU's edu device, vendor 1234h and device 11e8h,
+ *       which has MSI and no MSI-X table (run-x86_64.sh --edu);
+ *   [6] a chora started on it with the module edu_probe claims it within
+ *       30 s, and carries its name, edu_probe@BB:DD.F.  That its module took
+ *       the interrupt by message is edu_probe's line, the merge test's to
+ *       read (#977).
  *
  * chora's own lines -- the claim, the region, the interrupt, the second
  * one's refusal -- and the kernel's line naming both tasks are the merge
@@ -68,6 +75,7 @@
 mach_port_t	master_device;
 
 #define CT_NET_CLASS	0x020000u
+#define CT_EDU_ID	0x11E81234u	/* QEMU's edu: device 11e8h, vendor 1234h */
 #define CT_HAL_TRIES	200
 #define CT_WAIT_STEPS	300		/* of 100 ms: 30 s */
 
@@ -101,16 +109,13 @@ nap(unsigned int ms)
 	(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, ms);
 }
 
-/* [1]: the HAL's first device of the network class. */
+/* The HAL's devices, listed; 0, said for `arm', when they cannot be. */
 static int
-find_the_card(natural_t *bdf)
+list_devices(int arm, vm_offset_t *buf, mach_msg_type_number_t *bytes,
+	     unsigned int *n)
 {
-	mach_port_t		hal = MACH_PORT_NULL;
-	vm_offset_t		buf = 0;
-	mach_msg_type_number_t	bytes = 0;
-	unsigned int		n = 0, i;
-	const struct hal_device_info *devs;
-	int			found = 0, tries;
+	mach_port_t	hal = MACH_PORT_NULL;
+	int		tries;
 
 	for (tries = 0; tries < CT_HAL_TRIES; tries++) {
 		if (netname_look_up(name_server_port, "", (char *)"hal",
@@ -119,16 +124,30 @@ find_the_card(natural_t *bdf)
 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
 	}
 	if (!MACH_PORT_VALID(hal)) {
-		not_asked(1, "the HAL never appeared");
+		not_asked(arm, "the HAL never appeared");
 		return 0;
 	}
-	if (hal_list_devices(hal, &buf, &bytes, &n) != KERN_SUCCESS) {
+	if (hal_list_devices(hal, buf, bytes, n) != KERN_SUCCESS) {
 		(void)mach_port_deallocate(mach_task_self(), hal);
-		verdict(1, 0, "the HAL would not list its devices");
+		verdict(arm, 0, "the HAL would not list its devices");
 		return 0;
 	}
 	(void)mach_port_deallocate(mach_task_self(), hal);
+	return 1;
+}
 
+/* [1]: the HAL's first device of the network class. */
+static int
+find_the_card(natural_t *bdf)
+{
+	vm_offset_t		buf = 0;
+	mach_msg_type_number_t	bytes = 0;
+	unsigned int		n = 0, i;
+	const struct hal_device_info *devs;
+	int			found = 0;
+
+	if (!list_devices(1, &buf, &bytes, &n))
+		return 0;
 	devs = (const struct hal_device_info *)buf;
 	for (i = 0; i < n && !found; i++)
 		if ((devs[i].class_rev >> 8) == CT_NET_CLASS) {
@@ -148,6 +167,37 @@ find_the_card(natural_t *bdf)
 	return 1;
 }
 
+/* [5]: QEMU's educational device, which has MSI and no MSI-X table (#977). */
+static int
+find_the_edu(natural_t *bdf)
+{
+	vm_offset_t		buf = 0;
+	mach_msg_type_number_t	bytes = 0;
+	unsigned int		n = 0, i;
+	const struct hal_device_info *devs;
+	int			found = 0;
+
+	if (!list_devices(5, &buf, &bytes, &n))
+		return 0;
+	devs = (const struct hal_device_info *)buf;
+	for (i = 0; i < n && !found; i++)
+		if (devs[i].vendor_device == CT_EDU_ID) {
+			*bdf = (natural_t)((devs[i].bus << 8)
+					   | (devs[i].slot << 3) | devs[i].func);
+			found = 1;
+		}
+	if (bytes != 0)
+		(void)vm_deallocate(mach_task_self(), buf, bytes);
+	if (!found) {
+		not_asked(5, "no edu device on this board (run-x86_64.sh --edu)");
+		return 0;
+	}
+	verdict(5, 1, "the HAL names the edu device at %02x:%02x.%x",
+		(unsigned)(*bdf >> 8), (unsigned)((*bdf >> 3) & 0x1F),
+		(unsigned)(*bdf & 0x7));
+	return 1;
+}
+
 /* NUL-separated strings, then the empty string that ends them (exec_types.h). */
 static size_t
 blob_add(char *blob, size_t at, size_t cap, const char *s)
@@ -161,13 +211,14 @@ blob_add(char *blob, size_t at, size_t cap, const char *s)
 }
 
 /*
- * A chora on `bdf' with the module chora_probe, started as a driver's parent
- * starts one: a task made here and lent to exec_server, with this task's
- * capability port to derive the child's from.  Its first thread is resumed.
+ * A chora on `bdf' with the module `module' of the class `class', started as
+ * a driver's parent starts one: a task made here and lent to exec_server,
+ * with this task's capability port to derive the child's from.  Its first
+ * thread is resumed.
  */
 static kern_return_t
-start_chora(mach_port_t exec_port, natural_t bdf, mach_port_t *task_out,
-	    int *rc_out)
+start_chora(mach_port_t exec_port, natural_t bdf, const char *class,
+	    const char *module, mach_port_t *task_out, int *rc_out)
 {
 	static char	envp_blob[] = "";
 	char		blob[64], where[8];
@@ -180,8 +231,8 @@ start_chora(mach_port_t exec_port, natural_t bdf, mach_port_t *task_out,
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
 	at = blob_add(blob, at, sizeof blob, "chora");
-	at = blob_add(blob, at, sizeof blob, "net");
-	at = blob_add(blob, at, sizeof blob, "chora_probe");
+	at = blob_add(blob, at, sizeof blob, class);
+	at = blob_add(blob, at, sizeof blob, module);
 	at = blob_add(blob, at, sizeof blob, where);
 	if (at >= sizeof blob)
 		return KERN_INVALID_ARGUMENT;
@@ -258,7 +309,8 @@ run_the_arms(void)
 	mach_port_t	root_paged = MACH_PORT_NULL, security = MACH_PORT_NULL;
 	mach_port_t	exec_port = MACH_PORT_NULL;
 	mach_port_t	first = MACH_PORT_NULL, second = MACH_PORT_NULL;
-	natural_t	bdf = 0;
+	mach_port_t	third = MACH_PORT_NULL;
+	natural_t	bdf = 0, edu = 0;
 	char		name[URMACH_TASK_NAME_MAX], want[URMACH_TASK_NAME_MAX];
 	mach_msg_type_number_t cnt;
 	kern_return_t	kr;
@@ -291,7 +343,7 @@ run_the_arms(void)
 	}
 
 	/* [2] */
-	kr = start_chora(exec_port, bdf, &first, &rc);
+	kr = start_chora(exec_port, bdf, "net", "chora_probe", &first, &rc);
 	if (kr != KERN_SUCCESS) {
 		verdict(2, 0, "/chora did not start: kr 0x%x, result %d", kr, rc);
 		return;
@@ -315,7 +367,7 @@ run_the_arms(void)
 		"\"%s\"", name, kr, want);
 
 	/* [4] */
-	kr = start_chora(exec_port, bdf, &second, &rc);
+	kr = start_chora(exec_port, bdf, "net", "chora_probe", &second, &rc);
 	if (kr != KERN_SUCCESS) {
 		verdict(4, 0, "a second /chora did not start: kr 0x%x, result %d",
 			kr, rc);
@@ -328,6 +380,30 @@ run_the_arms(void)
 		"was still there after 30 s", claimed(bdf) ? "still claimed" :
 		"claimed by nobody");
 	(void)mach_port_deallocate(mach_task_self(), second);
+
+	/* [5], and [6], left driving the device as the first chora is (#977) */
+	if (!find_the_edu(&edu))
+		return;
+	kr = start_chora(exec_port, edu, "misc", "edu_probe", &third, &rc);
+	if (kr != KERN_SUCCESS) {
+		verdict(6, 0, "/chora did not start on the edu device: kr 0x%x, "
+			"result %d", kr, rc);
+		return;
+	}
+	for (i = 0; i < CT_WAIT_STEPS && !claimed(edu); i++)
+		nap(100);
+	(void)snprintf(want, sizeof want, "edu_probe@%02x:%02x.%x",
+		       (unsigned)(edu >> 8), (unsigned)((edu >> 3) & 0x1F),
+		       (unsigned)(edu & 0x7));
+	memset(name, 0, sizeof name);
+	cnt = sizeof name;
+	kr = urmach_task_get_name(third, name, &cnt);
+	name[sizeof name - 1] = '\0';
+	verdict(6, claimed(edu) && kr == KERN_SUCCESS && strcmp(name, want) == 0,
+		"a chora started on the edu device, %s, and that task's name "
+		"reads \"%s\" (kr 0x%x), and the device's is \"%s\"",
+		claimed(edu) ? "which the kernel says is claimed" :
+		"which 30 s on nobody claims", name, kr, want);
 }
 
 int
