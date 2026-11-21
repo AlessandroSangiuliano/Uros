@@ -2216,7 +2216,7 @@ ds_master_device_dma_alloc(
 
 		if (!device_md_dma_grant(bdf, (unsigned long)pa,
 					 (unsigned long)size, TRUE, TRUE,
-					 &iova)) {
+					 ~0UL, &iova)) {
 			(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 			kmem_free(kernel_map, kva, size);
 			return KERN_FAILURE;
@@ -2478,7 +2478,7 @@ ds_master_device_dma_alloc_sg(
 
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)list,
-					       n_pages, TRUE, TRUE, &iova,
+					       n_pages, TRUE, TRUE, ~0UL, &iova,
 					       &identity)) {
 			/*
 			 * dma_region_drop() takes the user mapping down
@@ -4319,7 +4319,7 @@ dma_grant_locked(struct dma_region *r, natural_t bdf,
 	if (r->nusers >= DEVICE_MAX_REGION_USERS)
 		return KERN_RESOURCE_SHORTAGE;
 	if (!device_md_dma_grant_pages(bdf, (const unsigned long *)r->pa,
-				       r->npages, reads, writes, base,
+				       r->npages, reads, writes, ~0UL, base,
 				       identity))
 		return KERN_FAILURE;
 	r->user[r->nusers].bdf = bdf;

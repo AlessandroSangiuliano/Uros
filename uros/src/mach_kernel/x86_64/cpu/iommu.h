@@ -694,15 +694,21 @@ struct iommu_domain {
 	unsigned		pages;	/* 4 KiB pages mapped into it       */
 
 	/*
-	 * The next address this domain will hand out (#432 stage 3e).
+	 * The next address this domain will hand out from IOMMU_IOVA_BASE up
+	 * (#432 stage 3e).
 	 *
-	 * 🔴 A BUMP AND NO FREE LIST, deliberately.  An IOVA space is 2^39
-	 * bytes at the shallowest depth this kernel will build, and a driver
-	 * that allocated a buffer a second would take nine thousand years to
-	 * exhaust it -- so reusing an address buys nothing and costs the one
-	 * property worth having here: an address that is never handed out
-	 * twice cannot be a stale mapping mistaken for a live one.  Running
-	 * out is REPORTED rather than wrapped.
+	 * 🔴 A BUMP AND NO FREE LIST, deliberately: an address that is never
+	 * handed out twice cannot be a stale mapping mistaken for a live one.
+	 * The window is 2^39 bytes at the shallowest depth this kernel
+	 * builds, 134 million pages -- about four years at one buffer a
+	 * second, where this said nine thousand (#610) -- and grants are made
+	 * once per region and device and kept, far fewer than one a second.
+	 * Running out is REPORTED rather than wrapped, and the bound is the
+	 * table's depth as well as the engines' widths (#610).
+	 *
+	 * #417: a device that cannot reach this window is given addresses
+	 * below 4 GiB instead, from a window that hands freed ones out again
+	 * -- IOMMU_IOVA_LOW_BASE.
 	 */
 	uint64_t		next_iova;
 };
@@ -984,8 +990,52 @@ unsigned iommu_queue_exercise(unsigned unit, unsigned n);
 #define	IOMMU_IOVA_BASE		0x0000000100000000ULL
 
 /*
+ * #417: where a device that cannot reach the window above gets its addresses
+ * -- one whose DMA has fewer bits than that, as AHCI without S64A or QEMU's
+ * edu at its default of 28.  Linux's way: the address is placed below what
+ * the device can reach.  From here up to the lowest of the device's reach and
+ * the top of the RAM below 4 GiB, which iommu_set_low_window() is told at
+ * boot.
+ *
+ * 🔑 NOT ZERO, for the reason IOMMU_IOVA_BASE gives: an uninitialised address
+ * must fault.  And NOTHING ABOVE THAT RAM: between it and 4 GiB lie the PCI
+ * windows, where a transfer may go to another device before it reaches any
+ * engine, and the interrupt range, which an engine takes for an interrupt.
+ *
+ * ⚠️ This window DOES hand an address out again, once its grant is revoked
+ * and the domain flushed -- a window this small, 28 bits being 65 536 pages,
+ * cannot be a bump that never gives one back.  It goes round before it does:
+ * a freed range comes back after everything above it in the window has been
+ * handed out since.  A reused address reaches only this device's own buffers,
+ * so the isolation between devices holds; what a narrow device loses is that a
+ * stale address it kept always faults.
+ */
+#define	IOMMU_IOVA_LOW_BASE	0x0000000000100000ULL
+
+/*
+ * The top of the RAM below 4 GiB, exclusive, from the boot's memory map: the
+ * low window ends below it (#417).  Zero, the value before it is said, closes
+ * the low window: a device that cannot reach IOMMU_IOVA_BASE is then refused.
+ */
+void iommu_set_low_window(uint64_t top);
+
+/*
+ * #417: the IOVA placement on scratch domains, no engine needed -- the window
+ * above for a device that reaches it, the low one for a device that does not,
+ * a freed address back only after the low window has gone round and never a
+ * live one, the table's depth as a bound (#610) and an identity domain held to
+ * the device's reach.  Non-zero when every case is right.
+ */
+int iommu_iova_check(unsigned *ran, unsigned *wrong);
+
+/*
  * Make `size' bytes of physical memory at `pa' reachable by `bdf', and answer
  * the address the DEVICE must be programmed with.  Non-zero on success.
+ *
+ * #417: `limit' is the highest address the device can use, its DMA mask, and
+ * the address answered is at or below it: from the window above where that
+ * reaches, from IOMMU_IOVA_LOW_BASE up where it does not, and in an identity
+ * domain the frame's own address, refused when it lies beyond.
  *
  * 🔴 THE ADDRESS THAT COMES BACK IS NOT THE PHYSICAL ONE, and that is this
  * stage's whole content (#432 stage 3e).  #457 closed with the clause "a
@@ -1007,7 +1057,7 @@ unsigned iommu_queue_exercise(unsigned unit, unsigned n);
  * it owns.
  */
 int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
-		uint64_t *iova_out);
+		uint64_t limit, uint64_t *iova_out);
 
 /*
  * The same for pages that are not physically contiguous: `n' frames, each
@@ -1025,8 +1075,16 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
  * the grant one entry instead of a thousand.
  */
 int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
-		      int read, int write, uint64_t *iova_out,
+		      int read, int write, uint64_t limit, uint64_t *iova_out,
 		      int *identity_out);
+
+/*
+ * #417: whether an address given to `bdf' is an IOVA -- the machine isolates,
+ * and the device's domain, opened or still to be, is not an identity one.
+ * Where it is not, the address is the frame's own, and the memory itself has
+ * to lie within the device's reach.
+ */
+int iommu_translates(uint16_t bdf);
 
 /*
  * This device must be programmed with physical addresses: map its grants at

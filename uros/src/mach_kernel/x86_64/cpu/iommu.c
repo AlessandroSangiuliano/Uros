@@ -2349,7 +2349,25 @@ struct device_domain {
 	unsigned		ngrants;
 	struct iommu_granted	grants[IOMMU_MAX_GRANTS];
 	struct iommu_domain	domain;
+
+	/*
+	 * #417: the low window's cursor -- where the next search starts, so
+	 * that a freed range comes back only once the window has gone round
+	 * -- and whether the window is closed, for good: a failed grant whose
+	 * mapping could not be taken back left a range that may not be
+	 * empty, and only this window would hand it out again.
+	 */
+	uint64_t		next_low;
+	int			low_closed;
 };
+
+/* The top of the RAM below 4 GiB, exclusive; zero closes the low window. */
+static uint64_t			low_window_top;
+
+void iommu_set_low_window(uint64_t top)
+{
+	low_window_top = top;
+}
 
 static struct device_domain	device_domains[IOMMU_MAX_DEVICE_DOMAINS];
 static unsigned			ndevice_domains;
@@ -2471,6 +2489,8 @@ static struct device_domain *domain_open(uint16_t bdf, int identity)
 	s->identity = identity;
 
 	s->ngrants = 0;
+	s->next_low = 0;
+	s->low_closed = 0;
 
 	if (!iommu_domain_create(&s->domain, found_vendor,
 				 (uint16_t)(ndevice_domains + 1u), levels))
@@ -2570,48 +2590,150 @@ static struct device_domain *domain_for_grant(uint16_t bdf)
 }
 
 /*
- * Take `size' bytes of address space out of the domain's window.
- *
- * ⚠️ Page aligned by construction: the caller's size is rounded and the base
- * starts aligned, so the bump preserves it.  Written as an assertion of the
- * invariant rather than a rounding, because a bump that quietly aligned would
- * hide a caller passing a size the mapping is going to refuse anyway.
+ * The highest address a table of `levels' levels holds: nine bits a level over
+ * a twelve-bit page.  #610: the window was bounded by the engines alone, and
+ * past this a new address lands on the entry of an old one, since each level
+ * keeps nine bits of it.
  */
-static int iova_take(struct device_domain *s, uint64_t pa, uint64_t size,
-		     uint64_t *out)
+static uint64_t depth_top(unsigned levels)
+{
+	unsigned bits = 12u + 9u * levels;
+
+	return bits >= 64 ? ~0ULL : (1ULL << bits) - 1;
+}
+
+/*
+ * The highest address this domain may hand a device whose DMA reaches
+ * `limit': the lowest of that, the table's depth, and every engine's width.
+ */
+static uint64_t domain_top(const struct device_domain *s, uint64_t limit)
+{
+	uint64_t top = limit;
+
+	if (top > depth_top(s->domain.levels))
+		top = depth_top(s->domain.levels);
+	if (!iommu_address_bits_ok(64))
+		for (unsigned i = 0; i < nunits; i++)
+			if (units[i].address_bits < 64
+			    && top > (1ULL << units[i].address_bits) - 1)
+				top = (1ULL << units[i].address_bits) - 1;
+	return top;
+}
+
+/* A live grant of `s' that [iova, iova + size) overlaps, or none. */
+static const struct iommu_granted *grant_over(const struct device_domain *s,
+					       uint64_t iova, uint64_t size)
+{
+	for (unsigned i = 0; i < s->ngrants; i++) {
+		const struct iommu_granted *g = &s->grants[i];
+
+		if (iova < g->iova + g->size && g->iova < iova + size)
+			return g;
+	}
+	return 0;
+}
+
+/*
+ * #417: `size' bytes of the low window, [IOMMU_IOVA_LOW_BASE, top], that no
+ * live grant holds -- searched from the cursor up to `top', then from the
+ * window's base up to the cursor, so that a freed range comes back only after
+ * everything above it has been handed out since.  A grant in the way moves
+ * the search to its end, forward each time; there are at most
+ * IOMMU_MAX_GRANTS of them.
+ */
+static int low_take(struct device_domain *s, uint64_t size, uint64_t top,
+		    uint64_t *out)
+{
+	uint64_t start = s->next_low;
+
+	if (s->low_closed || top < IOMMU_IOVA_LOW_BASE
+	    || top - IOMMU_IOVA_LOW_BASE < size - 1)
+		return 0;
+	if (start < IOMMU_IOVA_LOW_BASE || start > top)
+		start = IOMMU_IOVA_LOW_BASE;
+
+	for (int turn = 0; turn < 2; turn++) {
+		uint64_t c = turn == 0 ? start : IOMMU_IOVA_LOW_BASE;
+
+		while (c <= top && top - c >= size - 1
+		       && (turn == 0 || c < start)) {
+			const struct iommu_granted *g = grant_over(s, c, size);
+
+			if (g == 0) {
+				s->next_low = c + size;
+				*out = c;
+				return 1;
+			}
+			c = g->iova + g->size;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Where `size' bytes go in a translated domain, at or below `top': the window
+ * from IOMMU_IOVA_BASE where that reaches, and the low window where it does
+ * not (#417) -- which ends below `low_top', the top of the RAM below 4 GiB,
+ * and below the interrupt range whatever that says.  A device whose window
+ * above has run out goes on in the low one, as Linux places anywhere below the
+ * mask; with the low window closed it is refused.
+ *
+ * Running out of the window above is never wrapped: a wrapped bump would hand
+ * out an address still mapped to somebody else's buffer, and the device would
+ * reach it perfectly.
+ */
+static int iova_place(struct device_domain *s, uint64_t size, uint64_t top,
+		      uint64_t low_top, uint64_t *out)
 {
 	uint64_t iova = s->domain.next_iova;
+
+	if (iova + size > iova && iova + size - 1 <= top) {
+		s->domain.next_iova = iova + size;
+		*out = iova;
+		return 1;
+	}
+
+	if (low_top == 0)
+		return 0;
+	if (low_top > IOMMU_INTERRUPT_RANGE_BASE)
+		low_top = IOMMU_INTERRUPT_RANGE_BASE;
+	if (top > low_top - 1)
+		top = low_top - 1;
+	return low_take(s, size, top, out);
+}
+
+/*
+ * Take `size' bytes of address space for a device whose DMA reaches `limit'.
+ *
+ * ⚠️ Page aligned by construction: the caller's size is rounded and both
+ * windows start aligned, so the bump and the search preserve it.  Written as
+ * an assertion of the invariant rather than a rounding, because a bump that
+ * quietly aligned would hide a caller passing a size the mapping is going to
+ * refuse anyway.
+ *
+ * ⚠️ An identity domain hands back the physical address and takes nothing out
+ * of either window.  Its grants are still recorded and still revoked; what it
+ * does not do is translate -- and its address is held to the device's reach
+ * and to the table's depth like any other (#610: a frame past 2^39 was mapped
+ * at its address modulo 2^39).  A scatter-gather grant there is page by page,
+ * and grant_pages_locked() holds each page to them.
+ */
+static int iova_take(struct device_domain *s, uint64_t pa, uint64_t size,
+		     uint64_t limit, uint64_t *out)
+{
+	uint64_t top = domain_top(s, limit);
 
 	if ((size & 0xFFFULL) != 0 || size == 0)
 		return 0;
 
-	/*
-	 * ⚠️ An identity domain hands back the physical address and takes
-	 * nothing out of the window.  Its grants are still recorded and still
-	 * revoked; what it does not do is translate.
-	 */
 	if (s->identity) {
+		if (pa + size < pa || pa + size - 1 > top)
+			return 0;
 		*out = pa;
 		return 1;
 	}
 
-	/*
-	 * Running out is reported and not wrapped.  A wrapped bump hands out
-	 * an address that is still mapped to somebody else's buffer, and the
-	 * device would reach it perfectly.
-	 */
-	if (iova + size < iova)
-		return 0;
-
-	if (!iommu_address_bits_ok(64))
-		for (unsigned i = 0; i < nunits; i++)
-			if (units[i].address_bits < 64
-			    && (iova + size - 1) >= (1ULL << units[i].address_bits))
-				return 0;
-
-	s->domain.next_iova = iova + size;
-	*out = iova;
-	return 1;
+	return iova_place(s, size, top, low_window_top, out);
 }
 
 static void grant_record(struct device_domain *s, uint64_t pa, uint64_t iova,
@@ -2642,8 +2764,49 @@ static int identity_unmap(struct device_domain *s, const uint64_t *pages,
 	return ok;
 }
 
+/*
+ * #610: a translated grant that failed after it began to map takes back what
+ * it may have mapped, and flushes, before it says no -- its caller frees the
+ * memory next, and a mapping left behind would reach it.  `pages' is a
+ * scatter-gather grant's frames, of which the first `n' may be mapped from
+ * `iova' on; null for a contiguous grant, mapped whole or in part from `pa'.
+ * This said that an address nobody was told is unreachable, and the next one
+ * of a bump is predictable (#610, item 2).
+ *
+ * When even that fails the range is not known to be empty.  The window above
+ * never hands it out again; the low window would, so it closes for good
+ * (#417), and the console says so.
+ */
+static void grant_undo(struct device_domain *s, uint64_t iova, uint64_t pa,
+		       uint64_t size, const uint64_t *pages, unsigned n)
+{
+	int ok;
+
+	if (pages == 0)
+		ok = iommu_domain_map(&s->domain, iova, pa, size, 0, 0);
+	else {
+		ok = 1;
+		for (unsigned i = 0; i < n; i++)
+			if (!iommu_domain_map(&s->domain,
+					      iova + (uint64_t)i * 4096u,
+					      pages[i], 4096u, 0, 0))
+				ok = 0;
+	}
+	if (!domain_flush(&s->domain))
+		ok = 0;
+
+	if (!ok && iova < IOMMU_IOVA_BASE && !s->low_closed) {
+		s->low_closed = 1;
+		printf("iommu: %02x:%02x.%u: a failed grant at 0x%llx could "
+		       "not be taken back, so its low window is closed and "
+		       "never hands that range out again (#417, #610)\n",
+		       (unsigned)(s->bdf >> 8), (unsigned)((s->bdf >> 3) & 0x1F),
+		       (unsigned)(s->bdf & 7), (unsigned long long)iova);
+	}
+}
+
 static int grant_locked(uint16_t bdf, uint64_t pa, uint64_t size, int read,
-			int write, uint64_t *iova_out)
+			int write, uint64_t limit, uint64_t *iova_out)
 {
 	struct device_domain *s = domain_for_grant(bdf);
 	uint64_t iova;
@@ -2651,14 +2814,14 @@ static int grant_locked(uint16_t bdf, uint64_t pa, uint64_t size, int read,
 	if (s == 0 || iova_out == 0)
 		return 0;
 
-	if (!iova_take(s, pa, size, &iova))
+	if (!iova_take(s, pa, size, limit, &iova))
 		return 0;
 
-	if (!iommu_domain_map(&s->domain, iova, pa, size, read, write))
+	if (!iommu_domain_map(&s->domain, iova, pa, size, read, write)
+	    || !domain_flush(&s->domain)) {
+		grant_undo(s, iova, pa, size, 0, 0);
 		return 0;
-
-	if (!domain_flush(&s->domain))
-		return 0;
+	}
 
 	grant_record(s, pa, iova, size, 0);
 	*iova_out = iova;
@@ -2666,27 +2829,25 @@ static int grant_locked(uint16_t bdf, uint64_t pa, uint64_t size, int read,
 }
 
 int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
-		uint64_t *iova_out)
+		uint64_t limit, uint64_t *iova_out)
 {
 	int	ok;
 
 	mutex_lock(&iommu_domain_lock);
-	ok = grant_locked(bdf, pa, size, read, write, iova_out);
+	ok = grant_locked(bdf, pa, size, read, write, limit, iova_out);
 	domain_unlock();
 	return ok;
 }
 
 static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
-			      int read, int write, uint64_t *iova_out,
-			      int *identity_out)
+			      int read, int write, uint64_t limit,
+			      uint64_t *iova_out, int *identity_out)
 {
 	struct device_domain *s = domain_for_grant(bdf);
 	uint64_t iova, size = (uint64_t)n * 4096u;
+	unsigned mapped;
 
 	if (s == 0 || pa == 0 || n == 0 || iova_out == 0 || identity_out == 0)
-		return 0;
-
-	if (!iova_take(s, pa[0], size, &iova))
 		return 0;
 
 	/*
@@ -2702,10 +2863,20 @@ static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
 	 * reached), and the record keeps the list for the revoke.
 	 */
 	if (s->identity) {
-		uint64_t *pages = (uint64_t *)kalloc((vm_size_t)n *
-						     sizeof(uint64_t));
+		uint64_t  top = domain_top(s, limit);
+		uint64_t *pages;
 		unsigned  i;
 
+		/*
+		 * #417, #610: each frame is mapped where it is, so each is
+		 * held to the device's reach and the table's depth.
+		 */
+		for (i = 0; i < n; i++)
+			if ((pa[i] & 0xFFFULL) != 0 || pa[i] > top
+			    || top - pa[i] < 4095u)
+				return 0;
+
+		pages = (uint64_t *)kalloc((vm_size_t)n * sizeof(uint64_t));
 		if (pages == 0)
 			return 0;
 
@@ -2730,20 +2901,23 @@ static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
 		return 1;
 	}
 
-	/*
-	 * ⚠️ Fails PART WAY and says so, exactly as iommu_domain_map does: the
-	 * window was taken and some of it is mapped.  What makes that safe is
-	 * that the window is not recorded and the caller must treat a failed
-	 * grant as a failed allocation -- so nothing is ever told the address,
-	 * and an address nobody holds is unreachable whatever it maps.
-	 */
-	for (unsigned i = 0; i < n; i++)
-		if (!iommu_domain_map(&s->domain, iova + (uint64_t)i * 4096u,
-				      pa[i], 4096u, read, write))
-			return 0;
-
-	if (!domain_flush(&s->domain))
+	if (!iova_take(s, pa[0], size, limit, &iova))
 		return 0;
+
+	/*
+	 * A failure part way takes back what was mapped (#610): the page that
+	 * failed as well, which may have its road built and not its entry.
+	 */
+	for (mapped = 0; mapped < n; mapped++)
+		if (!iommu_domain_map(&s->domain,
+				      iova + (uint64_t)mapped * 4096u,
+				      pa[mapped], 4096u, read, write))
+			break;
+
+	if (mapped < n || !domain_flush(&s->domain)) {
+		grant_undo(s, iova, 0, 0, pa, mapped < n ? mapped + 1 : n);
+		return 0;
+	}
 
 	grant_record(s, pa[0], iova, size, 0);
 	*iova_out = iova;
@@ -2752,16 +2926,149 @@ static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
 }
 
 int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
-		      int read, int write, uint64_t *iova_out,
+		      int read, int write, uint64_t limit, uint64_t *iova_out,
 		      int *identity_out)
 {
 	int	ok;
 
 	mutex_lock(&iommu_domain_lock);
-	ok = grant_pages_locked(bdf, pa, n, read, write, iova_out,
+	ok = grant_pages_locked(bdf, pa, n, read, write, limit, iova_out,
 				identity_out);
 	domain_unlock();
 	return ok;
+}
+
+int iommu_translates(uint16_t bdf)
+{
+	struct device_domain *s;
+	int translates;
+
+	if (!iommu_can_isolate())
+		return 0;
+
+	mutex_lock(&iommu_domain_lock);
+	s = domain_slot(bdf);
+	translates = s == 0 || !s->identity;
+	domain_unlock();
+	return translates;
+}
+
+/*
+ * #417: the scratch domain iommu_iova_check() places on.  Placement is
+ * arithmetic on a domain's records, so these are records only: no table is
+ * built and no engine sees it.
+ */
+static struct device_domain	iova_scratch;
+
+static void iova_scratch_reset(unsigned levels, int identity)
+{
+	iova_scratch.identity = identity;
+	iova_scratch.ngrants = 0;
+	iova_scratch.next_low = 0;
+	iova_scratch.low_closed = 0;
+	iova_scratch.domain.levels = levels;
+	iova_scratch.domain.next_iova = IOMMU_IOVA_BASE;
+}
+
+/* Placed and recorded, as a grant is: the address, or ~0 when refused. */
+static uint64_t iova_scratch_take(uint64_t size, uint64_t top,
+				  uint64_t low_top)
+{
+	uint64_t iova;
+
+	if (iova_scratch.ngrants >= IOMMU_MAX_GRANTS
+	    || !iova_place(&iova_scratch, size, top, low_top, &iova))
+		return ~0ULL;
+	grant_record(&iova_scratch, 0, iova, size, 0);
+	return iova;
+}
+
+/* The record at `iova' forgotten, as a revoke does once it has flushed. */
+static void iova_scratch_forget(uint64_t iova)
+{
+	for (unsigned i = 0; i < iova_scratch.ngrants; i++)
+		if (iova_scratch.grants[i].iova == iova) {
+			iova_scratch.ngrants--;
+			iova_scratch.grants[i] =
+				iova_scratch.grants[iova_scratch.ngrants];
+			return;
+		}
+}
+
+int iommu_iova_check(unsigned *ran, unsigned *wrong)
+{
+	const uint64_t	P = 4096u, LOW = IOMMU_IOVA_LOW_BASE;
+	const uint64_t	RAM = 0x20000000ULL;	/* 512 MiB below 4 GiB */
+	const uint64_t	W28 = (1ULL << 28) - 1;
+	const uint64_t	TOP4 = IOMMU_IOVA_LOW_BASE + 4 * 4096u - 1;
+	unsigned	r = 0, w = 0, i;
+	uint64_t	a, b, got[4];
+	int		in_order;
+
+#define	IOVA_CASE(cond)	do { r++; if (!(cond)) w++; } while (0)
+
+	/* A device that reaches the window above is given it, in order. */
+	iova_scratch_reset(3, 0);
+	a = iova_scratch_take(P, depth_top(3), RAM);
+	b = iova_scratch_take(2 * P, depth_top(3), RAM);
+	IOVA_CASE(a == IOMMU_IOVA_BASE && b == IOMMU_IOVA_BASE + P);
+
+	/* One that reaches 28 bits is given the low window, from its base. */
+	a = iova_scratch_take(P, W28, RAM);
+	b = iova_scratch_take(P, W28, RAM);
+	IOVA_CASE(a == LOW && b == LOW + P);
+
+	/* Freed, the first is not handed out while the window has room above. */
+	iova_scratch_forget(a);
+	IOVA_CASE(iova_scratch_take(P, W28, RAM) == LOW + 2 * P);
+
+	/* A window of four pages, filled in order; a fifth is refused... */
+	iova_scratch_reset(3, 0);
+	in_order = 1;
+	for (i = 0; i < 4; i++) {
+		got[i] = iova_scratch_take(P, TOP4, RAM);
+		if (got[i] != LOW + i * P)
+			in_order = 0;
+	}
+	IOVA_CASE(in_order && iova_scratch_take(P, TOP4, RAM) == ~0ULL);
+
+	/* ...and the second, freed, is what comes back, the window gone round. */
+	iova_scratch_forget(LOW + P);
+	IOVA_CASE(iova_scratch_take(P, TOP4, RAM) == LOW + P);
+
+	/* Two pages now fit nowhere: never over a live grant. */
+	IOVA_CASE(iova_scratch_take(2 * P, TOP4, RAM) == ~0ULL);
+
+	/* #610: the table's depth bounds the window above. */
+	IOVA_CASE(depth_top(3) == (1ULL << 39) - 1
+		  && depth_top(4) == (1ULL << 48) - 1
+		  && depth_top(5) == (1ULL << 57) - 1);
+	iova_scratch_reset(3, 0);
+	iova_scratch.domain.next_iova = (1ULL << 39) - P;
+	a = iova_scratch_take(2 * P, depth_top(3), 0);
+	b = iova_scratch_take(P, depth_top(3), 0);
+	IOVA_CASE(a == ~0ULL && b == (1ULL << 39) - P);
+
+	/* No RAM below 4 GiB said: below the window above, nothing. */
+	iova_scratch_reset(3, 0);
+	IOVA_CASE(iova_scratch_take(P, W28, 0) == ~0ULL);
+
+	/* The low window ends below the interrupt range, whatever RAM says. */
+	iova_scratch_reset(3, 0);
+	iova_scratch.next_low = IOMMU_INTERRUPT_RANGE_BASE - P;
+	IOVA_CASE(iova_scratch_take(2 * P, 0xFFFFFFFFULL, 0xFFFFFFFFULL) == LOW);
+
+	/* An identity domain: the frame's own address, within the reach. */
+	iova_scratch_reset(3, 1);
+	IOVA_CASE(iova_take(&iova_scratch, 0x10000000ULL, P, W28, &a) == 0
+		  && iova_take(&iova_scratch, 0x0FFFE000ULL, 2 * P, W28, &a) == 1
+		  && a == 0x0FFFE000ULL);
+
+#undef	IOVA_CASE
+
+	*ran = r;
+	*wrong = w;
+	return w == 0;
 }
 
 /*
@@ -2888,9 +3195,9 @@ static int revoke_locked(uint16_t bdf, uint64_t pa, uint64_t size)
 		      (vm_size_t)(size / 4096u) * sizeof(uint64_t));
 
 	/*
-	 * The record goes, and the ADDRESS does not come back.  See next_iova:
-	 * an address handed out twice is a stale mapping that a device can
-	 * mistake for a live one, and the space is 2^39 bytes.
+	 * The record goes.  An address of the window above does not come
+	 * back (next_iova); one of the low window does, now that the domain
+	 * is flushed, once that window has gone round (#417).
 	 */
 	s->grants[i] = s->grants[s->ngrants - 1];
 	s->ngrants--;
