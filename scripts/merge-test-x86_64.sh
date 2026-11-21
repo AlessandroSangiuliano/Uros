@@ -48,7 +48,8 @@
 #       for, and say so: 0 if so, 1 if not.  ci/job.sh asks it before it
 #       builds (#755, #776)
 #   -P  only ask whether every patch of ablations/ still applies to this tree,
-#       and say so: 0 if each does, 1 if not (#769).  A whole run asks it too
+#       and whether the sweep of every patch plans (#975), and say so: 0 if
+#       both, 1 if not (#769).  A whole run asks them too
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
 # default is tested the same way; its char build, which the entries marked @char
 # boot, is that build's path with -char after it (#765).  A run that refuses to
@@ -429,6 +430,31 @@ patches_apply() {
 	PATCHES_SAID="merge-test: ablations: ablate.sh --check-all did not answer (status $rc)"
 	return 2
 }
+# #975: whether the sweep of every patch plans, asked of ci/job.sh --dry-run
+# --sweep all, which is what the campaign's plan step runs.  A patch the sweep
+# takes and ablate.sh refuses stops every sweep at its plan: six of #804's,
+# judged on a machine's metal, did so from 02/11, and nobody started a sweep
+# to see it.  Returns 0 if it plans, 1 if it refuses, 2 if the question could
+# not be asked; the verdict, one line, in SWEEP_SAID.
+SWEEP_SAID=""
+sweep_plans() {
+	local out rc n left
+	out=$("$HERE/scripts/ci/job.sh" --dry-run --no-install --sweep all 2>&1)
+	rc=$?
+	case $rc in
+	0)	n=$(sed -n 's/^job: a sweep instead of the merge test: [0-9]* of the \([0-9]*\) patches .*$/\1/p' <<< "$out")
+		left=$(sed -n 's/^job: \([0-9]*\) patch(es) left out of all, .*$/\1/p' <<< "$out")
+		if [ -n "$n" ]; then
+			SWEEP_SAID="merge-test: ablations: the sweep of every patch plans, $n patches, ${left:-none} left out as judged on a machine's metal"
+			return 0
+		fi ;;
+	2)	SWEEP_SAID=$(sed -n 's/^job: \(ablate\.sh refuses [0-9]* of the [0-9]* patches of this sweep\)$/merge-test: ablations: the sweep of every patch does not plan, \1 -- WRONG (#975)/p' <<< "$out")
+		[ -n "$SWEEP_SAID" ] && return 1 ;;
+	esac
+	printf '%s\n' "$out" | tail -n 10 >&2
+	SWEEP_SAID="merge-test: ablations: ci/job.sh --dry-run --sweep all did not answer (status $rc)"
+	return 2
+}
 if [ $LISTS_ONLY = 1 ]; then
 	lists_cover
 	exit
@@ -437,6 +463,10 @@ if [ $PATCHES_ONLY = 1 ]; then
 	patches_apply
 	rc=$?
 	echo "$PATCHES_SAID"
+	sweep_plans
+	src=$?
+	echo "$SWEEP_SAID"
+	[ $src -le $rc ] || rc=$src
 	exit $rc
 fi
 # #951: a run sent SIGTERM stops the boot it is running, says so of that boot
@@ -465,6 +495,10 @@ patches_apply
 ROTTEN=$?
 echo "$PATCHES_SAID"
 [ $ROTTEN -le 1 ] || exit 2
+sweep_plans
+UNSWEPT=$?
+echo "$SWEEP_SAID"
+[ $UNSWEPT -le 1 ] || exit 2
 mkdir -p "$OUT"
 
 # #412: the PCID entries' half of judge().  "Not offered" is taken at the
@@ -1051,8 +1085,9 @@ echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK
 echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 # #769: said again here, beside the totals a reader looks at, and outside the
 # total: ci/job.sh counts that as the entries' WRONG lines, and asks the
-# patches itself.
+# patches itself.  #975: the sweep's plan, the same way.
 echo "$PATCHES_SAID"
+echo "$SWEEP_SAID"
 echo "merge-test: $WRONG wrong"
 # #951: and a stopped run dies of the signal, as run-x86_64.sh does, so that
 # whoever sent it sees it obeyed.
@@ -1061,5 +1096,5 @@ if [ -n "$STOP" ]; then
 	kill -TERM $$
 fi
 # #782: whether, not how many -- see the header.
-[ $((WRONG + ROTTEN)) -eq 0 ] || exit 1
+[ $((WRONG + ROTTEN + UNSWEPT)) -eq 0 ] || exit 1
 exit 0
