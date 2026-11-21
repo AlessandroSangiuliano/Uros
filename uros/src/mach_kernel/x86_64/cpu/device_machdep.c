@@ -31,6 +31,7 @@
 #include <cpu/lapic.h>	/* lapic_eoi, and which processor to route to */
 #include <cpu/pci_cfg.h>
 #include <cpu/pci_msix.h>	/* #457: a device's own table */
+#include <cpu/pci_msi.h>	/* #977: a message without a table */
 #include <cpu/smp.h>		/* #659: the boot processor's apic id */
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
@@ -806,6 +807,14 @@ static struct pci_msix	msi_device[DEVICE_MD_MSI_MAX];
 static unsigned int	msi_entry_of[DEVICE_MD_MSI_MAX];
 
 /*
+ * #977: and the slots given to a function's plain MSI, which has no table:
+ * cap is nonzero while the slot is one.  A slot is one of the two kinds at
+ * most.  A function's MSI is one message, so a second registration of it is
+ * refused rather than pointed at another vector over the first.
+ */
+static struct pci_msi	msi_plain[DEVICE_MD_MSI_MAX];
+
+/*
  * #598: <cpu/pci_msix.h> says why every programmer of a device calls these.
  * The slot's remapping entry is the slot's: its index in the map is the
  * slot's number among the MSI slots, and its vector is the slot's.  Its
@@ -939,6 +948,94 @@ msi_detach(unsigned int slot, struct pci_msix *gone)
 	return had;
 }
 
+/*
+ * #977: a plain MSI attached to its slot, and detached, under the same lock
+ * and in the same order as the two above: the record first, the device
+ * after.  Zero from attach, and nothing recorded or written, when the
+ * function's MSI is another slot's already or the message does not fit it.
+ */
+static int
+msi_attach_plain(unsigned int slot, const struct pci_msi *p,
+		 unsigned long long addr, unsigned int data)
+{
+	unsigned int	i = slot - DEVICE_MD_MSI_BASE, j;
+	int		ok = 1;
+
+	hw_lock_lock(&msi_function_lock);
+	for (j = 0; j < DEVICE_MD_MSI_MAX && ok; j++)
+		if (msi_plain[j].cap != 0
+		    && msi_plain[j].segment == p->segment
+		    && msi_plain[j].bus == p->bus
+		    && msi_plain[j].dev == p->dev
+		    && msi_plain[j].func == p->func)
+			ok = 0;
+	if (ok) {
+		msi_plain[i] = *p;
+		if (!pci_msi_arm(p, addr, data)) {
+			msi_plain[i].cap = 0;
+			ok = 0;
+		}
+	}
+	hw_lock_unlock(&msi_function_lock);
+	return ok;
+}
+
+static int
+msi_detach_plain(unsigned int slot, struct pci_msi *gone)
+{
+	unsigned int	i = slot - DEVICE_MD_MSI_BASE;
+	int		had;
+
+	hw_lock_lock(&msi_function_lock);
+	had = msi_plain[i].cap != 0;
+	if (had) {
+		*gone = msi_plain[i];
+		/*
+		 * 🔴 The device before the handler, as msi_detach() says.  And
+		 * its enable goes with it: the function has the one message,
+		 * and without per-vector masking disabling is the only stop.
+		 */
+		pci_msi_disarm(&msi_plain[i]);
+		msi_plain[i].cap = 0;
+	}
+	hw_lock_unlock(&msi_function_lock);
+	return had;
+}
+
+/*
+ * #977: a function with no MSI-X table and MSI's capability has one message,
+ * entry 0.  It got no message at all, and its driver took its INTx line --
+ * which is refused when another task's device raises the same line (#972).
+ * The vector and its remapping entry are claimed as for a table's entry.
+ */
+static int
+msi_register_plain(unsigned int bus, unsigned int dev, unsigned int func,
+		   unsigned int entry, device_md_intr_t handler,
+		   unsigned int *slot_out)
+{
+	struct pci_msi		p;
+	unsigned int		slot = 0, data = 0;
+	unsigned long long	addr = 0;
+
+	if (entry != 0)
+		return 0;
+	if (!pci_msi_probe(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, &p))
+		return 0;
+	if (!msi_claim_vector(handler, &slot, &addr, &data))
+		return 0;
+	if (!msi_remap_vector(slot, bus, dev, func, &addr, &data)) {
+		msi_release_vector(slot);
+		return 0;
+	}
+	if (!msi_attach_plain(slot, &p, addr, data)) {
+		msi_unremap_vector(slot, bus, dev, func);
+		msi_release_vector(slot);
+		return 0;
+	}
+	*slot_out = slot;
+	return 1;
+}
+
 int
 device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
 		       unsigned int entry, device_md_intr_t handler,
@@ -951,8 +1048,10 @@ device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
 	if (slot_out == 0 || handler == 0)
 		return 0;
 
+	/* #977: MSI-X first, and plain MSI where there is no table. */
 	if (!pci_msix_probe(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, &m))
-		return 0;
+		return msi_register_plain(bus, dev, func, entry, handler,
+					  slot_out);
 
 	if (entry >= m.vectors)
 		return 0;
@@ -980,6 +1079,7 @@ void
 device_md_msi_unregister(unsigned int slot)
 {
 	struct pci_msix	gone;
+	struct pci_msi	plain;
 
 	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS)
 		return;
@@ -987,10 +1087,13 @@ device_md_msi_unregister(unsigned int slot)
 	/*
 	 * #598: and the slot's remapping entry, after the device stops using
 	 * it -- so that the device, told to stop and not doing so, is refused
-	 * instead of reaching whoever holds the vector next.
+	 * instead of reaching whoever holds the vector next.  #977: a table's
+	 * entry or a plain MSI, whichever the slot was given.
 	 */
 	if (msi_detach(slot, &gone))
 		msi_unremap_vector(slot, gone.bus, gone.dev, gone.func);
+	else if (msi_detach_plain(slot, &plain))
+		msi_unremap_vector(slot, plain.bus, plain.dev, plain.func);
 
 	msi_release_vector(slot);
 }
