@@ -4182,7 +4182,7 @@ ct14_list_shape(mach_port_t device_port, mach_port_t handle, const char *name)
                          0, &buf_cap);
     }
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [14] WRONG — %s: the buffer of two contiguous pages "
                "was not mapped or not handed over (kr=%d) (#712)\n",
