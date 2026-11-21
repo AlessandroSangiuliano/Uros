@@ -954,21 +954,47 @@ msi_detach(unsigned int slot, struct pci_msix *gone)
  * after.  Zero from attach, and nothing recorded or written, when the
  * function's MSI is another slot's already or the message does not fit it.
  */
+/* Whether the function's MSI is a slot's already; msi_function_lock held. */
 static int
-msi_attach_plain(unsigned int slot, const struct pci_msi *p,
-		 unsigned long long addr, unsigned int data)
+msi_plain_taken(const struct pci_msi *p)
 {
-	unsigned int	i = slot - DEVICE_MD_MSI_BASE, j;
-	int		ok = 1;
+	unsigned int j;
 
-	hw_lock_lock(&msi_function_lock);
-	for (j = 0; j < DEVICE_MD_MSI_MAX && ok; j++)
+	for (j = 0; j < DEVICE_MD_MSI_MAX; j++)
 		if (msi_plain[j].cap != 0
 		    && msi_plain[j].segment == p->segment
 		    && msi_plain[j].bus == p->bus
 		    && msi_plain[j].dev == p->dev
 		    && msi_plain[j].func == p->func)
-			ok = 0;
+			return 1;
+	return 0;
+}
+
+/*
+ * The same, asked before a vector is claimed, so that a refusal spends no
+ * slot.  msi_attach_plain() asks again under the lock it holds while it
+ * records, and that answer is the one that counts.
+ */
+static int
+msi_plain_held(const struct pci_msi *p)
+{
+	int held;
+
+	hw_lock_lock(&msi_function_lock);
+	held = msi_plain_taken(p);
+	hw_lock_unlock(&msi_function_lock);
+	return held;
+}
+
+static int
+msi_attach_plain(unsigned int slot, const struct pci_msi *p,
+		 unsigned long long addr, unsigned int data)
+{
+	unsigned int	i = slot - DEVICE_MD_MSI_BASE;
+	int		ok;
+
+	hw_lock_lock(&msi_function_lock);
+	ok = !msi_plain_taken(p);
 	if (ok) {
 		msi_plain[i] = *p;
 		if (!pci_msi_arm(p, addr, data)) {
@@ -1020,6 +1046,8 @@ msi_register_plain(unsigned int bus, unsigned int dev, unsigned int func,
 	if (entry != 0)
 		return 0;
 	if (!pci_msi_probe(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, &p))
+		return 0;
+	if (msi_plain_held(&p))
 		return 0;
 	if (!msi_claim_vector(handler, &slot, &addr, &data))
 		return 0;

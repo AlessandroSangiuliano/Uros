@@ -8371,6 +8371,29 @@ static void msi_plain_selftest(void)
 	      : " — WRONG, the capability is written and the device's message"
 		" did not arrive on its slot\r\n");
 
+	/*
+	 * The function has one message, so a second registration is refused
+	 * rather than given another vector over the first -- whose driver
+	 * would wait on a slot the device no longer writes.
+	 */
+	{
+		unsigned int second = 0;
+
+		if (device_md_msi_register(0, edu, 0, 0, msi_handler,
+					   &second)) {
+			kputs("UrMach x86-64: plain MSI: asked again, the same"
+			      " function was given a second slot, ");
+			kputdec(second);
+			kputs(" — WRONG, its one message pointed at another"
+			      " vector over the first\r\n");
+			device_md_msi_unregister(second);
+		} else {
+			kputs("UrMach x86-64: plain MSI: asked again, the same"
+			      " function was refused a second slot — its one"
+			      " message is the first slot's\r\n");
+		}
+	}
+
 	device_md_msi_unregister(slot);
 	pci_msi_read(&p, 0, 0, &control);
 	kputs("UrMach x86-64: plain MSI: given back, its control word reads ");

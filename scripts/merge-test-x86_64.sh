@@ -121,9 +121,10 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             from a shell, a forked child's write on its terminal (#952)
 #   msiplain  the harness's verdict, with QEMU's edu device (--edu): the
 #             boot's plain-MSI test gave it a slot, enabled with one message
-#             at the local APICs' address, rang it on that slot, and found
-#             it disabled once given back -- what "harness" would pass a
-#             kernel that never ran the test, since no WRONG says so (#977)
+#             at the local APICs' address, rang it on that slot, was refused
+#             a second slot for its one message, and found it disabled once
+#             given back -- what "harness" would pass a kernel that never ran
+#             the test, since no WRONG says so (#977)
 #   stop13    the name server stops at service_checkin, which grub.cfg says is
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in.  Since #744 it checks in on its
@@ -593,11 +594,12 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# default board and on entry 37, whose -i remaps interrupts where the
 	# engine can: under TCG, so that the message is the remapped one, and
 	# not under KVM, where QEMU's intel-iommu remaps nothing without
-	# intremap=on.  The harness reads its WRONG lines; these are the three
+	# intremap=on.  The harness reads its WRONG lines; these are the four
 	# lines that make its claims, since a test that never ran says no WRONG.
 	msiplain) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'plain MSI: the edu device at 00:[0-9]+\.0 was given slot [0-9]+, .* enabled, one message, at the local APICs. address' "$f" &&
 		grep -aq 'plain MSI: edu was asked to raise .* a device wrote the message the kernel put in its capability, and it arrived as an interrupt' "$f" &&
+		grep -aq 'plain MSI: asked again, the same function was refused a second slot' "$f" &&
 		grep -aq 'plain MSI: given back, its control word reads .* disabled, so the device can no longer send it' "$f" ;;
 	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
 	# while interrupts are remapped takes its pin instead, for the reason
