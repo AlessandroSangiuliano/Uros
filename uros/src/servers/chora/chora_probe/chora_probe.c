@@ -114,26 +114,26 @@ probe_attach(struct driver *d)
 		driver_log(d, "WRONG -- no interrupt to take: 0x%x", kr);
 		return -1;
 	}
-	if (d->irq_msix)
+	if (d->irq_message)
 		reg_write(E1000_IVAR, E1000_IVAR_OTHER_ENTRY0);
 
-	reg_write(E1000_IMS, E1000_ICR_LSC | (d->irq_msix ? E1000_ICR_OTHER : 0));
+	reg_write(E1000_IMS, E1000_ICR_LSC | (d->irq_message ? E1000_ICR_OTHER : 0));
 	reg_write(E1000_ICS, E1000_ICR_LSC);
 	for (i = 0; i < PROBE_WAIT_STEPS && rang == 0; i++)
 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
 
 	quiet();
-	if (d->irq_msix)
+	if (d->irq_message)
 		reg_write(E1000_IVAR, 0);
 
 	if (rang == 0) {
 		driver_log(d, "WRONG -- told to ring, the card sent nothing in a "
-			   "second to %s %u", d->irq_msix ? "MSI-X slot" :
+			   "second to %s %u", d->irq_message ? "message slot" :
 			   "INTx line", (unsigned)d->irq_slot);
 		return -1;
 	}
 	driver_log(d, "took an interrupt, %s %u, ICR 0x%08x",
-		   d->irq_msix ? "MSI-X slot" : "INTx line",
+		   d->irq_message ? "message slot" : "INTx line",
 		   (unsigned)d->irq_slot, (unsigned)rang_icr);
 	return 0;
 }
