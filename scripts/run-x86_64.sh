@@ -539,6 +539,13 @@ must_report 'UrMach x86-64: PCID ' 'pcid_test: ' \
 must_report 'UrMach x86-64: global pages ' 'UrMach x86-64: \(a page narrowed after a split\|global pages are off, so a split\|no frame for the global split probe\|the probe.s frame has no entry\|no processor online besides the one that\|the direct map is already 4 KiB\|the probe.s page did not split\)' \
 	'The global split probe ends in its summary line or in one of the lines that say why it could not ask (#437).' \
 	'global split probe'
+# #977: the boot's plain-MSI test, on a board with QEMU's edu device (--edu).
+# Its one wait, for the device's message, is bounded and said either way; a
+# stop after its first line is a stop inside device_md_msi_register() or in
+# the device's configuration space.
+must_report 'UrMach x86-64: plain MSI: the edu device at ' 'UrMach x86-64: plain MSI: \(given back, \|the edu device at .*WRONG\)' \
+	'The plain-MSI test names the device it found, then ends in the line that says what giving it back left, or in a WRONG that says why it could not go on (#977).' \
+	'plain MSI test'
 must_report 'preempt_test: starting' 'preempt_test: \(PASS\|NOT ASKED\)' \
 	'Its failure mode is silence: a processor never taken from a thread that will not yield prints nothing at all (#459/#461).'
 must_report 'fpu_stress: 3 threads' 'fpu_stress: \(PASS\|NOT ASKED\)' \
@@ -960,6 +967,7 @@ IOMMU_NAME="none"
 BOARD=""
 KVM_ARGS=""
 HPET_ARGS=""
+EDU_ARGS=""
 SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
@@ -1004,6 +1012,15 @@ while :; do
 			exit 2 ;;
 		esac
 		shift 2 ;;
+	--edu)
+		# #977: QEMU's educational device, vendor 1234h and device
+		# 11e8h (docs/specs/edu.rst in QEMU 11.1.2): MSI with one
+		# message and no MSI-X table, and a register that raises an
+		# interrupt when written.  The one device here the kernel can
+		# ask for a message without a table, which its boot test does.
+		# An option, as --hpet is, so that the merge test can ask.
+		EDU_ARGS="-device edu"
+		shift ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
 		#
@@ -1514,7 +1531,7 @@ QERR="$LOG.qemu-stderr"
 # sets what the boot wrote in a superblock against it.
 QEMU_STARTED_EPOCH=$(date +%s)
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $EDU_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
