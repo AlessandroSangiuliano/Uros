@@ -308,6 +308,13 @@ extern int		device_md_debugger_break(void);
  * file exists to keep out of that table.  So device_intr_enable() and the
  * unregister below take it without knowing which kind it is.
  *
+ * Which capability (#977): MSI-X first, when the device has a table.  A
+ * device with no table and MSI's capability has one message, entry 0, and
+ * nothing else; while a slot holds it, a second registration is refused
+ * rather than pointed at another vector over the first.  Its message is in
+ * its configuration space, and the machine writes it there as it writes a
+ * table's entry.
+ *
  * Answers zero if the machine has no message-signalled interrupts, if that
  * device has none, or if there is no slot left.  ⚠️ i386 answers zero always
  * and means it: this tree's i386 has no MSI at all, and a machine that cannot
@@ -327,7 +334,8 @@ extern int		device_md_msi_register(unsigned int bus,
  * delivery whatever the device does; here the address and the value are in
  * the device's own table, so the machine must put the mask back there -- and
  * it can, because it is the one that wrote them.  A device left armed at a
- * vector whose handler is gone raises an interrupt nobody claims.
+ * vector whose handler is gone raises an interrupt nobody claims.  For a
+ * plain MSI, with no table and its one message, that is disabling it (#977).
  */
 extern void		device_md_msi_unregister(unsigned int slot);
 

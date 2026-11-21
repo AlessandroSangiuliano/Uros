@@ -118,6 +118,13 @@ routine device_intr_register(
  * the kernel finds the capability, allocates a vector, decides the address
  * and the value, and writes them there itself.
  *
+ * Which capability (#977): MSI-X first, when the function has a table, and
+ * `entry' is an entry of it.  A function with no table and MSI's capability
+ * has one message, entry 0, and is refused any other -- and refused a second
+ * registration of it while the first holds it.  A function with neither is
+ * refused, and its driver is left its INTx line.  The two are never enabled
+ * together.
+ *
  * `slot' comes back in the same numbering as an IRQ, and is what
  * device_intr_enable and device_intr_unregister take afterwards -- a driver
  * that has one does not need to know which kind it is.
