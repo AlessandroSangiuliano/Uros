@@ -51,6 +51,8 @@ struct driver {
 	mach_port_t	master_device;
 	struct uros_cap	token;			/* the capability the claim rests on */
 
+	uint64_t	dma_reach;		/* driver_dma_reach()'s; all ones */
+
 	mach_port_t	irq_port;		/* MACH_PORT_NULL: none asked for */
 	natural_t	irq_slot;		/* what device_intr_enable() takes */
 	int		irq_message;		/* 1: a message; 0: the INTx line */
@@ -122,14 +124,24 @@ struct driver_dma {
 };
 
 /*
- * A buffer of `size' bytes for the device, zeroed.  `reach' is the highest
- * address the device can use, inclusive -- a device whose DMA has fewer bits
- * than the machine's says so, and a buffer beyond it is given back and
- * refused, said, rather than handed over to be cut short by the device: AHCI
- * without S64A and QEMU's edu, 28 bits, are such devices.  0 means no limit.
+ * How far the device's DMA reaches, the highest address it can use, inclusive
+ * (#417): its DMA mask, as Linux's dma_set_mask() takes it.  The kernel places
+ * every address it gives the device from then on below it -- the buffers of
+ * driver_dma_alloc(), and the pages other servers lend the device -- an IOVA
+ * placed below it where the machine translates, memory taken below it where
+ * it does not.  A device whose DMA has fewer bits than the machine's says so
+ * before its first buffer: AHCI without S64A, QEMU's edu at its default 28.
+ * Until then it reaches everything.
+ */
+kern_return_t	driver_dma_reach(struct driver *d, uint64_t reach);
+
+/*
+ * A buffer of `size' bytes for the device, zeroed, within its reach.  One the
+ * kernel placed beyond the reach declared is given back and refused, said:
+ * that is the kernel's promise broken, and a device would cut the address.
  */
 kern_return_t	driver_dma_alloc(struct driver *d, vm_size_t size,
-				 uint64_t reach, struct driver_dma *out);
+				 struct driver_dma *out);
 
 /*
  * Give it back: this task's mapping, then the buffer.  The device must have
