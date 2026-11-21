@@ -1,0 +1,46 @@
+Kind: ablation
+Issue: #973
+Takes out: libdl's half: dlopen() is given a module's bare file name again, as before #973, and the cache, which still keys by class and name, serves a bare name with the first module of that name.  The second pool's twin.so is fetched, and libdl, which knows an object by the path it was opened with, hands back the first twin as already loaded.  modload_test's [2] is given modload_a's twin.
+Run: --iommu intel --entry 68 600 -smp 4
+Expect: modload_test: \[2\] modload_load_named\("modload_b", "twin.so"\) gave modload_a/twin.so A, where modload_b/twin.so B was asked for -- WRONG
+
+diff --git a/uros/src/lib/libmodload/modload.c b/uros/src/lib/libmodload/modload.c
+index 1f4b35ed..ae97867b 100644
+--- a/uros/src/lib/libmodload/modload.c
++++ b/uros/src/lib/libmodload/modload.c
+@@ -107,7 +107,17 @@ cache_read_file(const char *path, void **buf, unsigned int *size)
+ 	kern_return_t kr;
+ 
+ 	slash = strchr(path, '/');
+-	if (slash == NULL || slash == path || slash[1] == '\0' ||
++	if (slash == NULL) {	/* 973-dlopen-bare-name: the first module of that name */
++		int i;
++
++		for (i = 0; i < n_cached_modules; i++)
++			if (strcmp(cached_modules[i].name, path) == 0)
++				break;
++		if (i == n_cached_modules)
++			return -1;
++		cm = &cached_modules[i];
++	} else {
++	if (slash == path || slash[1] == '\0' ||
+ 	    strchr(slash + 1, '/') != NULL ||
+ 	    (size_t)(slash - path) >= sizeof(class)) {
+ 		printf("%s: \"%s\" is not <class>/<name>\n", log_tag, path);
+@@ -121,6 +131,7 @@ cache_read_file(const char *path, void **buf, unsigned int *size)
+ 		printf("%s: module \"%s\" not in cache\n", log_tag, path);
+ 		return -1;
+ 	}
++	}
+ 
+ 	copy = 0;
+ 	kr = vm_allocate(mach_task_self(), &copy, cm->size, TRUE);
+@@ -304,7 +315,7 @@ load_cached(const struct cached_module *cm, const char *sym_suffix)
+ 	void *ops;
+ 
+ 	/* Both names are shorter than MODULE_NAME_MAX: the cache holds no other. */
+-	(void) snprintf(path, sizeof(path), "%s/%s", cm->class, cm->name);
++	(void) snprintf(path, sizeof(path), "%s", cm->name);	/* 973-dlopen-bare-name */
+ 
+ 	suf_len = strlen(sym_suffix);
+ 	if (suf_len + 1 >= sizeof(sym_buf)) {
