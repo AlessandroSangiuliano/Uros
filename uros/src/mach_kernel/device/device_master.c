@@ -574,6 +574,13 @@ static struct device_claim_entry {
 	 */
 	unsigned int	ops;
 
+	/*
+	 * #417: how far the device's DMA reaches, the highest address it can
+	 * use, as its claimant declared through device_dma_reach -- all of
+	 * them until it does.  A word, read and written like `ops'.
+	 */
+	vm_address_t	dma_reach;
+
 	/* Measured once, when the device was handed over. */
 	struct {
 		uint64_t	base;
@@ -866,6 +873,46 @@ static kern_return_t
 check_claim(natural_t bdf)
 {
 	return check_claim_op(bdf, 0, 0);
+}
+
+/*
+ * #417: how far `bdf''s DMA reaches, as its claimant declared -- everything
+ * when it declared nothing, or nobody holds it.  The first in a read section,
+ * the second for a caller that holds device_table_lock.
+ */
+static vm_address_t
+claim_dma_reach(natural_t bdf)
+{
+	vm_address_t	reach = ~(vm_address_t)0;
+	unsigned	i, n;
+
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n; i++)
+		if (device_claim[i].bdf == bdf) {
+			reach = device_claim[i].dma_reach;
+			break;
+		}
+	urmach_rcu_read_unlock();
+	return reach;
+}
+
+static vm_address_t
+claim_dma_reach_locked(natural_t bdf)
+{
+	unsigned i;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			return device_claim[i].dma_reach;
+	return ~(vm_address_t)0;
+}
+
+/* #417: whether the page at `pa' lies wholly at or below `reach'. */
+static int
+page_within(vm_address_t pa, vm_address_t reach)
+{
+	return pa <= reach && reach - pa >= PAGE_SIZE - 1;
 }
 
 /*
@@ -2137,7 +2184,8 @@ ds_master_device_dma_alloc(
 	kern_return_t kr;
 	vm_offset_t kva;
 	vm_offset_t pa;
-	vm_address_t dma;
+	vm_address_t dma, reach;
+	vm_offset_t max_pa;
 	uint64_t region_id = 0;
 
 	kr = check_master_port(master_port);
@@ -2155,11 +2203,22 @@ ds_master_device_dma_alloc(
 	size = round_page(size);
 
 	/*
+	 * #417: where the device will be given an IOVA, the engine places it
+	 * below the device's reach and the memory may lie anywhere; where it
+	 * will be given the frame's own address -- nothing translates, or the
+	 * device asked for physical addresses -- the memory itself is taken
+	 * within the reach.
+	 */
+	reach = claim_dma_reach(bdf);
+	max_pa = (bdf != DEVICE_DMA_NO_BDF && device_md_dma_translates(bdf))
+		 ? ~(vm_offset_t)0 : (vm_offset_t)reach;
+
+	/*
 	 * Allocate wired, physically contiguous memory.
 	 * kmem_alloc_contig guarantees contiguity for DMA.
 	 */
-	kr = kmem_alloc_contig(kernel_map, &kva, size,
-			       PAGE_MASK, 0);
+	kr = kmem_alloc_contig_below(kernel_map, &kva, size,
+				     PAGE_MASK, 0, max_pa);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2216,7 +2275,7 @@ ds_master_device_dma_alloc(
 
 		if (!device_md_dma_grant(bdf, (unsigned long)pa,
 					 (unsigned long)size, TRUE, TRUE,
-					 ~0UL, &iova)) {
+					 (unsigned long)reach, &iova)) {
 			(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 			kmem_free(kernel_map, kva, size);
 			return KERN_FAILURE;
@@ -2330,6 +2389,7 @@ ds_master_device_dma_alloc_sg(
 	vm_offset_t	list;
 	vm_size_t	list_bytes, list_size;
 	vm_map_copy_t	list_copy;
+	vm_address_t	reach;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -2401,6 +2461,34 @@ ds_master_device_dma_alloc_sg(
 	for (i = 0; i < n_pages; i++)
 		((vm_address_t *)list)[i] =
 			pmap_extract(pmap_kernel(), kva + i * PAGE_SIZE);
+
+	/*
+	 * #417: where nothing will be granted, these frames are the addresses
+	 * the device is given, so each must lie within its reach -- and taken
+	 * one by one, anywhere, one may not.  Refused and said, rather than
+	 * handed to a device that would cut its address.  A grant below holds
+	 * them to the reach itself: an IOVA placed under it, or an identity
+	 * frame refused beyond it.
+	 */
+	reach = claim_dma_reach(bdf);
+	if (!(bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()))
+		for (i = 0; i < n_pages; i++)
+			if (!page_within(((vm_address_t *)list)[i], reach)) {
+				printf("device_dma_alloc_sg: %02x:%02x.%u's "
+				       "page %u lies at 0x%lx, past the 0x%lx "
+				       "its DMA reaches -- refused (#417)\n",
+				       (unsigned)(bdf >> 8),
+				       (unsigned)((bdf >> 3) & 0x1F),
+				       (unsigned)(bdf & 7), i,
+				       (unsigned long)((vm_address_t *)list)[i],
+				       (unsigned long)reach);
+				(void) vm_map_unwire(ipc_kernel_map, list,
+						     list + list_size, FALSE);
+				kmem_free(ipc_kernel_map, list, list_size);
+				kmem_free(kernel_map, kva, size);
+				task_deallocate(task);
+				return KERN_RESOURCE_SHORTAGE;
+			}
 
 	/*
 	 * 🔴 ONE GRANT OVER THE WHOLE LIST, AFTER IT IS COLLECTED, and not one
@@ -2478,7 +2566,8 @@ ds_master_device_dma_alloc_sg(
 
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)list,
-					       n_pages, TRUE, TRUE, ~0UL, &iova,
+					       n_pages, TRUE, TRUE,
+					       (unsigned long)reach, &iova,
 					       &identity)) {
 			/*
 			 * dma_region_drop() takes the user mapping down
@@ -3988,6 +4077,68 @@ ds_master_device_dma_identity(
 }
 
 /*
+ * ── How far a device's DMA reaches (#417) ─────────────────────────────
+ *
+ * Its DMA mask, as a driver tells Linux with dma_set_mask(): the highest
+ * address it can use.  Recorded in the claim, and read by every path that
+ * gives this device an address -- its own buffers, contiguous and
+ * scatter-gather, and the pages other servers lend it -- so that the address
+ * is placed within it, rather than each path asking its caller, who for a
+ * lent page does not know the device at all.
+ *
+ * ⚠️ What was placed before keeps its address: a buffer the device holds is
+ * not moved under it.  Said once per change, as the move off pass-through is:
+ * a device that reaches less than the machine has is a fact about it the boot
+ * log should carry.
+ */
+kern_return_t
+ds_master_device_dma_reach(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	vm_address_t		reach)
+{
+	vm_address_t	was = ~(vm_address_t)0;
+	kern_return_t	kr;
+	unsigned	i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (bdf == DEVICE_DMA_NO_BDF)
+		return KERN_INVALID_ARGUMENT;
+
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_reach");
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	/*
+	 * Under the lock, and on the entry still this task's: the claim may
+	 * have been released since it was checked.
+	 */
+	mutex_lock(&device_table_lock);
+	kr = KERN_NO_ACCESS;
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf) {
+			if (device_claim[i].task == current_task()) {
+				was = device_claim[i].dma_reach;
+				device_claim[i].dma_reach = reach;
+				kr = KERN_SUCCESS;
+			}
+			break;
+		}
+	mutex_unlock(&device_table_lock);
+
+	if (kr == KERN_SUCCESS && was != reach)
+		printf("device: %02x:%02x.%u's DMA reaches 0x%lx, and every "
+		       "address it is given from now on lies below (#417)\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)reach);
+	return kr;
+}
+
+/*
  * How big the region table is, and how much of it is taken (#530).
  *
  * 🔴 A TEST WAS COMPARING ITS OWN SHARE WITH THE TOTAL.  dma_reclaim_test
@@ -4319,8 +4470,9 @@ dma_grant_locked(struct dma_region *r, natural_t bdf,
 	if (r->nusers >= DEVICE_MAX_REGION_USERS)
 		return KERN_RESOURCE_SHORTAGE;
 	if (!device_md_dma_grant_pages(bdf, (const unsigned long *)r->pa,
-				       r->npages, reads, writes, ~0UL, base,
-				       identity))
+				       r->npages, reads, writes,
+				       (unsigned long)claim_dma_reach_locked(bdf),
+				       base, identity))
 		return KERN_FAILURE;
 	r->user[r->nusers].bdf = bdf;
 	r->user[r->nusers].dma = (vm_offset_t)*base;
@@ -4426,6 +4578,16 @@ dma_map_foreign_pages(
 	 * what makes it an answer and not a pass-through.
 	 */
 	if (!device_md_dma_isolates()) {
+		/*
+		 * #417: and within the device's reach, since the frame is
+		 * what it is given: a lent page beyond is refused, not cut.
+		 */
+		vm_address_t reach = claim_dma_reach(bdf);
+
+		for (k = 0; k < n; k++)
+			if (!page_within(paddr[k] & ~(vm_address_t)PAGE_MASK,
+					 reach))
+				return KERN_RESOURCE_SHORTAGE;
 		for (k = 0; k < n; k++)
 			dma_addr[k] = paddr[k];
 		dma_ask_account(t0, t1, t2, t3, 0, n);
@@ -4942,6 +5104,7 @@ ds_master_device_claim(
 	 */
 	device_claim[i].cap_id = cap.cap_id;
 	device_claim[i].ops = ops;
+	device_claim[i].dma_reach = ~(vm_address_t)0;
 	for (b = 0; b < fresh.nregions; b++)
 		device_claim[i].region[b] = fresh.region[b];
 	device_claim[i].nregions = fresh.nregions;

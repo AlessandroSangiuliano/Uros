@@ -903,3 +903,30 @@ routine device_dma_map_foreign_region(
 	out	ops		: natural_t;
 	out	pages		: dma_sg_addr_t
 	);
+
+/*
+ * #417: how far this device's DMA reaches -- the highest address it can use,
+ * inclusive: its DMA mask, as a driver tells Linux with dma_set_mask().  From
+ * this call on, every address the kernel gives the device is at or below it:
+ * the buffers device_dma_alloc and device_dma_alloc_sg place for it, and the
+ * pages other servers lend it through device_dma_map_foreign_*.
+ *
+ * Where the machine translates, the address is an IOVA the engine places
+ * below the reach, and the memory may lie anywhere.  Where it does not, or the
+ * device asked for physical addresses (device_dma_identity), the address is
+ * the frame's own: a buffer's memory is taken below the reach, and a lent page
+ * that lies beyond it is refused, rather than handed to a device that would
+ * cut its address and write somewhere else.
+ *
+ * Until it is called a device reaches everything, as before, and what was
+ * placed before keeps its address.  KERN_INVALID_ARGUMENT for
+ * DEVICE_DMA_NO_BDF, which is no device, and the claim's refusal for a device
+ * that is not this task's.
+ *
+ * ⚠️ IN THE TAIL OF THIS FILE: MIG numbers a subsystem's routines by position.
+ */
+routine device_dma_reach(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	reach		: vm_address_t
+	);
