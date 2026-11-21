@@ -119,6 +119,11 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             at the prompt printed its lines and gave the prompt back -- a
 #             program's stdout on the controlling terminal, fork and execve
 #             from a shell, a forked child's write on its terminal (#952)
+#   msiplain  the harness's verdict, with QEMU's edu device (--edu): the
+#             boot's plain-MSI test gave it a slot, enabled with one message
+#             at the local APICs' address, rang it on that slot, and found
+#             it disabled once given back -- what "harness" would pass a
+#             kernel that never ran the test, since no WRONG says so (#977)
 #   stop13    the name server stops at service_checkin, which grub.cfg says is
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in.  Since #744 it checks in on its
@@ -193,11 +198,13 @@ ENTRIES="
 14 harness --socket1-cpu 1,sockets=2,cores=64,maxcpus=128
 14 char @char
 14 ush @ush
+14 msiplain --edu
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
 36 harness --iommu_intel
 37 harness --iommu_intel
+37 msiplain --iommu_intel_--edu
 38 harness --iommu_intel
 36 harness --iommu_amd
 37 harness --iommu_amd
@@ -582,6 +589,16 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ||
 		alone_ok "$n" "$h" "$f" 'msi_race: NOT ASKED — alone' ;;
+	# #977: the boot's plain-MSI test of QEMU's edu device (--edu), on the
+	# default board and on entry 37, whose -i remaps interrupts where the
+	# engine can: under TCG, so that the message is the remapped one, and
+	# not under KVM, where QEMU's intel-iommu remaps nothing without
+	# intremap=on.  The harness reads its WRONG lines; these are the three
+	# lines that make its claims, since a test that never ran says no WRONG.
+	msiplain) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'plain MSI: the edu device at 00:[0-9]+\.0 was given slot [0-9]+, .* enabled, one message, at the local APICs. address' "$f" &&
+		grep -aq 'plain MSI: edu was asked to raise .* a device wrote the message the kernel put in its capability, and it arrived as an interrupt' "$f" &&
+		grep -aq 'plain MSI: given back, its control word reads .* disabled, so the device can no longer send it' "$f" ;;
 	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
 	# while interrupts are remapped takes its pin instead, for the reason
 	# it gives: QEMU's tables name no HPET, and its message could not go
