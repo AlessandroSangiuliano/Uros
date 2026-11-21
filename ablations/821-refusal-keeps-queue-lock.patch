@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #821
+Takes out: the queue lock's release in cpm_allocate_below()'s refusal when no run lies low enough, as it was before #821: the free lock is given back and the queue lock kept.  On entry 68 edu's buffer within 20 bits is such a refusal, and the system must not go on.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: FAILED: 'edu_probe@.*: claimed ' appeared and 'edu_probe@.*' never did
+Note: the allocation edu_probe makes after the refusal takes the queue lock again and waits for ever, so the chora on edu never says whether its module took the device.  Without that allocation the boot passed with the lock kept, since nothing after the refusal asked for it.
+
+diff --git a/uros/src/mach_kernel/vm/vm_resident.c b/uros/src/mach_kernel/vm/vm_resident.c
+index faed9004..88d15c21 100644
+--- a/uros/src/mach_kernel/vm/vm_resident.c
++++ b/uros/src/mach_kernel/vm/vm_resident.c
+@@ -2766,7 +2766,6 @@ cpm_allocate_below(
+ 	pages = vm_page_find_contiguous(npages, max_pa);
+ 	if (pages == VM_PAGE_NULL) {
+ 		mutex_unlock(&vm_page_queue_free_lock);
+-		vm_page_unlock_queues();
+ 		return KERN_NO_SPACE;
+ 	}
+ 
