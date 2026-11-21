@@ -55,22 +55,35 @@
 
 #define MAX_CACHED_MODULES	16
 
+/*
+ * 🔑 A module is its class and its file name (#973).  Two pools may each hold
+ * a "twin.so", and the cache knew a module by its file name alone: a program
+ * that fetched two classes got the first class's module whenever it asked for
+ * the second's.  So every lookup asks for both, and the path dlopen() is given
+ * is "<class>/<name>" -- libdl knows an object by the path it was opened with,
+ * and would hand back the first twin as already loaded.
+ */
 struct cached_module {
+	char		class[MODULE_NAME_MAX];
 	char		name[MODULE_NAME_MAX];
 	vm_offset_t	data;		/* vm_allocate'd by bootstrap */
 	vm_size_t	size;		/* bytes in .so */
 };
+
+/* "<class>/<name>", the path a module is opened with: two names and a '/'. */
+#define MODULE_PATH_MAX		(2 * MODULE_NAME_MAX)
 
 static struct cached_module	cached_modules[MAX_CACHED_MODULES];
 static int			n_cached_modules;
 static const char	       *log_tag = "modload";
 
 static struct cached_module *
-find_cached_module(const char *name)
+find_cached_module(const char *class, const char *name)
 {
 	int i;
 	for (i = 0; i < n_cached_modules; i++) {
-		if (strcmp(cached_modules[i].name, name) == 0)
+		if (strcmp(cached_modules[i].class, class) == 0 &&
+		    strcmp(cached_modules[i].name, name) == 0)
 			return &cached_modules[i];
 	}
 	return NULL;
@@ -80,27 +93,32 @@ find_cached_module(const char *name)
  * I/O callback: serve dlopen() reads from the cache
  * ================================================================ */
 
+/*
+ * The path is "<class>/<name>", as load_cached() makes it: one '/', with a
+ * class and a name on either side.  Any other path is no module of a pool.
+ */
 static int
 cache_read_file(const char *path, void **buf, unsigned int *size)
 {
-	const char *basename;
+	char class[MODULE_NAME_MAX];
+	const char *slash;
 	const struct cached_module *cm;
 	vm_offset_t copy;
 	kern_return_t kr;
 
-	basename = path;
-	{
-		const char *p = path;
-		while (*p != '\0') {
-			if (*p == '/')
-				basename = p + 1;
-			p++;
-		}
+	slash = strchr(path, '/');
+	if (slash == NULL || slash == path || slash[1] == '\0' ||
+	    strchr(slash + 1, '/') != NULL ||
+	    (size_t)(slash - path) >= sizeof(class)) {
+		printf("%s: \"%s\" is not <class>/<name>\n", log_tag, path);
+		return -1;
 	}
+	memcpy(class, path, (size_t)(slash - path));
+	class[slash - path] = '\0';
 
-	cm = find_cached_module(basename);
+	cm = find_cached_module(class, slash + 1);
 	if (cm == NULL) {
-		printf("%s: module \"%s\" not in cache\n", log_tag, basename);
+		printf("%s: module \"%s\" not in cache\n", log_tag, path);
 		return -1;
 	}
 
@@ -130,6 +148,11 @@ static const struct dl_io_ops cache_io_ops = {
  * Fetch the module pool for a class from the bootstrap
  * ================================================================ */
 
+/*
+ * Every module the pool of <class> lists, into the cache: the number of them
+ * that are there afterwards, fetched now or before.  A class name that does
+ * not fit a pool's is refused, not cut: a cut name is another class's name.
+ */
 static int
 fetch_class(const char *class)
 {
@@ -138,10 +161,15 @@ fetch_class(const char *class)
 	mach_msg_type_number_t names_count = 0;
 	module_name_t class_buf;
 	const char *p;
-	int added = 0;
+	int present = 0;
 
-	strncpy(class_buf, class, sizeof(class_buf) - 1);
-	class_buf[sizeof(class_buf) - 1] = '\0';
+	if (strlen(class) >= sizeof(class_buf)) {
+		printf("%s: class \"%s\": a name longer than %u characters "
+		       "is no pool's\n", log_tag, class,
+		       (unsigned)(sizeof(class_buf) - 1));
+		return 0;
+	}
+	strcpy(class_buf, class);
 
 	kr = bootstrap_list_modules(bootstrap_port, class_buf,
 				    &names, &names_count);
@@ -156,9 +184,21 @@ fetch_class(const char *class)
 		if (len == 0)
 			break;
 
+		if (len >= MODULE_NAME_MAX) {
+			printf("%s: module \"%s/%s\": a name longer than %u "
+			       "characters is no pool's\n", log_tag, class, p,
+			       (unsigned)(MODULE_NAME_MAX - 1));
+			p += len + 1;
+			continue;
+		}
+		if (find_cached_module(class, p) != NULL) {
+			present++;
+			p += len + 1;
+			continue;
+		}
 		if (n_cached_modules >= MAX_CACHED_MODULES) {
-			printf("%s: module cache full, dropping \"%s\"\n",
-			       log_tag, p);
+			printf("%s: module cache full, dropping \"%s/%s\"\n",
+			       log_tag, class, p);
 			break;
 		}
 
@@ -168,8 +208,7 @@ fetch_class(const char *class)
 			mach_msg_type_number_t data_count = 0;
 			struct cached_module *cm;
 
-			strncpy(name_buf, p, sizeof(name_buf) - 1);
-			name_buf[sizeof(name_buf) - 1] = '\0';
+			strcpy(name_buf, p);
 
 			kr = bootstrap_get_module(bootstrap_port, class_buf,
 						  name_buf, &data, &data_count);
@@ -182,11 +221,11 @@ fetch_class(const char *class)
 			}
 
 			cm = &cached_modules[n_cached_modules++];
-			strncpy(cm->name, p, sizeof(cm->name) - 1);
-			cm->name[sizeof(cm->name) - 1] = '\0';
+			strcpy(cm->class, class);
+			strcpy(cm->name, p);
 			cm->data = data;
 			cm->size = data_count;
-			added++;
+			present++;
 		}
 
 		p += len + 1;
@@ -195,15 +234,15 @@ fetch_class(const char *class)
 	if (names != 0)
 		vm_deallocate(mach_task_self(), names, names_count);
 
-	return added;
+	return present;
 }
 
 /*
- * Fetch one module of a class into the cache (#963).  0 when it is there
- * already or now; -1, said, otherwise.  A name that does not fit a pool's
+ * Fetch one module of a class into the cache (#963): its entry, there
+ * already or now; NULL, said, otherwise.  A name that does not fit a pool's
  * name is refused, not cut: a cut name is another module's name.
  */
-static int
+static struct cached_module *
 fetch_one(const char *class, const char *name)
 {
 	kern_return_t kr;
@@ -217,14 +256,15 @@ fetch_one(const char *class, const char *name)
 		printf("%s: module \"%s/%s\": a name longer than %u "
 		       "characters is no pool's\n", log_tag, class, name,
 		       (unsigned)(sizeof(name_buf) - 1));
-		return -1;
+		return NULL;
 	}
-	if (find_cached_module(name) != NULL)
-		return 0;
+	cm = find_cached_module(class, name);
+	if (cm != NULL)
+		return cm;
 	if (n_cached_modules >= MAX_CACHED_MODULES) {
-		printf("%s: module cache full, \"%s\" not fetched\n",
-		       log_tag, name);
-		return -1;
+		printf("%s: module cache full, \"%s/%s\" not fetched\n",
+		       log_tag, class, name);
+		return NULL;
 	}
 
 	strcpy(class_buf, class);
@@ -234,14 +274,69 @@ fetch_one(const char *class, const char *name)
 	if (kr != KERN_SUCCESS) {
 		printf("%s: bootstrap_get_module(\"%s\", \"%s\") failed: "
 		       "0x%x\n", log_tag, class, name, kr);
-		return -1;
+		return NULL;
 	}
 
 	cm = &cached_modules[n_cached_modules++];
+	strcpy(cm->class, class);
 	strcpy(cm->name, name);
 	cm->data = data;
 	cm->size = data_count;
-	return 0;
+	return cm;
+}
+
+/*
+ * dlopen() a cached module as "<class>/<name>" and return the symbol
+ * <basename><sym_suffix>:
+ *   "ahci.so"       + "_module_ops"    → "ahci_module_ops"
+ *   "virtio_blk.so" + "_module_ops"    → "virtio_blk_module_ops"
+ *   "pci_scan.so"   + "_discovery_ops" → "pci_scan_discovery_ops"
+ */
+static void *
+load_cached(const struct cached_module *cm, const char *sym_suffix)
+{
+	char path[MODULE_PATH_MAX];
+	char sym_buf[96];
+	size_t base_len = 0;
+	size_t suf_len;
+	const char *p;
+	void *handle;
+	void *ops;
+
+	/* Both names are shorter than MODULE_NAME_MAX: the cache holds no other. */
+	(void) snprintf(path, sizeof(path), "%s/%s", cm->class, cm->name);
+
+	suf_len = strlen(sym_suffix);
+	if (suf_len + 1 >= sizeof(sym_buf)) {
+		printf("%s: sym_suffix too long\n", log_tag);
+		return NULL;
+	}
+
+	handle = dlopen(path, RTLD_NOW);
+	if (handle == NULL) {
+		printf("%s: dlopen(\"%s\") failed: %s\n",
+		       log_tag, path, dlerror());
+		return NULL;
+	}
+
+	for (p = cm->name; *p != '\0' && *p != '.' &&
+			   base_len < sizeof(sym_buf) - suf_len - 1; p++) {
+		sym_buf[base_len++] = *p;
+	}
+	memcpy(sym_buf + base_len, sym_suffix, suf_len);
+	sym_buf[base_len + suf_len] = '\0';
+
+	ops = dlsym(handle, sym_buf);
+	if (ops == NULL) {
+		printf("%s: dlsym(\"%s\") failed: %s\n",
+		       log_tag, sym_buf, dlerror());
+		dlclose(handle);
+		return NULL;
+	}
+
+	printf("%s: loaded module \"%s\" (sym %s)\n",
+	       log_tag, path, sym_buf);
+	return ops;
 }
 
 /* ================================================================
@@ -280,8 +375,7 @@ modload_load_class(const char *class, const char *sym_suffix,
 	}
 
 	for (i = 0; i < n_cached_modules && loaded < max_ops; i++) {
-		void *ops = modload_load_module(cached_modules[i].name,
-						sym_suffix);
+		void *ops = load_cached(&cached_modules[i], sym_suffix);
 		if (ops != NULL)
 			out_ops[loaded++] = ops;
 	}
@@ -290,66 +384,11 @@ modload_load_class(const char *class, const char *sym_suffix,
 }
 
 void *
-modload_load_module(const char *name, const char *sym_suffix)
-{
-	void *handle;
-	void *ops;
-	const char *basename;
-	char sym_buf[96];
-	size_t base_len = 0;
-	size_t suf_len;
-	const char *p;
-
-	handle = dlopen(name, RTLD_NOW);
-	if (handle == NULL) {
-		printf("%s: dlopen(\"%s\") failed: %s\n",
-		       log_tag, name, dlerror());
-		return NULL;
-	}
-
-	/*
-	 * Derive the ops symbol name from the module filename:
-	 *   "ahci.so"       + "_module_ops"  → "ahci_module_ops"
-	 *   "virtio_blk.so" + "_module_ops"  → "virtio_blk_module_ops"
-	 *   "pci_scan.so"   + "_discovery_ops" → "pci_scan_discovery_ops"
-	 */
-	basename = name;
-	for (p = name; *p != '\0'; p++) {
-		if (*p == '/')
-			basename = p + 1;
-	}
-
-	suf_len = strlen(sym_suffix);
-	if (suf_len + 1 >= sizeof(sym_buf)) {
-		printf("%s: sym_suffix too long\n", log_tag);
-		dlclose(handle);
-		return NULL;
-	}
-
-	for (p = basename; *p != '\0' && *p != '.' &&
-			   base_len < sizeof(sym_buf) - suf_len - 1; p++) {
-		sym_buf[base_len++] = *p;
-	}
-	memcpy(sym_buf + base_len, sym_suffix, suf_len);
-	sym_buf[base_len + suf_len] = '\0';
-
-	ops = dlsym(handle, sym_buf);
-	if (ops == NULL) {
-		printf("%s: dlsym(\"%s\") failed: %s\n",
-		       log_tag, sym_buf, dlerror());
-		dlclose(handle);
-		return NULL;
-	}
-
-	printf("%s: loaded module \"%s\" (sym %s)\n",
-	       log_tag, name, sym_buf);
-	return ops;
-}
-
-void *
 modload_load_named(const char *class, const char *name, const char *sym_suffix)
 {
-	if (fetch_one(class, name) != 0)
+	const struct cached_module *cm = fetch_one(class, name);
+
+	if (cm == NULL)
 		return NULL;
-	return modload_load_module(name, sym_suffix);
+	return load_cached(cm, sym_suffix);
 }

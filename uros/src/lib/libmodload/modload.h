@@ -59,18 +59,12 @@ int	modload_load_class(const char *class, const char *sym_suffix,
 			   void **out_ops, int max_ops);
 
 /*
- * Load a single already-cached module by basename (as returned by
- * bootstrap_list_modules) and return the symbol <basename><sym_suffix>.
- * Returns NULL on failure.
- */
-void   *modload_load_module(const char *name, const char *sym_suffix);
-
-/*
  * Fetch ONE module from <class>'s pool, <name> -- "chora_probe.so" -- and
  * nothing else of its class, dlopen it, and return the symbol
- * <basename><sym_suffix> as modload_load_module() does (#963).  NULL, with a
- * line saying why, when a name does not fit a pool's, the pool has no such
- * module, or it does not load.
+ * <basename><sym_suffix> (#963).  NULL, with a line saying why, when a name
+ * does not fit a pool's, the pool has no such module, or it does not load.
+ * The module is <class>'s own: another pool's module of the same file name
+ * is another module (#973).
  *
  * 🔑 For a program that drives one device: chora loads the one module it was
  * told to, and a task holding one device must not hold the code of every
