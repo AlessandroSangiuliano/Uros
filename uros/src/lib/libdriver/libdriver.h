@@ -23,12 +23,8 @@
  * it, loads the module that drives it and hands the module a `struct driver'.
  * The module does the rest through these calls -- the device's configuration
  * space, its regions mapped, its interrupt delivered to a handler on a thread
- * of its own -- and says what it does with driver_log(), under the task's
- * name, which is the device's.
- *
- * ⚠️ DMA is not here yet.  It comes with its first user, the virtio-net driver
- * (#479): none of what #963 asks of a module needs it, and a call nobody makes
- * is a call nobody has tried.
+ * of its own, its DMA buffers (#978) -- and says what it does with
+ * driver_log(), under the task's name, which is the device's.
  *
  * The module is a shared object loaded into chora, and resolves these names
  * against chora's own symbols, so it links against nothing.
@@ -112,6 +108,11 @@ kern_return_t	driver_interrupt(struct driver *d,
  * something only in the device's own domain; elsewhere the physical address.
  * The module needs to know neither, only to give the device this one
  * (device_dma_alloc's contract, device_master.defs).
+ *
+ * ⚠️ The device reaches it only as a bus master, bit 2 of its command
+ * register: the kernel sets it where it arms the device's MSI or MSI-X
+ * (pci_msi.c, pci_msix.c), and a module on an INTx line sets it itself, with
+ * driver_config_write().
  */
 struct driver_dma {
 	volatile void	*va;		/* this task's mapping */
@@ -133,7 +134,8 @@ kern_return_t	driver_dma_alloc(struct driver *d, vm_size_t size,
 /*
  * Give it back: this task's mapping, then the buffer.  The device must have
  * stopped using it: what it writes after this lands in memory the kernel may
- * have given to someone else, or in nothing.
+ * have given to someone else, or in nothing.  A refusal of the kernel's is
+ * said, since the buffer then stays allocated.
  */
 void		driver_dma_free(struct driver *d, struct driver_dma *dma);
 

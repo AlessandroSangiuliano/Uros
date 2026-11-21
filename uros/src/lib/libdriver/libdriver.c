@@ -417,10 +417,19 @@ driver_dma_alloc(struct driver *d, vm_size_t size, uint64_t reach,
 void
 driver_dma_free(struct driver *d, struct driver_dma *dma)
 {
+	kern_return_t	kr;
+
 	if (dma->kva == 0)
 		return;
-	(void)vm_deallocate(mach_task_self(), (vm_address_t)dma->va,
-			    dma->size);
-	(void)device_dma_free(d->master_device, d->bdf, dma->kva, dma->size);
+	kr = vm_deallocate(mach_task_self(), (vm_address_t)dma->va, dma->size);
+	if (kr != KERN_SUCCESS)
+		driver_log(d, "the mapping of the DMA buffer at device address "
+			   "0x%lx would not go: 0x%x",
+			   (unsigned long)dma->device_addr, kr);
+	kr = device_dma_free(d->master_device, d->bdf, dma->kva, dma->size);
+	if (kr != KERN_SUCCESS)
+		driver_log(d, "the DMA buffer at device address 0x%lx was not "
+			   "given back, and stays allocated: 0x%x",
+			   (unsigned long)dma->device_addr, kr);
 	memset(dma, 0, sizeof *dma);
 }
