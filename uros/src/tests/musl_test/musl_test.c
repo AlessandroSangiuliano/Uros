@@ -2294,6 +2294,77 @@ as_pipe_reader(void)
 	return have == PX_COUNT * (long)(sizeof PX_LINE - 1) ? 0 : 3;
 }
 
+/*
+ * #904: the pipelines scripts/ush-x86_64.py types at ush, which waits for the
+ * lines these print, as a shell's user would read them: ush's own word on
+ * its children is not their output.  `pipe-out | pipe-count': pipe-count
+ * reads its stdin to end of file and says whether it got all pipe-out wrote,
+ * [45]'s 200 lines.  `pipe-yes | pipe-head': pipe-head reads one line and
+ * goes; pipe-yes, SIGPIPE ignored, writes until a write fails, and says how.
+ */
+static int
+as_pipe_counter(void)
+{
+	static char	buf[4 * sizeof PX_LINE];
+	const long	want = PX_COUNT * (long)(sizeof PX_LINE - 1);
+	long		have = 0, wrong = 0;
+	ssize_t		got, k;
+
+	while ((got = read(0, buf, sizeof buf)) > 0) {
+		for (k = 0; k < got; k++)
+			if (buf[k] != PX_LINE[(have + k) %
+					      (long)(sizeof PX_LINE - 1)])
+				wrong++;
+		have += got;
+	}
+	if (got < 0)
+		printf("musl_test (pipe-count): read answered errno %d after %ld "
+		       "bytes\n", errno, have);
+	else if (have == want && wrong == 0)
+		printf("musl_test (pipe-count): %ld bytes, %d lines as written, "
+		       "then end of file\n", have, PX_COUNT);
+	else
+		printf("musl_test (pipe-count): %ld bytes of %ld, %ld of them NOT "
+		       "as written, then end of file\n", have, want, wrong);
+	return 0;
+}
+
+static int
+as_pipe_yes(void)
+{
+	long	lines = 0;
+
+	(void)signal(SIGPIPE, SIG_IGN);
+	while (write(1, PX_LINE, sizeof PX_LINE - 1) ==
+	       (ssize_t)(sizeof PX_LINE - 1))
+		lines++;
+	if (errno == EPIPE)
+		fprintf(stderr, "musl_test (pipe-yes): write answered EPIPE once "
+			"the reader had gone\n");
+	else
+		fprintf(stderr, "musl_test (pipe-yes): write answered errno %d, "
+			"NOT EPIPE, after %ld lines\n", errno, lines);
+	return errno == EPIPE ? 0 : 1;
+}
+
+static int
+as_pipe_head(void)
+{
+	char	line[sizeof PX_LINE], c;
+	size_t	n = 0;
+
+	while (n < sizeof line - 1 && read(0, &c, 1) == 1) {
+		line[n++] = c;
+		if (c == '\n')
+			break;
+	}
+	line[n] = '\0';
+	printf("musl_test (pipe-head): %s, and gone\n",
+	       strcmp(line, PX_LINE) == 0 ? "one line read"
+	       : "NOT the line written read");
+	return 0;
+}
+
 static void
 arm_pipe_exec(void)
 {
@@ -2997,6 +3068,572 @@ arm_wait_codes(void)
 		: "the death read as SIGINT's");
 }
 
+/* A child that waits to be killed, in short naps, and exits 9 if nothing
+ * has ended it in 10 s, so that an arm whose kill went nowhere still ends
+ * well within its bound. */
+static void wait_to_be_killed(void) __attribute__((noreturn));
+static void
+wait_to_be_killed(void)
+{
+	int	i;
+
+	for (i = 0; i < 100; i++)
+		nap_ms(100);
+	_exit(9);
+}
+
+/*
+ * ── [46] SIGTTIN and SIGTTOU at SIG_DFL (#934) ───────────────────────────
+ *
+ * The signal thread dropped both: libposix-uros's table of default actions
+ * had no entry for either, so a background group that read the terminal, or
+ * wrote it under TOSTOP, went on.  A child in a group of its own raises
+ * SIGTTIN and then SIGTTOU; each must stop it and be reported under
+ * WUNTRACED with its signal, and each continue under WCONTINUED.
+ */
+#define WT_TTIN		1	/* SIGTTIN's stop not reported as SIGTTIN */
+#define WT_TTOU		2	/* SIGTTOU's stop not reported as SIGTTOU */
+#define WT_CONT		4	/* a continue not reported */
+#define WT_KILL		8	/* the end by SIGKILL not reported as one */
+
+static int
+wait_tty_stops_run(void)
+{
+	pid_t	c, r1, r2, r3, r4, r5;
+	int	s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, wrong = 0;
+
+	c = fork();
+	if (c < 0)
+		return 64;
+	if (c == 0) {
+		(void)setpgid(0, 0);
+		nap_ms(200);
+		(void)raise(SIGTTIN);		/* stopped by its default action */
+		nap_ms(200);
+		(void)raise(SIGTTOU);
+		wait_to_be_killed();
+	}
+	(void)setpgid(c, c);
+	r1 = waitpid(c, &s1, WUNTRACED);
+	(void)kill(c, SIGCONT);
+	r2 = waitpid(c, &s2, WCONTINUED);
+	r3 = waitpid(c, &s3, WUNTRACED);
+	(void)kill(c, SIGCONT);
+	r4 = waitpid(c, &s4, WCONTINUED);
+	(void)kill(c, SIGKILL);
+	r5 = waitpid(c, &s5, 0);
+	if (r1 != c || !WIFSTOPPED(s1) || WSTOPSIG(s1) != SIGTTIN)
+		wrong |= WT_TTIN;
+	if (r3 != c || !WIFSTOPPED(s3) || WSTOPSIG(s3) != SIGTTOU)
+		wrong |= WT_TTOU;
+	if (r2 != c || !WIFCONTINUED(s2) || r4 != c || !WIFCONTINUED(s4))
+		wrong |= WT_CONT;
+	if (r5 != c || !WIFSIGNALED(s5) || WTERMSIG(s5) != SIGKILL)
+		wrong |= WT_KILL;
+	printf("musl_test (tty stops): raise(SIGTTIN) %d %#x, continued %d %#x, "
+	       "raise(SIGTTOU) %d %#x, continued %d %#x, SIGKILL %d %#x\n",
+	       (int)r1, (unsigned)s1, (int)r2, (unsigned)s2, (int)r3,
+	       (unsigned)s3, (int)r4, (unsigned)s4, (int)r5, (unsigned)s5);
+	return wrong;
+}
+
+static void
+arm_wait_tty_stops(void)
+{
+	int	r = run_bounded(wait_tty_stops_run, 60);
+
+	if (r == -2 || r == 64) {
+		not_asked(46, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(46, r == 0, "a child stopped by SIGTTIN and by SIGTTOU, each "
+		"continued, then killed, answered %d%s%s%s%s%s", r,
+		r < 0 ? ": the waits did not end in 60 s" : "",
+		r > 0 && (r & WT_TTIN) ? "; SIGTTIN's stop NOT reported as one" : "",
+		r > 0 && (r & WT_TTOU) ? "; SIGTTOU's stop NOT reported as one" : "",
+		r > 0 && (r & WT_CONT) ? "; a continue NOT reported" : "",
+		r > 0 && (r & WT_KILL) ? "; the kill NOT reported as SIGKILL's" : "");
+}
+
+/*
+ * ── [47] kill() of a group of three, and kill(0) (#934) ──────────────────
+ *
+ * kill(-group, sig) and kill(0, sig) went to proc_kill() as a pid, which none
+ * is; [37] asks killpg(), musl's kill(-group), of a group with one process in
+ * it.  Here three children make a group and a fourth stays out of it:
+ * kill(-group, SIGTERM) must end the three and not the fourth, which is
+ * asked how it ended: an exit 9 is its own 10 s run out, no kill.  Then a
+ * child leads a group of its own with SIGTERM ignored and makes two more in
+ * it, which put SIGTERM back to SIG_DFL: its kill(0, SIGTERM) must end the
+ * two and not itself.
+ */
+#define WK_GROUP	1	/* kill(-group) did not end the three by SIGTERM */
+#define WK_OUT		2	/* a signal ended the child outside the group */
+#define WK_ZERO		4	/* kill(0) did not end the two by SIGTERM */
+#define WK_SELF		8	/* kill(0)'s caller did not come back from it */
+#define WK_LOST		16	/* the child outside: its wait did not say how */
+#define WK_SETUP	32	/* kill(0)'s group not made: a pipe or fork refused */
+
+/* [47]'s second group, led by the caller of kill(0): 0 if its two ended by
+ * SIGTERM and it did not, 2 if its pipe or a fork was refused. */
+static int
+kill_zero_leader(void)
+{
+	pid_t	q[2], got;
+	int	fds[2], st, i, ended = 0, rc;
+	char	b;
+
+	(void)setpgid(0, 0);
+	(void)signal(SIGTERM, SIG_IGN);
+	if (pipe(fds) != 0)
+		return 2;
+	for (i = 0; i < 2; i++) {
+		q[i] = fork();
+		if (q[i] < 0)
+			return 2;
+		if (q[i] == 0) {
+			(void)signal(SIGTERM, SIG_DFL);
+			(void)write(fds[1], "x", 1);	/* SIG_DFL now: kill me */
+			wait_to_be_killed();
+		}
+	}
+	(void)close(fds[1]);
+	for (i = 0; i < 2; i++)
+		if (read(fds[0], &b, 1) != 1)
+			break;
+	rc = kill(0, SIGTERM);
+	for (i = 0; i < 2; i++) {
+		st = 0;
+		got = waitpid(q[i], &st, 0);
+		if (got == q[i] && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM)
+			ended++;
+	}
+	printf("musl_test (kill(0)): kill(0, SIGTERM) answered %d, and %d of the "
+	       "2 in its group ended by it\n", rc, ended);
+	return rc == 0 && ended == 2 ? 0 : 1;
+}
+
+static int
+kill_groups_run(void)
+{
+	pid_t	c[3], out, z, got, alive;
+	int	st, i, ended = 0, rk, ost = 0, zst = 0, wrong = 0;
+
+	for (i = 0; i < 3; i++) {
+		c[i] = fork();
+		if (c[i] < 0)
+			return 64;
+		if (c[i] == 0) {
+			(void)setpgid(0, i == 0 ? 0 : c[0]);
+			wait_to_be_killed();
+		}
+		(void)setpgid(c[i], c[0]);	/* as a shell does */
+	}
+	out = fork();
+	if (out < 0)
+		return 64;
+	if (out == 0)
+		wait_to_be_killed();
+	rk = kill(-c[0], SIGTERM);
+	for (i = 0; i < 3; i++) {
+		st = 0;
+		got = waitpid(c[i], &st, 0);
+		if (got == c[i] && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM)
+			ended++;
+	}
+	if (rk != 0 || ended != 3)
+		wrong |= WK_GROUP;
+	/* 0: still there.  When the group's kill went nowhere, the waits for
+	 * the three outlast its 10 s too, and it is gone with its exit 9. */
+	alive = waitpid(out, &ost, WNOHANG);
+	if (alive == out && WIFSIGNALED(ost))
+		wrong |= WK_OUT;
+	else if (alive != 0 &&
+	    !(alive == out && WIFEXITED(ost) && WEXITSTATUS(ost) == 9))
+		wrong |= WK_LOST;
+	if (alive == 0) {
+		(void)kill(out, SIGKILL);
+		(void)waitpid(out, &st, 0);
+	}
+	z = fork();
+	if (z < 0)
+		return 64;
+	if (z == 0)
+		_exit(kill_zero_leader());
+	got = waitpid(z, &zst, 0);
+	if (got != z || !WIFEXITED(zst))
+		wrong |= WK_SELF;
+	else if (WEXITSTATUS(zst) == 2)
+		wrong |= WK_SETUP;
+	else if (WEXITSTATUS(zst) != 0)
+		wrong |= WK_ZERO;
+	printf("musl_test (group kills): kill(-%d, SIGTERM) answered %d and ended "
+	       "%d of 3; the one outside, %d, WNOHANG %d status %#x; kill(0)'s "
+	       "caller %d status %#x\n", (int)c[0], rk, ended, (int)out,
+	       (int)alive, (unsigned)ost, (int)got, (unsigned)zst);
+	return wrong;
+}
+
+static void
+arm_kill_groups(void)
+{
+	int	r = run_bounded(kill_groups_run, 60);
+
+	if (r == -2 || r == 64) {
+		not_asked(47, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(47, r == 0, "kill(-group, SIGTERM) of a group of three and "
+		"kill(0, SIGTERM) from inside a group answered %d: %s, %s, %s", r,
+		r < 0 ? "they did not end in 60 s" : (r & WK_GROUP)
+		? "the three NOT all ended by SIGTERM"
+		: "the three ended by SIGTERM",
+		r < 0 ? "-" : (r & WK_OUT) ? "the child outside it WAS reached"
+		: (r & WK_LOST) ? "the child outside it NOT found by its wait"
+		: "the child outside it was not",
+		r < 0 ? "-" : (r & WK_SELF) ? "kill(0)'s caller did NOT come back"
+		: (r & WK_SETUP) ? "kill(0)'s group NOT made, a pipe or fork refused"
+		: (r & WK_ZERO) ? "kill(0) did NOT end the two"
+		: "kill(0) ended the two and not its caller");
+}
+
+/*
+ * ── [48] WNOHANG for a group, and for this group (#934) ──────────────────
+ *
+ * [36] waits for a group, for this group and for any child blocking, and
+ * asks WNOHANG only once no child is left.  Here two children make a group
+ * and end after 1.5 s and 3 s, with 21 and 22, and a third stays in this
+ * group and ends after 2.25 s, with 23.  While they run, waitpid(-group,
+ * WNOHANG) and waitpid(0, WNOHANG) must answer 0; polled, the group's must
+ * give its two, in that order, and never the third, then ECHILD; this
+ * group's must give the third, then ECHILD.
+ */
+#define WN_RUNNING	1	/* a WNOHANG with children running did not answer 0 */
+#define WN_GROUP	2	/* the group's did not give its two, or gave another */
+#define WN_OURS		4	/* this group's did not give the third */
+#define WN_ECHILD	8	/* with none left, the answer was not ECHILD */
+
+static int
+wait_group_nohang_run(void)
+{
+	pid_t	a, b, c, r, r0g, r0o, g1 = 0, g2 = 0, o1 = 0, gend, oend;
+	int	s, s1 = 0, s2 = 0, s3 = 0, e_g, e_o, step, wrong = 0;
+
+	a = fork();
+	if (a < 0)
+		return 64;
+	if (a == 0) {
+		(void)setpgid(0, 0);
+		nap_ms(1500);
+		_exit(21);
+	}
+	(void)setpgid(a, a);
+	b = fork();
+	if (b == 0) {
+		(void)setpgid(0, a);
+		nap_ms(3000);
+		_exit(22);
+	}
+	c = fork();
+	if (c == 0) {
+		nap_ms(2250);
+		_exit(23);
+	}
+	if (b < 0 || c < 0)
+		return 64;
+	(void)setpgid(b, a);			/* as a shell does */
+	r0g = waitpid(-a, NULL, WNOHANG);
+	r0o = waitpid(0, NULL, WNOHANG);
+	for (step = 0; step < 1000 && (g2 == 0 || o1 == 0); step++) {
+		if (g2 == 0) {
+			s = 0;
+			r = waitpid(-a, &s, WNOHANG);
+			if (r < 0)
+				break;
+			if (r > 0 && g1 == 0) {
+				g1 = r;
+				s1 = s;
+			} else if (r > 0) {
+				g2 = r;
+				s2 = s;
+			}
+		}
+		if (o1 == 0) {
+			s = 0;
+			r = waitpid(0, &s, WNOHANG);
+			if (r < 0)
+				break;
+			if (r > 0) {
+				o1 = r;
+				s3 = s;
+			}
+		}
+		nap_ms(10);
+	}
+	gend = waitpid(-a, NULL, WNOHANG);
+	e_g = errno;
+	oend = waitpid(0, NULL, WNOHANG);
+	e_o = errno;
+	if (r0g != 0 || r0o != 0)
+		wrong |= WN_RUNNING;
+	if (g1 != a || !WIFEXITED(s1) || WEXITSTATUS(s1) != 21 ||
+	    g2 != b || !WIFEXITED(s2) || WEXITSTATUS(s2) != 22)
+		wrong |= WN_GROUP;
+	if (o1 != c || !WIFEXITED(s3) || WEXITSTATUS(s3) != 23)
+		wrong |= WN_OURS;
+	if (gend != -1 || e_g != ECHILD || oend != -1 || e_o != ECHILD)
+		wrong |= WN_ECHILD;
+	printf("musl_test (group WNOHANG): while running %d and %d; the group's "
+	       "gave %d status %#x and %d status %#x, of %d and %d; this group's "
+	       "%d status %#x, of %d; then %d errno %d and %d errno %d\n",
+	       (int)r0g, (int)r0o, (int)g1, (unsigned)s1, (int)g2, (unsigned)s2,
+	       (int)a, (int)b, (int)o1, (unsigned)s3, (int)c, (int)gend, e_g,
+	       (int)oend, e_o);
+	return wrong;
+}
+
+static void
+arm_wait_group_nohang(void)
+{
+	int	r = run_bounded(wait_group_nohang_run, 30);
+
+	if (r == -2 || r == 64) {
+		not_asked(48, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(48, r == 0, "WNOHANG for a group and for this group, asked while "
+		"their children ended, answered %d: %s, %s, %s, %s", r,
+		r < 0 ? "they did not end in 30 s" : (r & WN_RUNNING)
+		? "a WNOHANG with children running did NOT answer 0"
+		: "0 while they ran",
+		r < 0 ? "-" : (r & WN_GROUP) ? "the group's did NOT give its two alone"
+		: "the group's gave its two, in order",
+		r < 0 ? "-" : (r & WN_OURS) ? "this group's did NOT give its child"
+		: "this group's gave its child",
+		r < 0 ? "-" : (r & WN_ECHILD) ? "and then NOT ECHILD"
+		: "and then ECHILD");
+}
+
+/*
+ * ── [49] wait4() of a child killed by SIGKILL (#934) ─────────────────────
+ *
+ * A task ended from outside cannot be asked its time once it has gone, so
+ * proc_server reads it before it ends a task for a signal.  A child spins
+ * until it is killed; after 600 ms the parent sends SIGKILL, and wait4()
+ * must say it died of SIGKILL and give it some of that time, at least 50 ms.
+ */
+static int
+wait_killed_rusage_run(void)
+{
+	struct rusage	ru;
+	pid_t		c, r;
+	int		st = 0;
+	long		user_ms, sys_ms;
+
+	memset(&ru, 0, sizeof ru);
+	c = fork();
+	if (c < 0)
+		return 64;
+	if (c == 0) {
+		volatile unsigned long	n = 0;
+
+		for (;;)
+			if (++n == 0)
+				_exit(1);	/* after 2^64 counts: not before SIGKILL */
+	}
+	nap_ms(600);
+	(void)kill(c, SIGKILL);
+	r = wait4(c, &st, 0, &ru);
+	user_ms = ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000;
+	sys_ms = ru.ru_stime.tv_sec * 1000 + ru.ru_stime.tv_usec / 1000;
+	printf("musl_test (killed rusage): a child that spun until SIGKILL ended "
+	       "%d status %#x, and wait4() gave %ld ms of user time and %ld ms of "
+	       "system time\n", (int)r, (unsigned)st, user_ms, sys_ms);
+	return (r == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL ? 0 : 1) |
+	       (user_ms + sys_ms >= 50 && user_ms + sys_ms < 60000 ? 0 : 2);
+}
+
+static void
+arm_wait_killed_rusage(void)
+{
+	int	r = run_bounded(wait_killed_rusage_run, 30);
+
+	if (r == -2 || r == 64) {
+		not_asked(49, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(49, r == 0, "wait4() of a child killed by SIGKILL after 600 ms "
+		"of spinning answered %d: %s, %s", r,
+		r < 0 ? "it did not end in 30 s" : (r & 1)
+		? "its death NOT read as SIGKILL's" : "its death read as SIGKILL's",
+		r < 0 ? "-" : (r & 2) ? "its time NOT there" : "its time there");
+}
+
+/*
+ * ── [50] Ten signals at SIG_DFL that no arm sent (#953) ────────────────────
+ *
+ * libposix-uros's signal thread took a signal's default action from a list
+ * of its own, and dropped the eight it left out whose default ends the
+ * process: SIGSTKFLT, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGIO, SIGPWR and
+ * SIGSYS.  Ten children each raise one signal at SIG_DFL, then SIGUSR1, whose
+ * handler they have: the signal thread takes the two in that order, so a
+ * child whose handler ran went on through the first.  Each of the eight must
+ * end its child by that signal; SIGURG and SIGWINCH, whose default is to
+ * ignore them, must leave theirs to exit 0 once its handler ran.
+ */
+static volatile sig_atomic_t	dfl_marked;
+
+static void
+dfl_mark(int s)
+{
+	(void)s;
+	dfl_marked = 1;
+}
+
+/* [50]'s child: exits 0 once SIGUSR1's handler ran after `sig', 9 if it had
+ * not run in 10 s. */
+static void dfl_child(int sig) __attribute__((noreturn));
+static void
+dfl_child(int sig)
+{
+	int	i;
+
+	(void)signal(sig, SIG_DFL);
+	(void)signal(SIGUSR1, dfl_mark);
+	(void)raise(sig);
+	(void)raise(SIGUSR1);
+	for (i = 0; i < 1000 && !dfl_marked; i++)
+		nap_ms(10);
+	_exit(dfl_marked ? 0 : 9);
+}
+
+static const int	dfl_sig[10] = {
+	SIGSTKFLT, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGIO, SIGPWR, SIGSYS,
+	SIGURG, SIGWINCH			/* the two ignored */
+};
+
+/* How many of the eight did not end their child by their signal, plus 16
+ * for each of SIGURG and SIGWINCH that did not leave its child to exit 0. */
+static int
+default_actions_run(void)
+{
+	pid_t	c[10];
+	int	st[10], i, ends = 0, ignored = 0;
+
+	for (i = 0; i < 10; i++) {
+		c[i] = fork();
+		if (c[i] < 0)
+			return 64;
+		if (c[i] == 0)
+			dfl_child(dfl_sig[i]);
+	}
+	for (i = 0; i < 10; i++) {
+		st[i] = 0;
+		if (waitpid(c[i], &st[i], 0) != c[i])
+			st[i] = -1;
+		if (i < 8 && !(st[i] != -1 && WIFSIGNALED(st[i]) &&
+		    WTERMSIG(st[i]) == dfl_sig[i]))
+			ends++;
+		if (i >= 8 && !(st[i] != -1 && WIFEXITED(st[i]) &&
+		    WEXITSTATUS(st[i]) == 0))
+			ignored++;
+	}
+	printf("musl_test (default actions): SIGSTKFLT %#x, SIGXCPU %#x, SIGXFSZ "
+	       "%#x, SIGVTALRM %#x, SIGPROF %#x, SIGIO %#x, SIGPWR %#x, SIGSYS "
+	       "%#x; SIGURG %#x, SIGWINCH %#x\n", (unsigned)st[0], (unsigned)st[1],
+	       (unsigned)st[2], (unsigned)st[3], (unsigned)st[4], (unsigned)st[5],
+	       (unsigned)st[6], (unsigned)st[7], (unsigned)st[8], (unsigned)st[9]);
+	return ends + 16 * ignored;
+}
+
+static void
+arm_default_actions(void)
+{
+	int	r = run_bounded(default_actions_run, 30);
+
+	if (r == -2 || r == 64) {
+		not_asked(50, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(50, r == 0, "eight signals whose default ends a process, and "
+		"SIGURG and SIGWINCH, each raised at SIG_DFL in a child of its own, "
+		"answered %d: %s, %s", r,
+		r < 0 ? "they did not end in 30 s" : (r & 15)
+		? "of the eight, one or more did NOT end its child by that signal"
+		: "each of the eight ended its child by that signal",
+		r < 0 ? "-" : (r & 48) ? "SIGURG or SIGWINCH did NOT leave its child "
+		"to go on" : "SIGURG and SIGWINCH left theirs to go on");
+}
+
+/*
+ * ── [51] A program, or a dynamic linker, of another machine is refused (#963)
+ *
+ * exec_server runs this machine's programs only, and loads this machine's
+ * dynamic linkers only.  /elf32_probe is an i386 program, and /interp_probe an
+ * x86-64 one whose PT_INTERP names /elf32_ldso_probe, an i386 one.  The one
+ * right answer to an execve of either is ENOEXEC.  A server that started one
+ * leaves a child killed by the fault its first instruction is, and any other
+ * errno is a refusal for another reason: the child exits with that errno,
+ * which the line prints.
+ */
+#define E32_REFUSED	200	/* [51]'s child's status when execve said ENOEXEC */
+
+/* The status an execve of `path' left its child with, or -1 with no child. */
+static int
+exec_status(const char *path)
+{
+	char	*argv[2];
+	char	*envp[1];
+	pid_t	pid;
+	int	status = 0;
+
+	argv[0] = (char *)path;
+	argv[1] = NULL;
+	envp[0] = NULL;
+	pid = fork();
+	if (pid < 0)
+		return -1;
+	if (pid == 0) {
+		(void)execve(argv[0], argv, envp);
+		_exit(errno == ENOEXEC ? E32_REFUSED : (errno & 0x7f));
+	}
+	if (waitpid(pid, &status, 0) != pid)
+		return -1;
+	return status;
+}
+
+static void
+arm_other_machine(void)
+{
+	int	program, ldso;
+
+	if (!program_is_there(51, "/elf32_probe")
+	    || !program_is_there(51, "/interp_probe")
+	    || !program_is_there(51, "/elf32_ldso_probe"))
+		return;
+	program = exec_status("/elf32_probe");
+	ldso = exec_status("/interp_probe");
+	if (program == -1 && ldso == -1) {
+		not_asked(51, "fork refused: no process server on this boot");
+		return;
+	}
+	verdict(51, program != -1 && WIFEXITED(program)
+		&& WEXITSTATUS(program) == E32_REFUSED && ldso != -1
+		&& WIFEXITED(ldso) && WEXITSTATUS(ldso) == E32_REFUSED,
+		"an execve of an i386 program left status %#x, and of a program "
+		"whose dynamic linker is i386 %#x; %#x is ENOEXEC's",
+		(unsigned)program, (unsigned)ldso, (unsigned)(E32_REFUSED << 8));
+}
+
+/*
+ * ── [52] A position-independent program that names no dynamic linker (#963)
+ *
+ * exec_server relocates it.  /hello_pie checks four of its own pointers and
+ * says what it read on lines of its own, which run-x86_64.sh holds it to; here
+ * it is started and killed as hello_exec is in [15], and a child that ended
+ * by itself before it was killed -- refused, or a fault -- is a WRONG.
+ */
+
 int
 main(int argc, char **argv)
 {
@@ -3005,6 +3642,13 @@ main(int argc, char **argv)
 		return as_pipe_writer();
 	if (argc > 1 && strcmp(argv[1], "pipe-in") == 0)
 		return as_pipe_reader();
+	/* #904: the pipelines typed at ush (scripts/ush-x86_64.py). */
+	if (argc > 1 && strcmp(argv[1], "pipe-count") == 0)
+		return as_pipe_counter();
+	if (argc > 1 && strcmp(argv[1], "pipe-yes") == 0)
+		return as_pipe_yes();
+	if (argc > 1 && strcmp(argv[1], "pipe-head") == 0)
+		return as_pipe_head();
 	if (argc > 1 && strcmp(argv[1], "child") == 0)
 		return as_exec_child();
 	if (argc > 1 && strcmp(argv[1], "env") == 0)
@@ -3079,6 +3723,15 @@ main(int argc, char **argv)
 	arm_waitid();
 	arm_wait_gone();
 	arm_wait_codes();
+	arm_wait_tty_stops();
+	arm_kill_groups();
+	arm_wait_group_nohang();
+	arm_wait_killed_rusage();
+	/* #953: the default action of the signals no arm above sends. */
+	arm_default_actions();
+	/* #963: what exec_server will not run, and what it relocates. */
+	arm_other_machine();
+	arm_parked_program(52, "/hello_pie");
 
 	printf("musl_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;

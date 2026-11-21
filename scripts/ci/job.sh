@@ -30,15 +30,22 @@
 # --share.
 #
 # Usage:
-#   scripts/ci/job.sh [--entries "N ..."] [--rounds R] [--accel L] [--out DIR]
-#                     [--no-install] [--dry-run]
-#   scripts/ci/job.sh --ablate "P ..." [--boots N] [--accel L] [--out DIR]
-#                     [--no-install] [--dry-run]
-#   scripts/ci/job.sh --sweep all|"P ..." [--share J/N] [--accel L] [--out DIR]
-#                     [--no-install] [--dry-run]
+#   scripts/ci/job.sh [--entries "N ..."] [--rounds R] [--stop-at T] [--accel L]
+#                     [--out DIR] [--no-install] [--dry-run]
+#   scripts/ci/job.sh --ablate "P ..." [--boots N] [--stop-at T] [--accel L]
+#                     [--out DIR] [--no-install] [--dry-run]
+#   scripts/ci/job.sh --sweep all|"P ..." [--share J/N] [--stop-at T] [--accel L]
+#                     [--out DIR] [--no-install] [--dry-run]
+#   scripts/ci/job.sh --packages arch|ubuntu
 #
 #   --entries "N ..."  only these merge-test entries (default: its whole list)
 #   --rounds R         merge-test rounds, one after the other (default 1)
+#   --stop-at T        stop at T, in seconds since the epoch: the merge test or
+#                      ablate.sh is sent SIGTERM, stops the boot it is running
+#                      and says so, and the job writes its record, where it
+#                      stopped included (#951).  The workflow gives the time
+#                      its step's limit leaves room for.  A SIGTERM sent to
+#                      the job does the same, at once: a cancelled run's
 #   --ablate "P ..."   an A/B instead of the merge test, with these patches of
 #                      ablations/, named without the directory or ".patch"
 #   --boots N          with --ablate, boots per arm and accelerator (default 1)
@@ -53,12 +60,18 @@
 #   --out DIR          rows, logs and the job's record (default ./ci-out)
 #   --no-install       use the tools already here, outside a container
 #   --dry-run          print the plan; install, build and boot nothing
+#   --packages D       print, on one line, the packages the job needs by their
+#                      names in D, arch or ubuntu, and do nothing else (#960)
 #
 # The tree is the one this script is in.  GITHUB_RUN_ID and JOB_INDEX name the
-# run and the job in every row, and UROS_BUILD_DIR is honoured as by the
-# harness.  OUT/boots.csv gets one row per boot, its times in UTC; the logs of
-# every WRONG boot are copied to OUT/failed/rN/; OUT/job.txt says what the job
-# ran on and with which tools.  With --ablate, OUT/ablate.csv gets the rows
+# run and the job in every row, CAMPAIGN_KIND what started the run -- nightly,
+# push or workflow_dispatch, which campaign.yml passes and job.txt says
+# (#961) -- and UROS_BUILD_DIR is honoured as by the harness.  OUT/boots.csv gets one row per boot, its times in UTC; the logs of
+# every WRONG boot are copied to OUT/failed/rN/, and those of a boot stopped --
+# at the time limit, or by a SIGTERM from outside -- to OUT/stopped/rN/;
+# OUT/job.txt says what the job ran on and with which tools, how many boots it
+# planned, and how it ended.  With
+# --ablate, OUT/ablate.csv gets the rows
 # instead, one per boot of either arm, and every boot's log stays in
 # OUT/ablate/, where ablate.sh works; with --sweep the same, one row per
 # patch's boot, and what ablate.sh said of each patch in OUT/sweep/NAME.out.
@@ -73,8 +86,9 @@
 # a warning · 3 the job
 # could not boot, or could not read its boots: the packages, the configure or
 # the build failed, the build had a warning, a round or the A/B did not report
-# every boot it was meant to, a boot's log was not where the merge test puts
-# it, or a boot's row had a comma inside a field and was not written.
+# every boot it was meant to, the job was stopped, at --stop-at's time or by a
+# SIGTERM, a boot's log was not where the merge test puts it, or a boot's row
+# had a comma inside a field and was not written.
 set -u
 # The container has no locale but C, and a run outside it reads the same words:
 # under another locale the compilers translate the very `warning:' the build's
@@ -88,6 +102,7 @@ HEADER=date,time,run_id,job,round,tree,cpu_model,mhz,accel,entry,smp,opt,verdict
 AB_HEADER=date,time,run_id,job,tree,cpu_model,mhz,patches,arm,boot,accel,run,harness_status,verdict,log
 RUN_ID=${GITHUB_RUN_ID:-local}
 JOB=${JOB_INDEX:-0}
+KIND=${CAMPAIGN_KIND:-}
 
 # What the build and the boots call that the image may not have.  gcc,
 # binutils, cmake and ninja build; make builds musl, whose own build it is
@@ -98,12 +113,74 @@ JOB=${JOB_INDEX:-0}
 # a run cut short with the stub on, and lib32-glibc and lib32-gcc-libs let the
 # host tests build for -m32 as well.  No psmisc: it was there for
 # run-x86_64.sh's killall, and the harness kills nothing by name since #618.
-PACKAGES=(gcc binutils cmake ninja make bison flex python git qemu-system-x86
-	grub e2fsprogs util-linux iproute2 gdb lib32-glibc lib32-gcc-libs)
+#
+# #960: each by its name in Arch Linux, which this script installs in the
+# container, and in Ubuntu, which campaign.yml installs on the runner for its
+# `ubuntu' mode, as --packages prints them: one row a tool, so that neither
+# list can gain or lose one the other has.  campaign.yml had a list of its own,
+# with nothing for lib32-glibc and lib32-gcc-libs: past fwrite_hook.c, the
+# Ubuntu jobs of 18/11 would have stopped on the -m32 host tests.  In Ubuntu
+# both come with gcc-multilib.  BUILD.md asks for the same lists.
+#
+# 🔴 #960: and sfdisk is util-linux's in Arch and fdisk's in Ubuntu, where
+# util-linux holds none.  GitHub's runner image has fdisk installed, so its
+# jobs never missed it; an Ubuntu installed from the list did, and stopped at
+# make-disk-x86_64.sh's "sfdisk not found" (20/11, in a chroot of 26.04.1).
+PACKAGE_TABLE='
+gcc		gcc
+binutils	binutils
+cmake		cmake
+ninja		ninja-build
+make		make
+bison		bison
+flex		flex
+python		python3
+git		git
+qemu-system-x86	qemu-system-x86
+grub		grub-common,grub-pc-bin
+e2fsprogs	e2fsprogs
+util-linux	util-linux,fdisk
+iproute2	iproute2
+gdb		gdb
+lib32-glibc	gcc-multilib
+lib32-gcc-libs	gcc-multilib
+'
+# One column of the table, arch or ubuntu, on one line, each name once and in
+# the table's order.  A row that is not two names fails it, rather than
+# dropping a tool from both lists unsaid.
+packages() {	# arch|ubuntu
+	local col
+	case "$1" in
+	arch)	col=1 ;;
+	ubuntu)	col=2 ;;
+	*)	return 2 ;;
+	esac
+	awk -v c=$col '
+		NF == 0 { next }
+		NF != 2 { bad = 1; exit }
+		{ n = split($c, p, ","); for (i = 1; i <= n; i++) if (!seen[p[i]]++) out = out (out == "" ? "" : " ") p[i] }
+		END { if (bad || out == "") exit 1; print out }' <<< "$PACKAGE_TABLE"
+}
 
+# #951: once job.txt is begun, a job that ends here says why in it as well, in
+# a "failed:" line: the job's summary on GitHub is that file, and without the
+# line pull-results.sh took a job whose build had failed -- the Ubuntu jobs of
+# 18/11 -- for one cut off before it could write its summary.  Its files are
+# named there as the artifact holds them, under OUT.  Before job.txt is begun
+# there is no file of this job's to write in, and OUT may hold an older job's.
+JOBTXT=""
 die() {
 	echo "job: $2" >&2
+	[ -z "$JOBTXT" ] || echo "failed:   ${2//"$OUT/"/}" >> "$JOBTXT"
 	exit "$1"
+}
+
+ARCH_PACKAGES=$(packages arch) || die 2 "the package table has a row that is not two names, an Arch Linux one and an Ubuntu one"
+read -r -a PACKAGES <<< "$ARCH_PACKAGES"
+
+# A time in seconds since the epoch, as job.txt says it (#951).
+when() {
+	date -u -d "@$1" '+%F %T UTC'
 }
 
 ENTRIES=""
@@ -119,13 +196,15 @@ ACCEL=auto
 OUT=ci-out
 INSTALL=1
 DRY=0
+STOP_AT=""
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--entries|--rounds|--accel|--out|--ablate|--boots|--sweep|--share)
+	--entries|--rounds|--accel|--out|--ablate|--boots|--sweep|--share|--stop-at)
 		[ $# -ge 2 ] || die 2 "$1 needs a value"
 		case "$1" in
 		--entries)	ENTRIES=$2 ;;
 		--rounds)	ROUNDS=$2; ROUNDS_SET=1 ;;
+		--stop-at)	STOP_AT=$2 ;;
 		--ablate)	ABLATE=$2 ;;
 		--boots)	BOOTS=$2; BOOTS_SET=1 ;;
 		--sweep)	SWEEP=$2 ;;
@@ -136,6 +215,13 @@ while [ $# -gt 0 ]; do
 		shift 2 ;;
 	--no-install)	INSTALL=0; shift ;;
 	--dry-run)	DRY=1; shift ;;
+	--packages)
+		[ $# -ge 2 ] || die 2 "$1 needs a value"
+		case "$2" in
+		arch|ubuntu)	packages "$2" || die 2 "the package table has a row that is not two names" ;;
+		*)		die 2 "--packages takes arch or ubuntu, not '$2'" ;;
+		esac
+		exit 0 ;;
 	-h|--help)	sed -n '/^# Usage:/,/^# it\.$/p' "$0"; exit 0 ;;
 	*)		die 2 "unknown argument '$1' (--help says what it takes)" ;;
 	esac
@@ -143,6 +229,10 @@ done
 
 case "$ROUNDS" in
 ''|*[!0-9]*|0)	die 2 "--rounds takes a number of rounds, not '$ROUNDS'" ;;
+esac
+# #951: a time, for the rounds, the A/B or the sweep alike.
+case "$STOP_AT" in
+*[!0-9]*)	die 2 "--stop-at takes a time in seconds since the epoch, not '$STOP_AT'" ;;
 esac
 read -r -a WANT <<< "$(tr ',\n\t' '   ' <<< "$ENTRIES")"
 for e in "${WANT[@]}"; do
@@ -341,6 +431,10 @@ if [ -n "$ABLATE" ]; then
 		[ $rc = 2 ] && die 2 "ablate.sh refuses this A/B"
 		die 3 "ablate.sh could not plan this A/B (status $rc)"
 	fi
+	# What ablate.sh plans, which a patch's Accel: line can narrow to one
+	# accelerator (#659); the arithmetic only where the plan does not say.
+	AB_WANT=$(sed -n 's/^ablate: plan: .*, \([0-9][0-9]*\) in all$/\1/p' <<< "$AB_PLAN")
+	[ -n "$AB_WANT" ] || AB_WANT=$((BOOTS * (HAS_TCG + HAS_KVM) * 2))
 fi
 # Each patch of a sweep planned by ablate.sh in the same way, every refusal said
 # before anything is built, and the boots each plan counts kept: they are what
@@ -415,10 +509,129 @@ else
 	echo "job: rows: $CSV; logs of WRONG boots: $OUT/failed/"
 	echo "job: and every patch of ablations/ asked whether it still applies to the tree (scripts/ablate.sh --check)"
 fi
+[ -z "$STOP_AT" ] ||
+	echo "job: it stops at $(when "$STOP_AT") (--stop-at $STOP_AT), or when it is sent SIGTERM: the merge test or ablate.sh is sent SIGTERM, and the boot it is running is said to be stopped"
 if [ $DRY = 1 ]; then
 	echo "job: dry run: nothing installed, built or booted"
 	exit 0
 fi
+
+# ------------------------------------------------------------------ stopping
+#
+# #951: the job stops itself, at --stop-at's time or when it is sent SIGTERM.
+# GitHub's own limit stops only the step's shell: the container, and this
+# script in it, went on booting while the artifact was uploaded, and the job's
+# summary was never written.  So the workflow gives the job a time, five
+# minutes before the step's limit, and passes on to the container the signal
+# the runner sends the step's shell when a run is cancelled; either way the job
+# stops what it is doing and writes its record, where it stopped included.
+#
+# TERMINATED says a SIGTERM came, and CHILD is the job under way -- a build
+# step, the merge test, ablate.sh -- to which the trap passes it on.  GRACE is
+# how long the merge test or ablate.sh has to end once sent SIGTERM: a boot
+# stops in seconds, but a side build or a check of the patches runs to its end
+# first.
+TERMINATED=""
+CHILD=""
+GRACE=180
+trap 'TERMINATED=TERM; [ -z "$CHILD" ] || kill -TERM "$CHILD" 2>/dev/null' TERM
+
+# A step of the job's own, run as a job waited for, so that the trap runs
+# during it (#801): its status, or that of its stop.  It gets SIGINT and
+# SIGQUIT back, which an asynchronous command of a shell without job control
+# starts with ignored: a Ctrl-C is its own to stop at, as in the foreground.
+step() {
+	local rc=0
+	env --default-signal=INT,QUIT "$@" <&0 &
+	CHILD=$!
+	[ -z "$TERMINATED" ] || kill -TERM "$CHILD" 2>/dev/null
+	wait "$CHILD" || rc=$?
+	if [ -n "$TERMINATED" ] && [ $rc -gt 128 ]; then
+		rc=0
+		wait "$CHILD" || rc=$?
+	fi
+	CHILD=""
+	return $rc
+}
+
+# A job sent SIGTERM before its first boot ends here, job.txt saying so.
+stopped_before() {	# what it was doing
+	local now
+	[ -z "$TERMINATED" ] && return 0
+	printf -v now '%(%s)T' -1
+	echo "stopped:  by SIG$TERMINATED from outside, $(when "$now"), while $1, before its first boot" >> "$OUT/job.txt"
+	echo "job: stopped by SIG$TERMINATED from outside, while $1, before its first boot"
+	exit 3
+}
+
+# A command the job's time or a SIGTERM may stop: a round of the merge test,
+# the A/B, a patch of the sweep.  Its output is read a line at a time, from a
+# descriptor with its own process behind it, copied to OUT, printed as well
+# unless quiet, and each line handed to HOOK.  At --stop-at's time it is sent
+# SIGTERM, which a SIGTERM to this script sends it at once; its lines are then
+# read to their end, for GRACE s at most before it is killed.  A trapped
+# signal does not end a read in bash, which takes the trap and reads on, so
+# the read wakes every five seconds: a SIGTERM starts the grace even when no
+# line comes.  Sets RC, its status; SENT, when it was sent SIGTERM; WHY, why;
+# KILLED, when it had to be killed.
+stoppable() {	# out print|quiet hook|"" command...
+	local out=$1 print=$2 hook=$3 fd ofd line pending="" rc now left
+	shift 3
+	SENT="" WHY="" KILLED=""
+	exec {fd}< <(exec "$@" 2>&1)
+	CHILD=$!
+	exec {ofd}> "$out"
+	while :; do
+		printf -v now '%(%s)T' -1
+		if [ -z "$SENT" ] && [ -n "$TERMINATED" ]; then
+			SENT=$now
+			WHY="by SIG$TERMINATED from outside, $(when "$now")"
+		elif [ -z "$SENT" ] && [ -n "$STOP_AT" ] && [ "$now" -ge "$STOP_AT" ]; then
+			kill -TERM "$CHILD" 2>/dev/null
+			SENT=$now
+			WHY="by its time limit, $(when "$STOP_AT")"
+		fi
+		if [ -n "$SENT" ]; then
+			left=$((SENT + GRACE - now))
+			if [ "$left" -le 0 ]; then
+				kill -KILL "$CHILD" 2>/dev/null
+				KILLED="had not ended $GRACE s after SIGTERM, and was killed"
+				break
+			fi
+		elif [ -n "$STOP_AT" ]; then
+			left=$((STOP_AT - now))
+		else
+			left=5
+		fi
+		[ "$left" -le 5 ] || left=5
+		rc=0
+		IFS= read -r -t "$left" -u "$fd" line || rc=$?
+		# A read that timed out keeps what it had of a line, and the rest
+		# comes with the next one.
+		if [ $rc -gt 128 ]; then
+			pending+=$line
+			continue
+		fi
+		line=$pending$line
+		pending=""
+		# The end of the output, once a last line without its newline has
+		# been read.
+		[ $rc = 0 ] || [ -n "$line" ] || break
+		[ "$print" = quiet ] || printf '%s\n' "$line"
+		printf '%s\n' "$line" >&"$ofd"
+		[ -z "$hook" ] || "$hook" "$line"
+		[ $rc = 0 ] || break
+	done
+	exec {fd}<&- {ofd}>&-
+	RC=0
+	wait "$CHILD" 2>/dev/null || RC=$?
+	CHILD=""
+	if [ -z "$SENT" ] && [ -n "$TERMINATED" ]; then
+		printf -v now '%(%s)T' -1
+		SENT=$now
+		WHY="by SIG$TERMINATED from outside, $(when "$now")"
+	fi
+}
 
 
 # ----------------------------------------------------------------- toolchain
@@ -429,6 +642,9 @@ fi
 {
 	echo "tree:     $TREE"
 	echo "run:      $RUN_ID, job $JOB"
+	# #961: the nightly is a dispatch as one started by hand is, and only
+	# this line tells pull-results.sh which it was.
+	[ -z "$KIND" ] || echo "kind:     $KIND"
 	echo "cpu:      $CPU, $NPROC processors"
 	echo "kvm:      /dev/kvm $KVM; accelerators: $ACCS"
 	echo "gcc:      $(gcc --version 2>&1 | head -n 1)"
@@ -437,7 +653,20 @@ fi
 	echo "cmake:    $(cmake --version 2>&1 | head -n 1)"
 	echo "ninja:    $(ninja --version 2>&1 | head -n 1)"
 	echo "grub:     $(grub-mkimage --version 2>&1 | head -n 1)"
+	# #951: what the job means to boot, written before it boots anything,
+	# so that a job that ends short of it -- stopped at its time limit or by
+	# a cancel, or cut off by GitHub -- leaves the number beside the rows it
+	# wrote.
+	if [ -n "$ABLATE" ]; then
+		echo "plan:     $AB_WANT boots, an A/B of ${PATCHES[*]##*/}"
+	elif [ -n "$SWEEP" ]; then
+		echo "plan:     $SW_WANT boots, a sweep of ${#SWEPT[@]} patches"
+	else
+		echo "plan:     $((PER_ROUND * ROUNDS)) boots, $ROUNDS round(s) of $PER_ROUND"
+	fi
+	[ -z "$STOP_AT" ] || echo "limit:    the job stops at $(when "$STOP_AT") (--stop-at $STOP_AT)"
 } > "$OUT/job.txt"
+JOBTXT=$OUT/job.txt
 sed 's/^/job: /' "$OUT/job.txt"
 
 # --------------------------------------------------------------------- build
@@ -445,15 +674,19 @@ sed 's/^/job: /' "$OUT/job.txt"
 FRESH=1
 [ -f "$BUILD/build.ninja" ] && FRESH=0
 echo "job: configuring ($OUT/configure.log)"
-if ! cmake -G Ninja -C "$PRESET" -S "$REPO/uros" -B "$BUILD" > "$OUT/configure.log" 2>&1; then
+if ! step cmake -G Ninja -C "$PRESET" -S "$REPO/uros" -B "$BUILD" > "$OUT/configure.log" 2>&1; then
+	stopped_before "configuring the build"
 	tail -n 30 "$OUT/configure.log"
 	die 3 "the configure failed: $OUT/configure.log"
 fi
+stopped_before "configuring the build"
 echo "job: building ($OUT/build.log)"
-if ! ninja -C "$BUILD" > "$OUT/build.log" 2>&1; then
+if ! step ninja -C "$BUILD" > "$OUT/build.log" 2>&1; then
+	stopped_before "building the tree"
 	tail -n 40 "$OUT/build.log"
 	die 3 "the build failed: $OUT/build.log"
 fi
+stopped_before "building the tree"
 WARN=$(grep 'warning:' "$OUT/build.log")
 if [ -n "$WARN" ]; then
 	printf '%s\n' "$WARN" | head -n 40
@@ -525,21 +758,35 @@ ab_rows() {
 	fi
 }
 
+# #951: where ablate.sh said it stopped, when it was sent SIGTERM.
+AB_WHERE=""
+ab_line() {	# a line of ablate.sh's
+	[[ $1 =~ ^ablate:\ stopped\ by\ SIG[A-Z]+\ (.*)$ ]] && AB_WHERE=${BASH_REMATCH[1]}
+	return 0
+}
+
 if [ -n "$ABLATE" ]; then
 	echo "job: the A/B ($OUT/ablate.out)"
-	UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --ab --boots "$BOOTS" \
-		--accel "$ACCEL" "${PATCHES[@]}" 2>&1 | tee "$OUT/ablate.out"
-	rc=${PIPESTATUS[0]}
+	stoppable "$OUT/ablate.out" print ab_line \
+		env UROS_ABLATE_DIR="$OUT/ablate" "$REPO/scripts/ablate.sh" --ab --boots "$BOOTS" \
+		--accel "$ACCEL" "${PATCHES[@]}"
+	rc=$RC
 	ab_rows
-	# What ablate.sh planned, which a patch's Accel: line can narrow to one
-	# accelerator (#659); the arithmetic only where the plan does not say.
-	want=$(sed -n 's/^ablate: plan: .*, \([0-9][0-9]*\) in all$/\1/p' <<< "$AB_PLAN")
-	[ -n "$want" ] || want=$((BOOTS * (HAS_TCG + HAS_KVM) * 2))
+	want=$AB_WANT
+	stop=""
+	[ -z "$SENT" ] ||
+		stop="$WHY, ${AB_WHERE:-where ablate.sh did not say}${KILLED:+; ablate.sh $KILLED}"
 	{
 		echo "ablate:   ${PATCHES[*]##*/}, $BOOTS boot(s) per arm and accelerator, $n of $want boots reported, ablate.sh status $rc"
 		grep '^ablate: \(ablated tree caught\|fixed tree passed\)' "$OUT/ablate.out" | sed 's/^ablate: /result:   /'
+		[ -z "$stop" ] || echo "stopped:  $stop"
 	} >> "$OUT/job.txt"
 	echo "job: the A/B reported $n of $want boots, ablate.sh status $rc -- tree $TREE, $CPU, $ACCS"
+	# A stopped A/B reported the boots it made, the last one stopped or none.
+	if [ -n "$stop" ]; then
+		echo "job: stopped $stop"
+		exit 3
+	fi
 	case $rc in
 	0|1)	[ $n = $want ] || die 3 "the A/B reported $n of the $want boots it was meant to: $OUT/ablate.out"
 		exit $rc ;;
@@ -567,14 +814,35 @@ if [ -n "$SWEEP" ]; then
 	mkdir -p "$OUT/sweep" || die 3 "cannot create $OUT/sweep"
 	worst=0
 	short=()
+	# #951: where the sweep stopped, at the time or at a SIGTERM: a patch that
+	# would start past either is not started, and one under way is stopped.
+	sw_stop=""
+	k=0
 	for p in "${SWEPT[@]}"; do
 		name=${p##*/}
 		name=${name%.patch}
+		k=$((k + 1))
+		printf -v now '%(%s)T' -1
+		if [ -n "$TERMINATED" ]; then
+			sw_stop="by SIG$TERMINATED from outside, $(when "$now"), before patch $k of ${#SWEPT[@]}, $name"
+			break
+		elif [ -n "$STOP_AT" ] && [ "$now" -ge "$STOP_AT" ]; then
+			sw_stop="by its time limit, $(when "$STOP_AT"), before patch $k of ${#SWEPT[@]}, $name"
+			break
+		fi
 		before=$(sweep_rows)
-		UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --boots 1 \
-			--accel "$(sweep_accel "$p")" "$p" > "$OUT/sweep/$name.out" 2>&1
-		rc=$?
+		AB_WHERE=""
+		stoppable "$OUT/sweep/$name.out" quiet ab_line \
+			env UROS_ABLATE_DIR="$OUT/ablate" "$REPO/scripts/ablate.sh" --boots 1 \
+			--accel "$(sweep_accel "$p")" "$p"
+		rc=$RC
 		added=$(($(sweep_rows) - before))
+		if [ -n "$SENT" ]; then
+			sw_stop="$WHY, at patch $k of ${#SWEPT[@]}, $name: ${AB_WHERE:-where ablate.sh did not say}${KILLED:+; ablate.sh $KILLED}"
+			echo "job: $name: stopped $WHY"
+			echo "sweep:    $name: stopped $WHY" >> "$OUT/job.txt"
+			break
+		fi
 		case $rc in
 		0)	say=CAUGHT ;;
 		1)	say="NOT CAUGHT" ;;
@@ -595,6 +863,11 @@ if [ -n "$SWEEP" ]; then
 	ab_rows
 	echo "sweep:    ${#SWEPT[@]} patches of ${#NAMES[@]} (share $SHARE), $n boots reported, the worst status $worst" >> "$OUT/job.txt"
 	echo "job: the sweep reported $n boots of ${#SWEPT[@]} patches, the worst status $worst -- tree $TREE, $CPU, $ACCS"
+	if [ -n "$sw_stop" ]; then
+		echo "stopped:  $sw_stop" >> "$OUT/job.txt"
+		echo "job: stopped $sw_stop"
+		exit 3
+	fi
 	[ ${#short[@]} = 0 ] ||
 		die 3 "the sweep has patches that reported fewer boots than their plans: ${short[*]}: $OUT/sweep/"
 	exit $worst
@@ -605,10 +878,12 @@ UNFOUND=0
 MALFORMED=()
 HEADER_COMMAS=${HEADER//[^,]/}
 # One boot's row.  The verdict is the merge test's words, its kind of judgement
-# included.  A WRONG boot's logs are copied where the artifact keeps them.
+# included.  A WRONG boot's logs are copied where the artifact keeps them, and
+# so are a stopped boot's, as far as it got (#951).
+STOPPED_BOOT=""
 row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 	local r=$1 e=$2 a=$3 n=$4 opt=$5 res=$6 kind=$7 named=$8
-	local rdir=$OUT/logs/r$r tag h f keep log mhz x line commas
+	local rdir=$OUT/logs/r$r tag h f keep log mhz x line commas dest
 	# The name merge-test-x86_64.sh gives a boot's logs, its boot_name() --
 	# one boot's, at the count this script runs it at: its lists_cover(),
 	# which -L asks, refuses two lines with one name there (#776).  A WRONG
@@ -637,13 +912,19 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 		log="missing: ${f#"$OUT"/}"
 		UNFOUND=$((UNFOUND + 1))
 	fi
-	if [ "$res" = WRONG ]; then
-		mkdir -p "$OUT/failed/r$r"
+	if [ "$res" = WRONG ] || [ "$res" = stopped ]; then
+		dest=failed
+		[ "$res" = stopped ] && dest=stopped
+		mkdir -p "$OUT/$dest/r$r"
 		for x in "$h" "$f" "$f.walk.txt"; do
-			[ -f "$x" ] && cp -p "$x" "$OUT/failed/r$r/"
+			[ -f "$x" ] && cp -p "$x" "$OUT/$dest/r$r/"
 		done
-		[ -f "$keep" ] && log=failed/r$r/${keep##*/}
-		WRONGS+=("round $r, entry $e $a -smp $n${opt:+ ($opt)}: $log")
+		[ -f "$keep" ] && log=$dest/r$r/${keep##*/}
+		if [ "$res" = WRONG ]; then
+			WRONGS+=("round $r, entry $e $a -smp $n${opt:+ ($opt)}: $log")
+		else
+			STOPPED_BOOT="entry $e $a -smp $n${opt:+ ($opt)}, $kind: $log"
+		fi
 	fi
 	line="$(date -u '+%F,%T'),$RUN_ID,$JOB,$r,$TREE,$CPU,$mhz,$a,$e,${n//,/;},${opt//,/ },$res (${kind//,/ }),$log"
 	# As many columns as the header: one comma inside a field shifts every
@@ -663,8 +944,11 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 # maxcpus=128 (#663) -- so it is a token, not a number: read as a number, those
 # two boots were not counted, every round came out 86 of 88, and every job
 # stopped after its first.
-VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9][^ ]*) (\(([^)]*)\) )?-- (as it should be|WRONG) \(([^)]*)\)(: (.*))?$'
+# #951: and a boot the merge test stopped when it was sent SIGTERM is said with
+# the result "stopped", and the run says where it stopped before its totals.
+VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9][^ ]*) (\(([^)]*)\) )?-- (as it should be|WRONG|stopped) \(([^)]*)\)(: (.*))?$'
 END_RE='^merge-test: ([0-9]+) wrong$'
+STOP_RE='^merge-test: stopped by SIG[A-Z]+ (.*)$'
 
 # Both kernels with the trap phase profile on, the kernel and nothing else,
 # in the first job only (#622).  UROS_SYSCALL_PROFILE is off in the preset, and
@@ -677,13 +961,16 @@ case $JOB in
 1-*)
 	pdir=$(mktemp -d) || die 3 "cannot create a scratch directory"
 	echo "job: both kernels with UROS_SYSCALL_PROFILE on ($OUT/profile-builds/)"
-	PROFILE_OUT=$("$REPO/scripts/profile-builds.sh" "$pdir" 2>&1)
+	# #951: a step, as the build is, read back from its file.
+	step "$REPO/scripts/profile-builds.sh" "$pdir" > "$pdir.out" 2>&1
 	PROFILE_BAD=$?
+	PROFILE_OUT=$(cat "$pdir.out")
 	printf '%s\n' "$PROFILE_OUT"
 	mkdir -p "$OUT/profile-builds"
 	cp "$pdir"/*.log "$OUT/profile-builds/" 2>/dev/null
-	rm -rf "$pdir"
+	rm -rf "$pdir" "$pdir.out"
 	sed -n 's/^profile-builds: /profile:  /p' <<< "$PROFILE_OUT" >> "$OUT/job.txt"
+	stopped_before "building both kernels with the profile on"
 	;;
 esac
 
@@ -694,9 +981,11 @@ esac
 # #769: asked of ablate.sh --check-all, which the merge test asks as well: the
 # question a merge is decided on is this one, from the same place.
 scratch=$(mktemp -d) || die 3 "cannot create a scratch directory"
-CHECK=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --check-all 2>&1)
+step env UROS_ABLATE_DIR="$scratch" "$REPO/scripts/ablate.sh" --check-all > "$scratch.out" 2>&1
 CHECK_RC=$?
-rm -rf "$scratch"
+CHECK=$(cat "$scratch.out")
+rm -rf "$scratch" "$scratch.out"
+stopped_before "asking whether every patch of ablations/ still applies"
 NPATCHES=$(ls "$REPO"/ablations/*.patch | wc -l)
 ROTTED=$(sed -n 's/^ablate: [0-9]* of the [0-9]* patches of ablations\/ no longer apply to [^ ]* -- regenerate them: //p' <<< "$CHECK")
 if [ $CHECK_RC != 0 ] && [ -z "$ROTTED" ]; then
@@ -716,33 +1005,63 @@ BOOTS=0
 WRONG=0
 SHORT=0
 DONE_ROUNDS=0
+# #951: where the rounds stopped, at the time or at a SIGTERM, for job.txt.
+STOPPED=""
+# A line of the merge test's: a verdict is a row, written as it arrives, so
+# that a stopped job keeps every boot it finished.
+round_line() {	# the line
+	local -a m
+	if [[ $1 =~ $VERDICT_RE ]]; then
+		m=("${BASH_REMATCH[@]}")
+		row "$r" "${m[1]}" "${m[2]}" "${m[3]}" "${m[5]}" "${m[6]}" "${m[7]}" "${m[9]}"
+		got=$((got + 1))
+		[ "${m[6]}" = WRONG ] && bad=$((bad + 1))
+		[ "${m[6]}" = stopped ] && halted=$((halted + 1))
+	elif [[ $1 =~ $END_RE ]]; then
+		said=${BASH_REMATCH[1]}
+	elif [[ $1 =~ $STOP_RE ]]; then
+		where=${BASH_REMATCH[1]}
+	fi
+	return 0
+}
 for r in $(seq 1 "$ROUNDS"); do
+	# #951: a round that would start past the time, or after a SIGTERM, is
+	# not started.
+	printf -v now '%(%s)T' -1
+	if [ -n "$TERMINATED" ]; then
+		STOPPED="by SIG$TERMINATED from outside, $(when "$now"), before round $r"
+		break
+	elif [ -n "$STOP_AT" ] && [ "$now" -ge "$STOP_AT" ]; then
+		STOPPED="by its time limit, $(when "$STOP_AT"), before round $r"
+		break
+	fi
 	args=(-a "$MT_ACC" -o "$OUT/logs/r$r")
 	[ -n "$ENTRIES" ] && args+=(-e "$ENTRIES")
 	got=0
 	bad=0
+	halted=0
 	said=""
-	# Each row is written as its line arrives, so a job stopped by its time
-	# limit keeps every boot it finished.
-	while IFS= read -r line; do
-		printf '%s\n' "$line"
-		if [[ $line =~ $VERDICT_RE ]]; then
-			m=("${BASH_REMATCH[@]}")
-			row "$r" "${m[1]}" "${m[2]}" "${m[3]}" "${m[5]}" "${m[6]}" "${m[7]}" "${m[9]}"
-			got=$((got + 1))
-			[ "${m[6]}" = WRONG ] && bad=$((bad + 1))
-		elif [[ $line =~ $END_RE ]]; then
-			said=${BASH_REMATCH[1]}
-		fi
-	done < <("$MT" "${args[@]}" 2>&1 | tee "$OUT/merge-r$r.out")
-	BOOTS=$((BOOTS + got))
+	where=""
+	stoppable "$OUT/merge-r$r.out" print round_line "$MT" "${args[@]}"
+	BOOTS=$((BOOTS + got - halted))
 	WRONG=$((WRONG + bad))
+	# #951: a stopped round reported the boots it made, the last one stopped
+	# or none, and its total, and said where it stopped; what it did not say
+	# is said in job.txt instead.
+	if [ -n "$SENT" ]; then
+		total=""
+		[ -n "$said" ] && [ "$said" -eq "$bad" ] ||
+			total="the merge test's own total was ${said:-never printed}, and $bad WRONG were read"
+		STOPPED="$WHY, in round $r, ${where:-where the merge test did not say}${STOPPED_BOOT:+: $STOPPED_BOOT}${KILLED:+; the merge test $KILLED}${total:+; $total}"
+		break
+	fi
 	# The census: a round counts only if it reported every boot it planned
 	# and its own total agrees with the lines read.  A merge test that refused
 	# to start, died, or changed the shape of its lines would otherwise pass
-	# as a short round with nothing wrong in it.
-	if [ -z "$said" ] || [ "$got" -ne "$PER_ROUND" ] || [ "$said" -ne "$bad" ]; then
-		echo "job: round $r reported $got of $PER_ROUND boots, $bad WRONG, and the merge test's own total was ${said:-never printed}: $OUT/merge-r$r.out" >&2
+	# as a short round with nothing wrong in it -- and so would one stopped
+	# by a SIGTERM this script did not send.
+	if [ -z "$said" ] || [ "$got" -ne "$PER_ROUND" ] || [ "$said" -ne "$bad" ] || [ $halted != 0 ]; then
+		echo "job: round $r reported $got of $PER_ROUND boots, $bad WRONG and $halted stopped, and the merge test's own total was ${said:-never printed}: $OUT/merge-r$r.out" >&2
 		SHORT=1
 		break
 	fi
@@ -754,6 +1073,7 @@ done
 	for w in "${WRONGS[@]}"; do
 		echo "WRONG:    $w"
 	done
+	[ -z "$STOPPED" ] || echo "stopped:  $STOPPED"
 	[ $SHORT = 0 ] || echo "short:    round $((DONE_ROUNDS + 1)) did not report every boot"
 	[ $UNFOUND = 0 ] || echo "unfound:  $UNFOUND boot(s) left no log under the name merge-test gives it"
 	for m in "${MALFORMED[@]}"; do
@@ -764,11 +1084,12 @@ echo "job: $BOOTS boots in $DONE_ROUNDS of $ROUNDS round(s), $WRONG WRONG -- tre
 for w in "${WRONGS[@]}"; do
 	echo "job:   WRONG: $w"
 done
+[ -z "$STOPPED" ] || echo "job: stopped $STOPPED"
 [ $UNFOUND = 0 ] || echo "job: $UNFOUND boot(s) left no log under the name merge-test gives it: see the rows' log column" >&2
 [ ${#MALFORMED[@]} = 0 ] || echo "job: ${#MALFORMED[@]} row(s) with a comma inside a field were not written: see job.txt" >&2
 [ -z "$ROTTED" ] || echo "job: ablations: no longer apply: $ROTTED" >&2
 [ $PROFILE_BAD = 0 ] || echo "job: a kernel with UROS_SYSCALL_PROFILE on did not build without a warning: $OUT/profile-builds/" >&2
 [ $WRONG = 0 ] || exit 1
-[ $SHORT = 0 ] && [ $UNFOUND = 0 ] && [ ${#MALFORMED[@]} = 0 ] || exit 3
+[ $SHORT = 0 ] && [ -z "$STOPPED" ] && [ $UNFOUND = 0 ] && [ ${#MALFORMED[@]} = 0 ] || exit 3
 [ -z "$ROTTED" ] && [ $PROFILE_BAD = 0 ] || exit 2
 exit 0

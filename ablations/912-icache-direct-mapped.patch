@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #912
+Takes out: the set-associative inode cache -- one way a set, and the 16 slots of ino & 15 it had, whatever table the mount was given: / (inode 2) and /mach_servers (18) evict each other in every walk.  ext_server's check finds inodes 2, 18, 34, 50, 66 and 82 missing the inode cache after the first round, all six in one slot; on today's image the walk of /mach_servers/cow_test does not collide (inodes 2, 22 and 23).  Asked of the inode cache's misses: over the page cache, a miss whose block is held there reads nothing from the disk (#912's second step).
+Run: --entry 14 600 -smp 4
+Expect: ext2: inode cache: WRONG -- (/mach_servers/cow_test walked 2000 times missed the inode cache|inodes 2, 18, 34, 50, 66 and 82 read in turn 50 times missed the inode cache)
+
+diff --git a/uros/src/file_systems/ext2fs/ext2fs.c b/uros/src/file_systems/ext2fs/ext2fs.c
+index 07782631..c266a5d0 100644
+--- a/uros/src/file_systems/ext2fs/ext2fs.c
++++ b/uros/src/file_systems/ext2fs/ext2fs.c
+@@ -557,7 +557,7 @@ static int write_super(
+  * whole when a probe fails, with no hook for what hangs off it, so it keeps
+  * the table inside the mount: ICACHE_SETS_MIN sets, four times the old one.
+  */
+-#define ICACHE_WAYS	4
++#define ICACHE_WAYS	1	/* 912-icache-direct-mapped */
+ #define ICACHE_SETS_MIN	16		/* a power of 2, at least 16 */
+ 
+ struct icache_entry {
+@@ -672,8 +672,8 @@ icache_set(struct ext2_mount *m, ino_t ino)
+ 		m->m_icache_sets = ICACHE_SETS_MIN;
+ 		m->m_icache_shift = 32 - 4;	/* log2(ICACHE_SETS_MIN) */
+ 	}
+-	h = (unsigned int)((unsigned int)ino * 2654435761u) >> m->m_icache_shift;
+-	return &m->m_icache[(size_t)h * ICACHE_WAYS];
++	h = (unsigned int)ino & (ICACHE_SETS_MIN - 1);	/* 912-icache-direct-mapped: ino & 15 */
++	return &m->m_icache_min[(size_t)h * ICACHE_WAYS];
+ }
+ 
+ /* The way that holds `ino' in `set', or NULL.  Under ext2_icache_lock. */

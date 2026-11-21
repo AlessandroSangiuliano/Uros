@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #912
+Takes out: itable_read's page cache: read_inode reads an inode's block from the device on every miss of the inode cache, as it did before.  Every inode is then read as the disk has it, whatever the cache holds, so no arm of ext_server's check could see a stale copy: each reads its inode back with what was written, from the inode table and not from the page cache.
+Run: --entry 14 600 -smp 4
+Expect: ext2: inode table: WRONG -- (a create into a block the page cache held|a batched flush|a flush of one inode): inode [0-9]+ was read from the inode table, not from the page cache
+
+diff --git a/uros/src/file_systems/ext2fs/ext2fs.c b/uros/src/file_systems/ext2fs/ext2fs.c
+index 04030025..c3fd629e 100644
+--- a/uros/src/file_systems/ext2fs/ext2fs.c
++++ b/uros/src/file_systems/ext2fs/ext2fs.c
+@@ -1015,7 +1015,7 @@ itable_read(struct ext2fs_file *fp, daddr_t disk_block, vm_size_t off,
+ 
+ 	c.fp = fp;
+ 	c.filled = 0;
+-	if (fp->f_dev.cache) {
++	if (fp->f_dev.cache && 0) {	/* 912-inode-read-from-disk: from the device, as before */
+ 		rc = page_cache_get(fp->f_dev.cache, disk_block, itable_fill,
+ 				    &c, &e);
+ 		if (rc != 0)

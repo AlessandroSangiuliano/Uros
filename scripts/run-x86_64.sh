@@ -631,6 +631,16 @@ must_report 'hello_exec: hello from exec_server' 'hello_exec: AUXV AT_PAGESZ (ta
 	'exec_server started it and the initial stack did not say what a page is, in words of this target: a layout of the wrong width reads the tag from one place and the value from another (#421).' \
 	hello_exec
 
+must_report 'chora_test: started' 'chora_test: [0-9]* of [0-9]* arms passed' \
+	'It starts chora on the network card twice and waits for each, every wait bounded at 30 s, so silence is a stop inside exec_load(), inside the HAL or inside the kernel it asks about the claim (#963).  It is the last line of chora.conf and its count ends the run.'
+
+must_report '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
+	'A chora claimed its device and never said whether its module took it.  It says so either way, so a stop here is a module that did not come back from attaching to its device -- a wait for an interrupt with no bound, or a fault (#963).' \
+	chora
+
+must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
+	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
+
 must_report 'musl_test: started' 'musl_test: [0-9]* of [0-9]* arms passed' \
 	'A static C program with musl under it, asking for threads, memory, signals and files through the system calls of this target (#414).  It started and did not reach its last line, which is a stop inside the personality or a thread that never came back.'
 
@@ -813,6 +823,22 @@ must_report 'iommu fault records decoded' 'fault-log cases' \
 
 must_report '=== ext2 filesystem server' 'ext2: .*page-cache cases' \
 	'ext_server asks the page cache about small caches of its own (#599).  No line means it was never asked.'
+
+# #912: ext_server's checks of the root's inode cache and of the inode table's
+# writers, before it registers the mount: one line for each question, NOT
+# ASKED included -- an ext_server that mounts nothing at / says NOT ASKED of
+# both.  Nothing asked for them before, and a check that stopped printing would
+# have passed.
+must_report '=== ext2 filesystem server' 'ext2: inode cache\( NOT ASKED\|: .*walk\)' \
+	'ext_server asks its inode cache about /mach_servers/cow_test walked 2000 times (#912).  No line means it was never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode cache\( NOT ASKED\|: .*\(collisions\|inodes 2, 18\|could not be read in round\)\)' \
+	'ext_server asks its inode cache about inodes 2, 18, 34, 50, 66 and 82, which the old hash put in one slot (#912).  No line means they were never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode table\( NOT ASKED\|: .*\(create\|was made and could not be opened\)\)' \
+	'ext_server makes a file in / whose inode lands in an inode-table block the page cache holds, and reads it back as a miss of the inode cache reads it (#912).  No line means it was never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode table\( NOT ASKED\|: .*\(a batched flush\|the flushes NOT ASKED\)\)' \
+	'ext_server writes into that file so that its inode, the group descriptors and the superblock are flushed as one batch, and reads the inode back (#912).  No line means it was never asked.'
+must_report '=== ext2 filesystem server' 'ext2: inode table\( NOT ASKED\|: .*\(a flush of one inode\|the flushes NOT ASKED\)\)' \
+	'ext_server writes inside that file'"'"'s block so that its inode alone is flushed, and reads it back (#912).  No line means it was never asked.'
 
 # #921: the CD drive DISK_ARGS puts on ahci0's port 2 is told apart by its
 # signature.  A module that took it for a disk fails the board check as well,
@@ -1098,7 +1124,7 @@ done
 # as one that answers it, so each arm that can decline names `NOT ASKED' beside
 # its own PASS — and NOT as a bare alternative, which would let the FIRST test
 # to decline, hundreds of lines early, be read as the end of the boot.
-DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|chora_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
 
 # 🔑 A BOOT THAT RESTARTS ITSELF ENDS AT THE RESTART (#373).  With -b the
 # kernel resets the machine after the quiet census, on reset_after='s deadline
@@ -1678,6 +1704,8 @@ expected_reports() {
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+		'chora_test: started'   'chora_test: [0-9]* of [0-9]* arms passed' \
+		'@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
@@ -1868,26 +1896,34 @@ else
 		"$([ -r "$CLOCK_CPUFREQ/scaling_available_frequencies" ] && echo 1 || echo 0)")" ;;
 	esac
 fi
-# Every other qemu alive when the run started or when it ended, one field each
+# Every other qemu alive when the run started or when it ended, one line each
 # (#618): what this script used to kill by name, and what competed with it for
 # the processors it measured on.  Ours is gone by now.
+#
+# 🔴 #960: one field of lines, which uros_conditions_block prints a line at a
+# time -- not an array.  This script is #!/bin/sh, and on Ubuntu /bin/sh is
+# dash: the array this block was built in was a syntax error there, which dash
+# meets only when it gets this far, after the boot.  Every boot of the first
+# campaign job to build on Ubuntu was judged "did not start" for it (dispatch
+# 44683216164, "1891: Syntax error"), while Arch's /bin/sh, bash, took it.
 OTHER_QEMU_AT_END=$(uros_other_qemus)
-OTHER_QEMU=()
-while IFS= read -r _q; do
-	[ -n "$_q" ] || continue
-	if printf '%s\n' "$OTHER_QEMU_AT_END" | grep -qxF -- "$_q"; then
-		OTHER_QEMU+=("other qemu:   at the start and at the end, $_q")
-	else
-		OTHER_QEMU+=("other qemu:   at the start, $_q")
-	fi
-done <<< "$OTHER_QEMU_AT_START"
-while IFS= read -r _q; do
-	[ -n "$_q" ] || continue
-	printf '%s\n' "$OTHER_QEMU_AT_START" | grep -qxF -- "$_q" ||
-		OTHER_QEMU+=("other qemu:   at the end, $_q")
-done <<< "$OTHER_QEMU_AT_END"
-[ ${#OTHER_QEMU[@]} -gt 0 ] ||
-	OTHER_QEMU=("other qemu:   none, at the start or at the end (#618)")
+OTHER_QEMU=$(
+	printf '%s\n' "$OTHER_QEMU_AT_START" | while IFS= read -r _q; do
+		[ -n "$_q" ] || continue
+		if printf '%s\n' "$OTHER_QEMU_AT_END" | grep -qxF -- "$_q"; then
+			printf 'other qemu:   at the start and at the end, %s\n' "$_q"
+		else
+			printf 'other qemu:   at the start, %s\n' "$_q"
+		fi
+	done
+	printf '%s\n' "$OTHER_QEMU_AT_END" | while IFS= read -r _q; do
+		[ -n "$_q" ] || continue
+		printf '%s\n' "$OTHER_QEMU_AT_START" | grep -qxF -- "$_q" ||
+			printf 'other qemu:   at the end, %s\n' "$_q"
+	done
+)
+[ -n "$OTHER_QEMU" ] ||
+	OTHER_QEMU="other qemu:   none, at the start or at the end (#618)"
 # The tree a third time, the run over (#587).
 TREE_AT_END=$(uros_tree_look)
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
@@ -1905,7 +1941,7 @@ UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"entry:        ${UROS_X86_64_BOOT_ENTRY:-from grub.cfg default}" \
 	"budget:       ${SECS}s" \
 	"command:      $0 $ORIG_ARGS" \
-	"${OTHER_QEMU[@]}")
+	"$OTHER_QEMU")
 printf '%s\n' "$UROS_COND" | tee -a "$LOG"
 
 # 🔥 A clock that moved during the run is a run nobody may compare with

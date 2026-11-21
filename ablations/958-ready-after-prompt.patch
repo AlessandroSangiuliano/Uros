@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #958
+Takes out: the look for ext2's ready line from the boot's first character -- it looks only past the prompt again, as before #958, so that under 958-widen-ready-first, whose ext2 is ready before the prompt every time, the line is never found and no command is typed
+Over: 958-widen-ready-first.patch
+Script: scripts/ush-x86_64.py
+Expect: ush-x86_64: 'ext2: ready, entering message loop' is not in what the boot printed from character [1-9][0-9]* on
+
+diff --git a/scripts/ush-x86_64.py b/scripts/ush-x86_64.py
+index 5e7a3b39..153a676c 100755
+--- a/scripts/ush-x86_64.py
++++ b/scripts/ush-x86_64.py
+@@ -205,7 +205,7 @@ def session(a, build):
+         # #958: from the boot's first character -- ext2's line may have come
+         # before the prompt.  Not finding it is the machine's answer, which
+         # is at its prompt, and no run this script could not make.
+-        frm = 0
++        frm = seen          # 958-ready-after-prompt: only past the prompt, as before
+         if not wait_for(ROOT_MOUNTED, a.budget, start=frm):
+             print(f"ush-x86_64: {ROOT_MOUNTED!r} is not in what the boot "
+                   f"printed from character {frm} on, {a.budget:.0f}s after "

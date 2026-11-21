@@ -425,7 +425,7 @@ machine_startup(void)
 #endif	/* MACH_KDB */
 	TR_INIT();
 
-	printf(version);
+	printf("%s", version);
 
 	/*
 	 * Whether the IPC Direct Thread Switch is on (#329), said where the

@@ -1,0 +1,25 @@
+Kind: widen
+Issue: #954
+Holds open: wakes the high thread, bound to the waker's processor and above it, between the wakee's wakeup and the look at handoff_wakee, and spins there for 50 ms or until the high thread is done, so that a tick in the window may let the high thread take the processor from the waker, every time
+Run: --entry 67 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+index 5d13982f..8ed07dbf 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
++++ b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+@@ -198,6 +198,15 @@ wakee_test(void)
+ 	thread_wakeup((event_t) &wakee_test_other_event);
+ 	took_first = self->handoff_wakee;
+ 	thread_wakeup((event_t) &wakee_test_wakee_event);
++	/* 954-widen-high-in-window: the high thread runnable here before the
++	 * look, and 50 ms of ticks at which it may take this processor */
++	thread_wakeup((event_t) &wakee_test_high_event);
++	{
++		uint64_t	w0 = rdtsc();
++
++		while (!wakee_test_high_done && rdtsc() - w0 < hz / 20)
++			cpu_pause();
++	}
+ 	took_named = self->handoff_wakee;
+ 	self->handoff_target = THREAD_NULL;
+ 	self->handoff_hint = FALSE;

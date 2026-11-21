@@ -65,4 +65,19 @@ int	modload_load_class(const char *class, const char *sym_suffix,
  */
 void   *modload_load_module(const char *name, const char *sym_suffix);
 
+/*
+ * Fetch ONE module from <class>'s pool, <name> -- "chora_probe.so" -- and
+ * nothing else of its class, dlopen it, and return the symbol
+ * <basename><sym_suffix> as modload_load_module() does (#963).  NULL, with a
+ * line saying why, when a name does not fit a pool's, the pool has no such
+ * module, or it does not load.
+ *
+ * 🔑 For a program that drives one device: chora loads the one module it was
+ * told to, and a task holding one device must not hold the code of every
+ * other driver of its class.  modload_load_class() is for a server that
+ * drives a whole class.
+ */
+void   *modload_load_named(const char *class, const char *name,
+			   const char *sym_suffix);
+
 #endif /* _MODLOAD_H_ */

@@ -1,0 +1,61 @@
+Kind: ablation
+Issue: #953
+Takes out: libposix-uros's use of proc_sig_default() -- the signal thread takes a signal's default action from its own list again, which leaves out SIGSTKFLT, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGIO, SIGPWR and SIGSYS and drops each: musl_test's [50] must see the eight leave their children to go on
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[50\] WRONG -- .*of the eight, one or more did NOT end its child by that signal
+
+diff --git a/uros/src/lib/libposix-uros/signals.c b/uros/src/lib/libposix-uros/signals.c
+index 84d5844d..99d5dcb2 100644
+--- a/uros/src/lib/libposix-uros/signals.c
++++ b/uros/src/lib/libposix-uros/signals.c
+@@ -91,6 +91,26 @@ mach_port_t              __uros_proc_port    = MACH_PORT_NULL;
+ proc_pid_t               __uros_my_pid       = 0;
+ static mach_port_t       __sig_port          = MACH_PORT_NULL;
+ 
++/* ------------------------------------------------------------------ */
++/* POSIX default actions                                              */
++/* ------------------------------------------------------------------ */
++
++/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S).
++ * A signo with no entry is dropped, as 'I' drops it.  The job-control
++ * stops are the three proc_stop() takes (proc.defs): SIGTSTP, and SIGTTIN
++ * and SIGTTOU, which char_server sends a background group that reads the
++ * terminal, or writes it under TOSTOP (#934). */
++static const char __sig_default[PROC_NSIG] = {
++    [PROC_SIGHUP]  = 'T', [PROC_SIGINT]  = 'T', [PROC_SIGQUIT] = 'T',
++    [PROC_SIGILL]  = 'T', [PROC_SIGTRAP] = 'T', [PROC_SIGABRT] = 'T',
++    [PROC_SIGBUS]  = 'T', [PROC_SIGFPE]  = 'T', [PROC_SIGKILL] = 'T',
++    [PROC_SIGUSR1] = 'T', [PROC_SIGSEGV] = 'T', [PROC_SIGUSR2] = 'T',
++    [PROC_SIGPIPE] = 'T', [PROC_SIGALRM] = 'T', [PROC_SIGTERM] = 'T',
++    [PROC_SIGCHLD] = 'I', [PROC_SIGCONT] = 'I',
++    [PROC_SIGSTOP] = 'S', [PROC_SIGTSTP] = 'S',
++    [PROC_SIGTTIN] = 'S', [PROC_SIGTTOU] = 'S',
++};
++
+ /* ------------------------------------------------------------------ */
+ /* netname retry — proc_server may not yet be visible on first probe. */
+ /* ------------------------------------------------------------------ */
+@@ -153,19 +173,13 @@ __uros_sig_loop(void)
+         if (h == SIG_IGN)
+             continue;
+         if (h == SIG_DFL) {
+-            /*
+-             * #953: proc_server's answer for a task with no signal port too
+-             * (proc_types.h).  This thread had a list of its own, and
+-             * dropped the eight signals it left out, whose default ends the
+-             * process: a program of musl went on through SIGXCPU or SIGSYS.
+-             */
+-            switch (proc_sig_default(signo)) {
+-            case PROC_SIG_DFL_IGN:
++            switch (__sig_default[signo]) {
++            case 'I':   /* ignore */
+                 continue;
+-            case PROC_SIG_DFL_TERM:
++            case 'T':   /* terminate */
+                 __uros_die_of_signal(signo);
+                 continue;     /* unreachable */
+-            case PROC_SIG_DFL_STOP:
++            case 'S':
+                 /*
+                  * #934: stopped, as SIGSTOP stops it, with this signal's
+                  * number for the parent's WSTOPSIG.  The stop is proc_server's

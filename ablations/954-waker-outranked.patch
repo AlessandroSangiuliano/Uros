@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #954
+Over: 954-widen-before-leaving.patch
+Takes out: the waker's priority above the wakee's -- at the startup thread's 12, below the wakee's 8, a tick before it leaves lets the wakee take its processor, the bet is won before the high thread can stand in the wakee's way, and the test must say its second question was not asked
+Run: --entry 67 300 -smp 4
+Expect: wakee_test: NOT ASKED . the wakee ran on processor [0-9]+ before its waker left it
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+index 5d13982f..c43f3a57 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
++++ b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+@@ -178,7 +178,7 @@ wakee_test(void)
+ 
+ 	/* #954: above the wakee and the other thread, below the high one. */
+ 	was_pri = self->priority;
+-	thread_set_own_priority(WAKEE_TEST_WAKER);
++	/* 954-waker-outranked: the waker stays at the priority it had */
+ 
+ 	printf("wakee_test: starting: processor %d names a wakee, wakes another "
+ 	       "thread, wakes the wakee, and leaves for a thread of higher "

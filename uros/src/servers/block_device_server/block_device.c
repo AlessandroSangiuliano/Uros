@@ -1073,20 +1073,53 @@ ds_device_register_dma(mach_port_t device, mach_port_t reply,
  * first meet.  Both drivers refuse a short list of their own now, but a
  * driver that forgets to is then only as wrong as its own transfer, and the
  * next driver written starts from zero again.
+ *
+ * #712: and the list's shape, which both drivers take on trust: they program
+ * up to 4096 bytes from each address, AHCI one PRD entry and virtio one
+ * descriptor per page.
+ *
+ * - An address that is not page-aligned moves the tail of its 4096 bytes into
+ *   the next physical page.  The kernel validates the page that CONTAINS each
+ *   address and hands back its translation plus the offset, so that next page
+ *   is covered by no capability, and where no IOMMU confines the device it can
+ *   be anybody's, the kernel's included.  It is refused here, before the
+ *   kernel is asked.
+ * - A list longer than the bytes is not an error -- cap_test [36] hands in a
+ *   buffer of 17 pages to ask for one -- but using all of it was.  virtio built
+ *   a descriptor for every page given, those past the bytes had length 0, and
+ *   QEMU marks a device broken at a zero-sized buffer; from then on it answers
+ *   no client.  So the list is trimmed here to the pages the bytes need, and
+ *   only those are checked, translated and handed to the driver.
  */
 #define BLK_PHYS_PAGES_MAX	32
 
+/* 1 with *npages trimmed to the pages `total' needs; 0, said, to refuse. */
 static int
-blk_pages_cover(mach_msg_type_number_t npages, unsigned int total,
-		const char *what)
+blk_phys_list(const vm_address_t *pages, mach_msg_type_number_t *npages,
+	      unsigned int total, const char *what)
 {
-	if ((uint64_t)npages * 4096u >= (uint64_t)total)
-		return 1;
+	uint64_t need = ((uint64_t)total + 4095u) / 4096u;
+	mach_msg_type_number_t k;
 
-	printf("blk: %s of %u bytes refused — %u page(s) hold %llu\n",
-	       what, total, (unsigned)npages,
-	       (unsigned long long)((uint64_t)npages * 4096u));
-	return 0;
+	if ((uint64_t)*npages < need) {
+		printf("blk: %s of %u bytes refused — %u page(s) hold %llu\n",
+		       what, total, (unsigned)*npages,
+		       (unsigned long long)((uint64_t)*npages * 4096u));
+		return 0;
+	}
+	*npages = (mach_msg_type_number_t)need;
+
+	for (k = 0; k < *npages; k++)
+		if (pages[k] & 4095u) {
+			printf("blk: %s of %u bytes refused — page %u of the "
+			       "list, 0x%llx, is not page-aligned, and the last "
+			       "%u of its 4096 bytes would land in the next "
+			       "physical page (#712)\n", what, total, (unsigned)k,
+			       (unsigned long long)pages[k],
+			       (unsigned)(pages[k] & 4095u));
+			return 0;
+		}
+	return 1;
 }
 
 static unsigned long long blk_tsc(void);
@@ -1640,7 +1673,7 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
-	if (!blk_pages_cover(phys_addrsCnt, total, "read"))
+	if (!blk_phys_list(phys_addrs, &phys_addrsCnt, total, "read"))
 		return D_INVALID_SIZE;
 
 	{
@@ -1720,7 +1753,7 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 	if (!blk_part_range_ok(part, recnum, nsectors))	/* #711 */
 		return D_INVALID_SIZE;
 
-	if (!blk_pages_cover(phys_addrsCnt, total, "write"))
+	if (!blk_phys_list(phys_addrs, &phys_addrsCnt, total, "write"))
 		return D_INVALID_SIZE;
 
 	ra_invalidate(part);

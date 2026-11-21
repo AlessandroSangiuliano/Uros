@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #953
+Takes out: SIGURG and SIGWINCH from the signals proc_sig_default() ignores, so that both halves end the process for them: musl_test's [50] must see their children ended, as sig_test sees a bare child ended by them
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[50\] WRONG -- .*SIGURG or SIGWINCH did NOT leave its child to go on
+
+diff --git a/uros/src/servers/proc_server/proc_types.h b/uros/src/servers/proc_server/proc_types.h
+index 7e96353c..fef02a0c 100644
+--- a/uros/src/servers/proc_server/proc_types.h
++++ b/uros/src/servers/proc_server/proc_types.h
+@@ -177,8 +177,7 @@ proc_sig_default(int signo)
+     switch (signo) {
+     case PROC_SIGCHLD:
+     case PROC_SIGCONT:          /* the continue itself is proc_server's */
+-    case PROC_SIGURG:
+-    case PROC_SIGWINCH:
++    /* 953-urg-winch-not-ignored: SIGURG and SIGWINCH end the process */
+         return PROC_SIG_DFL_IGN;
+     case PROC_SIGSTOP:
+     case PROC_SIGTSTP:

@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #963
+Takes out: the words after a boot module's name, with a bundle loaded: the kernel publishes argv[0] and --bundle= alone again, so entry 68's `-f chora.conf' never reaches bootstrap, which reads bootstrap.conf and runs the default boot's tests on it instead of chora_test.
+Run: --iommu intel --entry 68 600 -smp 4
+Expect: act_test: started
+
+diff --git a/uros/src/mach_kernel/kern/bootstrap.c b/uros/src/mach_kernel/kern/bootstrap.c
+index 58dec3fb..b4c5606e 100644
+--- a/uros/src/mach_kernel/kern/bootstrap.c
++++ b/uros/src/mach_kernel/kern/bootstrap.c
+@@ -1118,7 +1118,7 @@ user_bootstrap(void)
+ 	     * follow the bundle's, in their order; bootstrap takes --bundle= out
+ 	     * of argv wherever it is, and reads the rest as its options.
+ 	     */
+-	    for (ai = 1; info->argv && info->argv[ai]; ai++)
++	    for (ai = 1; 0 && info->argv && info->argv[ai]; ai++)	/* 963-kernel-drops-module-words */
+ 		bsz += strlen(info->argv[ai]) + 1;
+ 	    kr = kmem_alloc(kernel_map, &bbuf, round_page(bsz));
+ 	    if (kr == KERN_SUCCESS) {
+@@ -1126,7 +1126,7 @@ user_bootstrap(void)
+ 
+ 		bcopy(argv0, (char *)bbuf, a0len + 1);
+ 		bcopy(bundle_arg, (char *)bbuf + a0len + 1, alen + 1);
+-		for (ai = 1; info->argv && info->argv[ai]; ai++) {
++		for (ai = 1; 0 && info->argv && info->argv[ai]; ai++) {	/* 963-kernel-drops-module-words */
+ 		    vm_size_t len = strlen(info->argv[ai]) + 1;
+ 
+ 		    bcopy(info->argv[ai], (char *)bbuf + at, len);

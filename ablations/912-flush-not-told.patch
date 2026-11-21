@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #912
+Takes out: write_inode's itable_wrote: a flush of the inode alone writes its block, and the page cache keeps the copy it held from before.  ext_server's check writes 100 more bytes inside the file's block, which dirties the inode alone, and reads the inode back from the page cache with the 100 bytes of the batched flush before it.
+Run: --entry 14 600 -smp 4
+Expect: ext2: inode table: WRONG -- a flush of one inode: inode [0-9]+ read back with 100 bytes where 200 were written
+
+diff --git a/uros/src/file_systems/ext2fs/ext2fs.c b/uros/src/file_systems/ext2fs/ext2fs.c
+index 04030025..b176f28c 100644
+--- a/uros/src/file_systems/ext2fs/ext2fs.c
++++ b/uros/src/file_systems/ext2fs/ext2fs.c
+@@ -3983,8 +3983,7 @@ write_inode(ino_t inumber, struct ext2fs_file *fp)
+ 		serialize_inode(fp);
+ 		rc = write_disk_block(fp, disk_block, vn->v_inode_blk,
+ 				      EXT2_BLOCK_SIZE(fs));
+-		if (rc == 0)
+-			itable_wrote(fp, disk_block, vn->v_inode_blk);	/* #912 */
++		/* 912-flush-not-told: the page cache is not given the block */
+ 	}
+ 	pthread_mutex_unlock(&ext2_itable_lock);
+ 	return rc;

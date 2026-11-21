@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #934
+Takes out: kill(0) as the caller's group -- h_kill() sends only a negative pid to __uros_kill_group(), and pid 0 goes to proc_kill(), which knows no pid 0: musl_test's [47] must see kill(0, SIGTERM) refused and the two in the caller's group left running
+Run: --entry 14 600 -smp 4
+Expect: musl_test: \[47\] WRONG -- .*kill\(0\) did NOT end the two
+
+diff --git a/uros/src/lib/libposix-uros/handlers.c b/uros/src/lib/libposix-uros/handlers.c
+index 0ce88e43..25b794b2 100644
+--- a/uros/src/lib/libposix-uros/handlers.c
++++ b/uros/src/lib/libposix-uros/handlers.c
+@@ -772,7 +772,7 @@ static long h_kill(long pid, long sig, long a3,
+                    long a4, long a5, long a6)
+ {
+     (void)a3; (void)a4; (void)a5; (void)a6;
+-    if ((int)pid <= 0)              /* a process group (#934) */
++    if ((int)pid < 0)  /* 934-kill-zero-as-pid: kill(0) to proc_kill() as pid 0 */
+         return __uros_kill_group((int)pid, (int)sig);
+     return __uros_kill((unsigned int)pid, (int)sig);
+ }

@@ -358,7 +358,8 @@ census_threads(void)
 	 * ⚠️ The NAME as well as the pointer (#425).
 	 *
 	 * This report used to give `task=0xffffc000004d83a0' and nothing else,
-	 * and struct task has no name field -- so a wedge log listed five live
+	 * and struct task had no name field -- it has had one since #963, which
+	 * only a task given a name fills -- so a wedge log listed five live
 	 * user tasks that could not be told apart, and the debugger was no help
 	 * because list_tasks() prints the same bare pointer.  Twice in one
 	 * afternoon the question "which program is stuck?" had to be answered by

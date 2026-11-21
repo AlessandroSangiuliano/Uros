@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #951
+Takes out: the count of stopped boots that names no cause -- the run's line, and the totals, say "stopped at a time limit" of every stopped boot, a cancelled run's too, as they said of run 44345740779's on 18/11.  harness-lifecycle-check.sh's jobstop finds pull-results.sh --job counting the boot it stopped with a SIGTERM as "1 stopped at a time limit".
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: jobstop
+Expect: lifecycle: jobstop: .* -- WRONG
+Note: run under each accelerator ablate.sh is given, which passes --kvm to harness-lifecycle-check.sh under KVM; jobstop runs job.sh and pull-results.sh -- this arm's -- with the arm's build
+
+diff --git a/scripts/ci/pull-results.sh b/scripts/ci/pull-results.sh
+index 50abb7e1..c5d3a46e 100755
+--- a/scripts/ci/pull-results.sh
++++ b/scripts/ci/pull-results.sh
+@@ -105,7 +105,7 @@ summary() {
+ 			printf "  %-38s %6d boots %5d WRONG\n", k, n[k], w[k] + 0 | cmd
+ 		close(cmd)
+ 		printf "%s", list
+-		printf "  in all: %d boots, %d WRONG%s\n", all, wrong, (stopped ? sprintf(", %d stopped", stopped) : "")
++		printf "  in all: %d boots, %d WRONG%s\n", all, wrong, (stopped ? sprintf(", %d stopped at a time limit", stopped) : "")
+ 	}'
+ }
+ 
+@@ -240,7 +240,7 @@ merge_line() {	# description jobs
+ 			a = ""; for (k in acc) a = a " " k
+ 			t = ""; for (k in tree) t = t " " k
+ 			printf "pull-results: %s: %d job(s), %d boots, %d WRONG%s; tree%s; accelerators%s\n",
+-				what, jobs, n, w, (s ? sprintf(", %d stopped", s) : ""),
++				what, jobs, n, w, (s ? sprintf(", %d stopped at a time limit", s) : ""),	# 951-stopped-counted-as-time-limit
+ 				(t == "" ? " -" : t), (a == "" ? " -" : a)
+ 		}'
+ }

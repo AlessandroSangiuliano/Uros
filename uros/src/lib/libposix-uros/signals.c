@@ -92,21 +92,6 @@ proc_pid_t               __uros_my_pid       = 0;
 static mach_port_t       __sig_port          = MACH_PORT_NULL;
 
 /* ------------------------------------------------------------------ */
-/* POSIX default actions                                              */
-/* ------------------------------------------------------------------ */
-
-/* What SIG_DFL does for each signo: terminate (T), ignore (I), stop (S). */
-static const char __sig_default[PROC_NSIG] = {
-    [PROC_SIGHUP]  = 'T', [PROC_SIGINT]  = 'T', [PROC_SIGQUIT] = 'T',
-    [PROC_SIGILL]  = 'T', [PROC_SIGTRAP] = 'T', [PROC_SIGABRT] = 'T',
-    [PROC_SIGBUS]  = 'T', [PROC_SIGFPE]  = 'T', [PROC_SIGKILL] = 'T',
-    [PROC_SIGUSR1] = 'T', [PROC_SIGSEGV] = 'T', [PROC_SIGUSR2] = 'T',
-    [PROC_SIGPIPE] = 'T', [PROC_SIGALRM] = 'T', [PROC_SIGTERM] = 'T',
-    [PROC_SIGCHLD] = 'I', [PROC_SIGCONT] = 'I',
-    [PROC_SIGSTOP] = 'S', [PROC_SIGTSTP] = 'S',
-};
-
-/* ------------------------------------------------------------------ */
 /* netname retry — proc_server may not yet be visible on first probe. */
 /* ------------------------------------------------------------------ */
 
@@ -168,13 +153,19 @@ __uros_sig_loop(void)
         if (h == SIG_IGN)
             continue;
         if (h == SIG_DFL) {
-            switch (__sig_default[signo]) {
-            case 'I':   /* ignore */
+            /*
+             * #953: proc_server's answer for a task with no signal port too
+             * (proc_types.h).  This thread had a list of its own, and
+             * dropped the eight signals it left out, whose default ends the
+             * process: a program of musl went on through SIGXCPU or SIGSYS.
+             */
+            switch (proc_sig_default(signo)) {
+            case PROC_SIG_DFL_IGN:
                 continue;
-            case 'T':   /* terminate */
+            case PROC_SIG_DFL_TERM:
                 __uros_die_of_signal(signo);
                 continue;     /* unreachable */
-            case 'S':
+            case PROC_SIG_DFL_STOP:
                 /*
                  * #934: stopped, as SIGSTOP stops it, with this signal's
                  * number for the parent's WSTOPSIG.  The stop is proc_server's

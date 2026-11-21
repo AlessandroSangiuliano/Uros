@@ -116,10 +116,10 @@ typedef struct proc_exit_msg {
 /* ------------------------------------------------------------------ */
 
 /*
- * Signal numbers — Linux/i386 layout for ease of porting libc later.
- * proc_server itself only special-cases SIGKILL/SIGSTOP/SIGCONT; the
- * other constants are just labels carried in the wire message and
- * interpreted by libposix-uros (#218).
+ * Signal numbers — Linux/i386 layout for ease of porting libc later; musl
+ * uses the same numbers on i386 and x86-64.  proc_server carries out
+ * SIGKILL, SIGSTOP and SIGCONT itself, and the default action of any other
+ * for a task that registered no signal port, from proc_sig_default() below.
  */
 #define PROC_SIGHUP           1
 #define PROC_SIGINT           2
@@ -136,13 +136,59 @@ typedef struct proc_exit_msg {
 #define PROC_SIGPIPE         13
 #define PROC_SIGALRM         14
 #define PROC_SIGTERM         15
+#define PROC_SIGSTKFLT       16
 #define PROC_SIGCHLD         17
 #define PROC_SIGCONT         18
 #define PROC_SIGSTOP         19   /* cannot be caught/blocked */
 #define PROC_SIGTSTP         20
 #define PROC_SIGTTIN         21   /* bg pgrp read from ctty (#275.2) */
 #define PROC_SIGTTOU         22   /* bg pgrp write to ctty w/ TOSTOP (#275.3) */
+#define PROC_SIGURG          23
+#define PROC_SIGXCPU         24
+#define PROC_SIGXFSZ         25
+#define PROC_SIGVTALRM       26
+#define PROC_SIGPROF         27
+#define PROC_SIGWINCH        28
+#define PROC_SIGIO           29   /* SIGPOLL */
+#define PROC_SIGPWR          30
+#define PROC_SIGSYS          31
 #define PROC_NSIG            32
+
+/*
+ * What SIG_DFL does with a signal: it ends the process, it is ignored, or
+ * it stops the process.  One answer for the two that carry it out (#953):
+ * libposix-uros's signal thread, in a program that registered a signal
+ * port, and proc_server, on the task port of one that did not.  Each had a
+ * list of its own, and they disagreed: the thread dropped the eight signals
+ * its list left out, whose default ends the process, and proc_server ended
+ * the process for SIGURG and SIGWINCH, whose default is to ignore them.
+ *
+ * POSIX ends the process abnormally, with a core, for SIGQUIT, SIGILL,
+ * SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGXCPU, SIGXFSZ and SIGSYS.
+ * There is no core file yet (#901), so those end it as the others do.
+ */
+#define PROC_SIG_DFL_TERM    'T'
+#define PROC_SIG_DFL_IGN     'I'
+#define PROC_SIG_DFL_STOP    'S'
+
+static inline int
+proc_sig_default(int signo)
+{
+    switch (signo) {
+    case PROC_SIGCHLD:
+    case PROC_SIGCONT:          /* the continue itself is proc_server's */
+    case PROC_SIGURG:
+    case PROC_SIGWINCH:
+        return PROC_SIG_DFL_IGN;
+    case PROC_SIGSTOP:
+    case PROC_SIGTSTP:
+    case PROC_SIGTTIN:
+    case PROC_SIGTTOU:
+        return PROC_SIG_DFL_STOP;
+    default:
+        return PROC_SIG_DFL_TERM;
+    }
+}
 
 #define PROC_SIGNAL_MSGID    3298
 

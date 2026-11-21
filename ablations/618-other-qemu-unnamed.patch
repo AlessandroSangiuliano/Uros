@@ -7,10 +7,10 @@ Script: bystander
 Expect: lifecycle: bystander: .*do not name it
 
 diff --git a/scripts/run-conditions.sh b/scripts/run-conditions.sh
-index f9697067..8345059b 100644
+index 6a59cdb4..80ac6223 100644
 --- a/scripts/run-conditions.sh
 +++ b/scripts/run-conditions.sh
-@@ -299,20 +299,6 @@ uros_clock_policy() {
+@@ -299,22 +299,6 @@ uros_clock_policy() {
  # which an image the campaign runs in need not carry.  comm is cut at fifteen
  # characters, "qemu-system-x86", which the pattern still meets.
  uros_other_qemus() {
@@ -26,7 +26,9 @@ index f9697067..8345059b 100644
 -		done
 -		[ "$_mine" = 1 ] && continue
 -		_cmd=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null) || continue
--		[ -n "$_cmd" ] && echo "pid $_pid: ${_cmd% }"
+-		# #960: printf, as uros_conditions_block does -- dash's echo would
+-		# read a backslash in a command line as an escape.
+-		[ -n "$_cmd" ] && printf 'pid %s: %s\n' "$_pid" "${_cmd% }"
 -	done
  	return 0
  }

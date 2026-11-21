@@ -44,8 +44,14 @@ parse_args(int argc, char **argv, char *conf_file)
 			collocation_prohibit = TRUE;
 			break;
 		case 'f':
-			/* Requires an argument.  */
-			if (argc <= 1) {
+			/*
+			 * Requires an argument, and argv[2] is it: argv[1] is
+			 * the -f itself.  This asked argc <= 1, which the loop
+			 * above has already ruled out, so a -f with nothing
+			 * after it read the null that ends argv as a path
+			 * (#963).
+			 */
+			if (argc <= 2) {
 				BOOTSTRAP_IO_LOCK();
 				printf("%s: -f switch lacks argument.\n",
 				       program_name);
@@ -65,6 +71,16 @@ parse_args(int argc, char **argv, char *conf_file)
 				strlcat(conf_file, argv[1], PATH_MAX);
 			}
 			conf_file_set = 1;
+			/*
+			 * Said, because nothing else would say it (#963): a
+			 * boot that reads another list runs other programs,
+			 * and the kernel dropped the words after a boot
+			 * module's name for as long as a bundle came with it.
+			 */
+			BOOTSTRAP_IO_LOCK();
+			printf("%s: configuration %s, as -f asks\n",
+			       program_name, conf_file);
+			BOOTSTRAP_IO_UNLOCK();
 			break;
 		case '-':
 			return;

@@ -149,6 +149,7 @@
 #include <mach.h>
 #include <mach/clock.h>		/* #290: BATTERY_CLOCK, clock_get_time */
 #include <mach/mach_traps.h>	/* #290: mach_host_self */
+#include <mach/mach_host.h>	/* #912: host_info, the inode cache's size */
 
 /*
  * MIG user stubs from ahci_batch.defs (subsystem 2950).
@@ -340,9 +341,12 @@ ext2_dev_has_batch(struct device *dev)
  *  - ext2_vnode_table_lock (global): vnode_get/put refcounts.
  *  - ext2_itable_lock (global, #599): the read-modify-write of an
  *    inode-table block -- write_new_inode, and a vnode's flush of its own
- *    inode.  Each reads the block afresh, changes one slot and writes the
- *    block back while holding it: a block holds many inodes, and a copy
- *    written back without being read again undid its neighbours.  Leaf.
+ *    inode, alone or batched.  Each reads the block afresh, changes one slot
+ *    and writes the block back while holding it: a block holds many inodes,
+ *    and a copy written back without being read again undid its neighbours.
+ *    #912: and gives the page cache the block it wrote (itable_wrote) before
+ *    letting the lock go, because read_inode reads those blocks through the
+ *    cache.
  *  - ext2_icache_lock (global, #599): every mount's inode cache.  The
  *    writeback thread's flushes write it (icache_follow) while path walks
  *    on the MIG thread read and fill it (read_inode), and an entry is a
@@ -351,8 +355,9 @@ ext2_dev_has_batch(struct device *dev)
  *
  * Lock order: v_lock -> ext2_alloc_lock (write-extend allocates while
  * holding the vnode); v_lock -> ext2_itable_lock (flush); v_lock -> pc_lock
- * (page cache) via the data path; v_lock -> ext2_icache_lock (flush).
- * Never the reverse.
+ * (page cache) via the data path; v_lock -> ext2_icache_lock (flush);
+ * ext2_itable_lock -> pc_lock (#912: itable_wrote, whose page_cache_wrote may
+ * wait out a fill of the block, which takes no ext2 lock).  Never the reverse.
  */
 static pthread_mutex_t ext2_icache_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ext2_alloc_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -530,6 +535,13 @@ static void unmount_fs(
 static int write_super(
 		struct ext2fs_file *);
 
+static int ext2_fill(
+		void *,
+		daddr_t,
+		vm_offset_t,
+		vm_size_t,
+		vm_offset_t);
+
 /*
  * Per-mount filesystem state.
  * One instance per mounted partition, hung off struct device.mount_data.
@@ -541,11 +553,27 @@ static int write_super(
  * ext2_get_mount().
  */
 
-#define ICACHE_SIZE	16		/* must be power of 2 */
-#define ICACHE_HASH(ino) ((ino) & (ICACHE_SIZE - 1))
+/*
+ * #912: the inode cache is set-associative, ICACHE_WAYS ways a set, the least
+ * recently used way replaced, and its set picked by a multiplicative hash.  It
+ * was 16 slots, one per ino & 15: on the root disk / is inode 2 and
+ * /mach_servers inode 18, so a walk through /mach_servers evicted each with
+ * the other, two disk reads of 1.5 ms per stat() under KVM, every time.
+ *
+ * A mount ext2_get_mount() makes for itself -- ext_server's, which last -- is
+ * given a table sized when its superblock is read: the smaller of 1/256 of
+ * the machine's memory and the filesystem's own inode count, about 15,000
+ * inodes on a 512 MB machine.  vm_allocate()'s memory is only backed where it
+ * is touched.  A mount the dispatch layer allocates (file_system.c) is freed
+ * whole when a probe fails, with no hook for what hangs off it, so it keeps
+ * the table inside the mount: ICACHE_SETS_MIN sets, four times the old one.
+ */
+#define ICACHE_WAYS	4
+#define ICACHE_SETS_MIN	16		/* a power of 2, at least 16 */
 
 struct icache_entry {
 	ino_t			ic_ino;		/* 0 = empty */
+	unsigned long long	ic_used;	/* m_icache_clock at the last use */
 	struct ext2_inode	ic_inode;	/* cached inode data */
 };
 
@@ -571,7 +599,21 @@ struct ext2_mount {
 	struct ext2_group_desc	*m_gd;
 	vm_size_t		 m_gd_size;
 	int			 m_nindir[NIADDR];
-	struct icache_entry	 m_icache[ICACHE_SIZE];
+	int			 m_own;		/* #912: ext2_get_mount() made it */
+	/*
+	 * #912: the inode cache, under ext2_icache_lock.  m_icache is
+	 * m_icache_sets * ICACHE_WAYS entries -- m_icache_min until the mount
+	 * is given a larger table -- and m_icache_shift is 32 less the log2 of
+	 * m_icache_sets.  The counters are this mount's since it was made.
+	 */
+	struct icache_entry	*m_icache;
+	unsigned int		 m_icache_sets;
+	unsigned int		 m_icache_shift;
+	unsigned long long	 m_icache_clock;
+	unsigned long		 m_icache_hits;
+	unsigned long		 m_icache_misses;
+	unsigned long		 m_itable_reads;	/* read_inode's disk reads */
+	struct icache_entry	 m_icache_min[ICACHE_SETS_MIN * ICACHE_WAYS];
 	struct ext2_vnode	 m_vnode_table[VNODE_TABLE_SIZE];
 	struct dcache_entry	 m_dcache[DCACHE_SIZE];
 };
@@ -606,6 +648,7 @@ ext2_get_mount(struct device *dev)
 			sizeof(struct ext2_mount), TRUE) != KERN_SUCCESS)
 		return NULL;
 
+	((struct ext2_mount *)dev->mount_data)->m_own = 1;	/* #912 */
 	return (struct ext2_mount *)dev->mount_data;
 }
 
@@ -623,18 +666,75 @@ ext2_get_mount(struct device *dev)
  */
 static unsigned int ext2_icache_gen;
 
+/*
+ * #912: the set `ino' hashes to, its first way; the mount's table, the one
+ * inside it until it is given another.  Under ext2_icache_lock.  The
+ * multiplicative hash takes the product's top bits (Knuth's 2654435761, the
+ * golden ratio of 2^32): consecutive numbers, and numbers 16 apart, fall in
+ * sets far from one another.
+ */
+static struct icache_entry *
+icache_set(struct ext2_mount *m, ino_t ino)
+{
+	unsigned int h;
+
+	if (m->m_icache == NULL) {
+		m->m_icache = m->m_icache_min;
+		m->m_icache_sets = ICACHE_SETS_MIN;
+		m->m_icache_shift = 32 - 4;	/* log2(ICACHE_SETS_MIN) */
+	}
+	h = (unsigned int)((unsigned int)ino * 2654435761u) >> m->m_icache_shift;
+	return &m->m_icache[(size_t)h * ICACHE_WAYS];
+}
+
+/* The way that holds `ino' in `set', or NULL.  Under ext2_icache_lock. */
+static struct icache_entry *
+icache_way(struct icache_entry *set, ino_t ino)
+{
+	int w;
+
+	for (w = 0; w < ICACHE_WAYS; w++)
+		if (set[w].ic_ino == ino)
+			return &set[w];
+	return NULL;
+}
+
+/* `ino' in its set: the way it holds, else an empty one, else the least
+ * recently used.  Under ext2_icache_lock. */
+static void
+icache_put(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
+{
+	struct icache_entry *set = icache_set(m, ino);
+	struct icache_entry *e = icache_way(set, ino);
+	int w;
+
+	if (e == NULL)
+		e = icache_way(set, 0);
+	if (e == NULL)
+		for (e = &set[0], w = 1; w < ICACHE_WAYS; w++)
+			if (set[w].ic_used < e->ic_used)
+				e = &set[w];
+	e->ic_ino = ino;
+	e->ic_inode = *inode;
+	e->ic_used = ++m->m_icache_clock;
+}
+
 static int
 icache_get(struct ext2_mount *m, ino_t ino, struct ext2_inode *out,
 	   unsigned int *gen)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+	struct icache_entry *e;
 	int hit = 0;
 
 	pthread_mutex_lock(&ext2_icache_lock);
-	if (e->ic_ino == ino) {
+	e = icache_way(icache_set(m, ino), ino);
+	if (e != NULL) {
 		*out = e->ic_inode;
+		e->ic_used = ++m->m_icache_clock;
+		m->m_icache_hits++;
 		hit = 1;
-	}
+	} else
+		m->m_icache_misses++;
 	*gen = ext2_icache_gen;
 	pthread_mutex_unlock(&ext2_icache_lock);
 	return hit;
@@ -645,13 +745,9 @@ static void
 icache_fill(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode,
 	    unsigned int gen)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
-
 	pthread_mutex_lock(&ext2_icache_lock);
-	if (gen == ext2_icache_gen) {
-		e->ic_ino = ino;
-		e->ic_inode = *inode;
-	}
+	if (gen == ext2_icache_gen)
+		icache_put(m, ino, inode);
 	pthread_mutex_unlock(&ext2_icache_lock);
 }
 
@@ -659,11 +755,8 @@ icache_fill(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode,
 static void
 icache_insert(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
-
 	pthread_mutex_lock(&ext2_icache_lock);
-	e->ic_ino = ino;
-	e->ic_inode = *inode;
+	icache_put(m, ino, inode);
 	ext2_icache_gen++;
 	pthread_mutex_unlock(&ext2_icache_lock);
 }
@@ -671,13 +764,91 @@ icache_insert(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
 static void
 icache_invalidate(struct ext2_mount *m, ino_t ino)
 {
-	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+	struct icache_entry *e;
 
 	pthread_mutex_lock(&ext2_icache_lock);
-	if (e->ic_ino == ino)
+	e = icache_way(icache_set(m, ino), ino);
+	if (e != NULL)
 		e->ic_ino = 0;
 	ext2_icache_gen++;
 	pthread_mutex_unlock(&ext2_icache_lock);
+}
+
+/*
+ * #912: a mount ext2_get_mount() made is given its table once its superblock
+ * is known, before any inode has been cached in the one inside it: the
+ * smaller of 1/256 of the machine's memory and the filesystem's inode count,
+ * rounded down to a power of 2 of sets.  A table no larger than the one
+ * inside, or one vm_allocate() refuses, leaves the mount with that one.
+ */
+static void
+icache_size(struct ext2_mount *m, unsigned int inodes)
+{
+	host_basic_info_data_t	info;
+	mach_msg_type_number_t	cnt = HOST_BASIC_INFO_COUNT;
+	mach_port_t		host = mach_host_self();
+	unsigned long long	budget, entries;
+	unsigned int		sets = ICACHE_SETS_MIN, shift = 32 - 4;
+	vm_address_t		table = 0;
+	kern_return_t		kr;
+
+	kr = host_info(host, HOST_BASIC_INFO, (host_info_t)&info, &cnt);
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (!m->m_own || kr != KERN_SUCCESS)
+		return;
+	budget = (unsigned long long)info.memory_size / 256u;
+	entries = budget / sizeof(struct icache_entry);
+	if (entries > inodes)
+		entries = inodes;
+	while ((unsigned long long)sets * 2u * ICACHE_WAYS <= entries &&
+	       shift > 1) {
+		sets *= 2;
+		shift--;
+	}
+	if (sets == ICACHE_SETS_MIN)
+		return;
+	if (vm_allocate(mach_task_self(), &table,
+			(vm_size_t)sets * ICACHE_WAYS * sizeof(struct icache_entry),
+			TRUE) != KERN_SUCCESS) {
+		printf("ext2: no room for an inode cache of %u sets; this mount "
+		       "keeps the %u of its own (#912)\n", sets,
+		       (unsigned)ICACHE_SETS_MIN);
+		return;
+	}
+	pthread_mutex_lock(&ext2_icache_lock);
+	m->m_icache = (struct icache_entry *)table;
+	m->m_icache_sets = sets;
+	m->m_icache_shift = shift;
+	ext2_icache_gen++;	/* a fill read before it would go to the old table */
+	pthread_mutex_unlock(&ext2_icache_lock);
+	printf("ext2: an inode cache of %u sets of %u ways, %llu KiB, for %u "
+	       "inodes (#912)\n", sets, (unsigned)ICACHE_WAYS,
+	       (unsigned long long)sets * ICACHE_WAYS *
+	       sizeof(struct icache_entry) / 1024u, inodes);
+}
+
+/*
+ * #912: what the inode cache has answered on the mount of `dev' since it was
+ * made -- hits, misses, and read_inode's disk reads of the inode table -- and
+ * its sets, for ext_server's check of it.  0 if `dev' has no mount yet.
+ */
+int
+ext2fs_icache_counts(struct device *dev, unsigned long *hits,
+		     unsigned long *misses, unsigned long *reads,
+		     unsigned int *sets)
+{
+	struct ext2_mount *m = (struct ext2_mount *)dev->mount_data;
+
+	if (m == NULL)
+		return 0;
+	pthread_mutex_lock(&ext2_icache_lock);
+	(void) icache_set(m, 0);	/* the table, if none was set yet */
+	*hits = m->m_icache_hits;
+	*misses = m->m_icache_misses;
+	*reads = m->m_itable_reads;
+	*sets = m->m_icache_sets;
+	pthread_mutex_unlock(&ext2_icache_lock);
+	return 1;
 }
 
 /*
@@ -802,36 +973,104 @@ free_file_buffers(register struct ext2fs_file *fp)
 	}
 
 	fp->f_ra_last_block = -1;
+}
 
-	/*
-	 * Free the cached inode block
-	 */
-	if (fp->f_inode_blk != 0) {
-	    (void) vm_deallocate(mach_task_self(),
-				 fp->f_inode_blk,
-				 fp->f_inode_blk_size);
-	    fp->f_inode_blk = 0;
-	    fp->f_inode_blk_size = 0;
+/* #912: the fill of an inode-table block, which says that it ran. */
+struct itable_fill_ctx {
+	struct ext2fs_file	*fp;
+	int			 filled;
+};
+
+static int
+itable_fill(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
+	    vm_offset_t phys)
+{
+	struct itable_fill_ctx *c = (struct itable_fill_ctx *)ctx;
+
+	c->filled = 1;
+	return ext2_fill(c->fp, block, data, size, phys);
+}
+
+/*
+ * #912: `len' bytes at `off' of inode-table block `disk_block', into `out' --
+ * through the page cache, so that an inode the inode cache let go is read from
+ * memory again while its block is held there.  It was read from the device on
+ * every miss.  Copied out under the cache's lock (page_cache_copyout): a flush
+ * on the writeback thread may be giving the cache that block at the same time
+ * (itable_wrote).  From the device when there is no cache, no slot to give, or
+ * the block was discarded while held.  m_itable_reads counts each read that
+ * went to the device.
+ */
+static int
+itable_read(struct ext2fs_file *fp, daddr_t disk_block, vm_size_t off,
+	    vm_size_t len, void *out)
+{
+	struct ext2_mount	*m = (struct ext2_mount *)fp->f_dev.mount_data;
+	struct itable_fill_ctx	 c;
+	struct page_cache_entry	*e = NULL;
+	vm_offset_t		 buf;
+	vm_size_t		 buf_size;
+	unsigned int		 reads = 0;
+	int			 rc = 0, got = 0;
+
+	c.fp = fp;
+	c.filled = 0;
+	if (fp->f_dev.cache) {
+		rc = page_cache_get(fp->f_dev.cache, disk_block, itable_fill,
+				    &c, &e);
+		if (rc != 0)
+			return rc;
+		reads += c.filled;
+		if (e != NULL) {
+			got = page_cache_copyout(fp->f_dev.cache, e, off, len,
+						 (vm_offset_t)out) ==
+			      KERN_SUCCESS;
+			page_cache_put(fp->f_dev.cache, e);
+		}
 	}
+	if (!got) {
+		rc = ext2_dev_read(&fp->f_dev,
+				   (recnum_t) dbtorec(&fp->f_dev,
+					ext2_fsbtodb(fp->f_fs, disk_block)),
+				   (int) EXT2_BLOCK_SIZE(fp->f_fs),
+				   (char **)&buf, &buf_size);
+		if (rc == KERN_SUCCESS) {
+			reads++;
+			if (off > buf_size || len > buf_size - off)
+				rc = FS_CORRUPT;
+			else
+				memcpy(out, (char *)buf + off, len);
+			(void) vm_deallocate(mach_task_self(), buf, buf_size);
+		}
+	}
+	if (m != NULL && reads != 0) {
+		pthread_mutex_lock(&ext2_icache_lock);
+		m->m_itable_reads += reads;
+		pthread_mutex_unlock(&ext2_icache_lock);
+	}
+	return rc;
 }
 
 /*
  * Read a new inode into a file structure.
  *
  * Checks the inode cache first; on hit, copies the cached inode
- * directly without any device I/O.  On miss, reads from disk and
- * populates the cache.
+ * directly without any device I/O.  On miss, reads its block through the
+ * page cache (itable_read, #912) and populates the inode cache.
  */
 static int
 read_inode(ino_t inumber, register struct ext2fs_file *fp)
 {
-	vm_offset_t		buf;
-	vm_size_t		buf_size;
+	struct ext2_inode	raw;
 	register
 	struct ext2_super_block	*fs;
 	daddr_t			disk_block;
 	kern_return_t		rc;
 	unsigned int		icache_gen = 0;
+
+	/* #912: the copy is the classic inode, the smallest one on a disk */
+	_Static_assert(sizeof(struct ext2_inode) == 128,
+		       "struct ext2_inode is not the 128-byte on-disk inode");
 
 #ifdef	DEBUG
 	int	i = inumber;
@@ -864,33 +1103,29 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	}
 	}
 
-	/* Cache miss — read from disk */
+	/* Inode-cache miss: its block, through the page cache (#912) */
 	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 
-	rc = ext2_dev_read(&fp->f_dev,
-			 (recnum_t) dbtorec(&fp->f_dev,
-					    ext2_fsbtodb(fp->f_fs, disk_block)),
-			 (int) EXT2_BLOCK_SIZE(fs),
-			 (char **)&buf,
-			 &buf_size);
+	/*
+	 * Locate the inode within the block.  We cannot simply
+	 * use pointer arithmetic on (struct ext2_inode *) because
+	 * sizeof(struct ext2_inode) is 128, while modern ext2
+	 * filesystems may use 256-byte (or larger) inodes.
+	 * Instead we compute the byte offset using the actual
+	 * on-disk inode size from the superblock -- and copy out the
+	 * 128 bytes this structure reads.
+	 */
+	rc = itable_read(fp, disk_block,
+			 (vm_size_t)ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs),
+			 sizeof(raw), &raw);
 	if (rc != KERN_SUCCESS)
 	    return (rc);
 
 	{
-	    struct ext2_inode *raw_inode;
+	    struct ext2_inode *raw_inode = &raw;
 	    struct ext2_inode *inode;
 	    unsigned long block;
 
-	    /*
-	     * Locate the inode within the block.  We cannot simply
-	     * use pointer arithmetic on (struct ext2_inode *) because
-	     * sizeof(struct ext2_inode) is 128, while modern ext2
-	     * filesystems may use 256-byte (or larger) inodes.
-	     * Instead we compute the byte offset using the actual
-	     * on-disk inode size from the superblock.
-	     */
-	    raw_inode = (struct ext2_inode *)
-		((char *)buf + ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs));
 	    inode = fp->f_ic;
 
 	    inode->i_mode = le16_to_cpu(raw_inode->i_mode);
@@ -925,21 +1160,99 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	}
 
 	/*
-	 * Clear out the old buffers (this also frees the previous
-	 * f_inode_blk, so we must cache the new block afterwards).
+	 * Clear out the old buffers.  #912: no raw inode block is kept for a
+	 * new vnode, as on a hit of the inode cache: every flush reads the
+	 * block afresh under ext2_itable_lock (vnode_inode_block, #599),
+	 * because a copy kept from here undid the inodes made in the same block
+	 * since (8563299e).
 	 */
 	free_file_buffers(fp);
 
-	/*
-	 * The raw inode block, handed to a new vnode or freed.  #599: NOT for
-	 * write-back -- every flush reads the block afresh under
-	 * ext2_itable_lock (vnode_inode_block), because a copy kept from
-	 * here undid the inodes made in the same block since (8563299e).
-	 */
-	fp->f_inode_blk = buf;
-	fp->f_inode_blk_size = buf_size;
-
 	return (0);
+}
+
+/*
+ * #912: inode `ino' of the mount of `dev', read as a path walk reads it --
+ * through the inode cache, on a handle of its own with no vnode, so that no
+ * open file's inode is touched -- and the handle's buffers freed.  For
+ * ext_server's check of the cache; the mount must have been opened before.
+ */
+int
+ext2fs_icache_read(struct device *dev, ino_t ino)
+{
+	struct ext2fs_file	*fp;
+	int			 rc;
+
+	if (dev->mount_data == NULL)
+		return FS_NO_ENTRY;
+	fp = (struct ext2fs_file *)malloc(sizeof(struct ext2fs_file));
+	if (fp == NULL)
+		return FS_NO_ENTRY;
+	memset(fp, 0, sizeof(*fp));
+	fp->f_dev = *dev;
+	fp->f_ic = &fp->f_ic_scratch;
+	rc = mount_fs(fp);
+	if (rc == 0)
+		rc = read_inode(ino, fp);
+	free_file_buffers(fp);
+	free(fp);
+	return rc;
+}
+
+/*
+ * #912: inode `ino' of the mount of `dev' as read_inode reads it on a miss of
+ * the inode cache -- the cache's entry for it let go first, then read on a
+ * handle of its own, through the page cache -- into `out', and the
+ * inode-table block that holds it into `blk'.  For ext_server's check that
+ * every write of an inode-table block reaches the page cache.
+ */
+int
+ext2fs_itable_peek(struct device *dev, ino_t ino, struct ext2_inode *out,
+		   daddr_t *blk)
+{
+	struct ext2_mount	*m = (struct ext2_mount *)dev->mount_data;
+	struct ext2fs_file	*fp;
+	int			 rc;
+
+	if (m == NULL)
+		return FS_NO_ENTRY;
+	fp = (struct ext2fs_file *)malloc(sizeof(struct ext2fs_file));
+	if (fp == NULL)
+		return FS_NO_ENTRY;
+	memset(fp, 0, sizeof(*fp));
+	fp->f_dev = *dev;
+	fp->f_ic = &fp->f_ic_scratch;
+	rc = mount_fs(fp);
+	if (rc == 0) {
+		icache_invalidate(m, ino);
+		rc = read_inode(ino, fp);
+	}
+	if (rc == 0) {
+		*out = *fp->f_ic;
+		*blk = ext2_ino2blk(fp->f_fs, fp->f_gd, ino);
+	}
+	free_file_buffers(fp);
+	free(fp);
+	return rc;
+}
+
+/* #912: the inode an open file is. */
+ino_t
+ext2fs_file_ino(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+
+	return fp->f_vnode != NULL ? fp->f_vnode->v_ino : fp->f_ino;
+}
+
+/*
+ * #912: does a flush of more than one dirty item on `dev' go out as one
+ * batch (flush_metadata_taken), or item by item through write_inode?
+ */
+int
+ext2fs_flush_batches(struct device *dev)
+{
+	return ext2_dev_has_batch(dev);
 }
 
 /*
@@ -2154,6 +2467,7 @@ mount_fs(register struct ext2fs_file	*fp)
 		m->m_fs = fp->f_fs;
 		m->m_gd = fp->f_gd;
 		m->m_gd_size = fp->f_gd_size;
+		icache_size(m, (unsigned int)fp->f_fs->s_inodes_count); /* #912 */
 	}
 
 	{
@@ -2439,23 +2753,12 @@ ext2fs_open_file_into(
 			ext2fs_close_file((fs_private_t)fp);
 			return FS_NO_RESOURCES;
 		}
-		if (vn->v_refcount == 1) {
-			/* New vnode — populate from scratch */
+		/*
+		 * New vnode — populate from scratch.  Its inode block stays 0
+		 * until its first flush reads one (vnode_inode_block, #599).
+		 */
+		if (vn->v_refcount == 1)
 			vn->v_ic = fp->f_ic_scratch;
-			vn->v_inode_blk = fp->f_inode_blk;
-			vn->v_inode_blk_size = fp->f_inode_blk_size;
-			fp->f_inode_blk = 0;
-			fp->f_inode_blk_size = 0;
-		} else {
-			/* Existing vnode — discard scratch data */
-			if (fp->f_inode_blk) {
-				vm_deallocate(mach_task_self(),
-					      fp->f_inode_blk,
-					      fp->f_inode_blk_size);
-				fp->f_inode_blk = 0;
-				fp->f_inode_blk_size = 0;
-			}
-		}
 		fp->f_vnode = vn;
 		fp->f_ic = &vn->v_ic;
 		fp->f_gen = vn->v_gen;
@@ -3175,6 +3478,28 @@ write_data_block(struct ext2fs_file *fp, daddr_t dblk, vm_offset_t data,
 }
 
 /*
+ * #912: an inode-table block the disk has just taken, given to the page
+ * cache, which read_inode reads those blocks through.  A copy held takes the
+ * bytes; with none, pc_forget rises past any readahead ticket taken before.
+ * Every writer of an inode-table block calls it once the write has landed --
+ * write_inode, write_new_inode and the batched flush -- with ext2_itable_lock
+ * still held: the cache must take the writes of one block in the order the
+ * disk took them, and two flushes of it told after the lock was let go could
+ * leave it with the older.  `data' is the writer's own buffer, never a slot.
+ * page_cache_wrote refuses only a size that is not the cache's block; the
+ * copy then goes, and the next read takes the disk's.
+ */
+static void
+itable_wrote(struct ext2fs_file *fp, daddr_t disk_block, vm_offset_t data)
+{
+	if (fp->f_dev.cache == NULL)
+		return;
+	if (page_cache_wrote(fp->f_dev.cache, disk_block, data,
+			     EXT2_BLOCK_SIZE(fp->f_fs)) != KERN_SUCCESS)
+		page_cache_discard(fp->f_dev.cache, disk_block);
+}
+
+/*
  * A copy of the directory block at `buf', to be edited and written with
  * dir_write_block; NULL when there is no memory.  The caller frees it.
  */
@@ -3568,10 +3893,11 @@ vnode_inode_block(struct ext2fs_file *fp, ino_t inumber, daddr_t disk_block)
 	 * 🔑 The cause is that a READ optimisation disabled the WRITE-BACK.
 	 * read_inode() checks the inode cache first and, on a hit, "copies the
 	 * cached inode directly without any device I/O" -- which is its whole
-	 * value.  But the first thing that path does is free_file_buffers(),
-	 * which clears f_inode_blk, and it returns without ever reading the
-	 * block that HOLDS the inode.  The vnode then inherits a zero, and
-	 * every flush of that inode fails for the life of the mount.
+	 * value.  But the first thing that path did was free_file_buffers(),
+	 * which cleared the raw block the handle kept (f_inode_blk, gone since
+	 * #912: no read keeps one now), and it returned without ever reading
+	 * the block that HOLDS the inode.  The vnode then inherited a zero, and
+	 * every flush of that inode failed for the life of the mount.
 	 *
 	 * ⚠️ Read HERE and not on the cache hit.  Reading it there would undo
 	 * exactly the I/O the cache exists to avoid, on every open of every
@@ -3657,6 +3983,8 @@ write_inode(ino_t inumber, struct ext2fs_file *fp)
 		serialize_inode(fp);
 		rc = write_disk_block(fp, disk_block, vn->v_inode_blk,
 				      EXT2_BLOCK_SIZE(fs));
+		if (rc == 0)
+			itable_wrote(fp, disk_block, vn->v_inode_blk);	/* #912 */
 	}
 	pthread_mutex_unlock(&ext2_itable_lock);
 	return rc;
@@ -4363,11 +4691,12 @@ flush_metadata_taken(struct ext2fs_file *fp, int w_inode, int w_gd,
 		io_buf_len_t bytes_written;
 		unsigned int inode_blk_size = EXT2_BLOCK_SIZE(fs);
 		int itable = 0;		/* #599: ext2_itable_lock held */
+		daddr_t inode_disk_block = 0;
 
 		/* --- Prepare inode block (serialize in-place) --- */
 		if (w_inode) {
-			daddr_t inode_disk_block = ext2_ino2blk(fs,
-						fp->f_gd, vn->v_ino);
+			inode_disk_block = ext2_ino2blk(fs, fp->f_gd,
+							vn->v_ino);
 
 			/* #599: held until the batch is written */
 			pthread_mutex_lock(&ext2_itable_lock);
@@ -4544,6 +4873,9 @@ flush_metadata_taken(struct ext2fs_file *fp, int w_inode, int w_gd,
 		}
 
 		if (itable) {
+			if (rc == KERN_SUCCESS)				/* #912 */
+				itable_wrote(fp, inode_disk_block,
+					     vn->v_inode_blk);
 			pthread_mutex_unlock(&ext2_itable_lock);
 			icache_follow(fp, rc);		/* #599 */
 		}
@@ -4672,6 +5004,8 @@ write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
 			raw->i_block[k] = cpu_to_le32(iblock[k]);
 
 	rc = write_disk_block(ctx, itblk, buf, EXT2_BLOCK_SIZE(fs));
+	if (rc == 0)
+		itable_wrote(ctx, itblk, buf);			/* #912 */
 	pthread_mutex_unlock(&ext2_itable_lock);
 	vm_deallocate(mach_task_self(), buf, bsz);
 

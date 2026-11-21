@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #963
+Takes out: task_name_valid's checks: any byte is taken, and a name too long is cut to the field, as a thread's name is (#763), where the user decided it be refused.  act_test's arm fifty-eight sends 32 characters and is answered KERN_SUCCESS.
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[58\] a name of 32 characters answered 0x0, not 0x4
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+index b2361186..44ead858 100644
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -1624,14 +1624,10 @@ task_name_valid(
+ {
+ 	vm_size_t	n;
+ 
+-	for (n = 0; n < count && name[n] != '\0'; n++) {
+-		unsigned char c = (unsigned char) name[n];
+-
+-		if (c < 0x20 || c > 0x7e)
+-			return FALSE;
+-	}
++	for (n = 0; n < count && name[n] != '\0'; n++)
++		;	/* 963-task-name-unchecked: any byte goes */
+ 	if (n > URMACH_TASK_NAME_MAX - 1)
+-		return FALSE;
++		n = URMACH_TASK_NAME_MAX - 1;	/* 963-task-name-unchecked: cut, as a thread's is */
+ 	*len = n;
+ 	return TRUE;
+ }

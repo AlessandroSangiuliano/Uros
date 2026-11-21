@@ -123,6 +123,228 @@ slurp_binary(const char *path, void **out, vm_size_t *out_size)
     return EXEC_OK;
 }
 
+/*
+ * Whether `img' is a program for the machine this server runs on (#963): the
+ * class and the machine <mach/elf.h> names as this one's.
+ *
+ * 🔴 libelf answers a different question.  It reads both classes, each with
+ * its own machine, because it is a reader, and libelf.h says that a loader
+ * has to ask for itself whether it can RUN what was read.  This one did not:
+ * an i386 image was mapped, and its first thread started on its entry as
+ * x86-64 code.
+ */
+static int
+image_is_this_machine(const elf_image_t *img)
+{
+    return elf_machine(img) == ELF_TARGET_MACHINE &&
+           elf_is_64bit(img) == (ELF_TARGET_CLASS == ELFCLASS64);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Relocation of a position-independent image                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A refusal of relocate_pie(), said once with the program's name.
+ */
+static int
+pie_refused(const char *path, const char *why)
+{
+    printf("exec: %s is position-independent and names no dynamic linker, "
+           "and is not relocated: %s (#963)\n", path, why);
+    return EXEC_ERR_PARSE;
+}
+
+#if ELF_RELA_HAS_ADDEND
+
+/* The gABI's packed relative relocations, which <mach/elf.h> does not name;
+ * the number is the one in musl's <elf.h>.  A program linked with
+ * -z pack-relative-relocs has them, and no RELA table to say so. */
+#ifndef DT_RELR
+#define DT_RELR		36
+#endif
+
+/*
+ * Where in the file the `len' bytes the image addresses at `va' are, when all
+ * of them are in the part of one PT_LOAD that the file holds.  NULL otherwise:
+ * in no segment, across two, or in a segment's zero-filled tail.
+ */
+static unsigned char *
+file_bytes_at(void *file_buf, const elf_image_t *img, uint64_t va,
+              uint64_t len)
+{
+    int n = elf_phdr_count(img);
+    int i;
+
+    for (i = 0; i < n; i++) {
+        elf_phdr_view_t ph;
+        uint64_t into;
+
+        if (elf_phdr_get(img, i, &ph) != ELF_OK)
+            continue;
+        /* data is NULL when the segment's file range is not all in the file */
+        if (ph.type != PT_LOAD || ph.data == NULL || va < ph.vaddr)
+            continue;
+        into = va - ph.vaddr;
+        if (into > ph.filesz || ph.filesz - into < len)
+            continue;
+        return (unsigned char *)file_buf + ph.offset + into;
+    }
+    return NULL;
+}
+
+/*
+ * Relocate a position-independent image that names no dynamic linker (#963),
+ * as bootstrap relocates the ones it loads (load.c).
+ *
+ * 🔴 NOBODY ELSE WILL.  exec_server left such an image as it was -- "for
+ * dynamic images that is the interpreter's job" -- and an image that names no
+ * interpreter has nobody to do it.  It ran at EXEC_DYN_BASE with every
+ * address in its data still the linker's, which start at zero, and nothing
+ * said so.  The first to need one is chora, whose modules resolve their
+ * symbols against the program, so the program is a PIE that exports them.
+ *
+ * x86-64's relocations are RELA, and a static PIE has only R_X86_64_RELATIVE:
+ * its slot is written `bias + addend', and what the slot held is not read.
+ * So the result is the same if the image relocates itself afterwards, as
+ * musl's start for a static PIE does.
+ *
+ * The slots are written in the file's bytes, before install_segments() copies
+ * them into the task, so every slot has to be in the part of a PT_LOAD that
+ * the file holds.  Refused, each with a line: a slot anywhere else, a table
+ * that is not where it says, any other type of relocation, a library or a
+ * PLT table to resolve -- that is a dynamic linker's job -- and a PIE with no
+ * table at all, because a loader that finds no table and goes on is exactly
+ * the silent success this replaces.
+ */
+static int
+relocate_pie(void *file_buf, const elf_image_t *img, vm_address_t bias,
+             const char *path)
+{
+    const Elf_Dyn *dyn = NULL;
+    uint64_t       ndyn = 0, i;
+    uint64_t       rela_va = 0, rela_size = 0;
+    uint64_t       rela_ent = sizeof(Elf_Reloc);
+    uint64_t       applied = 0;
+    int            have_rela = 0;
+    const unsigned char *table;
+    int            k, nph = elf_phdr_count(img);
+
+    for (k = 0; k < nph; k++) {
+        elf_phdr_view_t ph;
+
+        if (elf_phdr_get(img, k, &ph) != ELF_OK || ph.type != PT_DYNAMIC)
+            continue;
+        if (ph.data == NULL)
+            return pie_refused(path, "its PT_DYNAMIC is not in the file");
+        dyn  = (const Elf_Dyn *)ph.data;
+        ndyn = ph.filesz / sizeof(Elf_Dyn);
+        break;
+    }
+    if (dyn == NULL)
+        return pie_refused(path, "it has no PT_DYNAMIC, and nothing says "
+                           "where its relocations are");
+
+    for (i = 0; i < ndyn && dyn[i].d_tag != DT_NULL; i++) {
+        switch (dyn[i].d_tag) {
+        case DT_RELA:
+            rela_va = dyn[i].d_un.d_ptr;
+            have_rela = 1;
+            break;
+        case DT_RELASZ:
+            rela_size = dyn[i].d_un.d_val;
+            break;
+        case DT_RELAENT:
+            rela_ent = dyn[i].d_un.d_val;
+            break;
+        case DT_NEEDED:
+            return pie_refused(path, "it needs a library, which only a "
+                               "dynamic linker loads");
+        case DT_PLTRELSZ:
+            if (dyn[i].d_un.d_val != 0)
+                return pie_refused(path, "it has PLT relocations, whose "
+                                   "symbols only a dynamic linker resolves");
+            break;
+        case DT_REL:
+        case DT_RELSZ:
+            return pie_refused(path, "it has a REL table, and this machine's "
+                               "relocations are RELA");
+        case DT_RELR:
+            return pie_refused(path, "it has packed relative relocations "
+                               "(DT_RELR), which this server does not apply");
+        default:
+            break;
+        }
+    }
+
+    if (!have_rela || rela_size == 0)
+        return pie_refused(path, "it has no RELA table, so nothing would be "
+                           "relocated and it would run with the linker's "
+                           "addresses");
+    if (rela_ent != sizeof(Elf_Reloc) || rela_size % sizeof(Elf_Reloc) != 0)
+        return pie_refused(path, "its RELA entries are not the size this "
+                           "machine's are");
+    table = file_bytes_at(file_buf, img, rela_va, rela_size);
+    if (table == NULL)
+        return pie_refused(path, "its RELA table is not in the file's part "
+                           "of a segment");
+
+    for (i = 0; i < rela_size / sizeof(Elf_Reloc); i++) {
+        Elf_Reloc      r;
+        unsigned char *slot;
+        uint64_t       type;
+        Elf_Addr       value;
+
+        memcpy(&r, table + i * sizeof r, sizeof r);
+        type = ELF_R_TYPE(r.r_info);
+        if (type == ELF_R_NONE)
+            continue;
+        if (type != ELF_R_RELATIVE) {
+            printf("exec: %s: relocation %lu at 0x%lx is of type %lu\n",
+                   path, (unsigned long)i, (unsigned long)r.r_offset,
+                   (unsigned long)type);
+            return pie_refused(path, "a relocation other than RELATIVE "
+                               "needs a symbol");
+        }
+        slot = file_bytes_at(file_buf, img, r.r_offset, sizeof(Elf_Addr));
+        if (slot == NULL) {
+            printf("exec: %s: relocation %lu writes at 0x%lx\n", path,
+                   (unsigned long)i, (unsigned long)r.r_offset);
+            return pie_refused(path, "a relocation writes outside the file's "
+                               "part of a segment");
+        }
+        value = (Elf_Addr)(bias + (Elf_Addr)r.r_addend);
+        memcpy(slot, &value, sizeof value);
+        applied++;
+    }
+
+    printf("exec: %s -> %lu relocations applied for its base 0x%lx (#963)\n",
+           path, (unsigned long)applied, (unsigned long)bias);
+    return EXEC_OK;
+}
+
+#else	/* a REL machine */
+
+/*
+ * ⚠️ i386 keeps a relocation's addend in its slot, and applying one is
+ * `*slot += bias' -- a different loop, which nothing there has needed: its
+ * position-independent programs name a dynamic linker, and no test would run
+ * the loop.  So such an image that names none is refused there, saying why,
+ * where it used to run with the linker's addresses.
+ */
+static int
+relocate_pie(void *file_buf, const elf_image_t *img, vm_address_t bias,
+             const char *path)
+{
+    (void)file_buf;
+    (void)img;
+    (void)bias;
+    return pie_refused(path, "this machine's relocations are REL, which "
+                       "this server does not apply");
+}
+
+#endif	/* ELF_RELA_HAS_ADDEND */
+
 /* ------------------------------------------------------------------ */
 /*  Segment installation in the new task                               */
 /* ------------------------------------------------------------------ */
@@ -141,8 +363,9 @@ slurp_binary(const char *path, void **out, vm_size_t *out_size)
  * For each PT_LOAD: vm_allocate at (vaddr + bias), vm_write the file
  * content, vm_protect to the segment's RWX flags.  `bias` is 0 for a
  * fixed-address ET_EXEC and the chosen load base for an ET_DYN image
- * (the interpreter, or a PIE main image).  exec_server does not apply
- * relocations — for dynamic images that is the interpreter's job.
+ * (the interpreter, or a PIE main image).  The relocations of a PIE that
+ * names no dynamic linker are already in the bytes (relocate_pie(), #963);
+ * one that names a dynamic linker is relocated by it.
  */
 static int
 install_segments(mach_port_t new_task, const elf_image_t *img,
@@ -232,6 +455,15 @@ load_interp(mach_port_t new_task, const char *interp_path,
         return rc;
     }
     if (elf_open(ibuf, (size_t)isz, &iimg) != ELF_OK) {
+        free(ibuf);
+        return EXEC_ERR_PARSE;
+    }
+    if (!image_is_this_machine(&iimg)) {
+        printf("exec: interpreter \"%s\" is an image of another machine "
+               "(machine %u, %d-bit): this server runs %s images only\n",
+               interp_path, (unsigned)elf_machine(&iimg),
+               elf_is_64bit(&iimg) ? 64 : 32, ELF_TARGET_NAME);
+        elf_close(&iimg);
         free(ibuf);
         return EXEC_ERR_PARSE;
     }
@@ -525,6 +757,15 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
             return EXEC_ERR_NOT_STATIC;
         }
     }
+    if (!image_is_this_machine(&img)) {
+        printf("exec: %s is an image of another machine (machine %u, "
+               "%d-bit): this server runs %s images only\n", path,
+               (unsigned)elf_machine(&img), elf_is_64bit(&img) ? 64 : 32,
+               ELF_TARGET_NAME);
+        elf_close(&img);
+        free(file_buf);
+        return EXEC_ERR_PARSE;
+    }
 
     /*
      * 3. The task is the caller's, made empty by the caller (#926): this
@@ -554,6 +795,17 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
 
     /* ET_DYN/PIE images load at a bias; fixed ET_EXEC at 0. */
     main_bias = (elf_type(&img) == ET_DYN) ? EXEC_DYN_BASE : 0;
+
+    /*
+     * 3.5. A position-independent image that names no dynamic linker is
+     *      relocated here, in the file's bytes, before they are copied into
+     *      the task (#963).  One that names a dynamic linker is left to it.
+     */
+    if (elf_type(&img) == ET_DYN && elf_interp(&img) == NULL) {
+        rc = relocate_pie(file_buf, &img, main_bias, path);
+        if (rc != EXEC_OK)
+            return fail_after_task(&img, file_buf, rc);
+    }
 
     /* 4. Map every PT_LOAD into the child. */
     rc = install_segments(new_task, &img, main_bias);

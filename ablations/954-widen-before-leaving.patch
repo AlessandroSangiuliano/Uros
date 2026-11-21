@@ -1,0 +1,24 @@
+Kind: widen
+Issue: #954
+Holds open: spins for 50 ms, or until the wakee has run, between the look at handoff_wakee and the waker's leaving for the high thread, so that a tick may let the wakee take the waker's processor before it leaves, every time
+Run: --entry 67 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+index 5d13982f..9220d00e 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
++++ b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
+@@ -202,6 +202,14 @@ wakee_test(void)
+ 	self->handoff_target = THREAD_NULL;
+ 	self->handoff_hint = FALSE;
+ 	mp_enable_preemption();
++	/* 954-widen-before-leaving: 50 ms of ticks before this thread leaves,
++	 * at which the wakee may take this processor first */
++	{
++		uint64_t	w0 = rdtsc();
++
++		while (!wakee_test_wakee_ran && rdtsc() - w0 < hz / 20)
++			cpu_pause();
++	}
+ 
+ 	/* And this thread leaves, with something better than the wakee here. */
+ 	thread_wakeup((event_t) &wakee_test_high_event);

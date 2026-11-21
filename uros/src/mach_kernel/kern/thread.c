@@ -1153,9 +1153,11 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 	/*
 	 * Inherit the creator's name, WITHIN the same task only (#425).
 	 *
-	 * struct task has no name, so what identifies a task in a kernel report
+	 * struct task had no name, so what identifies a task in a kernel report
 	 * is the name on one of its threads -- libmach's crt0 puts the program
-	 * there before main() runs.  Naming only that first thread leaves a
+	 * there before main() runs.  ⚠️ It has had one since #963, but only a
+	 * task given a name has one, so for every other task this is still what
+	 * names it.  Naming only that first thread leaves a
 	 * hole: a task whose main thread has exited while its workers run on
 	 * keeps no name at all, and that is precisely a wedged task, which is
 	 * when the question gets asked.  Inheriting closes it -- every thread

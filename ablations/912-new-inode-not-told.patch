@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #912
+Takes out: write_new_inode's itable_wrote: a create writes the new inode into its inode-table block, and the page cache keeps the copy it held from before.  ext_server's check reads back the second file it makes, whose inode lands in the block of the first, held in the page cache since the first was read back: its slot as it was, no link.
+Run: --entry 14 600 -smp 4
+Expect: ext2: inode table: WRONG -- a create into a block the page cache held: inode [0-9]+ read back with mode 0[0-7]* and 0 link\(s\), its block as it was before the create
+
+diff --git a/uros/src/file_systems/ext2fs/ext2fs.c b/uros/src/file_systems/ext2fs/ext2fs.c
+index 04030025..d42770bf 100644
+--- a/uros/src/file_systems/ext2fs/ext2fs.c
++++ b/uros/src/file_systems/ext2fs/ext2fs.c
+@@ -5004,8 +5004,7 @@ write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
+ 			raw->i_block[k] = cpu_to_le32(iblock[k]);
+ 
+ 	rc = write_disk_block(ctx, itblk, buf, EXT2_BLOCK_SIZE(fs));
+-	if (rc == 0)
+-		itable_wrote(ctx, itblk, buf);			/* #912 */
++	/* 912-new-inode-not-told: the page cache is not given the block */
+ 	pthread_mutex_unlock(&ext2_itable_lock);
+ 	vm_deallocate(mach_task_self(), buf, bsz);
+ 

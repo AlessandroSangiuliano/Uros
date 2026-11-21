@@ -1150,6 +1150,55 @@ st_wrote_follows_the_disk(void)
 	return ok;
 }
 
+/*
+ * P21: page_cache_copyout gives the bytes of a pinned block at the offset
+ * asked; a part past the end of the slot is refused with nothing copied, and
+ * so is a block discarded while it was pinned (#912).
+ */
+static int
+st_copyout_gives_the_bytes(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct page_cache_entry	*e = 0;
+	unsigned char		 blk[ST_BLOCK], out[16];
+	unsigned int		 i;
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	for (i = 0; i < ST_BLOCK; i++)
+		blk[i] = (unsigned char)i;
+	if (st_install(pc, 3, blk) != 0 ||
+	    page_cache_get(pc, 3, st_fill, 0, &e) != 0 || e == 0) {
+		if (e != 0)
+			page_cache_put(pc, e);
+		(void) st_done(pc);
+		return 0;
+	}
+	memset(out, 0, sizeof(out));
+	if (page_cache_copyout(pc, e, 100, sizeof(out), (vm_offset_t)out) != 0)
+		ok = 0;
+	for (i = 0; i < sizeof(out); i++)
+		if (out[i] != (unsigned char)(100 + i))
+			ok = 0;
+	memset(out, 0x5C, sizeof(out));
+	if (page_cache_copyout(pc, e, ST_BLOCK - 8, sizeof(out),
+			       (vm_offset_t)out) != KERN_INVALID_ARGUMENT)
+		ok = 0;
+	for (i = 0; i < sizeof(out); i++)
+		if (out[i] != 0x5C)
+			ok = 0;
+	page_cache_discard(pc, 3);
+	if (page_cache_copyout(pc, e, 0, sizeof(out), (vm_offset_t)out) !=
+	    KERN_ABORTED || out[0] != 0x5C)
+		ok = 0;
+	page_cache_put(pc, e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
 /* Count a case, and mark it failed by its number. */
 static void
 st_case(unsigned int *ran, unsigned int *wrong, unsigned int *failed, int ok)
@@ -1194,5 +1243,6 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong,
 	st_case(ran, wrong, failed, st_install_takes_no_stale_bytes());
 	st_case(ran, wrong, failed, st_discard_leaves_nothing());
 	st_case(ran, wrong, failed, st_wrote_follows_the_disk());
+	st_case(ran, wrong, failed, st_copyout_gives_the_bytes());
 	page_cache_quiet = 0;
 }

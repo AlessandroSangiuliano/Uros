@@ -4140,6 +4140,139 @@ out:
     return ok;
 }
 
+/*
+ * #712: the list's shape, which both drivers take on trust (block_device.c,
+ * blk_phys_list()).  The buffer is two contiguous pages, so that whatever
+ * crosses a page boundary lands in this task's memory, where it can be seen.
+ *
+ * - An address 0x800 into the first page, asked for 4096 bytes, is refused:
+ *   D_INVALID_SIZE, before the kernel is asked, with the second page as it
+ *   was.  Accepted, its last 0x800 bytes land in the second page -- which,
+ *   were the buffer not contiguous, could be anybody's.
+ * - Both pages for 4096 bytes, one page more than the bytes, is served from
+ *   the first page, and the controller answers a read after it.  virtio built
+ *   a descriptor of length 0 for the second page, and QEMU marks a device
+ *   broken at that: every request after it timed out, the next read too.
+ */
+static int
+ct14_list_shape(mach_port_t device_port, mach_port_t handle, const char *name)
+{
+    struct uros_cap        buf_cap;
+    vm_address_t           kva = 0, uva = 0, pa = 0, pages[2];
+    uint64_t               region_id = 0;
+    io_buf_len_t           got = 0, again = 0;
+    kern_return_t          kr, kr2;
+    unsigned char         *second;
+    unsigned int           i, landed = 0;
+    unsigned               magic;
+    int                    ok = 0;
+
+    kr = device_dma_alloc(device_port, DEVICE_DMA_NO_BDF, 8192, &kva, &pa,
+                          &region_id);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [14] WRONG — no buffer of two contiguous pages to "
+               "ask %s with (kr=%d) (#712)\n", name, (int)kr);
+        return 0;
+    }
+    kr = device_dma_map_user(device_port, kva, 8192, mach_task_self(), &uva);
+    if (kr == KERN_SUCCESS) {
+        memset(&buf_cap, 0, sizeof(buf_cap));
+        kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                         CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
+                         0, &buf_cap);
+    }
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [14] WRONG — %s: the buffer of two contiguous pages "
+               "was not mapped or not handed over (kr=%d) (#712)\n",
+               name, (int)kr);
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 8192);
+        return 0;
+    }
+    second = (unsigned char *)uva + 4096;
+
+    /* An address 0x800 into the first page, and a page's worth of bytes. */
+    memset((void *)uva, 0xA5, 8192);
+    pages[0] = pa + 0x800;
+    kr = device_read_phys(handle, D_READ, 0, 4096, pages, 1, &got);
+    for (i = 0; i < 4096; i++)
+        if (second[i] != 0xA5)
+            landed++;
+    if (kr != D_INVALID_SIZE || landed != 0) {
+        printf("cap_test: [14] WRONG — %s answered kr=%d (%u bytes read) to "
+               "an address 0x800 into its page for 4096 bytes, not "
+               "D_INVALID_SIZE, and %u bytes of the page after the buffer's "
+               "first changed: the transfer was not refused, and what crosses "
+               "a page boundary lands in the next physical page (#712)\n",
+               name, (int)kr, (unsigned)got, landed);
+    } else {
+        printf("cap_test: [14] %s refused an address 0x800 into its page "
+               "(D_INVALID_SIZE), and the page after it is as it was — a "
+               "list's addresses are page-aligned (#712)\n", name);
+
+        /* Both pages, and one page's worth of bytes. */
+        memset((void *)uva, 0, 8192);
+        pages[0] = pa;
+        pages[1] = pa + 4096;
+        got = 0;
+        kr = device_read_phys(handle, D_READ, 0, 4096, pages, 2, &got);
+        magic = (unsigned)(((unsigned char *)uva)[1080])
+              | ((unsigned)(((unsigned char *)uva)[1081]) << 8);
+        kr2 = device_read_phys(handle, D_READ, 0, 4096, pages, 1, &again);
+
+        if (kr != KERN_SUCCESS || got != 4096 || magic != 0xEF53u)
+            printf("cap_test: [14] WRONG — %s did not serve 4096 bytes "
+                   "through a list one page longer than them: kr=%d, %u "
+                   "bytes, +1080 holds 0x%x rather than 0xef53 (#712)\n",
+                   name, (int)kr, (unsigned)got, magic);
+        else if (kr2 != KERN_SUCCESS || again != 4096)
+            printf("cap_test: [14] WRONG — %s served a list one page longer "
+                   "than its bytes, and then did not answer a plain read "
+                   "(kr=%d, %u bytes): the controller stopped after it "
+                   "(#712)\n", name, (int)kr2, (unsigned)again);
+        else {
+            io_buf_ptr_t           data = NULL;
+            mach_msg_type_number_t cnt = 0;
+            kern_return_t          n1, n2, n3;
+
+            printf("cap_test: [14] %s read 4096 bytes through a list one page "
+                   "longer than them, from the first page, and answered the "
+                   "next read — the list is trimmed to the bytes (#712)\n",
+                   name);
+
+            /*
+             * And a count of -1, on the paths whose count is signed: rounded
+             * up in unsigned arithmetic it was 0 sectors, which every range
+             * passes (#711).  device_write's and the batch's counts are MIG's
+             * own, unsigned.
+             */
+            n1 = device_read(handle, D_READ, 0, (io_buf_len_t)-1, &data, &cnt);
+            if (n1 == KERN_SUCCESS && data != NULL && cnt != 0)
+                (void)vm_deallocate(mach_task_self(), (vm_address_t)data, cnt);
+            n2 = device_read_phys(handle, D_READ, 0, (io_buf_len_t)-1, pages,
+                                  1, &got);
+            n3 = device_write_phys(handle, D_WRITE, 0, (io_buf_len_t)-1, pages,
+                                   1, &got);
+            if (n1 != D_INVALID_SIZE || n2 != D_INVALID_SIZE
+                || n3 != D_INVALID_SIZE)
+                printf("cap_test: [14] WRONG — %s answered a count of -1 with "
+                       "kr=%d (device_read), %d (device_read_phys) and %d "
+                       "(device_write_phys), not D_INVALID_SIZE on each "
+                       "(#712)\n", name, (int)n1, (int)n2, (int)n3);
+            else {
+                printf("cap_test: [14] %s refused a count of -1 on "
+                       "device_read, device_read_phys and device_write_phys, "
+                       "D_INVALID_SIZE each (#712)\n", name);
+                ok = 1;
+            }
+        }
+    }
+
+    (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 8192);
+    return ok;
+}
+
 static int
 the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
                              const char *name)
@@ -4243,7 +4376,7 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
     printf("cap_test: [14] %s refused 8192 bytes into %u page (kr=%d) — the "
            "page list has to cover the byte count\n",
            name, (unsigned)pa_cnt, (int)kr);
-    ok = 1;
+    ok = ct14_list_shape(device_port, handle, name);	/* #712 */
 
 out:
     (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);

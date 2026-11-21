@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #961
+Takes out: the line that says a job of a run on GitHub booted without KVM, a fault: pull-results.sh says it only by the word at the end of the run's line again, as of the nightly of 11/11 to 18/11.  harness-lifecycle-check.sh's jobnokvm finds no such line for the job that could not open /dev/kvm.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: jobnokvm
+Expect: lifecycle: jobnokvm: pull-results.sh --job; of run 4242424242's job whose /dev/kvm cannot be opened it said: .* -- WRONG
+
+diff --git a/scripts/ci/pull-results.sh b/scripts/ci/pull-results.sh
+index 7305ee15..b607966d 100755
+--- a/scripts/ci/pull-results.sh
++++ b/scripts/ci/pull-results.sh
+@@ -163,7 +163,7 @@ kvm_fault() {	# artifact-dir job description
+ 	[ -n "$run" ] || return 0
+ 	case "$kvm" in
+ 	"/dev/kvm cannot be opened"*)
+-		echo "pull-results: $what: job $j BOOTED WITHOUT KVM, a fault: its /dev/kvm could not be opened, and every boot ran under TCG alone" ;;
++		: ;;	# 961-nokvm-not-a-fault: said only by the run's line, as before
+ 	esac
+ }
+ 

@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #961
+Takes out: the guard that keeps the fault to jobs of runs on GitHub: a job run here, "run: local", which may lack /dev/kvm for reasons of its own, is said to have booted without KVM as a fault too.  harness-lifecycle-check.sh's jobnokvm finds the line for its local job.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: jobnokvm
+Expect: lifecycle: jobnokvm: pull-results.sh --job; of the job of run local whose /dev/kvm cannot be opened it said a fault: .* -- WRONG
+
+diff --git a/scripts/ci/pull-results.sh b/scripts/ci/pull-results.sh
+index 7305ee15..21ee050a 100755
+--- a/scripts/ci/pull-results.sh
++++ b/scripts/ci/pull-results.sh
+@@ -160,8 +160,7 @@ kvm_fault() {	# artifact-dir job description
+ 	[ -f "$d/job.txt" ] || return 0
+ 	run=$(sed -n 's/^run: *\([0-9][0-9]*\),.*/\1/p' "$d/job.txt")
+ 	kvm=$(sed -n 's/^kvm: *//p' "$d/job.txt")
+-	[ -n "$run" ] || return 0
+-	case "$kvm" in
++	case "$kvm" in	# 961-nokvm-fault-for-local-jobs: whichever run, and a job run here
+ 	"/dev/kvm cannot be opened"*)
+ 		echo "pull-results: $what: job $j BOOTED WITHOUT KVM, a fault: its /dev/kvm could not be opened, and every boot ran under TCG alone" ;;
+ 	esac

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #712
+Takes out: device_read_phys's refusal of a negative count, as it was before #711 -- a count of -1 rounds up to 0 sectors in unsigned arithmetic, the driver refuses 0 sectors, and the answer is D_IO_ERROR where it is D_INVALID_SIZE on every other path.  cap_test [14] finds device_read_phys answering a count of -1 with 2500.
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[14\] WRONG — [a-z_0-9]+ answered a count of -1 with kr=[-0-9]+ \(device_read\), 2500 \(device_read_phys\)
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index c9d48745..6e34ce06 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -1632,7 +1632,7 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
+ 	 * #711: io_buf_len_t is signed, and a negative count rounded up in
+ 	 * unsigned arithmetic came out as 0 sectors, which any range passes.
+ 	 */
+-	if (bytes_wanted <= 0 || phys_addrsCnt == 0)
++	if (bytes_wanted == 0 || phys_addrsCnt == 0)	/* 712-negative-count-is-io-error */
+ 		return D_INVALID_SIZE;
+ 
+ 	total = ((unsigned int)bytes_wanted + SECTOR_SIZE - 1) &

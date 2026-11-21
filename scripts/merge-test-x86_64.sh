@@ -58,7 +58,9 @@
 # of ablations/ no longer applies, and 0 if every judged entry is as it should
 # be and every patch applies.  How many were wrong is the last line's, "N
 # wrong": a count as the status said 2 and 3 as well, which ablate.sh reads as
-# a run that did not start (#782).
+# a run that did not start (#782).  Sent SIGTERM, a run stops the boot it is
+# running, says so of it in a verdict line whose result is "stopped", starts
+# no other, prints its totals and dies of the signal (#951).
 
 set -u
 ACC=both
@@ -157,6 +159,16 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #   refusedfault  -j: a fault from ring 0 on a task's present page that SMAP or
 #             SMEP refused is reported, not retried for ever; the probe's own
 #             PASS/WRONG/NOT ASKED verdict (refused_fault_test, #750)
+#   wakee     -w: wakee_test's PASS, and the harness's verdict -- the hand-off
+#             reached the thread it named, and that thread ran elsewhere when
+#             a thread above it took its waker's processor; NOT ASKED on one
+#             processor (#777, #954)
+#   chora     the harness's verdict, of entry 68, where bootstrap reads
+#             chora.conf: bootstrap's line that -f chose it, the first chora's
+#             three lines -- the claim, its registers mapped, an interrupt
+#             taken -- the second chora's refused claim, and the kernel's line
+#             refusing it, which names both tasks; chora_test's count is the
+#             note (#963)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -261,8 +273,10 @@ ENTRIES="
 64 harness - 1
 65 harness
 65 harness - 1
-67 harness
-67 harness - 1
+67 wakee
+67 wakee - 1
+68 chora --iommu_intel
+68 chora --iommu_intel 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -277,6 +291,7 @@ SKIPPED="
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
 62: -d asks only of a build whose master tick calls the dispatch probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
 66: -z asks only of a build whose thread_doassign() calls the window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
+69: -r with chora.conf is for scripts/ddb-chora.py, which opens the debugger once chora drives the card and reads its task listing; nothing here writes to the serial line (#963)
 "
 
 # A boot's name: what its two logs are called, and what ci/job.sh's row()
@@ -286,6 +301,21 @@ SKIPPED="
 # separate.
 boot_name() {	# entry accelerator -smp options-as-shown
 	echo "e$1-$2${3//,/_}${4:+-${4##* }}"
+}
+
+# #957: a boot's verdict line, every one of them, in the one shape ci/job.sh's
+# VERDICT_RE reads: "merge-test: entry E ACC -smp N [(OPTIONS) ]-- RESULT
+# (KIND)[: LOG]".  It reads the kind up to its first ")", and a line it cannot
+# read is a boot with no row, its logs not copied to failed/, and a round
+# reported short -- the job's status 3, not the 1 of a WRONG.  A note quoting
+# a test's own line did that: refused_fault_test's WRONG ends in "(#750)".  So
+# the kind -- the judge's word and the note after it, whoever wrote the note
+# -- is printed here with no parenthesis and on one line.  The options are
+# the list's own, and lists_cover() refuses a parenthesis in them.
+verdict_line() {	# entry accelerator -smp options-as-shown result kind [log]
+	local kind=${6//[()]/}
+	kind=${kind//[$'\n\r']/ }
+	echo "merge-test: entry $1 $2 -smp $3 ${4:+($4) }-- $5 ($kind)${7:+: $7}"
 }
 
 # #776: the boots a run makes at -smp $1 of the entries in $2 (" N ... ", or
@@ -363,6 +393,14 @@ lists_cover() {
 		echo "merge-test: lists: $e -- at the count ENTRIES is written for, $SMP_LISTED, each line's boot needs a name of its own (#776)" >&2
 		bad=1
 	done
+	# #957: and no parenthesis in a line's options, which its verdict lines
+	# show between parentheses: ci/job.sh's VERDICT_RE ends them at the first
+	# ")", and a verdict line it cannot read leaves its boot with no row.
+	while read -r e _ opt _; do
+		[[ $e =~ ^[0-9]+$ && $opt == *['()']* ]] || continue
+		echo "merge-test: lists: entry $e's options $opt have a parenthesis, and its verdict lines show them between parentheses, which ci/job.sh reads only up to the first ')' (#957)" >&2
+		bad=1
+	done <<< "$ENTRIES"
 	[ $bad = 0 ] &&
 		echo "merge-test: lists: each of grub.cfg's $n entries is run or said not run: $(wc -w <<< "$run") run, $(wc -w <<< "$skip") not"
 	return $bad
@@ -401,6 +439,22 @@ if [ $PATCHES_ONLY = 1 ]; then
 	echo "$PATCHES_SAID"
 	exit $rc
 fi
+# #951: a run sent SIGTERM stops the boot it is running, says so of that boot
+# in a verdict line whose result is "stopped", starts no other, prints its
+# totals as a whole run does, and dies of the signal.  ci/job.sh sends it at
+# its time limit, and when it is sent SIGTERM itself, as at a cancel: a
+# campaign job that ran out of GitHub's minutes was cut off in a boot, which
+# left no row and no log, and its summary was never written.
+# The trap passes the signal on to the boot, which run-x86_64.sh and
+# ush-x86_64.py stop as they stop for a Ctrl-C, their qemu stopped and the
+# lock given back.  So that it runs while a boot runs, the boot is a job
+# waited for: a shell runs a trap only once the command it waits for in the
+# foreground has ended (#801).  TERM and not INT: a SIGINT that comes while
+# the shell waits for a $(...) is lost (#801), and a Ctrl-C reaches every
+# process of the terminal's group anyway.
+STOP=""
+BOOT=""
+trap 'STOP=TERM; [ -z "$BOOT" ] || kill -TERM "$BOOT" 2>/dev/null' TERM
 lists_cover || exit 2
 plan_boots "$SMP" "$ONLY"
 if [ ${#CLASH[@]} -gt 0 ]; then
@@ -503,11 +557,21 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# #952: the ush build, typed at by ush-x86_64.py.  Its count is the
 	# verdict, every command of its list answered and at least one: a
 	# session that stopped at a command says fewer, and one that never got
-	# to the prompt says none.
-	ush) out=$(grep -aoE '^ush-x86_64: [0-9]+ of [0-9]+ commands answered' "$h" | tail -n 1) &&
-		[ -n "$out" ] && out=${out#ush-x86_64: } &&
-		[ "${out%% *}" -gt 0 ] && [ "${out%% *}" = "$(echo "$out" | cut -d' ' -f3)" ] &&
-		NOTE=$out ;;
+	# to the prompt says none.  #958: and when it is not, the note says why:
+	# the count where the session got that far, or else the script's last
+	# line, which says what it read when it stopped before typing -- at its
+	# prompt, a root disk that ext2 never said was ready.
+	ush) out=$(grep -aoE '^ush-x86_64: [0-9]+ of [0-9]+ commands answered' "$h" | tail -n 1)
+		out=${out#ush-x86_64: }
+		if [ -n "$out" ] && [ "${out%% *}" -gt 0 ] &&
+		   [ "${out%% *}" = "$(echo "$out" | cut -d' ' -f3)" ]; then
+			NOTE=$out
+		else
+			[ -n "$out" ] ||
+				out=$(grep -av -e '^ *$' -e '^ush-x86_64: log: ' "$h" | tail -n 1 | sed 's/^ush-x86_64: //')
+			NOTE=$out
+			false
+		fi ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/mig) bad request message ID' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ||
 		alone_ok "$n" "$h" "$f" 'ioapic_race: NOT ASKED — alone' ;;
@@ -647,7 +711,7 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 			out=$("$HERE/scripts/ddb-report-check.sh" "$f" clock_event_tick)
 			case $out in
 			"ddb-report-check: PASS"*) ;;
-			*)	NOTE="${out//[()]/}"
+			*)	NOTE=$out
 				false ;;
 			esac
 		elif grep -aqE 'UrMach x86-64: trap |no handler' "$f"; then
@@ -669,6 +733,40 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		"")	NOTE="no refused_fault_test verdict"; false ;;
 		*)	NOTE="${out#*refused_fault_test: }"; false ;;
 		esac ;;
+	# #954: -w, the hand-off's wakee.  Under "harness" a NOT ASKED passed
+	# and asked nothing, and since #954 wakee_test says NOT ASKED where its
+	# waker left with no bet open, the wakee having run first: what a waker
+	# above the wakee, with preemption off, cannot let happen, and what one
+	# below it did in each boot of 954-waker-outranked, all four of which
+	# the harness passed.  So its PASS is asked for, except on one
+	# processor, where the question does not arise and the verdict says
+	# NOT ASKED (#779).  The note is the verdict's word, not its line.
+	wakee)	out=$(grep -a 'wakee_test: \(PASS\|WRONG\|NOT ASKED\)' "$f" | head -n 1)
+		case $out in
+		*"wakee_test: PASS"*)
+			grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
+		"")	NOTE="no wakee_test verdict"; false ;;
+		*)	alone_ok "$n" "$h" "$f" 'wakee_test: NOT ASKED — 1 processor(s)' ||
+			{ out=${out#*wakee_test: }; NOTE="wakee_test said ${out%% —*}"; false; } ;;
+		esac ;;
+	# #963: chora on the network card, from chora.conf.  The harness passes a
+	# boot whose chora_test answered with nothing unexplained, and the lines
+	# #963's boxes are about are asked for here because nothing else asks:
+	# bootstrap read chora.conf, the first chora claimed the card, mapped
+	# its registers and took an interrupt, and the second chora's claim was
+	# refused -- by the kernel, in a line that names each task, and the two
+	# names are the same because the name is the device's.  A boot with no
+	# card answers NOT ASKED in chora_test and fails here, since this entry
+	# exists to ask.
+	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: mapped region 0, ' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: took an interrupt, ' "$f" &&
+		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the claim on .* was refused' "$f" &&
+		grep -aqE 'REFUSED to task 0x[0-9a-f]+ \(chora_probe@[^)]*\) .*claimed by task 0x[0-9a-f]+ \(chora_probe@' "$f" &&
+		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
+		[ -n "$out" ] && NOTE=$out ;;
 	esac
 }
 
@@ -769,12 +867,13 @@ marked() {
 		[[ " ${opt//_/ } " == *" @$1 "* ]] && echo yes
 	done | grep -q yes
 }
-if marked char; then
+# #951: and a run asked to stop builds no side build it will not boot.
+if [ -z "$STOP" ] && marked char; then
 	side_build "$CHAR_BUILD" char char_server -DOSFMK_BUILD_CHAR_SERVER=ON
 	CHAR_REFUSED=$SIDE_REFUSED
 	[ -z "$CHAR_REFUSED" ] || echo "merge-test: $CHAR_REFUSED -- the entries marked @char are WRONG, not run" >&2
 fi
-if marked ush; then
+if [ -z "$STOP" ] && marked ush; then
 	side_build "$USH_BUILD" ush "char_server and the ush bundle" \
 		-DOSFMK_BUILD_CHAR_SERVER=ON -DUROS_BUNDLE_USH=ON
 	USH_REFUSED=$SIDE_REFUSED
@@ -783,6 +882,11 @@ fi
 echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}${STUB:+, gdb stub on every run}"
 echo "$SKIPPED" | sed '/^$/d; s/^/merge-test: not run -- /'
 [ ${#SAME[@]} -eq 0 ] || printf 'merge-test: booted once -- %s (#776)\n' "${SAME[@]}"
+# #951: the boots made so far, of all the run plans, for the line a stopped
+# run ends with.
+MADE=0
+PLANNED=$(( ${#PLAN[@]} * $(wc -w <<< "$ACCS") ))
+STOPPED_AT=""
 for boot in "${PLAN[@]}"; do
 	IFS=$'\x1f' read -r e v opt n <<< "$boot"
 	# #765: @char is the merge test's, not run-x86_64.sh's: it picks the
@@ -804,6 +908,12 @@ for boot in "${PLAN[@]}"; do
 		opt=$(echo " $opt " | sed 's/ @ush / /; s/^ *//; s/ *$//')
 	fi
 	for a in $ACCS; do
+		# #951: asked to stop between two boots, it starts no other.
+		if [ -n "$STOP" ]; then
+			STOPPED_AT="before boot $((MADE + 1)) of $PLANNED"
+			break 2
+		fi
+		MADE=$((MADE + 1))
 		budget=1200
 		k=""
 		# ush-x86_64.py's wait for each line a command prints (#952).
@@ -819,7 +929,7 @@ for boot in "${PLAN[@]}"; do
 		# a boot that never happened.
 		rm -f "$h" "$f" "$f.walk.txt"
 		if [ -n "$refused" ]; then
-			echo "merge-test: entry $e $a -smp $n ($shown) -- WRONG (did not run, the $side build: ${refused//[()]/}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "did not run, the $side build: $refused" "$h"
 			echo "$refused" > "$h"
 			WRONG=$((WRONG + 1))
 			continue
@@ -832,13 +942,40 @@ for boot in "${PLAN[@]}"; do
 		# root disk, and types its commands.  Its exit statuses are the
 		# harness's -- 0, 1, and 2 for a run it could not make -- and the
 		# line it carried is the full log.
+		# #951: a job waited for, so that a SIGTERM's trap runs during the
+		# boot and passes the signal on; its standard input named, which an
+		# asynchronous command would otherwise have from /dev/null, and
+		# SIGINT and SIGQUIT given back, which it would otherwise start
+		# with ignored, out of a shell's reach to trap again: a Ctrl-C is
+		# run-x86_64.sh's to stop at, as it was in the foreground (#801).  A
+		# SIGTERM that came before $BOOT was set is passed on here.
+		started=$SECONDS
 		( cd "$HERE" || exit 2
 		  [ -z "$build" ] || export UROS_BUILD_DIR=$build
 		  if [ "$side" = ush ]; then
-			exec ./scripts/ush-x86_64.py --build "$build" $k --entry "$e" --smp "$n" \
-				--budget "$budget" --wait "$wait" --log "$f"
+			exec env --default-signal=INT,QUIT ./scripts/ush-x86_64.py --build "$build" $k \
+				--entry "$e" --smp "$n" --budget "$budget" --wait "$wait" --log "$f"
 		  fi
-		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?
+		  UROS_X86_64_LOG="$f" exec env --default-signal=INT,QUIT ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 <&0 &
+		BOOT=$!
+		[ -z "$STOP" ] || kill -TERM "$BOOT" 2>/dev/null
+		wait "$BOOT" || rc=$?
+		# A SIGTERM during the wait ran the trap and ended the wait at once,
+		# with 143 whatever the boot did: the boot's own status is the next
+		# wait's, once it has stopped.
+		if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+			rc=0
+			wait "$BOOT" || rc=$?
+		fi
+		BOOT=""
+		# Stopped by the signal, the boot is said to be, and judged no
+		# further; one that ended by itself first is judged as any other,
+		# and the run stops before the next.
+		if [ -n "$STOP" ] && [ $rc -gt 128 ]; then
+			verdict_line "$e" "$a" "$n" "$shown" stopped "SIG$STOP $((SECONDS - started)) s into the boot, which then ended with status $rc" "$h"
+			STOPPED_AT="at boot $MADE of $PLANNED"
+			break 2
+		fi
 		# A run not made is WRONG, and says which: not started (2), qemu
 		# never ran or said nothing (3), stopped by a signal (above 128) --
 		# the statuses ablate.sh reads the same way -- or no full log
@@ -853,7 +990,7 @@ for boot in "${PLAN[@]}"; do
 		*)	[ -e "$f" ] || notrun="no full log was written" ;;
 		esac
 		if [ -n "$notrun" ]; then
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (did not run, status $rc: ${notrun//[()]/}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "did not run, status $rc: $notrun" "$h"
 			WRONG=$((WRONG + 1))
 			continue
 		fi
@@ -872,7 +1009,7 @@ for boot in "${PLAN[@]}"; do
 		ng_rc=0
 		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
 		if ! judge "$e" "$v" "$h" "$f" "$a" "$n"; then
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG ($v${NOTE:+: $NOTE}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "$v${NOTE:+: $NOTE}" "$h"
 			WRONG=$((WRONG + 1))
 		elif [ $ng_rc -ne 0 ]; then
 			# One line, the last, which says why: ci/job.sh reads the
@@ -880,22 +1017,21 @@ for boot in "${PLAN[@]}"; do
 			why=$(printf '%s\n' "$ng" | tail -n 1)
 			[ -n "$why" ] || why="nothing said on its output"
 			printf 'NO GLYPH (#661): the check could not run (exit %s): %s\n' "$ng_rc" "$why" >> "$h"
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "the no-glyph check could not run: $why" "$h"
 			WRONG=$((WRONG + 1))
 		elif [ -n "$ng" ]; then
 			printf '%s\n' "$ng" | sed 's/^/NO GLYPH (#661): line /' >> "$h"
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (no glyph): $h"
+			verdict_line "$e" "$a" "$n" "$shown" WRONG "no glyph" "$h"
 			WRONG=$((WRONG + 1))
 		else
 			# #742: said in the row as well, which ci/job.sh writes from
-			# this line.  No parenthesis in the note: its VERDICT_RE ends
-			# the kind at the first one.
+			# this line.
 			if grep -aq 'the debug registers came back' "$f"; then
 				NOTE="${NOTE:+$NOTE; }#742: the debug registers came back"
 				CAMEBACK=$((CAMEBACK + 1))
 				CAMEBACK_WHERE="$CAMEBACK_WHERE, entry $e $a -smp $n"
 			fi
-			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- as it should be ($v${NOTE:+: $NOTE})"
+			verdict_line "$e" "$a" "$n" "$shown" "as it should be" "$v${NOTE:+: $NOTE}"
 			case $NOTE in
 			"NOT ASKED"*)
 				UNASKED=$((UNASKED + 1))
@@ -904,6 +1040,11 @@ for boot in "${PLAN[@]}"; do
 		fi
 	done
 done
+# #951: a stopped run says where it stopped, and prints the totals of the boots
+# it made as a whole run does.
+if [ -n "$STOP" ]; then
+	echo "merge-test: stopped by SIG$STOP ${STOPPED_AT:-after its last boot, $MADE of $PLANNED}"
+fi
 # ⚠️ Before the total and in a shape of its own: ci/job.sh reads the run's end
 # as exactly "merge-test: N wrong".
 echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK_WHERE:+:${CAMEBACK_WHERE#,}}"
@@ -913,6 +1054,12 @@ echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 # patches itself.
 echo "$PATCHES_SAID"
 echo "merge-test: $WRONG wrong"
+# #951: and a stopped run dies of the signal, as run-x86_64.sh does, so that
+# whoever sent it sees it obeyed.
+if [ -n "$STOP" ]; then
+	trap - TERM
+	kill -TERM $$
+fi
 # #782: whether, not how many -- see the header.
 [ $((WRONG + ROTTEN)) -eq 0 ] || exit 1
 exit 0

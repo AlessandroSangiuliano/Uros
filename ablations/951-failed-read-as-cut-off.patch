@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #951
+Takes out: pull-results.sh's reading of the "failed:" line in job.txt -- a job that ended on a failure is said to have been cut off before writing its summary, as the Ubuntu jobs of 18/11 were, whose build had failed.  harness-lifecycle-check.sh's jobfail finds pull-results.sh --job saying "did NOT FINISH" where it should say FAILED, and why.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: jobfail
+Expect: lifecycle: jobfail: .* -- WRONG
+Note: jobfail builds and boots nothing: its configure fails at once, in a build directory of its own; ablate.sh passes --kvm under KVM, and it changes nothing there
+
+diff --git a/scripts/ci/pull-results.sh b/scripts/ci/pull-results.sh
+index 50abb7e1..a6a8eece 100755
+--- a/scripts/ci/pull-results.sh
++++ b/scripts/ci/pull-results.sh
+@@ -135,8 +135,7 @@ job_end() {	# artifact-dir job description
+ 	fail=$(sed -n 's/^failed: *//p' "$d/job.txt" 2>/dev/null)
+ 	if [ ! -f "$d/job.txt" ]; then
+ 		echo "pull-results: $what: job $j left no job.txt; $got boots$plan"
+-	elif [ -n "$fail" ]; then
+-		echo "pull-results: $what: job $j FAILED: $fail; $got boots$plan"
++	# 951-failed-read-as-cut-off: a failed: line not read
+ 	elif [ -z "$stop" ] && ! grep -qE '^(boots:|ablate:   |sweep:    [0-9]+ patches of )' "$d/job.txt"; then
+ 		echo "pull-results: $what: job $j did NOT FINISH: its job.txt has no summary, so it was cut off before writing one; $got boots$plan"
+ 	elif [ -n "$stop" ]; then
