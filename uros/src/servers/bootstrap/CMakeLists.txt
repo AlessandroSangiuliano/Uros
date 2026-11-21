@@ -841,6 +841,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             chora_test:${_SBIN}/chora_test
             modules/net/chora_probe.so:${_MOD}/net/chora_probe.so
             modules/net/chora_absent.so:${_MOD}/net/chora_absent.so
+            # #977: chora's module for QEMU's educational device, which
+            # has MSI and no MSI-X table.
+            modules/misc/edu_probe.so:${_MOD}/misc/edu_probe.so
             ${_CHAR_FILES}
             ${_MUSL_FILES}
             ${_IPC_BENCH_FILE}
@@ -868,6 +871,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # without it, and run-x86_64.sh builds the bundle, not ALL.
             ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
             chora_probe_module chora_absent_module chora_bin
+            edu_probe_module
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
