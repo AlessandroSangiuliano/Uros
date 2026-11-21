@@ -373,3 +373,54 @@ driver_interrupt(struct driver *d, void (*handler)(struct driver *, void *),
 	(void)pthread_detach(th);
 	return KERN_SUCCESS;
 }
+
+kern_return_t
+driver_dma_alloc(struct driver *d, vm_size_t size, uint64_t reach,
+		 struct driver_dma *out)
+{
+	vm_address_t	kva = 0, uva = 0, dma = 0;
+	uint64_t	region = 0;	/* dma_region_id_t, a cap_u64_t in C */
+	kern_return_t	kr;
+
+	memset(out, 0, sizeof *out);
+	kr = device_dma_alloc(d->master_device, d->bdf, size, &kva, &dma,
+			      &region);
+	if (kr != KERN_SUCCESS) {
+		driver_log(d, "no DMA buffer of %lu bytes: 0x%x",
+			   (unsigned long)size, kr);
+		return kr;
+	}
+	if (reach != 0 && ((uint64_t)dma > reach ||
+			   (uint64_t)dma + size - 1 > reach)) {
+		driver_log(d, "a DMA buffer at device address 0x%lx, past the "
+			   "0x%lx this device can reach: given back",
+			   (unsigned long)dma, (unsigned long)reach);
+		(void)device_dma_free(d->master_device, d->bdf, kva, size);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	kr = device_dma_map_user(d->master_device, kva, size, mach_task_self(),
+				 &uva);
+	if (kr != KERN_SUCCESS) {
+		driver_log(d, "a DMA buffer of %lu bytes would not map: 0x%x",
+			   (unsigned long)size, kr);
+		(void)device_dma_free(d->master_device, d->bdf, kva, size);
+		return kr;
+	}
+	memset((void *)uva, 0, size);
+	out->va = (volatile void *)uva;
+	out->size = size;
+	out->device_addr = (uint64_t)dma;
+	out->kva = kva;
+	return KERN_SUCCESS;
+}
+
+void
+driver_dma_free(struct driver *d, struct driver_dma *dma)
+{
+	if (dma->kva == 0)
+		return;
+	(void)vm_deallocate(mach_task_self(), (vm_address_t)dma->va,
+			    dma->size);
+	(void)device_dma_free(d->master_device, d->bdf, dma->kva, dma->size);
+	memset(dma, 0, sizeof *dma);
+}

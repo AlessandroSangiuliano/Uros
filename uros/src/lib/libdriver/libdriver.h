@@ -105,4 +105,36 @@ kern_return_t	driver_interrupt(struct driver *d,
 				 void (*handler)(struct driver *, void *),
 				 void *arg);
 
+/*
+ * A DMA buffer of the device's (#978): physically contiguous, mapped in this
+ * task, and the address the DEVICE must be given, which is not that mapping.
+ * Where the machine confines the device it is an IOVA, a number that means
+ * something only in the device's own domain; elsewhere the physical address.
+ * The module needs to know neither, only to give the device this one
+ * (device_dma_alloc's contract, device_master.defs).
+ */
+struct driver_dma {
+	volatile void	*va;		/* this task's mapping */
+	vm_size_t	size;
+	uint64_t	device_addr;	/* what the device is programmed with */
+	vm_address_t	kva;		/* the kernel's, which device_dma_free takes */
+};
+
+/*
+ * A buffer of `size' bytes for the device, zeroed.  `reach' is the highest
+ * address the device can use, inclusive -- a device whose DMA has fewer bits
+ * than the machine's says so, and a buffer beyond it is given back and
+ * refused, said, rather than handed over to be cut short by the device: AHCI
+ * without S64A and QEMU's edu, 28 bits, are such devices.  0 means no limit.
+ */
+kern_return_t	driver_dma_alloc(struct driver *d, vm_size_t size,
+				 uint64_t reach, struct driver_dma *out);
+
+/*
+ * Give it back: this task's mapping, then the buffer.  The device must have
+ * stopped using it: what it writes after this lands in memory the kernel may
+ * have given to someone else, or in nothing.
+ */
+void		driver_dma_free(struct driver *d, struct driver_dma *dma);
+
 #endif /* _LIBDRIVER_H_ */
