@@ -42,8 +42,10 @@
  * reads right came through the device, at the address libdriver gave.
  *
  * So: the device's first region mapped; the interrupt asked of libdriver,
- * which must be a message; 977h raised; up to a second for the handler; then
- * the round trip.  chora said the claim, and this says the rest.
+ * which must be a message; 977h raised; up to a second for the handler; the
+ * round trip; then a buffer asked within edu's default 28 bits, which
+ * libdriver must refuse where the machine translates.  chora said the claim,
+ * and this says the rest.
  *
  * ⚠️ A test module: what it was asked to see and did not is a WRONG.
  */
@@ -83,6 +85,9 @@
  * someone else's memory.
  */
 #define EDU_DMA_REACH		UINT64_MAX
+
+/* edu's default, which edu_narrow() asks within: 28 bits, 256 MiB. */
+#define EDU_DMA_REACH_DEFAULT	((1ULL << 28) - 1)
 
 #define PROBE_WAIT_STEPS	100		/* of 10 ms: a second */
 #define DMA_WAIT_STEPS		300		/* of 10 ms: three seconds */
@@ -199,6 +204,40 @@ edu_round_trip(struct driver *d)
 	return 0;
 }
 
+/*
+ * The other side of `reach': a buffer asked within edu's default 28 bits,
+ * which the device is never given.  Where the machine translates, every IOVA
+ * is from 4 GiB up, so libdriver must give it back and refuse it -- today, as
+ * the kernel cannot place a buffer within a reach (#417).  Where it does not,
+ * the buffer is physical, given or refused by where it lies, and given it
+ * must be within.  Said either way; which is right for the boot is the merge
+ * test's to say, as it knows whether the boot translates.
+ */
+static int
+edu_narrow(struct driver *d)
+{
+	struct driver_dma	buf;
+	kern_return_t		kr;
+
+	kr = driver_dma_alloc(d, EDU_BUF_BYTES, EDU_DMA_REACH_DEFAULT, &buf);
+	if (kr != KERN_SUCCESS) {
+		driver_log(d, "a DMA buffer within edu's default 28 bits: "
+			   "refused, 0x%x", kr);
+		return 0;
+	}
+	if (buf.device_addr + EDU_BUF_BYTES - 1 > EDU_DMA_REACH_DEFAULT) {
+		driver_log(d, "WRONG -- a DMA buffer within edu's default 28 "
+			   "bits: given, at device address 0x%llx, past them",
+			   (unsigned long long)buf.device_addr);
+		driver_dma_free(d, &buf);
+		return -1;
+	}
+	driver_log(d, "a DMA buffer within edu's default 28 bits: given, at "
+		   "device address 0x%llx", (unsigned long long)buf.device_addr);
+	driver_dma_free(d, &buf);
+	return 0;
+}
+
 static int
 edu_attach(struct driver *d)
 {
@@ -242,7 +281,9 @@ edu_attach(struct driver *d)
 	driver_log(d, "took an interrupt, message slot %u, status 0x%x",
 		   (unsigned)d->irq_slot, (unsigned)rang_status);
 
-	return edu_round_trip(d);
+	if (edu_round_trip(d) != 0)
+		return -1;
+	return edu_narrow(d);
 }
 
 const struct chora_module_ops edu_probe_chora_ops = {

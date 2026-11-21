@@ -178,8 +178,9 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             message, the device driven, and a DMA round trip through it at
 #             the address libdriver gave -- an IOVA from 4 GiB up where -I
 #             turned translation on, as entry 70 must, and a physical one
-#             below 4 GiB where it did not; chora_test's count and the
-#             address read are the note (#963, #977, #978)
+#             below 4 GiB where it did not, and a buffer asked within edu's
+#             default 28 bits refused where it did; chora_test's count and
+#             the address read are the note (#963, #977, #978)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -560,15 +561,23 @@ alone_ok() {	# -smp log-of-the-harness full-log the-test's-words-on-one-processo
 # address is an IOVA, from 4 GiB up (IOMMU_IOVA_BASE), nine hex digits or
 # more; where it did not, it is physical, below 4 GiB on the harness's
 # 512 MiB.  Entry 70 boots with -I and must say so: a round trip there at a
-# physical address is the -I gone from its line, and not a pass.
+# physical address is the -I gone from its line, and not a pass.  And the
+# buffer it asks within edu's default 28 bits: refused under translation,
+# libdriver's line naming the IOVA it gave back (0x6, KERN_RESOURCE_SHORTAGE);
+# given within them or refused, by where the memory lies, where nothing
+# translates.
 chora_dma() {	# entry full-log
-	local rt='edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: a DMA round trip of 4096 bytes through the device.s buffer, at device address ' kind='0x[0-9a-f]{1,8}'
+	local p='edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: ' kind='0x[0-9a-f]{1,8}'
+	local narrow='(given, at device address 0x[0-9a-f]{1,7}|refused, 0x6)([^0-9a-f]|$)'
 	if grep -aq -- '-I given: translation IS ON' "$2"; then
 		kind='0x[1-9a-f][0-9a-f]{8,}'
+		narrow='refused, 0x6([^0-9a-f]|$)'
+		grep -aqE "${p}a DMA buffer at device address 0x[1-9a-f][0-9a-f]{8,}, past the 0xfffffff this device can reach: given back" "$2" || return 1
 	elif [ "$1" = 70 ]; then
 		return 1
 	fi
-	grep -aoE "$rt$kind: every byte came back" "$2" | tail -n 1 | grep -oE '0x[0-9a-f]+: every' | cut -d: -f1 | grep .
+	grep -aqE "${p}a DMA buffer within edu.s default 28 bits: $narrow" "$2" || return 1
+	grep -aoE "${p}a DMA round trip of 4096 bytes through the device.s buffer, at device address $kind: every byte came back" "$2" | tail -n 1 | grep -oE '0x[0-9a-f]+: every' | cut -d: -f1 | grep .
 }
 
 judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
@@ -803,7 +812,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# #977: and the chora on QEMU's edu device, which has MSI and no MSI-X
 	# table: edu_probe took its interrupt by message, and drives the device.
 	# #978: after a DMA round trip through it, at an address of the kind
-	# the boot's translation says (chora_dma).
+	# the boot's translation says, and a buffer within 28 bits refused
+	# where the boot translates (chora_dma).
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
