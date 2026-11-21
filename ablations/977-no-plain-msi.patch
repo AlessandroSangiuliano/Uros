@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #977
+Takes out: the plain MSI device_md_msi_register() gives a function with no MSI-X table: such a function gets no message again, as before #977, and its driver would take its INTx line.  The boot's plain-MSI test asks for edu's message, is given no slot, and says so.
+Run: --edu --entry 14 600 -smp 4
+Expect: plain MSI: the edu device at 00:[0-9]+\.0 was given no slot by device_md_msi_register\(\) .* WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index c420b74e..378a3704 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -1078,8 +1078,7 @@ device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
+ 
+ 	/* #977: MSI-X first, and plain MSI where there is no table. */
+ 	if (!pci_msix_probe(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, &m))
+-		return msi_register_plain(bus, dev, func, entry, handler,
+-					  slot_out);
++		return 0;	/* 977-no-plain-msi: no table, no message */
+ 
+ 	if (entry >= m.vectors)
+ 		return 0;

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #977
+Takes out: the store that enables the message: pci_msi_arm() writes the address and the data and leaves MSI disabled, so the function goes on using its pin.  The boot's plain-MSI test reads the control word back without the enable bit, rings edu, and no message arrives on the slot.
+Run: --edu --entry 14 600 -smp 4
+Expect: plain MSI: edu was asked to raise .* WRONG, the capability is written and the device.s message did not arrive on its slot
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pci_msi.c b/uros/src/mach_kernel/x86_64/cpu/pci_msi.c
+index 41f66c2e..d38528ba 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/pci_msi.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pci_msi.c
+@@ -111,7 +111,7 @@ pci_msi_arm(const struct pci_msi *m, uint64_t address, uint32_t data)
+ 	pci_cfg_command(m->segment, m->bus, m->dev, m->func,
+ 			PCI_CMD_BUS_MASTER, 0);
+ 
+-	msi_control_write(m, (uint16_t)(control | PCI_MSI_CTL_ENABLE));
++	msi_control_write(m, control);	/* 977-msi-not-enabled: written, never enabled */
+ 	return 1;
+ }
+ 
