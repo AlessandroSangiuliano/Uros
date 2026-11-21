@@ -55,6 +55,7 @@
 
 #include <mach.h>
 #include <mach/thread_switch.h>
+#include <stdio.h>			/* snprintf */
 
 #define EDU_INTR_STATUS		0x24u
 #define EDU_INTR_RAISE		0x60u
@@ -154,22 +155,62 @@ edu_dma(struct driver *d, uint64_t src, uint64_t dst, uint32_t cmd)
 }
 
 /*
+ * What the kernel says of the device's DMA between two readings, as the end
+ * of a line: `said' is for the ones that carry numbers.
+ */
+static const char *
+edu_refusals(const struct driver_dma_faults *before,
+	     const struct driver_dma_faults *after, char *said, size_t len)
+{
+	switch (driver_dma_verdict(before, after)) {
+	case DRIVER_DMA_NOT_CONFINED:
+		return "on a device nothing confines";
+	case DRIVER_DMA_NOT_REFUSED:
+		return "and the kernel refused none of it";
+	case DRIVER_DMA_REFUSED:
+		(void)snprintf(said, len, "and the kernel refused it %u times, "
+			       "the last at 0x%llx",
+			       (unsigned)(after->count - before->count),
+			       (unsigned long long)after->address);
+		return said;
+	case DRIVER_DMA_UNKNOWN:
+		break;
+	}
+	(void)snprintf(said, len, "and the kernel cannot say what it refused: "
+		       "%u refusals may have gone uncounted",
+		       (unsigned)(after->lost - before->lost));
+	return said;
+}
+
+/*
  * The round trip: the pattern into the device's buffer from one of
  * driver_dma_alloc()'s, that buffer zeroed, and the device's copy back into
- * it.  Every byte must read as it was written.
+ * it.  Every byte must read as it was written, and where the machine confines
+ * the device the kernel must have refused none of its DMA: read once the
+ * buffer is granted, when the device has its domain, and once both halves are
+ * done.
  */
 static int
 edu_round_trip(struct driver *d)
 {
-	struct driver_dma	buf;
-	volatile uint8_t	*p;
-	kern_return_t		kr;
-	unsigned int		i, wrong = 0, first = 0;
+	struct driver_dma		buf;
+	struct driver_dma_faults	before, after;
+	enum driver_dma_verdict		verdict;
+	volatile uint8_t		*p;
+	kern_return_t			kr;
+	unsigned int			i, wrong = 0, first = 0;
+	char				said[96];
 
 	kr = driver_dma_alloc(d, EDU_BUF_BYTES, EDU_DMA_REACH, &buf);
 	if (kr != KERN_SUCCESS) {
 		driver_log(d, "WRONG -- no DMA buffer of %u bytes: 0x%x",
 			   EDU_BUF_BYTES, kr);
+		return -1;
+	}
+	if (driver_dma_faults(d, &before) != KERN_SUCCESS) {
+		driver_log(d, "WRONG -- no reading of the device's refused DMA "
+			   "to compare with");
+		driver_dma_free(d, &buf);
 		return -1;
 	}
 	p = (volatile uint8_t *)buf.va;
@@ -184,6 +225,14 @@ edu_round_trip(struct driver *d)
 	if (edu_dma(d, EDU_BUF, buf.device_addr, EDU_DMA_TO_RAM) != 0)
 		return -1;
 
+	if (driver_dma_faults(d, &after) != KERN_SUCCESS) {
+		driver_log(d, "WRONG -- no reading of the device's refused DMA "
+			   "after the round trip");
+		driver_dma_free(d, &buf);
+		return -1;
+	}
+	verdict = driver_dma_verdict(&before, &after);
+
 	for (i = 0; i < EDU_BUF_BYTES; i++)
 		if (p[i] != edu_pattern(i) && wrong++ == 0)
 			first = i;
@@ -191,15 +240,26 @@ edu_round_trip(struct driver *d)
 		driver_log(d, "WRONG -- a DMA round trip of %u bytes through the "
 			   "device's buffer, at device address 0x%llx: %u bytes "
 			   "came back different, the first at %u, 0x%02x for "
-			   "0x%02x", EDU_BUF_BYTES,
+			   "0x%02x, %s", EDU_BUF_BYTES,
 			   (unsigned long long)buf.device_addr, wrong, first,
-			   (unsigned)p[first], (unsigned)edu_pattern(first));
+			   (unsigned)p[first], (unsigned)edu_pattern(first),
+			   edu_refusals(&before, &after, said, sizeof said));
+		driver_dma_free(d, &buf);
+		return -1;
+	}
+	if (verdict == DRIVER_DMA_REFUSED || verdict == DRIVER_DMA_UNKNOWN) {
+		driver_log(d, "WRONG -- a DMA round trip of %u bytes through the "
+			   "device's buffer, at device address 0x%llx: every "
+			   "byte came back, %s", EDU_BUF_BYTES,
+			   (unsigned long long)buf.device_addr,
+			   edu_refusals(&before, &after, said, sizeof said));
 		driver_dma_free(d, &buf);
 		return -1;
 	}
 	driver_log(d, "a DMA round trip of %u bytes through the device's "
-		   "buffer, at device address 0x%llx: every byte came back",
-		   EDU_BUF_BYTES, (unsigned long long)buf.device_addr);
+		   "buffer, at device address 0x%llx: every byte came back, %s",
+		   EDU_BUF_BYTES, (unsigned long long)buf.device_addr,
+		   edu_refusals(&before, &after, said, sizeof said));
 	driver_dma_free(d, &buf);
 	return 0;
 }

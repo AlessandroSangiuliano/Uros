@@ -561,7 +561,10 @@ alone_ok() {	# -smp log-of-the-harness full-log the-test's-words-on-one-processo
 # address is an IOVA, from 4 GiB up (IOMMU_IOVA_BASE), nine hex digits or
 # more; where it did not, it is physical, below 4 GiB on the harness's
 # 512 MiB.  Entry 70 boots with -I and must say so: a round trip there at a
-# physical address is the -I gone from its line, and not a pass.  And the
+# physical address is the -I gone from its line, and not a pass.  The line's
+# end is the kernel's count of the device's refused DMA: none of it refused
+# where it translates, which confines edu, and nothing confining it where it
+# does not -- so the IOVA and the confinement are read apart.  And the
 # buffer it asks within edu's default 28 bits: refused under translation,
 # libdriver's line naming the IOVA it gave back (0x6, KERN_RESOURCE_SHORTAGE);
 # given within them or refused, by where the memory lies, where nothing
@@ -569,15 +572,17 @@ alone_ok() {	# -smp log-of-the-harness full-log the-test's-words-on-one-processo
 chora_dma() {	# entry full-log
 	local p='edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: ' kind='0x[0-9a-f]{1,8}'
 	local narrow='(given, at device address 0x[0-9a-f]{1,7}|refused, 0x6)([^0-9a-f]|$)'
+	local refused='on a device nothing confines'
 	if grep -aq -- '-I given: translation IS ON' "$2"; then
 		kind='0x[1-9a-f][0-9a-f]{8,}'
 		narrow='refused, 0x6([^0-9a-f]|$)'
+		refused='and the kernel refused none of it'
 		grep -aqE "${p}a DMA buffer at device address 0x[1-9a-f][0-9a-f]{8,}, past the 0xfffffff this device can reach: given back" "$2" || return 1
 	elif [ "$1" = 70 ]; then
 		return 1
 	fi
 	grep -aqE "${p}a DMA buffer within edu.s default 28 bits: $narrow" "$2" || return 1
-	grep -aoE "${p}a DMA round trip of 4096 bytes through the device.s buffer, at device address $kind: every byte came back" "$2" | tail -n 1 | grep -oE '0x[0-9a-f]+: every' | cut -d: -f1 | grep .
+	grep -aoE "${p}a DMA round trip of 4096 bytes through the device.s buffer, at device address $kind: every byte came back, $refused" "$2" | tail -n 1 | grep -oE '0x[0-9a-f]+: every' | cut -d: -f1 | grep .
 }
 
 judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
