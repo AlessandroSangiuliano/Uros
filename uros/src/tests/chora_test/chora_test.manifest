@@ -6,11 +6,11 @@
 #
 # 🔑 What it MAY HAND ON is the whole of it.  A chora it starts asks for any
 # PCI class, and exec_load() cuts that to these lines (#743): the network
-# class, and edu's, class ffh ("other"), each with DMA, registers and the
-# interrupt.  So each chora holds those two classes and no other, and the
-# second chora on the card is refused by the claim the first holds, not by a
-# capability it lacks.
+# class, and edu's, which QEMU 11.1.2's edu reports as 00ff00h (base class
+# 00h, subclass ffh), each with DMA, registers and the interrupt.  So each
+# chora holds those two classes and no other, and the second chora on the
+# card is refused by the claim the first holds, not by a capability it lacks.
 
 name chora_test
 delegatable 5 0x020000 0x7
-delegatable 5 0xff0000 0x7
+delegatable 5 0x00ff00 0x7
