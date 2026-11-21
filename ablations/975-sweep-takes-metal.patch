@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #975
+Takes out: what --sweep all leaves out: it takes the patches judged on a machine's metal again, as before #975, and ablate.sh refuses the six of #804 under QEMU, so the sweep of every patch stops at its plan.  The merge test asks for that plan, in -P as in a whole run, and says it does not plan.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -P
+Expect: merge-test: ablations: the sweep of every patch does not plan, ablate\.sh refuses 6 of the [0-9]+ patches of this sweep -- WRONG \(#975\)
+Note: -P boots nothing: it asks whether every patch applies and whether the sweep of every patch plans.  Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take (as 765-char-build-without-char-server says).
+
+diff --git a/scripts/ci/job.sh b/scripts/ci/job.sh
+index 1a23fc6b..8f2791ce 100755
+--- a/scripts/ci/job.sh
++++ b/scripts/ci/job.sh
+@@ -298,10 +298,7 @@ if [ -n "$SWEEP" ]; then
+ 			hdr=$(sed -n '/^diff --git /q;p' "$p")
+ 			grep -qx 'Kind:[[:space:]]*ablation' <<< "$hdr" || continue
+ 			grep -q '^Expect:' <<< "$hdr" || continue
+-			if grep -q '^Machine:' <<< "$hdr"; then
+-				METAL+=("$(basename "$p" .patch)")
+-				continue
+-			fi
++			# 975-sweep-takes-metal: a patch judged on a machine's metal too
+ 			NAMES+=("$(basename "$p" .patch)")
+ 		done
+ 	else
