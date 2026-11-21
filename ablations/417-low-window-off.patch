@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #417
+Takes out: the low IOVA window: a device that cannot reach the window from 4 GiB is refused, as before #417.  The boot's placement check must say so, and on entry 70 edu's round trip within its default 28 bits finds no buffer.
+Run: --iommu intel --edu --entry 70 600 -smp 4
+Expect: UrMach x86-64: [0-9]+ IOVA placement cases, [1-9][0-9]* wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index c938cbf3..eb1e9ddb 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -2699,7 +2699,8 @@ static int iova_place(struct device_domain *s, uint64_t size, uint64_t top,
+ 		low_top = IOMMU_INTERRUPT_RANGE_BASE;
+ 	if (top > low_top - 1)
+ 		top = low_top - 1;
+-	return low_take(s, size, top, out);
++	(void)low_take;
++	return 0;
+ }
+ 
+ /*

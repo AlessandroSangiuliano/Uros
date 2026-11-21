@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #417
+Takes out: the reach device_dma_alloc reads from the device's claim: every buffer is placed as for a device that reaches everything.  On entry 70 edu's buffer within its declared 28 bits is given an IOVA from 4 GiB, and libdriver must say the kernel placed it past the reach it was told.
+Run: --iommu intel --edu --entry 70 600 -smp 4
+Expect: edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the kernel placed a DMA buffer at device address 0x[0-9a-f]+, past the 0xfffffff it was told the device reaches
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 0cfb77ec..6f1ea7d8 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -2209,7 +2209,7 @@ ds_master_device_dma_alloc(
+ 	 * device asked for physical addresses -- the memory itself is taken
+ 	 * within the reach.
+ 	 */
+-	reach = claim_dma_reach(bdf);
++	reach = ~(vm_address_t)0;
+ 	max_pa = (bdf != DEVICE_DMA_NO_BDF && device_md_dma_translates(bdf))
+ 		 ? ~(vm_offset_t)0 : (vm_offset_t)reach;
+ 

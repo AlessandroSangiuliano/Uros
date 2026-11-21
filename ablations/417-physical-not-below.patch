@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #417
+Takes out: the physical limit of a contiguous allocation: vm_page_find_contiguous() takes the lowest run wherever it lies.  On entry 68, where nothing translates, edu's buffer within its declared 20 bits is given memory above them, and libdriver must say the kernel placed it past the reach it was told.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the kernel placed a DMA buffer at device address 0x[0-9a-f]+, past the 0xfffff it was told the device reaches
+
+diff --git a/uros/src/mach_kernel/vm/vm_resident.c b/uros/src/mach_kernel/vm/vm_resident.c
+index faed9004..1c602ddc 100644
+--- a/uros/src/mach_kernel/vm/vm_resident.c
++++ b/uros/src/mach_kernel/vm/vm_resident.c
+@@ -2649,10 +2649,6 @@ vm_page_find_contiguous(
+ 	prev_ptr = &vm_page_queue_free;
+ 	for (m = vm_page_queue_free; m != VM_PAGE_NULL; m = NEXT_PAGE(m)) {
+ 
+-		/* #417: this page's last byte past max_pa, and every later one */
+-		if (m->phys_addr > max_pa || max_pa - m->phys_addr < page_size - 1)
+-			break;
+-
+ 		if (m->phys_addr != prev_addr + page_size) {
+ 			/*
+ 			 *	Whoops!  Pages aren't contiguous.  Start over.
