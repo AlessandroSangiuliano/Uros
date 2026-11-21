@@ -55,7 +55,7 @@
 void
 driver_log(const struct driver *d, const char *fmt, ...)
 {
-	char	line[256];
+	char	line[512];	/* two addresses and a verdict fit (#978) */
 	int	n;
 	va_list	ap;
 
@@ -432,4 +432,39 @@ driver_dma_free(struct driver *d, struct driver_dma *dma)
 			   "given back, and stays allocated: 0x%x",
 			   (unsigned long)dma->device_addr, kr);
 	memset(dma, 0, sizeof *dma);
+}
+
+kern_return_t
+driver_dma_faults(const struct driver *d, struct driver_dma_faults *now)
+{
+	natural_t	confined = 0, count = 0, lost = 0, undrained = 0;
+	vm_address_t	address = 0;
+	kern_return_t	kr;
+
+	memset(now, 0, sizeof *now);
+	kr = device_dma_faults(d->master_device, d->bdf, &confined, &count,
+			       &address, &lost, &undrained);
+	if (kr != KERN_SUCCESS) {
+		driver_log(d, "the kernel would not say what it refused of the "
+			   "device's DMA: 0x%x", kr);
+		return kr;
+	}
+	now->confined = confined != 0;
+	now->count = count;
+	now->address = (uint64_t)address;
+	now->lost = lost;
+	return KERN_SUCCESS;
+}
+
+enum driver_dma_verdict
+driver_dma_verdict(const struct driver_dma_faults *before,
+		   const struct driver_dma_faults *after)
+{
+	if (!after->confined)
+		return DRIVER_DMA_NOT_CONFINED;
+	if (after->count != before->count)	/* modulo 2^32: != */
+		return DRIVER_DMA_REFUSED;
+	if (after->lost != before->lost)
+		return DRIVER_DMA_UNKNOWN;
+	return DRIVER_DMA_NOT_REFUSED;
 }

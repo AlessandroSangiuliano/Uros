@@ -139,4 +139,37 @@ kern_return_t	driver_dma_alloc(struct driver *d, vm_size_t size,
  */
 void		driver_dma_free(struct driver *d, struct driver_dma *dma);
 
+/*
+ * What the kernel knows of the device's refused DMA (#599): a reading, which
+ * means something only against an earlier one.  Where the machine confines
+ * the device, an address it was never granted is refused and counted; where
+ * nothing confines it, nothing is refused, and no reading can say a transfer
+ * was not.
+ */
+struct driver_dma_faults {
+	int		confined;	/* 0: nothing confines the device */
+	natural_t	count;		/* refusals since boot, modulo 2^32 */
+	uint64_t	address;	/* the last refused */
+	natural_t	lost;		/* times refusals may have gone uncounted */
+};
+
+kern_return_t	driver_dma_faults(const struct driver *d,
+				  struct driver_dma_faults *now);
+
+/*
+ * Between two readings, device_master.defs' verdict: REFUSED where `count'
+ * moved, UNKNOWN where only `lost' did, NOT_REFUSED where neither, and
+ * NOT_CONFINED where the later reading says nothing confines the device.
+ */
+enum driver_dma_verdict {
+	DRIVER_DMA_NOT_CONFINED,
+	DRIVER_DMA_NOT_REFUSED,
+	DRIVER_DMA_REFUSED,
+	DRIVER_DMA_UNKNOWN
+};
+
+enum driver_dma_verdict	driver_dma_verdict(
+				const struct driver_dma_faults *before,
+				const struct driver_dma_faults *after);
+
 #endif /* _LIBDRIVER_H_ */
