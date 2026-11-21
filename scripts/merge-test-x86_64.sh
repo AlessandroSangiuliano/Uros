@@ -167,8 +167,9 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             chora.conf: bootstrap's line that -f chose it, the first chora's
 #             three lines -- the claim, its registers mapped, an interrupt
 #             taken -- the second chora's refused claim, and the kernel's line
-#             refusing it, which names both tasks; chora_test's count is the
-#             note (#963)
+#             refusing it, which names both tasks -- and modload_test's count,
+#             which chora.conf runs first; chora_test's and modload_test's
+#             counts are the note (#963, #973)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -758,6 +759,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# names are the same because the name is the device's.  A boot with no
 	# card answers NOT ASKED in chora_test and fails here, since this entry
 	# exists to ask.
+	# #973: and modload_test's count.  The harness waits for a test that
+	# said it started; one chora.conf never started says nothing, and only
+	# a verdict that asks for its count sees it gone.
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
@@ -766,7 +770,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the claim on .* was refused' "$f" &&
 		grep -aqE 'REFUSED to task 0x[0-9a-f]+ \(chora_probe@[^)]*\) .*claimed by task 0x[0-9a-f]+ \(chora_probe@' "$f" &&
 		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
-		[ -n "$out" ] && NOTE=$out ;;
+		mod=$(grep -aoE 'modload_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
+		[ -n "$out" ] && [ -n "$mod" ] && NOTE="$out; $mod" ;;
 	esac
 }
 
