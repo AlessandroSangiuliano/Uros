@@ -31,6 +31,7 @@
 #include <mach/mach_port.h>
 #include <mach_init.h>
 #include <mach/cap_types.h>
+#include <mach/urmach_identity.h>	/* #747: cap_self */
 #include <mach/mach_traps.h>	/* the cap traps, declared once (#426) */
 #include <mach/mach_host.h>	/* urmach_task_rights_port (#938) */
 #include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
@@ -175,6 +176,40 @@ __attribute__((weak)) cap_derive(const struct uros_cap *parent,
     return KERN_SUCCESS;
 }
 
+/*
+ * #747: a child for another task, named by a port it receives on -- the
+ * child's owner is that task, so only it can present the child.  Weak, as the
+ * three above are: cap_server links this library and its routine of the same
+ * name is the one it means.
+ */
+kern_return_t
+__attribute__((weak)) cap_derive_for(const struct uros_cap *parent,
+               uint64_t reduced_ops,
+               uint32_t lifetime_ms,
+               mach_port_t delegate,
+               struct uros_cap *out)
+{
+    mach_port_t srv = cap_server_port();
+    if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
+    if (parent == NULL || out == NULL) return CAP_ERR_INVALID_TOKEN;
+
+    char in_buf[CAP_TOKEN_MAX];
+    char out_buf[CAP_TOKEN_MAX];
+    mach_msg_type_number_t out_len = CAP_TOKEN_MAX;
+
+    memcpy(in_buf, parent, sizeof(struct uros_cap));
+
+    kern_return_t kr = mig_cap_derive_for(srv, in_buf,
+                                          (mach_msg_type_number_t)sizeof(struct uros_cap),
+                                          reduced_ops, lifetime_ms, delegate,
+                                          out_buf, &out_len);
+    if (kr != KERN_SUCCESS) return kr;
+    if (out_len != sizeof(struct uros_cap)) return CAP_ERR_INVALID_TOKEN;
+
+    memcpy(out, out_buf, sizeof(struct uros_cap));
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 __attribute__((weak)) cap_revoke(uint64_t cap_id)
 {
@@ -198,8 +233,9 @@ __attribute__((weak)) cap_subscribe_revoke(mach_port_t notify_port)
 }
 
 kern_return_t
-__attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource_type,
-                                 uint64_t op, uint64_t resource_id)
+__attribute__((weak)) cap_verify(const struct uros_cap *token, uint64_t presenter,
+                                 uint32_t resource_type, uint64_t op,
+                                 uint64_t resource_id)
 {
     mach_port_t srv = cap_server_port();
     if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
@@ -210,12 +246,11 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource
 
     return mig_cap_verify(srv, buf,
                           (mach_msg_type_number_t)sizeof(struct uros_cap),
-                          resource_type, op, resource_id);
+                          presenter, resource_type, op, resource_id);
 }
 
 /*
- * ⚠️ The declarations of urmach_cap_verify and urmach_cap_use used to be
- * HERE, with a comment saying no kernel-facing header shipped them.  That was
+ * ⚠️ The declarations of the capability traps used to be HERE, with a comment saying no kernel-facing header shipped them.  That was
  * true and it was the problem: a token is a pointer, the other half of these
  * calls is an assembly stub that carries no types, and nothing anywhere
  * compared this file's idea of them with the kernel's.  They are declared in
@@ -225,22 +260,27 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint32_t resource
 
 kern_return_t
 cap_verify_local(const struct uros_cap *token,
+                 uint64_t presenter,
                  uint32_t resource_type,
                  uint32_t op,
                  uint64_t resource_id)
 {
     if (token == NULL) return CAP_ERR_INVALID_TOKEN;
-    return urmach_cap_verify(token, resource_type, op, resource_id);
+    return urmach_cap_verify(token, presenter, resource_type, op, resource_id);
 }
 
-kern_return_t
-cap_use_local(const struct uros_cap *token,
-              uint32_t resource_type,
-              uint32_t op,
-              uint64_t resource_id)
+uint64_t
+cap_self(void)
 {
-    if (token == NULL) return CAP_ERR_INVALID_TOKEN;
-    return urmach_cap_use(token, resource_type, op, resource_id);
+    static uint64_t        self;
+    security_token_t       tok;
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+
+    if (self == 0 &&
+        task_info(mach_task_self(), TASK_SECURITY_TOKEN, (task_info_t)&tok,
+                  &n) == KERN_SUCCESS)
+        self = urmach_identity_of(tok);
+    return self;
 }
 
 /*

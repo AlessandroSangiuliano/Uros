@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the deadline cap_expiry_note() gives the waiter -- it is rung and finds none to wait for, so no deadline is swept, and what a capability bought outlives it; irq_claim_test's [21] and cap_test's [54] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[21\] WRONG
+Expect: cap_test: \[54\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index b3b60661..bad14cbd 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -900,7 +900,6 @@ cap_expiry_note(uint64_t due)
+         return;
+     pthread_mutex_lock(&cap_expiry_lock);
+     if (cap_expiry_due == 0 || due < cap_expiry_due) {
+-        cap_expiry_due = due;
+         earlier = 1;
+     }
+     pthread_mutex_unlock(&cap_expiry_lock);

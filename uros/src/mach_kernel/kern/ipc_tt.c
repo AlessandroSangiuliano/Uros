@@ -118,6 +118,7 @@
 #include <mach/mach_server.h>
 #include <mach/mach_host_server.h>
 #include <kern/ipc_tt.h>
+#include <mach/urmach_identity.h>	/* #747: URMACH_IDENTITY_TASK_BIT */
 #include <kern/thread_act.h>
 #include <kern/misc_protos.h>
 #include <kern/zalloc.h>		/* #927: the reduced ports' records */
@@ -1192,6 +1193,54 @@ urmach_task_port_rights(
 	if (kr == KERN_SUCCESS)
 		ipc_port_release_send(port);
 	return kr;
+}
+
+/*
+ *	Routine:	urmach_port_receiver [kernel call]
+ *	Purpose:
+ *		#747: the identity of the task that receives on `port' -- the
+ *		owner a capability is derived to when its owner names the
+ *		delegate by a port the delegate receives on.  The answer is the
+ *		receiving space's copy of its task's identity, so nothing is
+ *		followed past the port's lock.
+ *
+ *		🔴 ip_receiver only while the port is in a space: active AND
+ *		with a receiver name.  A port in transit is active too, and its
+ *		ip_receiver is the union's other half, ip_destination -- a port
+ *		read as a space would answer whatever that port held where the
+ *		identity lives.
+ *	Conditions:
+ *		Nothing locked.  On success the send right the request
+ *		carried is consumed here; on an error it is left to the
+ *		request's destruction, as every kernel call leaves it.
+ *	Returns:
+ *		KERN_SUCCESS		*identityp is the receiving task's.
+ *		KERN_INVALID_ARGUMENT	no host, or no task receives on it:
+ *					the kernel, in transit, dead.
+ */
+kern_return_t
+urmach_port_receiver(
+	host_t		host,
+	ipc_port_t	port,
+	uint64_t	*identityp)
+{
+	uint64_t	id = 0;
+
+	*identityp = 0;
+	if (host == HOST_NULL || !IP_VALID(port))
+		return KERN_INVALID_ARGUMENT;
+
+	ip_lock(port);
+	if (ip_active(port) && port->ip_receiver_name != MACH_PORT_NULL &&
+	    port->ip_receiver != IS_NULL)
+		id = port->ip_receiver->is_identity;
+	ip_unlock(port);
+
+	if ((id & URMACH_IDENTITY_TASK_BIT) == 0)
+		return KERN_INVALID_ARGUMENT;
+	*identityp = id;
+	ipc_port_release_send(port);
+	return KERN_SUCCESS;
 }
 
 /*

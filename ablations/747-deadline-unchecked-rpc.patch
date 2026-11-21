@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #747
+Takes out: the deadline in cap_server's cap_verify, as before the lifetime was kept; cap_test's [50] must say WRONG when cap_server verifies a capability past its deadline
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[50\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 5e14484a..e94a9fb0 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1197,7 +1197,6 @@ cap_verify(mach_port_t             server,
+ 
+     if (!cap_verify_hmac(&token))           return CAP_ERR_INVALID_TOKEN;
+     if (token.revoked)                      return CAP_ERR_REVOKED;
+-    if (cap_expired(&token) != KERN_SUCCESS) return CAP_ERR_EXPIRED; /* #747 */
+     /*
+      * #747: and presented by the task it was issued to.  The asker is the
+      * server verifying, so it says who presented the token, as it does to the

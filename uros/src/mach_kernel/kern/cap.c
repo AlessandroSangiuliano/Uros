@@ -48,6 +48,9 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/cpu_data.h>	/* #537: disable_preemption */
+#include <kern/clock.h>		/* #747: the clock a deadline is read on */
+#include <mach/clock_types.h>	/* #747: URMACH_CAP_CLOCK */
+#include <mach/urmach_identity.h>	/* #747: who presents */
 #include <kern/cpu_number.h>
 #include <cpus.h>		/* NCPUS */
 
@@ -73,13 +76,11 @@
 #define CAP_STATE_BUCKETS       256
 
 #define CAP_FLAG_REVOKED        0x1
-#define CAP_FLAG_CONSUMED       0x2
 
 struct cap_state_entry {
     struct cap_state_entry *next;
     uint64_t  cap_id;
     uint32_t  flags;
-    uint32_t  uses_left;     /* meaningful only when max_uses != 0 */
 };
 
 static struct cap_state_entry *cap_state_table[CAP_STATE_BUCKETS];
@@ -168,7 +169,6 @@ cap_state_get_or_create(uint64_t cap_id)
 
     e->cap_id    = cap_id;
     e->flags     = 0;
-    e->uses_left = 0;
     unsigned b = cap_bucket(cap_id);
     e->next = cap_state_table[b];
     cap_state_table[b] = e;
@@ -231,24 +231,27 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
 }
 
 /*
- * Core validation shared by urmach_cap_verify and urmach_cap_use:
+ * Core validation, urmach_cap_verify's and the kernel's own:
  *   - HMAC must match
- *   - resource_id must match
+ *   - not past its deadline (cap_deadline_check, #747)
+ *   - presented by the task it was issued to (#747)
+ *   - resource type and id must match
  *   - op must be a subset of allowed_ops
- *   - not expired (for v1 `expires` is unused and must be 0)
  *   - not revoked
  */
-static kern_return_t cap_fields_check(const struct uros_cap *, uint32_t,
-                                      uint32_t, uint64_t);
+static kern_return_t cap_fields_check(const struct uros_cap *, uint64_t,
+                                      uint32_t, uint32_t, uint64_t);
 
 /* The fields, and the look-up among the revoked.  Must be called with cap_lock held. */
 static kern_return_t
 cap_rest_locked(const struct uros_cap *t,
+                uint64_t presenter,
                 uint32_t resource_type,
                 uint32_t op,
                 uint64_t resource_id)
 {
-    kern_return_t kr = cap_fields_check(t, resource_type, op, resource_id);
+    kern_return_t kr = cap_fields_check(t, presenter, resource_type, op,
+                                        resource_id);
 
     if (kr != KERN_SUCCESS)
         return kr;
@@ -258,6 +261,40 @@ cap_rest_locked(const struct uros_cap *t,
         return CAP_ERR_REVOKED;
 
     return KERN_SUCCESS;
+}
+
+/*
+ * #747: is the token past its deadline?  `expires' is nanoseconds since boot on
+ * URMACH_CAP_CLOCK, written by cap_server from that clock when it issued the
+ * token, and 0 for a token asked for with no lifetime.  It was written 0 in
+ * every token and read nowhere, so a lifetime asked for was dropped and the
+ * token never ended.
+ *
+ * 🔑 Checked on every call and never cached: it is the one field whose answer
+ * changes while the token's bytes do not, so #537's per-processor cache, which
+ * skips what cannot change, must not skip it.  And outside cap_lock, so that no
+ * clock is read under a lock every verification on every processor takes.
+ *
+ * ⚠️ A deadline that cannot be read against is not kept, and a token that has
+ * one is refused: a clock that did not configure would otherwise make every
+ * lifetime endless, which is the defect this check ends.
+ */
+static kern_return_t
+cap_deadline_check(const struct uros_cap *t)
+{
+    clock_t clock;
+    tvalspec_t now;
+    uint64_t ns;
+
+    if (t->expires == 0)
+        return KERN_SUCCESS;
+    if (URMACH_CAP_CLOCK >= clock_count)
+        return CAP_ERR_EXPIRED;
+    clock = &clock_list[URMACH_CAP_CLOCK];
+    if (clock->cl_ops == 0 || (*clock->cl_ops->c_gettime)(&now) != KERN_SUCCESS)
+        return CAP_ERR_EXPIRED;
+    ns = (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
+    return ns < t->expires ? KERN_SUCCESS : CAP_ERR_EXPIRED;
 }
 
 /*
@@ -300,6 +337,7 @@ cap_mac_check_unlocked(const struct uros_cap *t)
 /* The whole check, cap_lock not held on entry or on return. */
 static kern_return_t
 cap_check_unlocked(const struct uros_cap *t,
+                   uint64_t presenter,
                    uint32_t resource_type,
                    uint32_t op,
                    uint64_t resource_id)
@@ -309,8 +347,11 @@ cap_check_unlocked(const struct uros_cap *t,
     kr = cap_mac_check_unlocked(t);
     if (kr != KERN_SUCCESS)
         return kr;
+    kr = cap_deadline_check(t);		/* #747 */
+    if (kr != KERN_SUCCESS)
+        return kr;
     simple_lock(&cap_lock);
-    kr = cap_rest_locked(t, resource_type, op, resource_id);
+    kr = cap_rest_locked(t, presenter, resource_type, op, resource_id);
     simple_unlock(&cap_lock);
     return kr;
 }
@@ -321,10 +362,22 @@ cap_check_unlocked(const struct uros_cap *t,
  */
 static kern_return_t
 cap_fields_check(const struct uros_cap *t,
+                 uint64_t presenter,
                  uint32_t resource_type,
                  uint32_t op,
                  uint64_t resource_id)
 {
+    /*
+     * 🔴 #747: AND WHO PRESENTS IT.  A token was good for whoever held its
+     * bytes -- one passed on in a message, one read out of another task's
+     * memory, one a forked child found in its copy of its parent's.  It is
+     * good for the task it was issued to now: the caller's own identity for
+     * the kernel's checks, the requester's from its message's trailer for a
+     * server's.  A presenter of 0 is nobody, and an owner of 0 was never
+     * issued, so neither matches.
+     */
+    if (presenter == 0 || t->owner != presenter)
+        return CAP_ERR_NOT_OWNER;
     /*
      * #599: and the KIND of resource the token names, for every caller --
      * the kernel's own and the two traps.  None compared it, so a token for
@@ -383,6 +436,8 @@ cap_check_in_kernel(const struct uros_cap *token,
     const uint8_t *a, *b;
     uint8_t diff = 0;
     kern_return_t kr;
+    /* #747: inside the kernel the presenter is the task calling it. */
+    uint64_t presenter = urmach_identity_of(current_task()->sec_token);
 
     /*
      * #537: the token this processor verified last, in this epoch?  Every
@@ -399,11 +454,15 @@ cap_check_in_kernel(const struct uros_cap *token,
     if (v->valid && v->epoch == epoch && diff == 0) {
         v->hits++;
         enable_preemption();
-        return cap_fields_check(token, resource_type, op, resource_id);
+        kr = cap_deadline_check(token);		/* #747: never cached */
+        if (kr != KERN_SUCCESS)
+            return kr;
+        return cap_fields_check(token, presenter, resource_type, op,
+                                resource_id);
     }
     enable_preemption();
 
-    kr = cap_check_unlocked(token, resource_type, op, resource_id);
+    kr = cap_check_unlocked(token, presenter, resource_type, op, resource_id);
 
     /*
      * Kept with the epoch read BEFORE the check: a revocation during it moves
@@ -469,7 +528,8 @@ cap_probe_body(void)
 
     t0 = urmach_tsc();
     for (unsigned k = 0; k < CAP_PROBE_ROUNDS; k++)
-        if (cap_check_unlocked(&cap_probe_token, RESOURCE_DMA_BUFFER,
+        if (cap_check_unlocked(&cap_probe_token, cap_probe_token.owner,
+                               RESOURCE_DMA_BUFFER,
                                CAP_OP_DMA_DEVICE_READ, 0x537) != KERN_SUCCESS)
             refused++;
     cap_probe_cycles[cpu_number()] = urmach_tsc() - t0;
@@ -527,6 +587,7 @@ cap_probe_drive(int me)
     cap_probe_token.resource_type = RESOURCE_DMA_BUFFER;
     cap_probe_token.resource_id = 0x537;
     cap_probe_token.allowed_ops = CAP_OP_DMA_DEVICE_READ;
+    cap_probe_token.owner = URMACH_IDENTITY_TASK_BIT | 0x537;	/* #747 */
     simple_lock(&cap_lock);
     hmac_sha256_with(&cap_hmac_ready, &cap_probe_token,
                      sizeof(cap_probe_token) - CAP_HMAC_SIZE,
@@ -536,7 +597,8 @@ cap_probe_drive(int me)
     disable_preemption();
     t0 = urmach_tsc();
     for (unsigned k = 0; k < CAP_PROBE_ROUNDS; k++)
-        if (cap_check_unlocked(&cap_probe_token, RESOURCE_DMA_BUFFER,
+        if (cap_check_unlocked(&cap_probe_token, cap_probe_token.owner,
+                               RESOURCE_DMA_BUFFER,
                                CAP_OP_DMA_DEVICE_READ, 0x537) != KERN_SUCCESS)
             refused++;
     alone = (urmach_tsc() - t0) / CAP_PROBE_ROUNDS;
@@ -628,6 +690,8 @@ cap_cache_selftest(void)
     t.resource_type = RESOURCE_DMA_BUFFER;
     t.resource_id = 0x537;
     t.allowed_ops = CAP_OP_DMA_DEVICE_READ;
+    /* #747: the task this runs in presents it -- cap_server's registration. */
+    t.owner = urmach_identity_of(current_task()->sec_token);
     simple_lock(&cap_lock);
     hmac_sha256_with(&cap_hmac_ready, &t, sizeof(t) - CAP_HMAC_SIZE, t.hmac);
     simple_unlock(&cap_lock);
@@ -674,6 +738,7 @@ cap_type_selftest(void)
     t.resource_type = RESOURCE_PCI_DEVICE;
     t.resource_id = 0x010601;
     t.allowed_ops = 0x3;
+    t.owner = urmach_identity_of(current_task()->sec_token);	/* #747 */
     simple_lock(&cap_lock);
     hmac_sha256(cap_hmac_key, CAP_HMAC_SIZE, &t,
                 sizeof(t) - CAP_HMAC_SIZE, t.hmac);
@@ -693,8 +758,15 @@ cap_type_selftest(void)
                "checked (#599)\n", as_pci, as_dma);
 }
 
+/*
+ * #747: `presenter' is the identity of the task presenting the token, which a
+ * server reads from the trailer of the request that carried it
+ * (urmach_msg_sender()).  The trap cannot know it: the caller is the server
+ * verifying, not the client presenting.
+ */
 kern_return_t
 urmach_cap_verify(const struct uros_cap *user_token,
+                  uint64_t presenter,
                   uint32_t resource_type,
                   uint32_t op,
                   uint64_t resource_id)
@@ -704,56 +776,7 @@ urmach_cap_verify(const struct uros_cap *user_token,
     if (kr != KERN_SUCCESS)
         return kr;
 
-    return cap_check_unlocked(&t, resource_type, op, resource_id);
-}
-
-kern_return_t
-urmach_cap_use(const struct uros_cap *user_token,
-               uint32_t resource_type,
-               uint32_t op,
-               uint64_t resource_id)
-{
-    struct uros_cap t;
-    kern_return_t kr = cap_copyin_token(user_token, &t);
-    if (kr != KERN_SUCCESS)
-        return kr;
-
-    /* #537: the MAC outside the lock; the revocation look-up and the use
-     * counted in one hold, as before. */
-    kr = cap_mac_check_unlocked(&t);
-    if (kr != KERN_SUCCESS)
-        return kr;
-    simple_lock(&cap_lock);
-    kr = cap_rest_locked(&t, resource_type, op, resource_id);
-    if (kr != KERN_SUCCESS) {
-        simple_unlock(&cap_lock);
-        return kr;
-    }
-
-    if (t.max_uses != 0) {
-        struct cap_state_entry *e = cap_state_get_or_create(t.cap_id);
-        if (e == NULL) {
-            simple_unlock(&cap_lock);
-            return CAP_ERR_NO_MEMORY;
-        }
-        /* re-check revoked state after the potentially-dropped lock */
-        if (e->flags & CAP_FLAG_REVOKED) {
-            simple_unlock(&cap_lock);
-            return CAP_ERR_REVOKED;
-        }
-        if (!(e->flags & CAP_FLAG_CONSUMED)) {
-            e->uses_left = t.max_uses;
-            e->flags |= CAP_FLAG_CONSUMED;
-        }
-        if (e->uses_left == 0) {
-            simple_unlock(&cap_lock);
-            return CAP_ERR_EXHAUSTED;
-        }
-        e->uses_left--;
-    }
-
-    simple_unlock(&cap_lock);
-    return KERN_SUCCESS;
+    return cap_check_unlocked(&t, presenter, resource_type, op, resource_id);
 }
 
 /*

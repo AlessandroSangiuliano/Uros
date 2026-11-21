@@ -61,6 +61,7 @@
 #include <servers/netname_defs.h>
 #include "netname_server.h"
 #include "notify_server.h"
+#include "snames.h"			/* #747: snames_request_sender */
 
 extern void netname_init(void);
 
@@ -567,8 +568,9 @@ mount_capability(netname_name_in_t prefix, const char *token,
     if (count != sizeof t)
 	return CAP_ERR_INVALID_TOKEN;
     memcpy(&t, token, sizeof t);
-    return urmach_cap_verify(&t, RESOURCE_MOUNT_POINT, CAP_OP_MOUNT_REGISTER,
-			     cap_name_hash(prefix));
+    /* #747: presented by the task that sent the check-in. */
+    return urmach_cap_verify(&t, snames_request_sender, RESOURCE_MOUNT_POINT,
+			     CAP_OP_MOUNT_REGISTER, cap_name_hash(prefix));
 }
 
 /*

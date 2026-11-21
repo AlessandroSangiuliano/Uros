@@ -332,8 +332,14 @@ mach_trap_t	mach_trap_table[] = {
 	 */
 	MACH_TRAP(not_implemented, 0),		/* 35: was mach_rpc_trap */
 	MACH_TRAP(not_implemented, 0),		/* 36: was mach_rpc_return_trap */
-	MACH_TRAP(urmach_cap_verify, 5),	/* 37: + type, #599 */
-	MACH_TRAP(urmach_cap_use, 5),		/* 38: + type, #599 */
+	/*
+	 * 37: token, presenter (#747), type (#599), op, id -- seven of i386's
+	 * words, two arguments being 64-bit.  One count serves both targets
+	 * (scripts/gen-trap-list.py refuses a trap with two), so x86-64 carries
+	 * two it does not use, as it carried one before the presenter.
+	 */
+	MACH_TRAP(urmach_cap_verify, 7),
+	MACH_TRAP(not_implemented, 0),		/* 38: was urmach_cap_use, #747 */
 	MACH_TRAP(urmach_cap_revoke, 2),	/* 39 */
 
 	MACH_TRAP(urmach_cap_register, 1),	/* 40 */

@@ -47,6 +47,19 @@
  */
 #define	URMACH_MONOTONIC_CLOCK	2
 
+/*
+ * #747: the clock a capability's deadline is written on, and read against --
+ * time since boot, never set and never going back.  That is the clock above on
+ * x86-64, and REALTIME_CLOCK on i386, where it is already time since boot.
+ * cap_server reads this id to write a deadline and the kernel to check one, so
+ * the two agree on what a deadline means.
+ */
+#if defined(__x86_64__)
+#define	URMACH_CAP_CLOCK	URMACH_MONOTONIC_CLOCK
+#else
+#define	URMACH_CAP_CLOCK	REALTIME_CLOCK
+#endif
+
 /* Any number of distributed clocks may be defined. */
 #define DIST_CLOCK_0	3		/* optional */
 #define DIST_CLOCK_1	4		/* optional */

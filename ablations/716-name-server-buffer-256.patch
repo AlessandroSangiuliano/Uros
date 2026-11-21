@@ -1,14 +1,14 @@
 Kind: ablation
 Issue: #716
-Takes out: the name server's buffer sized by MIG (38486a64, 7fb4dc98) -- it receives into 256 bytes again, and the kernel destroys a longer request unread: a mount's check-in with its capability, and a long path's look-up
+Takes out: the name server's buffer sized by MIG (38486a64, 7fb4dc98) -- it receives into 256 bytes again, and the kernel destroys a longer request unread: a long path's look-up, mount_test's [12]; a mount's check-in with its capability no longer, since #747 made the token 120 bytes from 192
 Run: --entry 14 1200 -smp 1
-Expect: ext2: netname_check_in_mount\(/\) failed \(kr=-308\)
+Expect: mount_test: \[12\] WRONG — a look-up of a 1023-byte path: -308
 
 diff --git a/uros/src/servers/name_server/netname.c b/uros/src/servers/name_server/netname.c
-index a1789682..ff6a94e6 100644
+index e42a4688..0c7635b7 100644
 --- a/uros/src/servers/name_server/netname.c
 +++ b/uros/src/servers/name_server/netname.c
-@@ -282,12 +282,7 @@ main(int argc, char **argv)
+@@ -284,12 +284,8 @@ main(int argc, char **argv)
       * larger of the largest request and the largest reply, and
       * mach_msg_server() adds the room for the trailer.
       */
@@ -17,8 +17,9 @@ index a1789682..ff6a94e6 100644
 -			 do_notify_subsystem_MAX_MESSAGE ?
 -			 do_netname_subsystem_MAX_MESSAGE :
 -			 do_notify_subsystem_MAX_MESSAGE,
--			 pset, MACH_MSG_OPTION_NONE);
-+    kr = mach_msg_server(snames_demux, 256, pset, MACH_MSG_OPTION_NONE);
+-			 pset, URMACH_RCV_SENDER);	/* #747: who asks */
++    kr = mach_msg_server(snames_demux, 256, pset,
++			 URMACH_RCV_SENDER);	/* #747: who asks */
      panic("%s: mach_msg_server: %s\n",
  	    program, mach_error_string(kr));
      return(1);

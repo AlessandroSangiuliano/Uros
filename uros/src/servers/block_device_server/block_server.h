@@ -389,6 +389,7 @@ struct blk_handle {
 	 * the notice never brought is still seen at the handle's next use.
 	 */
 	struct uros_cap		cap;
+	uint64_t		presenter;	/* #747: who opened it with cap */
 	uint32_t		cap_op;
 	uint64_t		cap_resource_id;
 	uint32_t		cap_epoch;
@@ -520,5 +521,12 @@ void blk_register_partitions(void);
  */
 
 /* mach_port_set_protected_payload now comes from <mach/mach_port.h> (MIG-generated) */
+
+/*
+ * #747: who sent the request being served, by the identity the kernel stamped
+ * in its trailer -- the presenter of a token it carries.  Set by blk_demux()
+ * around each request; one message loop, so one request at a time.
+ */
+extern uint64_t blk_request_sender;
 
 #endif /* _BLOCK_SERVER_H_ */

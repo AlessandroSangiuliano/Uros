@@ -43,6 +43,8 @@
 #include <mach/sync.h>		/* #552: semaphore_create/signal/wait */
 #include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
 #include <mach/clock.h>		/* #708: host_get_clock_service, clock_get_time */
+#include <mach/clock_types.h>	/* #747: URMACH_CAP_CLOCK, NSEC_PER_SEC */
+#include <mach/urmach_identity.h>	/* #747: urmach_identity_of */
 #include <mach/urmach_futex.h>	/* #708: the futex's three timed waits */
 #include <pthread.h>		/* #708: [31]'s sender */
 #include <mach/mach_traps.h>
@@ -183,7 +185,7 @@ wait_for_cap_server(void)
         return MACH_PORT_NULL;
     }
     memset(&bogus, 0x5A, sizeof(bogus));
-    kr = cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+    kr = cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
     /*
      * ⚠️ An answer FROM cap_server, which is one of its own codes.  A request
      * destroyed unanswered comes back MIG_SERVER_DIED, and a send that could
@@ -912,13 +914,13 @@ a_revocation_reaches_every_child(void)
         const struct uros_cap *t = i < CT48_CHILDREN ? &child[i]
                                  : &grand[i - CT48_CHILDREN];
 
-        if (urmach_cap_verify(t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+        if (urmach_cap_verify(t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
                               CT48_ID) != CAP_ERR_REVOKED) {
             trap_left++;
             if (first_left == CT48_CHILDREN)
                 first_left = i;
         }
-        if (cap_verify(t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+        if (cap_verify(t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
                        CT48_ID) != CAP_ERR_REVOKED)
             rpc_left++;
     }
@@ -969,9 +971,9 @@ cap_verify_asks_the_type(void)
                "about: %d (#745)\n", (int)kr);
         return 0;
     }
-    same  = cap_verify(&t, RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT49_ID);
-    other = cap_verify(&t, RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ, CT49_ID);
-    trap  = urmach_cap_verify(&t, RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ,
+    same  = cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT49_ID);
+    other = cap_verify(&t, cap_self(), RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ, CT49_ID);
+    trap  = urmach_cap_verify(&t, cap_self(), RESOURCE_DMA_BUFFER, CAP_OP_BLK_READ,
                               CT49_ID);
 
     if (same == KERN_SUCCESS && other == CAP_ERR_RESOURCE_MISMATCH &&
@@ -987,6 +989,539 @@ cap_verify_asks_the_type(void)
            "cap_server and %d from the trap, where those two must be "
            "CAP_ERR_RESOURCE_MISMATCH(%d) (#745)\n", (int)same, (int)other,
            (int)trap, (int)CAP_ERR_RESOURCE_MISMATCH);
+    return 0;
+}
+
+/*
+ * Test [50]: a lifetime asked for is kept (#747).
+ *
+ * cap_acquire and cap_derive took a lifetime and threw it away, writing every
+ * deadline 0, so a capability asked for with a lifetime never ended.  One is
+ * asked for with CT50_MS here.  It must verify at once, by the trap and by
+ * cap_server -- the control -- with its deadline written CT50_MS after the
+ * request on the capability clock; and once that deadline has passed, both
+ * must refuse it with CAP_ERR_EXPIRED.  A child derived from it asking for a
+ * hundred times as long must be given its parent's deadline and end with it:
+ * a child never outlives its parent.
+ *
+ * 🔑 The clock is read here too, before the request and after the control, so
+ * that a control already refused as expired says which it was: a machine that
+ * took longer than the lifetime to ask, which could not pose the question
+ * (NOT ASKED), or a deadline written short, which is the defect (WRONG).
+ */
+#define CT50_ID		0x7470ULL
+#define CT50_MS		300u
+#define CT50_NS		((uint64_t)CT50_MS * 1000000ULL)
+
+/* Now on the clock a capability's deadline is written on; 0 if unreadable. */
+static uint64_t
+ct50_now(mach_port_t clk)
+{
+    tvalspec_t ts;
+
+    if (clk == MACH_PORT_NULL || clock_get_time(clk, &ts) != KERN_SUCCESS)
+        return 0;
+    return (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
+}
+
+static int
+a_lifetime_is_kept(void)
+{
+    struct uros_cap t, child;
+    mach_port_t     host = mach_host_self(), clk = MACH_PORT_NULL;
+    kern_return_t   kr, ckr, trap0, rpc0, trap1, rpc1, ctrap1, crpc1;
+    uint64_t        before, after, now;
+    unsigned int    waits = 0;
+    int             ok;
+
+    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [50] WRONG — the capability clock could not be "
+               "asked for: %d (#747)\n", (int)kr);
+        return 0;
+    }
+
+    memset(&t, 0, sizeof(t));
+    memset(&child, 0, sizeof(child));
+    before = ct50_now(clk);
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT50_ID, CAP_OP_BLK_READ, CT50_MS,
+                     &t);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [50] WRONG — no block-device capability with a "
+               "lifetime of %u ms: %d (#747)\n", CT50_MS, (int)kr);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    ckr   = cap_derive(&t, CAP_OP_BLK_READ, 100 * CT50_MS, &child);
+    trap0 = urmach_cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                              CT50_ID);
+    rpc0  = cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
+    after = ct50_now(clk);
+
+    if (before == 0 || after == 0) {
+        printf("cap_test: [50] WRONG — the capability clock could not be "
+               "read (#747)\n");
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    if ((trap0 == CAP_ERR_EXPIRED || rpc0 == CAP_ERR_EXPIRED) &&
+        after - before >= CT50_NS) {
+        printf("cap_test: [50] NOT ASKED — the capability expired before it "
+               "was verified once: %llu ms passed between asking for it and "
+               "verifying it, past its lifetime of %u ms (#747)\n",
+               (unsigned long long)((after - before) / 1000000ULL), CT50_MS);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 1;
+    }
+
+    /* Past the deadline, by the clock it is written on, and a tick more. */
+    do {
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        now = ct50_now(clk);
+    } while (now != 0 && now < t.expires + 20000000ULL && ++waits < 200);
+    (void)mach_port_deallocate(mach_task_self(), clk);
+
+    trap1  = urmach_cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                               CT50_ID);
+    rpc1   = cap_verify(&t, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID);
+    ctrap1 = ckr == KERN_SUCCESS
+           ? urmach_cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                               CT50_ID) : ckr;
+    crpc1  = ckr == KERN_SUCCESS
+           ? cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ, CT50_ID)
+           : ckr;
+
+    ok = trap0 == KERN_SUCCESS && rpc0 == KERN_SUCCESS
+      && t.expires >= before + CT50_NS && t.expires <= after + CT50_NS
+      && ckr == KERN_SUCCESS && child.expires == t.expires
+      && trap1 == CAP_ERR_EXPIRED && rpc1 == CAP_ERR_EXPIRED
+      && ctrap1 == CAP_ERR_EXPIRED && crpc1 == CAP_ERR_EXPIRED;
+    if (ok) {
+        printf("cap_test: [50] a capability asked for with %u ms verified at "
+               "once, its deadline written %llu ms after the request, and once "
+               "past it was refused as expired by the trap and by cap_server; "
+               "a child asking for %u ms was given its parent's deadline and "
+               "refused with it (#747)\n", CT50_MS,
+               (unsigned long long)((t.expires - before) / 1000000ULL),
+               100 * CT50_MS);
+        return 1;
+    }
+    printf("cap_test: [50] WRONG — a capability asked for with %u ms: at "
+           "once the trap %d and cap_server %d, its deadline %lld ms after "
+           "the request, and past it %d and %d; a child asking for %u ms (%d) "
+           "with its deadline %lld ms after its parent's, and past it %d and "
+           "%d, where every one past must be CAP_ERR_EXPIRED(%d) (#747)\n",
+           CT50_MS, (int)trap0, (int)rpc0,
+           (long long)((int64_t)(t.expires - before) / 1000000LL),
+           (int)trap1, (int)rpc1, 100 * CT50_MS, (int)ckr,
+           (long long)((int64_t)(child.expires - t.expires) / 1000000LL),
+           (int)ctrap1, (int)crpc1, (int)CAP_ERR_EXPIRED);
+    return 0;
+}
+
+/*
+ * Test [51]: every task has an identity of its own, and what it sends carries
+ * it (#747).
+ *
+ * A task's security token was its parent's, or a default every user task
+ * shared, and the trailer of a message any task sent said KERNEL_SECURITY_TOKEN.
+ * So this task's identity must carry the task bit, a task made now must have
+ * another, and a message this task sends itself must arrive with this task's
+ * identity as its sender: sent and received in two calls, which go through
+ * ipc_kmsg_get(), and in one call, which goes through the hot path's copy in
+ * mach_msg.c -- the two places the kernel writes it.
+ *
+ * The hot path takes a call whose options are MACH_SEND_MSG|MACH_RCV_MSG and
+ * the trailer's bits, and nothing else: a receive timeout sends the call the
+ * slow way, through ipc_kmsg_get(), so the call in one has none.  It cannot
+ * wait: its message is on the port before its receive looks.  And the hot
+ * path copies into a buffer its processor keeps, and goes the slow way when
+ * there is none; a message received leaves its buffer behind, so the call in
+ * one is made CT51_ONE_CALLS times, and every one must carry the sender.
+ */
+#define CT51_ONE_CALLS 8
+
+static security_token_t
+ct51_sent_and_received(mach_port_t port, int one_call, kern_return_t *kr_out)
+{
+    struct {
+        mach_msg_header_t           h;
+        mach_msg_format_0_trailer_t t;
+    } m;
+    mach_msg_option_t trailer =
+        MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+        | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SENDER);
+    kern_return_t kr;
+
+    memset(&m, 0, sizeof(m));
+    m.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+    m.h.msgh_size = sizeof(m.h);
+    m.h.msgh_remote_port = port;
+    m.h.msgh_local_port = MACH_PORT_NULL;
+    m.h.msgh_id = 0x747;
+    if (one_call)
+        kr = mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG | trailer,
+                      sizeof(m.h), sizeof(m), port, MACH_MSG_TIMEOUT_NONE,
+                      MACH_PORT_NULL);
+    else {
+        kr = mach_msg(&m.h, MACH_SEND_MSG, sizeof(m.h), 0, MACH_PORT_NULL,
+                      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        if (kr == KERN_SUCCESS)
+            kr = mach_msg(&m.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT | trailer, 0,
+                          sizeof(m), port, 1000, MACH_PORT_NULL);
+    }
+    *kr_out = kr;
+    return m.t.msgh_sender;
+}
+
+static int
+every_task_has_its_own_identity(void)
+{
+    security_token_t       me, other = { { 0, 0 } }, two, one;
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+    mach_port_t            child = MACH_PORT_NULL;
+    mach_port_t            port = MACH_PORT_NULL;
+    kern_return_t          kr, kr_other = KERN_FAILURE, kr_two, kr_one;
+    uint64_t               id_me, id_other, id_two, id_one;
+    int                    calls;
+
+    kr = task_info(mach_task_self(), TASK_SECURITY_TOKEN, (task_info_t)&me,
+                   &n);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [51] WRONG — this task's security token could not "
+               "be read: %d (#747)\n", (int)kr);
+        return 0;
+    }
+    id_me = urmach_identity_of(me);
+    if (task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                    &child) == KERN_SUCCESS) {
+        n = TASK_SECURITY_TOKEN_COUNT;
+        kr_other = task_info(child, TASK_SECURITY_TOKEN, (task_info_t)&other,
+                             &n);
+        (void)task_terminate(child);
+        (void)mach_port_deallocate(mach_task_self(), child);
+    }
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                           &port) != KERN_SUCCESS) {
+        printf("cap_test: [51] WRONG — no port to send to (#747)\n");
+        return 0;
+    }
+    two = ct51_sent_and_received(port, 0, &kr_two);
+    id_one = 0;
+    kr_one = KERN_FAILURE;
+    for (calls = 1; calls <= CT51_ONE_CALLS; calls++) {
+        one = ct51_sent_and_received(port, 1, &kr_one);
+        id_one = urmach_identity_of(one);
+        if (kr_one != KERN_SUCCESS || id_one != id_me)
+            break;
+    }
+    if (calls > CT51_ONE_CALLS)
+        calls = CT51_ONE_CALLS;
+    (void)mach_port_mod_refs(mach_task_self(), port,
+                             MACH_PORT_RIGHT_RECEIVE, -1);
+
+    id_other = urmach_identity_of(other);
+    id_two   = urmach_identity_of(two);
+    if ((id_me & URMACH_IDENTITY_TASK_BIT) != 0 &&
+        kr_other == KERN_SUCCESS && (id_other & URMACH_IDENTITY_TASK_BIT) != 0 &&
+        id_other != id_me && kr_two == KERN_SUCCESS && id_two == id_me &&
+        kr_one == KERN_SUCCESS && id_one == id_me) {
+        printf("cap_test: [51] this task is 0x%llx and a task made now "
+               "0x%llx, and a message it sent itself came with 0x%llx as its "
+               "sender, in two calls and in one, %d times (#747)\n",
+               (unsigned long long)id_me, (unsigned long long)id_other,
+               (unsigned long long)id_me, calls);
+        return 1;
+    }
+    printf("cap_test: [51] WRONG — this task is 0x%llx, a task made now "
+           "0x%llx (%d), and a message it sent itself came with 0x%llx in two "
+           "calls (%d) and 0x%llx in one (%d), the last of %d such calls: each "
+           "task's own, the task bit set, and the sender's (#747)\n",
+           (unsigned long long)id_me, (unsigned long long)id_other,
+           (int)kr_other, (unsigned long long)id_two, (int)kr_two,
+           (unsigned long long)id_one, (int)kr_one, calls);
+    return 0;
+}
+
+/*
+ * Test [52]: a capability is issued to the task that asked for it (#747).
+ *
+ * Its owner was a port name written MACH_PORT_NULL in every token, so a token
+ * was good for whoever held its bytes.  cap_server writes the identity the
+ * kernel stamped on the request now: a token this task asks for must name this
+ * task, and so must a child it derives from it.
+ */
+#define CT52_ID		0x7472ULL
+
+static int
+a_capability_names_its_owner(void)
+{
+    security_token_t       me;
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+    struct uros_cap        t, child;
+    kern_return_t          kr, ckr = KERN_FAILURE;
+    uint64_t               id_me;
+
+    memset(&t, 0, sizeof(t));
+    memset(&child, 0, sizeof(child));
+    kr = task_info(mach_task_self(), TASK_SECURITY_TOKEN, (task_info_t)&me,
+                   &n);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [52] WRONG — this task's identity could not be "
+               "read: %d (#747)\n", (int)kr);
+        return 0;
+    }
+    id_me = urmach_identity_of(me);
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT52_ID, CAP_OP_BLK_READ, 0, &t);
+    if (kr == KERN_SUCCESS)
+        ckr = cap_derive(&t, CAP_OP_BLK_READ, 0, &child);
+    if (kr == KERN_SUCCESS && t.owner == id_me &&
+        ckr == KERN_SUCCESS && child.owner == id_me) {
+        printf("cap_test: [52] a capability this task asked for names it, "
+               "0x%llx, as its owner, and so does the child it derived from "
+               "it (#747)\n", (unsigned long long)id_me);
+        return 1;
+    }
+    printf("cap_test: [52] WRONG — this task is 0x%llx; a capability it asked "
+           "for (%d) names 0x%llx, and the child it derived (%d) 0x%llx "
+           "(#747)\n", (unsigned long long)id_me, (int)kr,
+           (unsigned long long)t.owner, (int)ckr,
+           (unsigned long long)child.owner);
+    return 0;
+}
+
+/*
+ * Test [53]: a capability is derived to another task, named by a port that
+ * task receives on (#747).
+ *
+ * Delegating was copying a token's bytes.  cap_derive_for names the delegate
+ * by a port it receives on, and the kernel answers whose port it is.  For a
+ * task made now, with a port of its own: the child must name that task as its
+ * owner and carry only the operation it was cut to, and must be refused once
+ * its parent is revoked.  This task's own task port, which the kernel receives
+ * on, names no task, and must be refused with CAP_ERR_NO_DELEGATE.
+ */
+#define CT53_ID		0x7473ULL
+
+static int
+a_capability_is_derived_to_a_named_task(void)
+{
+    mach_port_t            other = MACH_PORT_NULL, name = MACH_PORT_NULL;
+    mach_port_t            port = MACH_PORT_NULL;
+    mach_msg_type_name_t   type = 0;
+    security_token_t       tok = { { 0, 0 } };
+    mach_msg_type_number_t n = TASK_SECURITY_TOKEN_COUNT;
+    struct uros_cap        parent, child, kid;
+    kern_return_t          kr, dkr = KERN_FAILURE, kkr = KERN_FAILURE;
+    kern_return_t          rkr = KERN_FAILURE, vkr = KERN_FAILURE;
+    kern_return_t          okr = KERN_FAILURE, ntrap = KERN_FAILURE;
+    kern_return_t          nrpc = KERN_FAILURE, lkr = KERN_FAILURE;
+    uint64_t               id_other;
+
+    memset(&parent, 0, sizeof(parent));
+    memset(&child, 0, sizeof(child));
+    memset(&kid, 0, sizeof(kid));
+    kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0, FALSE,
+                     &other);
+    if (kr == KERN_SUCCESS)
+        kr = task_info(other, TASK_SECURITY_TOKEN, (task_info_t)&tok, &n);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_allocate(other, MACH_PORT_RIGHT_RECEIVE, &name);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_extract_right(other, name, MACH_MSG_TYPE_MAKE_SEND,
+                                     &port, &type);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [53] WRONG — no task with a port of its own to "
+               "derive for: %d (#747)\n", (int)kr);
+        if (MACH_PORT_VALID(other)) {
+            (void)task_terminate(other);
+            (void)mach_port_deallocate(mach_task_self(), other);
+        }
+        return 0;
+    }
+    id_other = urmach_identity_of(tok);
+
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT53_ID,
+                     CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &parent);
+    if (kr == KERN_SUCCESS) {
+        dkr = cap_derive_for(&parent, CAP_OP_BLK_READ, 0, port, &child);
+        kkr = cap_derive_for(&parent, CAP_OP_BLK_READ, 0, mach_task_self(),
+                             &kid);
+        /*
+         * The child is the other task's: it verifies as presented by it --
+         * the control -- and is refused as presented by this task, which
+         * holds its bytes, by the trap and by cap_server.
+         */
+        okr   = urmach_cap_verify(&child, id_other, RESOURCE_BLK_DEVICE,
+                                  CAP_OP_BLK_READ, CT53_ID);
+        ntrap = urmach_cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE,
+                                  CAP_OP_BLK_READ, CT53_ID);
+        nrpc  = cap_verify(&child, cap_self(), RESOURCE_BLK_DEVICE,
+                           CAP_OP_BLK_READ, CT53_ID);
+        /* And WRITE, which it was cut away from, even as presented by it. */
+        lkr   = urmach_cap_verify(&child, id_other, RESOURCE_BLK_DEVICE,
+                                  CAP_OP_BLK_WRITE, CT53_ID);
+        rkr = cap_revoke(parent.cap_id);
+        vkr = urmach_cap_verify(&child, id_other, RESOURCE_BLK_DEVICE,
+                                CAP_OP_BLK_READ, CT53_ID);
+    }
+    (void)mach_port_deallocate(mach_task_self(), port);
+    (void)task_terminate(other);
+    (void)mach_port_deallocate(mach_task_self(), other);
+
+    if (kr == KERN_SUCCESS && dkr == KERN_SUCCESS && child.owner == id_other &&
+        child.allowed_ops == CAP_OP_BLK_READ && kkr == CAP_ERR_NO_DELEGATE &&
+        okr == KERN_SUCCESS && ntrap == CAP_ERR_NOT_OWNER &&
+        nrpc == CAP_ERR_NOT_OWNER && lkr == CAP_ERR_OP_NOT_ALLOWED &&
+        rkr == KERN_SUCCESS && vkr == CAP_ERR_REVOKED) {
+        printf("cap_test: [53] a child derived for a task named by its port "
+               "names it, 0x%llx, carries READ alone and is refused WRITE, "
+               "verifies as presented by it and is refused with "
+               "CAP_ERR_NOT_OWNER as presented by this task, by the trap and "
+               "by cap_server, and was refused as revoked with its parent; "
+               "this task's own task port, which the "
+               "kernel receives on, was refused with CAP_ERR_NO_DELEGATE "
+               "(#747)\n", (unsigned long long)id_other);
+        return 1;
+    }
+    printf("cap_test: [53] WRONG — the parent %d; the child derived for task "
+           "0x%llx (%d) names 0x%llx with operations 0x%llx and WRITE "
+           "answered %d; presented by "
+           "its owner %d, by this task %d to the trap and %d to cap_server "
+           "(CAP_ERR_NOT_OWNER is %d); after its parent's revocation (%d) "
+           "answered %d; derived for this task's own task port, %d, where it "
+           "must be CAP_ERR_NO_DELEGATE(%d) (#747)\n",
+           (int)kr, (unsigned long long)id_other, (int)dkr,
+           (unsigned long long)child.owner,
+           (unsigned long long)child.allowed_ops, (int)lkr, (int)okr,
+           (int)ntrap,
+           (int)nrpc, (int)CAP_ERR_NOT_OWNER, (int)rkr, (int)vkr,
+           (int)kkr, (int)CAP_ERR_NO_DELEGATE);
+    return 0;
+}
+
+/*
+ * Test [54]: a handle opened on a capability with a deadline stops at it
+ * (#747).
+ *
+ * The block server asks an open handle's capability again when the revocation
+ * epoch moves, and a deadline moved nothing: a handle opened on a capability
+ * asked for with a lifetime went on reading past it.  cap_server revokes a
+ * capability when its deadline comes now, which moves the epoch and sends the
+ * block server its notice.  So a read before the deadline must succeed -- the
+ * control -- and the handle must be refused with KERN_NO_ACCESS once the
+ * deadline has passed: it is read every CT54_POLL_MS from then, for
+ * CT54_WAIT_MS at most, and how long the refusal took is said.  As in [50]
+ * the clock is read here, so that a control that could not be asked in time
+ * says NOT ASKED and not WRONG.
+ */
+#define CT54_MS		300u
+#define CT54_POLL_MS	20u
+#define CT54_WAIT_MS	5000u
+
+static int
+a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
+{
+    struct uros_cap        tok;
+    security_token_t       null_sec = { { 0, 0 } };
+    char                   blob[CAP_TOKEN_MAX];
+    mach_port_t            host = mach_host_self(), clk = MACH_PORT_NULL;
+    mach_port_t            h = MACH_PORT_NULL;
+    io_buf_ptr_t           buf = NULL;
+    mach_msg_type_number_t got = 0;
+    kern_return_t          kr, okr, r1 = KERN_FAILURE, r2 = KERN_FAILURE;
+    uint64_t               before, after, now;
+    unsigned int           waits = 0;
+    int                    asked = 0;
+
+    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [54] WRONG — the capability clock could not be "
+               "asked for: %d (#747)\n", (int)kr);
+        return 0;
+    }
+    memset(&tok, 0, sizeof(tok));
+    before = ct50_now(clk);
+    kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
+                     CAP_OP_BLK_READ, CT54_MS, &tok);
+    okr = KERN_FAILURE;
+    if (kr == KERN_SUCCESS) {
+        memcpy(blob, &tok, sizeof(tok));
+        okr = device_open_cap(part_port, MACH_PORT_NULL, D_READ, null_sec,
+                              (char *)name, blob,
+                              (mach_msg_type_number_t)sizeof(tok), &h);
+    }
+    if (okr == KERN_SUCCESS) {
+        r1 = device_read(h, 0, 0, 512, &buf, &got);
+        if (r1 == KERN_SUCCESS && buf != NULL && got > 0)
+            (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf, got);
+    }
+    after = ct50_now(clk);
+
+    if (before == 0 || after == 0 ||
+        (kr == KERN_SUCCESS && okr == KERN_SUCCESS && r1 != KERN_SUCCESS &&
+         after - before >= CT54_MS * 1000000ULL)) {
+        if (before == 0 || after == 0)
+            printf("cap_test: [54] WRONG — the capability clock could not be "
+                   "read (#747)\n");
+        else
+            printf("cap_test: [54] NOT ASKED — %llu ms passed between asking "
+                   "for the capability and the first read, past its lifetime "
+                   "of %u ms (#747)\n",
+                   (unsigned long long)((after - before) / 1000000ULL),
+                   CT54_MS);
+        if (okr == KERN_SUCCESS) {
+            (void)device_close(h);
+            (void)mach_port_deallocate(mach_task_self(), h);
+        }
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return before != 0 && after != 0;
+    }
+    now = after;
+    if (okr == KERN_SUCCESS) {
+        /* From the deadline on, by the clock it is written on, until refused. */
+        do {
+            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+                                CT54_POLL_MS);
+            now = ct50_now(clk);
+            if (now != 0 && now >= tok.expires) {
+                buf = NULL;
+                got = 0;
+                r2 = device_read(h, 0, 0, 512, &buf, &got);
+                if (r2 == KERN_SUCCESS && buf != NULL && got > 0)
+                    (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf,
+                                        got);
+                asked = 1;
+            }
+        } while (now != 0 && (!asked || r2 == KERN_SUCCESS) &&
+                 now < tok.expires + (uint64_t)CT54_WAIT_MS * 1000000ULL &&
+                 ++waits < 2 * (CT54_MS + CT54_WAIT_MS) / CT54_POLL_MS);
+        (void)device_close(h);
+        (void)mach_port_deallocate(mach_task_self(), h);
+    }
+    (void)mach_port_deallocate(mach_task_self(), clk);
+
+    if (now == 0) {
+        printf("cap_test: [54] WRONG — the capability clock could not be read "
+               "while waiting for the deadline (#747)\n");
+        return 0;
+    }
+    if (kr == KERN_SUCCESS && okr == KERN_SUCCESS && r1 == KERN_SUCCESS &&
+        asked && r2 == KERN_NO_ACCESS) {
+        printf("cap_test: [54] %s: a handle opened on a capability asked for "
+               "with %u ms read before its deadline and was refused with "
+               "KERN_NO_ACCESS within %llu ms after it (#747)\n", name,
+               CT54_MS, (unsigned long long)((now - tok.expires) / 1000000ULL));
+        return 1;
+    }
+    printf("cap_test: [54] WRONG — %s: a capability asked for with %u ms "
+           "(%d), the open %d, a read before its deadline %d and the reads "
+           "after it, for %llu ms, %d the last, where one must be refused with "
+           "KERN_NO_ACCESS(%d) (#747)\n", name, CT54_MS, (int)kr, (int)okr,
+           (int)r1, asked ? (unsigned long long)((now - tok.expires) / 1000000ULL)
+           : 0ULL, asked ? (int)r2 : -1, (int)KERN_NO_ACCESS);
     return 0;
 }
 
@@ -2049,6 +2584,31 @@ subsystem_name_is_not_a_pointer(void)
  * (#591).
  */
 /*
+ * #747: a buffer's capability goes to the block server as a child derived for
+ * it, named by the handle it reads through.  A capability is good for the task
+ * it was issued to, and the block server is the one that presents it to the
+ * kernel, for every page.  The parent stays this task's: revoking it revokes
+ * the child, and the mappings the child bought with it.
+ */
+static kern_return_t
+ct_lend(mach_port_t handle, const struct uros_cap *mine, struct uros_cap *lent)
+{
+    memset(lent, 0, sizeof(*lent));
+    return cap_derive_for(mine, mine->allowed_ops, 0, handle, lent);
+}
+
+static kern_return_t
+ct_register_dma(mach_port_t handle, const struct uros_cap *mine)
+{
+    struct uros_cap lent;
+    kern_return_t   kr = ct_lend(handle, mine, &lent);
+
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&lent, sizeof(lent));
+    return kr;
+}
+
+/*
  * ── [15] The master device port is a way around the manifest (#511) ──────
  *
  * 🔴 THIS TASK'S OWN POLICY FILE SAYS IT MAY NOT DRIVE PCI HARDWARE, and
@@ -2292,7 +2852,7 @@ a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
             goto out;
         }
 
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
         if (kr != KERN_SUCCESS) {
             printf("cap_test: [12] WRONG — the block server would not take "
                    "the capability (kr=%d)\n", (int)kr);
@@ -2567,7 +3127,7 @@ b2_hand(mach_port_t handle, uint64_t region, uint32_t type)
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
     if (kr != KERN_SUCCESS)
         return kr;
-    return device_register_dma(handle, (char *)&t, sizeof(t));
+    return ct_register_dma(handle, &t);
 }
 
 /* Fill the page with 0xA5, read 4 KiB into it: kr, and what +1080 holds. */
@@ -2714,7 +3274,7 @@ revoking_a_capability_takes_the_mapping_down(mach_port_t device_port,
        : cap_request(RESOURCE_DMA_BUFFER, r.region,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(h, (char *)&t, sizeof(t));
+        kr = ct_register_dma(h, &t);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [20] WRONG — %s is registered, and no page was "
                "handed over (kr=%d) (#591)\n", name, (int)kr);
@@ -2765,7 +3325,7 @@ a_handle_refuses_rather_than_evicts(mach_port_t device_port,
 {
     mach_port_t     h, h2;
     struct b2_page  r;
-    struct uros_cap t[5];
+    struct uros_cap t[5], lent[5];	/* #747: the same child, handed again */
     kern_return_t   kr[5], kr_again, kr_read, kr_new;
     unsigned        magic;
     int             intact, i, ok;
@@ -2784,15 +3344,17 @@ a_handle_refuses_rather_than_evicts(mach_port_t device_port,
                             CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
                             0, &t[i]);
         if (kr[i] == KERN_SUCCESS)
-            kr[i] = device_register_dma(h, (char *)&t[i], sizeof(t[i]));
+            kr[i] = ct_lend(h, &t[i], &lent[i]);
+        if (kr[i] == KERN_SUCCESS)
+            kr[i] = device_register_dma(h, (char *)&lent[i], sizeof(lent[i]));
     }
-    kr_again = device_register_dma(h, (char *)&t[0], sizeof(t[0]));
+    kr_again = device_register_dma(h, (char *)&lent[0], sizeof(lent[0]));
     kr_read = b2_read(h, &r, &magic, &intact);
     b2_close(h);
 
     h2 = b2_open(part_port, name);
     kr_new = h2 == MACH_PORT_NULL ? KERN_FAILURE
-           : device_register_dma(h2, (char *)&t[4], sizeof(t[4]));
+           : ct_register_dma(h2, &t[4]);
     b2_close(h2);
     b2_free(device_port, &r);
 
@@ -2888,7 +3450,7 @@ a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
        : cap_request(RESOURCE_DMA_BUFFER, r.region,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(h, (char *)&t, sizeof(t));
+        kr = ct_register_dma(h, &t);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [26] WRONG — %s is registered, and no page was "
                "handed over (kr=%d) (#591)\n", name, (int)kr);
@@ -3003,7 +3565,7 @@ ct27_buffer(mach_port_t device_port, mach_port_t handle, vm_address_t *kva,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
                      &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     return kr;
 }
 
@@ -3306,7 +3868,7 @@ ct36_buffer(mach_port_t device_port, mach_port_t handle, vm_address_t *kva,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
                      &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     return kr;
 }
 
@@ -3516,7 +4078,7 @@ many_pages_in_one_request(mach_port_t device_port, mach_port_t part_port,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
                      0, &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [25] WRONG — %s: the buffer was not handed over "
                "(kr=%d) (#591)\n", name, (int)kr);
@@ -3620,7 +4182,7 @@ ct14_list_shape(mach_port_t device_port, mach_port_t handle, const char *name)
                          0, &buf_cap);
     }
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [14] WRONG — %s: the buffer of two contiguous pages "
                "was not mapped or not handed over (kr=%d) (#712)\n",
@@ -3772,7 +4334,7 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
                      0, &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [14] WRONG — %s: the buffer was not handed "
                "over (kr=%d)\n", name, (int)kr);
@@ -3875,7 +4437,7 @@ ct14_write_and_put_back(mach_port_t device_port, mach_port_t handle,
                      CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
                      &buf_cap);
     if (kr == KERN_SUCCESS)
-        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        kr = ct_register_dma(handle, &buf_cap);
     if (kr != KERN_SUCCESS)
         printf("cap_test: [14] WRONG — %s: the buffer was not handed over "
                "(kr=%d)\n", tname, (int)kr);
@@ -5477,6 +6039,15 @@ main(int argc, char **argv)
         pass = 0;
     if (!cap_verify_asks_the_type())
         pass = 0;
+    /* #747: a lifetime asked for is kept, and every task is its own. */
+    if (!a_lifetime_is_kept())
+        pass = 0;
+    if (!every_task_has_its_own_identity())
+        pass = 0;
+    if (!a_capability_names_its_owner())
+        pass = 0;
+    if (!a_capability_is_derived_to_a_named_task())
+        pass = 0;
 
     /*
      * #395 probe.  Fill xmm0..7 with a known pattern, cross the kernel once,
@@ -5517,7 +6088,7 @@ main(int argc, char **argv)
                 ctl_bad++;
 
             xmm_fill(pat);
-            kr = urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
+            kr = urmach_cap_verify(&bogus, cap_self(), RESOURCE_BLK_DEVICE, 1, 0);
             xmm_read(got);
             if (kr != CAP_ERR_INTERNAL)
                 hmac_ran = 1;
@@ -5813,6 +6384,13 @@ main(int argc, char **argv)
             }
         }
     }
+
+    /* #747: and a handle ends with its capability's deadline. */
+    if (found_name == NULL)
+        printf("cap_test: [54] NOT ASKED — no partition in the name server "
+               "(#747)\n");
+    else if (!a_handle_ends_with_its_deadline(part_port, found_name))
+        pass = 0;
 
     if (!bad_descriptor_unwind())
         pass = 0;

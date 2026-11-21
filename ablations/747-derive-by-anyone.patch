@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the owner in cap_derive -- any task holding a capability's bytes derives from it, as before; fork_cap_test's [5] must say WRONG when a forked child derives from its parent's capability
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: fork_cap_test: \[5\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 5e14484a..925d574e 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -556,7 +556,7 @@ cap_derive_to(cap_token_t            parent_buf,
+ 
+     if (!cap_verify_hmac(&parent)) return CAP_ERR_INVALID_TOKEN;
+     /* #747: only the task it was issued to derives from it. */
+-    if (parent.owner != g_request_sender || g_request_sender == 0) {
++    if (0) {
+         printf("cap: DENY derive from cap %llu: asked by 0x%llx, issued to "
+                "0x%llx (#747)\n", (unsigned long long)parent.cap_id,
+                (unsigned long long)g_request_sender,

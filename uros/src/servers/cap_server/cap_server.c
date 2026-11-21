@@ -46,8 +46,13 @@
 #include <mach/mach_traps.h>	/* urmach_cap_revoke (#432) */
 #include <mach/mach_host.h>	/* urmach_task_port_rights (#938) */
 #include <mach/task_rights.h>	/* URMACH_TASK_RIGHTS_IDENTITY (#938) */
+#include <mach/clock.h>		/* clock_get_time (#747) */
+#include <mach/thread_switch.h>	/* the waiter's pause (#747) */
+#include <mach/clock_types.h>	/* URMACH_CAP_CLOCK (#747) */
+#include <mach/urmach_identity.h>	/* the requester's identity (#747) */
 #include <mach_init.h>
 #include <sa_mach.h>
+#include <pthread.h>		/* a deadline's waiter (#747) */
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -91,6 +96,14 @@ static mach_port_t provision_port;
 static mach_port_t cap_port_set;
 
 /*
+ * #747: the port in the set that a deadline's waiter rings when one comes.
+ * No other task holds a right to it; see "A deadline is a revocation at that
+ * time" below.
+ */
+static mach_port_t cap_sweep_port = MACH_PORT_NULL;
+static void cap_expiry_sweep(void);
+
+/*
  * Single-threaded snapshot of the receive port the current request
  * arrived on.  Set by cap_demux before dispatching the MIG server,
  * cleared after.  Used by the policy gate in cap_acquire to decide
@@ -98,6 +111,14 @@ static mach_port_t cap_port_set;
  * cap_port: no — legacy / permissive).
  */
 static mach_port_t g_request_local_port;
+
+/*
+ * #747: and the task that sent it, by the identity the kernel stamped in the
+ * request's trailer -- the one a capability is issued to, and the only one
+ * that may derive from it.  Set and cleared with g_request_local_port; 0 for a
+ * request received without its sender, which owns nothing.
+ */
+static uint64_t g_request_sender;
 
 /*
  * Dispatcher: snapshot the receive port for the policy gate, then
@@ -125,9 +146,21 @@ cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
         return TRUE;
     }
 
+    /*
+     * #747: the waiter's ring -- a deadline has come.  Only this task holds a
+     * right to the port, so only the waiter rings it.  No reply.
+     */
+    if (cap_sweep_port != MACH_PORT_NULL &&
+        in->msgh_local_port == cap_sweep_port) {
+        cap_expiry_sweep();
+        return TRUE;
+    }
+
     g_request_local_port = in->msgh_local_port;
+    g_request_sender = urmach_msg_sender(in);		/* #747 */
     handled = cap_server_server(in, out);
     g_request_local_port = MACH_PORT_NULL;
+    g_request_sender = 0;
     return handled;
 }
 
@@ -233,10 +266,89 @@ policy_allows_v1(mach_port_t sender,
  *   routine cap_derive(cap_server, parent; reduced_ops,
  *                      lifetime_ms; out child);
  *   routine cap_revoke(cap_server, cap_id);
- *   routine cap_verify(cap_server, token, op, resource_id);
+ *   routine cap_verify(cap_server, token, presenter, resource_type, op,
+ *                      resource_id);
  *
  * MIG synthesizes the out/in array lengths as mach_msg_type_number_t.
  * ============================================================ */
+
+/*
+ * ── A token's deadline (#747) ─────────────────────────────────────────────
+ *
+ * cap_acquire and cap_derive took a lifetime and threw it away, `(void)
+ * lifetime_ms', writing every deadline 0: a caller that asked for 100 ms was
+ * told success and given a token that never ended.  The deadline is written on
+ * URMACH_CAP_CLOCK, nanoseconds since boot, the clock the kernel checks it
+ * against in the trap; its service port is asked for once and kept.
+ */
+static mach_port_t cap_clock_port = MACH_PORT_NULL;
+
+/* Now on the capability clock; 0 when it cannot be read. */
+static int
+cap_now_ns(uint64_t *now)
+{
+    tvalspec_t ts;
+
+    if (cap_clock_port == MACH_PORT_NULL) {
+        mach_port_t   host = mach_host_self();
+        kern_return_t kr = host_get_clock_service(host, URMACH_CAP_CLOCK,
+                                                  &cap_clock_port);
+
+        (void)mach_port_deallocate(mach_task_self(), host);
+        if (kr != KERN_SUCCESS) {
+            cap_clock_port = MACH_PORT_NULL;
+            return 0;
+        }
+    }
+    if (clock_get_time(cap_clock_port, &ts) != KERN_SUCCESS)
+        return 0;
+    *now = (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
+    return 1;
+}
+
+/*
+ * #747: whether a deadline's waiter is running, and a deadline written, for it
+ * -- "A deadline is a revocation at that time", below.
+ */
+static int  cap_expiry_running;
+static void cap_expiry_note(uint64_t due);
+
+/*
+ * The deadline of a token asked for `lifetime_ms' from now, and never past
+ * `ceiling', its parent's deadline (0: none).  0 is no deadline.  A lifetime
+ * asked for when the clock cannot be read is refused, not dropped: -1.  So is
+ * one asked for with no waiter running: a deadline revokes what it bought, and
+ * nothing would.  Every deadline begins as a lifetime asked for, so without
+ * the waiter there is none.
+ */
+static int
+cap_deadline(unsigned int lifetime_ms, uint64_t ceiling, uint64_t *out)
+{
+    uint64_t now, d;
+
+    if (lifetime_ms == 0) {
+        *out = ceiling;
+        return 0;
+    }
+    if (!cap_expiry_running || !cap_now_ns(&now))
+        return -1;
+    d = now + (uint64_t)lifetime_ms * 1000000ULL;
+    *out = (ceiling != 0 && ceiling < d) ? ceiling : d;
+    return 0;
+}
+
+/* Is the token past its deadline?  One that cannot be read against is. */
+static kern_return_t
+cap_expired(const struct uros_cap *t)
+{
+    uint64_t now;
+
+    if (t->expires == 0)
+        return KERN_SUCCESS;
+    if (!cap_now_ns(&now) || now >= t->expires)
+        return CAP_ERR_EXPIRED;
+    return KERN_SUCCESS;
+}
 
 kern_return_t
 cap_acquire(mach_port_t             server,
@@ -390,6 +502,29 @@ cap_acquire(mach_port_t             server,
 
     }	/* resource_type < RESOURCE_TYPE_MAX */
 
+    uint64_t expires;
+
+    /*
+     * #747: issued to the task that asked, by the identity the kernel stamped
+     * on its request.  The owner was a port name written MACH_PORT_NULL, "audit
+     * trailer not consulted in v1", so a token was good for whoever held its
+     * bytes.
+     */
+    if (g_request_sender == 0) {
+        printf("cap: DENY port=0x%x: the request came without its sender's "
+               "identity, so there is nobody to issue it to (#747)\n",
+               (unsigned)g_request_local_port);
+        return CAP_ERR_INTERNAL;
+    }
+    if (cap_deadline(lifetime_ms, 0, &expires) != 0) {
+        printf("cap: DENY port=0x%x: a lifetime of %u ms was asked for, and "
+               "%s (#747)\n", (unsigned)g_request_local_port, lifetime_ms,
+               cap_expiry_running
+               ? "the clock it would be kept on cannot be read"
+               : "no waiter runs to revoke it at its deadline");
+        return CAP_ERR_INTERNAL;
+    }
+
     struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
     if (!e) return CAP_ERR_NO_MEMORY;
     memset(e, 0, sizeof(*e));
@@ -399,15 +534,11 @@ cap_acquire(mach_port_t             server,
     t->resource_type = resource_type;
     t->resource_id   = resource_id;
     t->allowed_ops   = ops;
-    t->owner         = MACH_PORT_NULL;  /* audit trailer not consulted in v1 */
-    t->owner_name[0] = '\0';
+    t->owner         = g_request_sender;	/* #747 */
     t->parent_cap_id = 0;
     t->depth         = 0;
     t->delegable     = 1;
-    t->expires       = 0;   /* v1: ignore lifetime_ms until clock wiring lands */
-    (void)lifetime_ms;
-    t->max_uses      = 0;
-    t->current_uses  = 0;
+    t->expires       = expires;		/* #747 */
     t->revoked       = 0;
     t->is_generic    = 0;
     t->first_child_cap_id = 0;
@@ -423,6 +554,7 @@ cap_acquire(mach_port_t             server,
      */
     e->sender = g_request_local_port;
     cap_table_insert(e);
+    cap_expiry_note(t->expires);		/* #747 */
 
     memcpy(token, t, sizeof(*t));
     *token_len = (mach_msg_type_number_t)sizeof(*t);
@@ -431,6 +563,88 @@ cap_acquire(mach_port_t             server,
            (unsigned long long)t->cap_id, resource_type,
            (unsigned long long)resource_id,
            (unsigned long long)ops);
+    return KERN_SUCCESS;
+}
+
+/*
+ * A child of `parent_buf' with `reduced_ops', issued to `owner' (#747): the
+ * requester itself for cap_derive, the task a port names for cap_derive_for.
+ */
+static kern_return_t
+cap_derive_to(cap_token_t            parent_buf,
+              mach_msg_type_number_t  parent_len,
+              uint64_t                reduced_ops,
+              unsigned int            lifetime_ms,
+              uint64_t                owner,
+              cap_token_t            child_buf,
+              mach_msg_type_number_t *child_len)
+{
+    if (parent_len != sizeof(struct uros_cap))
+        return CAP_ERR_INVALID_TOKEN;
+    if (*child_len < sizeof(struct uros_cap))
+        return CAP_ERR_NO_MEMORY;
+
+    struct uros_cap parent;
+    memcpy(&parent, parent_buf, sizeof(parent));
+
+    if (!cap_verify_hmac(&parent)) return CAP_ERR_INVALID_TOKEN;
+    /* #747: only the task it was issued to derives from it. */
+    if (parent.owner != g_request_sender || g_request_sender == 0) {
+        printf("cap: DENY derive from cap %llu: asked by 0x%llx, issued to "
+               "0x%llx (#747)\n", (unsigned long long)parent.cap_id,
+               (unsigned long long)g_request_sender,
+               (unsigned long long)parent.owner);
+        return CAP_ERR_NOT_OWNER;
+    }
+    if (parent.revoked)            return CAP_ERR_REVOKED;
+    if (cap_expired(&parent) != KERN_SUCCESS) return CAP_ERR_EXPIRED; /* #747 */
+    if (!parent.delegable)         return CAP_ERR_NOT_DELEGABLE;
+    if (parent.depth + 1 > CAP_MAX_DEPTH) return CAP_ERR_DEPTH_EXCEEDED;
+    if ((reduced_ops & ~parent.allowed_ops) != 0) return CAP_ERR_OP_NOT_ALLOWED;
+
+    struct cap_entry *parent_entry = cap_table_find_by_id(parent.cap_id);
+    if (!parent_entry || parent_entry->token.revoked) return CAP_ERR_REVOKED;
+
+    /* #747: its own lifetime, and never past its parent's. */
+    uint64_t expires;
+
+    if (cap_deadline(lifetime_ms, parent.expires, &expires) != 0)
+        return CAP_ERR_INTERNAL;
+
+    struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
+    if (!e) return CAP_ERR_NO_MEMORY;
+    memset(e, 0, sizeof(*e));
+
+    struct uros_cap *t = &e->token;
+    *t = parent;                           /* copy identity + rights */
+    t->cap_id        = cap_table_alloc_id();
+    t->allowed_ops   = reduced_ops;
+    t->parent_cap_id = parent.cap_id;
+    t->depth         = parent.depth + 1;
+    t->expires       = expires;		/* #747 */
+    t->owner         = owner;		/* #747 */
+    t->first_child_cap_id  = 0;
+    t->next_sibling_cap_id = parent_entry->token.first_child_cap_id;
+
+    cap_sign(t);
+    e->sender = g_request_local_port;	/* #599: see cap_acquire */
+    cap_table_insert(e);
+    cap_expiry_note(t->expires);		/* #747 */
+
+    /* Link as new first child of parent (re-sign parent since
+     * first_child_cap_id changed). */
+    parent_entry->token.first_child_cap_id = t->cap_id;
+    cap_sign(&parent_entry->token);
+
+    memcpy(child_buf, t, sizeof(*t));
+    *child_len = (mach_msg_type_number_t)sizeof(*t);
+
+    printf("cap: derived id=%llu from parent=%llu ops=0x%llx depth=%u "
+           "for 0x%llx\n",
+           (unsigned long long)t->cap_id,
+           (unsigned long long)parent.cap_id,
+           (unsigned long long)reduced_ops,
+           t->depth, (unsigned long long)owner);
     return KERN_SUCCESS;
 }
 
@@ -444,56 +658,44 @@ cap_derive(mach_port_t             server,
            mach_msg_type_number_t *child_len)
 {
     (void)server;
-    (void)lifetime_ms;
+    return cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms,
+                         g_request_sender, child_buf, child_len);
+}
 
-    if (parent_len != sizeof(struct uros_cap))
-        return CAP_ERR_INVALID_TOKEN;
-    if (*child_len < sizeof(struct uros_cap))
-        return CAP_ERR_NO_MEMORY;
+/*
+ * #747: a child for another task, named by a port it receives on.  The kernel
+ * answers whose port it is; a port no task receives on -- the kernel's, one in
+ * transit, a dead one -- names nobody to issue the child to.  The request's
+ * right to the port is kept by nobody: given back here when the child is made,
+ * and with the request by mach_msg_server() when it is refused.
+ */
+kern_return_t
+cap_derive_for(mach_port_t             server,
+               cap_token_t            parent_buf,
+               mach_msg_type_number_t  parent_len,
+               uint64_t                reduced_ops,
+               unsigned int            lifetime_ms,
+               mach_port_t             delegate,
+               cap_token_t            child_buf,
+               mach_msg_type_number_t *child_len)
+{
+    mach_port_t       host = mach_host_self();
+    urmach_identity_t id = 0;
+    kern_return_t     kr;
 
-    struct uros_cap parent;
-    memcpy(&parent, parent_buf, sizeof(parent));
-
-    if (!cap_verify_hmac(&parent)) return CAP_ERR_INVALID_TOKEN;
-    if (parent.revoked)            return CAP_ERR_REVOKED;
-    if (!parent.delegable)         return CAP_ERR_NOT_DELEGABLE;
-    if (parent.depth + 1 > CAP_MAX_DEPTH) return CAP_ERR_DEPTH_EXCEEDED;
-    if ((reduced_ops & ~parent.allowed_ops) != 0) return CAP_ERR_OP_NOT_ALLOWED;
-
-    struct cap_entry *parent_entry = cap_table_find_by_id(parent.cap_id);
-    if (!parent_entry || parent_entry->token.revoked) return CAP_ERR_REVOKED;
-
-    struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
-    if (!e) return CAP_ERR_NO_MEMORY;
-    memset(e, 0, sizeof(*e));
-
-    struct uros_cap *t = &e->token;
-    *t = parent;                           /* copy identity + rights */
-    t->cap_id        = cap_table_alloc_id();
-    t->allowed_ops   = reduced_ops;
-    t->parent_cap_id = parent.cap_id;
-    t->depth         = parent.depth + 1;
-    t->first_child_cap_id  = 0;
-    t->next_sibling_cap_id = parent_entry->token.first_child_cap_id;
-
-    cap_sign(t);
-    e->sender = g_request_local_port;	/* #599: see cap_acquire */
-    cap_table_insert(e);
-
-    /* Link as new first child of parent (re-sign parent since
-     * first_child_cap_id changed). */
-    parent_entry->token.first_child_cap_id = t->cap_id;
-    cap_sign(&parent_entry->token);
-
-    memcpy(child_buf, t, sizeof(*t));
-    *child_len = (mach_msg_type_number_t)sizeof(*t);
-
-    printf("cap: derived id=%llu from parent=%llu ops=0x%llx depth=%u\n",
-           (unsigned long long)t->cap_id,
-           (unsigned long long)parent.cap_id,
-           (unsigned long long)reduced_ops,
-           t->depth);
-    return KERN_SUCCESS;
+    (void)server;
+    kr = urmach_port_receiver(host, delegate, &id);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: DENY derive_for: no task receives on port 0x%x "
+               "(kr=%d) (#747)\n", (unsigned)delegate, (int)kr);
+        return CAP_ERR_NO_DELEGATE;
+    }
+    kr = cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms, id,
+                       child_buf, child_len);
+    if (kr == KERN_SUCCESS)
+        (void)mach_port_deallocate(mach_task_self(), delegate);
+    return kr;
 }
 
 /*
@@ -548,26 +750,17 @@ cap_subtree_next(uint64_t root, struct cap_entry *e, int descend)
     return NULL;
 }
 
-kern_return_t
-cap_revoke(mach_port_t server, uint64_t cap_id)
+/*
+ * Revoke `root' and everything under it in the tree: each capability marked in
+ * this server's table and told to the kernel, which withdraws what it bought.
+ * The number revoked now goes in *count, and the kernel's first refusal is the
+ * answer; the rest of the tree is revoked all the same (#745).  cap_revoke asks
+ * it for a task that may revoke, and a deadline's sweep for itself (#747).
+ */
+static kern_return_t
+cap_revoke_tree(struct cap_entry *root, int *count)
 {
-    (void)server;
-
-    struct cap_entry *root = cap_table_find_by_id(cap_id);
-    if (!root) return CAP_ERR_INVALID_TOKEN;
-
-    /*
-     * #599: the revocation needed no authority at all, so any task could
-     * take any other's capability away -- ext_server's page-cache buffer,
-     * a driver's claim on its device.
-     */
-    if (!cap_revoke_authorised(root)) {
-        printf("cap: DENY revoke of cap %llu from port=0x%x — not the task "
-               "it was issued to, nor one it descends from\n",
-               (unsigned long long)cap_id, (unsigned)g_request_local_port);
-        return CAP_ERR_UNAUTHORIZED;
-    }
-
+    uint64_t cap_id = root->token.cap_id;
     struct cap_entry *e;
     int revoked = 0, descend = 1;
     kern_return_t kr, refused = KERN_SUCCESS;
@@ -620,23 +813,216 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
         }
     }
 
-    printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
-           revoked, (unsigned long long)cap_id);
+    *count = revoked;
+    return refused;
+}
 
-    /*
-     * Issue #183: notify every subscribed resource server so they can
-     * drop cap-gated state synchronously (e.g. block_device_server
-     * marks any blk_handle whose cap_id matches as revoked).  We fire
-     * one notification per cap in the cascade so a subscriber that
-     * only knows about a specific child can still react.
-     */
-    if (n_revoke_subscribers > 0 && revoked > 0) {
+/*
+ * Issue #183: notify every subscribed resource server so they can
+ * drop cap-gated state synchronously (e.g. block_device_server
+ * marks any blk_handle whose cap_id matches as revoked).  We fire
+ * one notification per cap in the cascade so a subscriber that
+ * only knows about a specific child can still react.  `count' is
+ * what cap_revoke_tree() revoked: none, and there is nothing to tell.
+ */
+static void
+cap_revoke_tell(struct cap_entry *root, int count)
+{
+    struct cap_entry *e;
+
+    if (n_revoke_subscribers > 0 && count > 0) {
         /* The same walk again, every node of the tree now revoked: a
          * notice for each, as there was for each before (#745). */
-        for (e = root; e != NULL; e = cap_subtree_next(cap_id, e, 1))
+        for (e = root; e != NULL;
+             e = cap_subtree_next(root->token.cap_id, e, 1))
             fanout_revoke_notify(e->token.cap_id);
     }
+}
 
+/*
+ * ── A deadline is a revocation at that time (#747) ─────────────────────────
+ *
+ * A token past its deadline is refused when it is presented, by the trap and
+ * by this server, and what it had bought before then was kept: a claim made
+ * with it, with the interrupts and the register mappings the claim had made,
+ * and the pages of a buffer lent with it, in the device's IOMMU domain.  A
+ * revocation takes all of that back (#745), and a deadline took none of it.
+ * So a capability is revoked when its deadline comes, as cap_revoke revokes
+ * it -- the kernel told of it and of its tree, and so withdrawing what they
+ * bought, and the subscribers given their notices -- by this server, which
+ * writes every deadline and so knows each one.
+ *
+ * The table is the receive loop's, and the waiting is a thread's of its own:
+ * all they share is cap_expiry_due, under cap_expiry_lock.  The loop lowers it
+ * when it writes a deadline earlier than it, and after a sweep sets it to the
+ * earliest one left, and rings cap_expiry_port either way, so that the waiter
+ * looks again.  The waiter waits on that port until the deadline comes, then
+ * rings cap_sweep_port, which is in the loop's port set, every
+ * CAP_EXPIRY_AGAIN_MS until a sweep has moved the deadline: a ring lost is
+ * rung again, and one that finds a queue full finds a ring already there.
+ *
+ * ⚠️ The revocation follows the deadline by a wake-up and a message.  The
+ * deadline itself holds at the instant it passes, by the clock, in the trap's
+ * checks and this server's; what the revocation adds is what those cannot
+ * do, taking back what was bought.
+ */
+#define CAP_EXPIRY_RING_ID	7470	/* a ring's id, for whoever reads one */
+#define CAP_EXPIRY_AGAIN_MS	100	/* a ring unanswered, or a clock unread */
+#define CAP_EXPIRY_LONGEST_MS	3600000	/* a far deadline, looked at hourly */
+
+static pthread_mutex_t cap_expiry_lock;	/* made ready in main() */
+static uint64_t        cap_expiry_due;		/* the next deadline; 0: none */
+static mach_port_t     cap_expiry_port = MACH_PORT_NULL;	/* the waiter's */
+
+/* An empty message to a port this task receives on.  It never waits. */
+static void
+cap_expiry_ring(mach_port_t port)
+{
+    mach_msg_header_t h;
+
+    memset(&h, 0, sizeof(h));
+    h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+    h.msgh_size = sizeof(h);
+    h.msgh_remote_port = port;
+    h.msgh_id = CAP_EXPIRY_RING_ID;
+    /* Unsent: the waiter rings again, or a ring is already queued. */
+    (void)mach_msg(&h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(h), 0,
+                   MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/* A deadline written: the waiter is told of it if it is the earliest. */
+static void
+cap_expiry_note(uint64_t due)
+{
+    int earlier = 0;
+
+    if (due == 0)
+        return;
+    pthread_mutex_lock(&cap_expiry_lock);
+    if (cap_expiry_due == 0 || due < cap_expiry_due) {
+        cap_expiry_due = due;
+        earlier = 1;
+    }
+    pthread_mutex_unlock(&cap_expiry_lock);
+    if (earlier)
+        cap_expiry_ring(cap_expiry_port);
+}
+
+/* The waiter, a thread of its own: it rings the loop when a deadline comes. */
+static void *
+cap_expiry_waiter(void *arg)
+{
+    struct {
+        mach_msg_header_t           h;
+        mach_msg_format_0_trailer_t t;
+    } m;
+    mach_msg_option_t  opt;
+    mach_msg_timeout_t ms;
+    mach_msg_return_t  mr;
+    uint64_t           due, now, wait;
+
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&cap_expiry_lock);
+        due = cap_expiry_due;
+        pthread_mutex_unlock(&cap_expiry_lock);
+
+        opt = MACH_RCV_MSG;
+        ms = MACH_MSG_TIMEOUT_NONE;
+        if (due != 0) {
+            opt |= MACH_RCV_TIMEOUT;
+            ms = CAP_EXPIRY_AGAIN_MS;
+            if (cap_now_ns(&now)) {
+                if (now >= due)
+                    cap_expiry_ring(cap_sweep_port);
+                else {
+                    wait = (due - now + 999999ULL) / 1000000ULL;
+                    ms = wait < CAP_EXPIRY_LONGEST_MS
+                       ? (mach_msg_timeout_t)wait : CAP_EXPIRY_LONGEST_MS;
+                }
+            }
+        }
+        mr = mach_msg(&m.h, opt, 0, sizeof(m), cap_expiry_port, ms,
+                      MACH_PORT_NULL);
+        if (mr != MACH_MSG_SUCCESS && mr != MACH_RCV_TIMED_OUT) {
+            printf("cap: the deadlines' waiter could not receive (0x%x); it "
+                   "tries again in %u ms (#747)\n", (unsigned)mr,
+                   (unsigned)CAP_EXPIRY_AGAIN_MS);
+            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+                                CAP_EXPIRY_AGAIN_MS);
+        }
+    }
+    return NULL;
+}
+
+/*
+ * The waiter rang: every capability past its deadline is revoked, with its
+ * tree, and the waiter is given the earliest deadline left.  A tree's
+ * deadlines are never past its root's, so its capabilities have all come to
+ * theirs too.
+ */
+static void
+cap_expiry_sweep(void)
+{
+    struct cap_entry *e;
+    uint64_t          now, next = 0;
+    int               n;
+
+    if (!cap_now_ns(&now)) {
+        printf("cap: the capability clock could not be read, so no deadline "
+               "was swept; the waiter rings again in %u ms (#747)\n",
+               (unsigned)CAP_EXPIRY_AGAIN_MS);
+        return;
+    }
+    for (e = cap_table_next(NULL); e != NULL; e = cap_table_next(e)) {
+        if (e->token.revoked || e->token.expires == 0)
+            continue;
+        if (e->token.expires > now) {
+            if (next == 0 || e->token.expires < next)
+                next = e->token.expires;
+            continue;
+        }
+        /* A refusal by the kernel is said by cap_revoke_tree(). */
+        (void)cap_revoke_tree(e, &n);
+        printf("cap: cap %llu reached its deadline %llu ms ago and was "
+               "revoked, %d cap(s) with its tree (#747)\n",
+               (unsigned long long)e->token.cap_id,
+               (unsigned long long)((now - e->token.expires) / 1000000ULL),
+               n);
+        cap_revoke_tell(e, n);
+    }
+    pthread_mutex_lock(&cap_expiry_lock);
+    cap_expiry_due = next;
+    pthread_mutex_unlock(&cap_expiry_lock);
+    cap_expiry_ring(cap_expiry_port);
+}
+
+kern_return_t
+cap_revoke(mach_port_t server, uint64_t cap_id)
+{
+    (void)server;
+
+    struct cap_entry *root = cap_table_find_by_id(cap_id);
+    if (!root) return CAP_ERR_INVALID_TOKEN;
+
+    /*
+     * #599: the revocation needed no authority at all, so any task could
+     * take any other's capability away -- ext_server's page-cache buffer,
+     * a driver's claim on its device.
+     */
+    if (!cap_revoke_authorised(root)) {
+        printf("cap: DENY revoke of cap %llu from port=0x%x — not the task "
+               "it was issued to, nor one it descends from\n",
+               (unsigned long long)cap_id, (unsigned)g_request_local_port);
+        return CAP_ERR_UNAUTHORIZED;
+    }
+
+    int revoked;
+    kern_return_t refused = cap_revoke_tree(root, &revoked);
+
+    printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
+           revoked, (unsigned long long)cap_id);
+    cap_revoke_tell(root, revoked);
     return refused;
 }
 
@@ -1015,6 +1401,7 @@ kern_return_t
 cap_verify(mach_port_t             server,
            cap_token_t            token_buf,
            mach_msg_type_number_t  token_len,
+           uint64_t                presenter,
            uint32_t                resource_type,
            uint64_t                op,
            uint64_t                resource_id)
@@ -1028,6 +1415,13 @@ cap_verify(mach_port_t             server,
 
     if (!cap_verify_hmac(&token))           return CAP_ERR_INVALID_TOKEN;
     if (token.revoked)                      return CAP_ERR_REVOKED;
+    if (cap_expired(&token) != KERN_SUCCESS) return CAP_ERR_EXPIRED; /* #747 */
+    /*
+     * #747: and presented by the task it was issued to.  The asker is the
+     * server verifying, so it says who presented the token, as it does to the
+     * trap: the identity in the trailer of the request that carried it.
+     */
+    if (presenter == 0 || token.owner != presenter) return CAP_ERR_NOT_OWNER;
     /* #745: the kind as well as the id, as the trap has since #599. */
     if (token.resource_type != resource_type) return CAP_ERR_RESOURCE_MISMATCH;
     if (token.resource_id != resource_id)   return CAP_ERR_RESOURCE_MISMATCH;
@@ -1169,6 +1563,41 @@ main(int argc, char **argv)
      */
     (void)gpu_console_init_async("cap", 100u, 50u);
 
+    /*
+     * #747: the deadlines' waiter, and the port it rings, in the set.  The
+     * clock's port is asked for first, here, so that the two threads never
+     * both ask for it.  Without the waiter a lifetime is refused, since
+     * nothing would revoke a capability at its deadline: cap_deadline().
+     */
+    {
+        pthread_t waiter;
+        uint64_t  now;
+
+        kr = cap_now_ns(&now) ? KERN_SUCCESS : KERN_FAILURE;
+        if (kr == KERN_SUCCESS &&
+            pthread_mutex_init(&cap_expiry_lock, NULL) != 0)
+            kr = KERN_FAILURE;
+        if (kr == KERN_SUCCESS)
+            kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                                    &cap_sweep_port);
+        if (kr == KERN_SUCCESS)
+            kr = mach_port_move_member(mach_task_self(), cap_sweep_port,
+                                       cap_port_set);
+        if (kr == KERN_SUCCESS)
+            kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                                    &cap_expiry_port);
+        if (kr == KERN_SUCCESS &&
+            pthread_create(&waiter, NULL, cap_expiry_waiter, NULL) != 0)
+            kr = KERN_FAILURE;
+        if (kr == KERN_SUCCESS) {
+            cap_expiry_running = 1;
+            printf("cap: the deadlines' waiter runs: a capability is revoked "
+                   "when its deadline comes (#747)\n");
+        } else
+            printf("cap: the deadlines' waiter did not start (%d), so a "
+                   "lifetime is refused (#747)\n", kr);
+    }
+
     bootstrap_completed(bootstrap_port, mach_task_self());
 
     printf("cap: entering message loop\n");
@@ -1200,7 +1629,7 @@ main(int argc, char **argv)
      * one grows.
      */
     mach_msg_server(cap_demux, CAP_MANIFEST_MAX_BYTES + 2048, cap_port_set,
-                    MACH_MSG_OPTION_NONE);
+                    URMACH_RCV_SENDER);		/* #747: who asks */
 
     printf("cap: mach_msg_server exited unexpectedly\n");
     return 1;
