@@ -645,6 +645,13 @@ must_report '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9
 	'A chora claimed its device and never said whether its module took it.  It says so either way, so a stop here is a module that did not come back from attaching to its device -- a wait for an interrupt with no bound, or a fault (#963).' \
 	chora
 
+# #977: and edu_probe's chora, on QEMU's educational device, in a pair of its
+# own: the pair above is met by the network card's chora alone, and the boot
+# ends on chora_test's count, which may come before edu_probe's last line.
+must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
+	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and says so either way (#977).' \
+	edu_probe
+
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
 
@@ -1723,6 +1730,7 @@ expected_reports() {
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'chora_test: started'   'chora_test: [0-9]* of [0-9]* arms passed' \
 		'@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
+		'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \

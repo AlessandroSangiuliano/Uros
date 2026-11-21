@@ -173,8 +173,10 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             chora.conf: bootstrap's line that -f chose it, the first chora's
 #             three lines -- the claim, its registers mapped, an interrupt
 #             taken -- the second chora's refused claim, and the kernel's line
-#             refusing it, which names both tasks; chora_test's count is the
-#             note (#963)
+#             refusing it, which names both tasks -- and edu_probe's chora, on
+#             QEMU's educational device (--edu): its interrupt taken by
+#             message, and the device driven; chora_test's count is the note
+#             (#963, #977)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -283,8 +285,8 @@ ENTRIES="
 65 harness - 1
 67 wakee
 67 wakee - 1
-68 chora --iommu_intel
-68 chora --iommu_intel 1
+68 chora --iommu_intel_--edu
+68 chora --iommu_intel_--edu 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -777,6 +779,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# names are the same because the name is the device's.  A boot with no
 	# card answers NOT ASKED in chora_test and fails here, since this entry
 	# exists to ask.
+	# #977: and the chora on QEMU's edu device, which has MSI and no MSI-X
+	# table: edu_probe took its interrupt by message, and drives the device.
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
@@ -784,6 +788,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: took an interrupt, ' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the claim on .* was refused' "$f" &&
 		grep -aqE 'REFUSED to task 0x[0-9a-f]+ \(chora_probe@[^)]*\) .*claimed by task 0x[0-9a-f]+ \(chora_probe@' "$f" &&
+		grep -aqE 'edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: took an interrupt, message slot [0-9]+, status 0x977' "$f" &&
+		grep -aqE 'edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: edu_probe drives the device' "$f" &&
 		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		[ -n "$out" ] && NOTE=$out ;;
 	esac
