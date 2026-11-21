@@ -638,6 +638,9 @@ must_report '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9
 	'A chora claimed its device and never said whether its module took it.  It says so either way, so a stop here is a module that did not come back from attaching to its device -- a wait for an interrupt with no bound, or a fault (#963).' \
 	chora
 
+must_report 'modload_test: started' 'modload_test: [0-9]* of [0-9]* arms passed' \
+	'It fetches the modules of two pools from bootstrap and dlopens them, and nothing in it waits, so silence is a stop inside the module pool, inside libdl or inside the code of a module (#973).  chora.conf waits for it before it starts chora_test.'
+
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
 
@@ -1705,6 +1708,7 @@ expected_reports() {
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'chora_test: started'   'chora_test: [0-9]* of [0-9]* arms passed' \
+		'modload_test: started' 'modload_test: [0-9]* of [0-9]* arms passed' \
 		'@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
