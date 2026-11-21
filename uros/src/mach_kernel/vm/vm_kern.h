@@ -139,6 +139,15 @@ extern kern_return_t kmem_alloc_contig(
 				vm_offset_t 	mask,
 				int 		flags);
 
+/* The same, its pages at or below the physical address max_pa (#417). */
+extern kern_return_t kmem_alloc_contig_below(
+				vm_map_t	map,
+				vm_offset_t	*addrp,
+				vm_size_t	size,
+				vm_offset_t 	mask,
+				int 		flags,
+				vm_offset_t	max_pa);
+
 extern kern_return_t	kmem_alloc(
 				vm_map_t	map,
 				vm_offset_t	*addrp,

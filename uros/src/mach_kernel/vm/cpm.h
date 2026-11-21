@@ -47,6 +47,14 @@ extern kern_return_t
 	cpm_allocate(vm_size_t size, vm_page_t *list, boolean_t wire);
 
 /*
+ *	The same, every page at or below max_pa (#417): KERN_NO_SPACE
+ *	when no run lies that low.
+ */
+extern kern_return_t
+	cpm_allocate_below(vm_size_t size, vm_page_t *list, boolean_t wire,
+			   vm_offset_t max_pa);
+
+/*
  *	CPM-specific event counters.
  */
 #define	VM_CPM_COUNTERS		(MACH_KDB && MACH_COUNTERS && VM_CPM)

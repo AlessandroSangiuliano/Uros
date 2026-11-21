@@ -261,6 +261,24 @@ kmem_alloc_contig(
 	vm_offset_t 	mask,
 	int 		flags)
 {
+	return kmem_alloc_contig_below(map, addrp, size, mask, flags,
+				       ~(vm_offset_t)0);
+}
+
+/*
+ * The same, its pages at or below the physical address max_pa: memory for a
+ * device whose DMA reaches no higher (#417).  KERN_NO_SPACE when no run of
+ * free pages lies that low.
+ */
+kern_return_t
+kmem_alloc_contig_below(
+	vm_map_t	map,
+	vm_offset_t	*addrp,
+	vm_size_t	size,
+	vm_offset_t 	mask,
+	int 		flags,
+	vm_offset_t	max_pa)
+{
 	vm_object_t		object;
 	vm_page_t		m, pages;
 	kern_return_t		kr;
@@ -288,6 +306,17 @@ kmem_alloc_contig(
 		kr = vm_map_find_space(map, &addr, size, mask, &entry);
 	}
 
+	/*
+	 * #821: the answer first.  vm_map_find_space() sets `entry' only on
+	 * success, and this wrote through it before asking, as
+	 * kernel_memory_allocate() does not.
+	 */
+	if (kr != KERN_SUCCESS) {
+		if ((flags & KMA_KOBJECT) == 0)
+			vm_object_deallocate(object);
+		return kr;
+	}
+
 	if ((flags & KMA_KOBJECT) == 0) {
 		entry->object.vm_object = object;
 		entry->offset = offset = 0;
@@ -301,15 +330,9 @@ kmem_alloc_contig(
 		}
 	}
 
-	if (kr != KERN_SUCCESS) {
-		if ((flags & KMA_KOBJECT) == 0)
-			vm_object_deallocate(object);
-		return kr;
-	}
-
 	vm_map_unlock(map);
 
-	kr = cpm_allocate(size, &pages, FALSE);
+	kr = cpm_allocate_below(size, &pages, FALSE, max_pa);
 
 	if (kr != KERN_SUCCESS) {
 		vm_map_remove(map, addr, addr + size, 0);

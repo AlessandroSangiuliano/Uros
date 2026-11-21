@@ -2617,10 +2617,15 @@ vm_page_verify_contiguous(
 
 /*
  *	Find a region large enough to contain at least npages
- *	of contiguous physical memory.
+ *	of contiguous physical memory, every page of it at or
+ *	below max_pa (#417).
  *
  *	Requirements:
  *		- Called while holding vm_page_queue_free_lock.
+ *		- The free list sorted by ascending address, as
+ *		vm_page_free_list_sort() leaves it: the walk stops
+ *		at the first page past max_pa, since nothing after
+ *		it is below.
  *		- Doesn't respect vm_page_free_reserved; caller
  *		must not ask for more pages than are legal to grab.
  *
@@ -2629,7 +2634,8 @@ vm_page_verify_contiguous(
  */
 static vm_page_t
 vm_page_find_contiguous(
-	int		npages)
+	int		npages,
+	vm_offset_t	max_pa)
 {
 	vm_page_t	m, *contig_prev = NULL, *prev_ptr;
 	vm_offset_t	prev_addr;
@@ -2642,6 +2648,10 @@ vm_page_find_contiguous(
 	prev_addr = vm_page_queue_free->phys_addr - (page_size + 1);
 	prev_ptr = &vm_page_queue_free;
 	for (m = vm_page_queue_free; m != VM_PAGE_NULL; m = NEXT_PAGE(m)) {
+
+		/* #417: this page's last byte past max_pa, and every later one */
+		if (m->phys_addr > max_pa || max_pa - m->phys_addr < page_size - 1)
+			break;
 
 		if (m->phys_addr != prev_addr + page_size) {
 			/*
@@ -2693,11 +2703,25 @@ cpm_allocate(
 	vm_page_t	*list,
 	boolean_t	wire)
 {
+	return cpm_allocate_below(size, list, wire, ~(vm_offset_t)0);
+}
+
+/*
+ *	The same, every page at or below max_pa: memory for a device
+ *	whose DMA reaches no higher (#417).  The lowest run there is,
+ *	since the free list is sorted first and walked from the bottom.
+ */
+kern_return_t
+cpm_allocate_below(
+	vm_size_t	size,
+	vm_page_t	*list,
+	boolean_t	wire,
+	vm_offset_t	max_pa)
+{
 	register vm_page_t	m;
-	vm_page_t		*first_contig;
-	vm_page_t		free_list, pages;
-	unsigned int		npages, n1pages;
-	int			vm_pages_available;
+	vm_page_t		pages;
+	unsigned int		npages;
+	vm_size_t		available;
 
 	if (size % page_size != 0)
 		return KERN_INVALID_ARGUMENT;
@@ -2708,11 +2732,25 @@ cpm_allocate(
 	/*
 	 *	Should also take active and inactive pages
 	 *	into account...  One day...
+	 *
+	 *	#821: counted in vm_size_t, and nothing when free is at or
+	 *	below the reserve.  As an int the shortfall went negative,
+	 *	and compared with a size it became a large unsigned that let
+	 *	every request through.
 	 */
-	vm_pages_available = vm_page_free_count - vm_page_free_reserved;
+	available = vm_page_free_count > vm_page_free_reserved
+		    ? (vm_size_t)(vm_page_free_count - vm_page_free_reserved)
+		      * page_size
+		    : 0;
 
-	if (size > vm_pages_available * page_size) {
+	/*
+	 *	#821: both refusals give back the queue lock as well as the
+	 *	free lock.  They gave back the free lock only, and after a
+	 *	refused request every fault in the system waited.
+	 */
+	if (size > available) {
 		mutex_unlock(&vm_page_queue_free_lock);
+		vm_page_unlock_queues();
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
@@ -2725,9 +2763,10 @@ cpm_allocate(
 	 *	list large enough to satisfy the request;
 	 *	the region will be physically contiguous.
 	 */
-	pages = vm_page_find_contiguous(npages);
+	pages = vm_page_find_contiguous(npages, max_pa);
 	if (pages == VM_PAGE_NULL) {
 		mutex_unlock(&vm_page_queue_free_lock);
+		vm_page_unlock_queues();
 		return KERN_NO_SPACE;
 	}
 
