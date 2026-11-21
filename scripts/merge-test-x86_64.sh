@@ -569,7 +569,9 @@ alone_ok() {	# -smp log-of-the-harness full-log the-test's-words-on-one-processo
 # #417: then edu's reach declared as its default 28 bits, which the kernel
 # says, and the round trip again within them: from the low IOVA window,
 # 1 MiB to 28 bits, where it translates; physical memory below 256 MiB
-# where it does not.  Then 20 bits, where nothing is free: refused.  And
+# where it does not.  Then 20 bits, where nothing is free: refused, and a
+# buffer within 28 bits given after it, which a refusal that kept the page
+# queues' lock would leave waiting for ever (#821).  And
 # never libdriver's line that the kernel placed a buffer past the reach it
 # was told, which would be the kernel's promise broken.
 chora_dma() {	# entry full-log
@@ -585,6 +587,7 @@ chora_dma() {	# entry full-log
 	grep -aqE "device: [0-9a-f]{2}:[0-9a-f]{2}\.[0-7].s DMA reaches 0xfffffff, and every address it is given from now on lies below" "$2" &&
 		grep -aqE "${p}$rt within edu.s default 28 bits, at device address $low: every byte came back, $refused" "$2" &&
 		grep -aqE "${p}a DMA buffer within 20 bits, where nothing is free: refused, 0x[0-9a-f]+" "$2" &&
+		grep -aqE "${p}after it, a DMA buffer within 28 bits again: given, at device address $low([^0-9a-f]|\$)" "$2" &&
 		! grep -aq 'the kernel placed a DMA buffer at device address' "$2" || return 1
 	grep -aoE "${p}$rt, at device address $kind: every byte came back, $refused" "$2" | tail -n 1 | grep -oE '0x[0-9a-f]+: every' | cut -d: -f1 | grep .
 }

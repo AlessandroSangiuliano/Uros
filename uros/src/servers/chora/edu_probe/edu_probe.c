@@ -276,7 +276,8 @@ edu_round_trip(struct driver *d, const char *within)
  * through an address the kernel placed below them -- from the low IOVA window
  * where the machine translates, memory below 256 MiB where it does not; then
  * 20 bits, below which no memory is free and the low window does not begin,
- * and a buffer that must be refused.  That refusal is the kernel's to make,
+ * and a buffer that must be refused, and one within 28 bits given after it.
+ * That refusal is the kernel's to make,
  * not libdriver's: libdriver's own line, that the kernel placed a buffer past
  * the reach, would be the kernel's promise broken, and the merge test asks
  * for its absence.
@@ -310,6 +311,24 @@ edu_reaches(struct driver *d)
 	}
 	driver_log(d, "a DMA buffer within 20 bits, where nothing is free: "
 		   "refused, 0x%x", kr);
+
+	/*
+	 * #821: and the allocator answers after the refusal.  The refusal used
+	 * to keep the page queues' lock, and the boot ended no worse for it,
+	 * since nothing after this asked for it: this does, through the same
+	 * path, and would wait for ever.
+	 */
+	if (driver_dma_reach(d, EDU_DMA_REACH_DEFAULT) != KERN_SUCCESS)
+		return -1;
+	kr = driver_dma_alloc(d, EDU_BUF_BYTES, &buf);
+	if (kr != KERN_SUCCESS) {
+		driver_log(d, "WRONG -- after that refusal, no DMA buffer within "
+			   "28 bits: 0x%x", kr);
+		return -1;
+	}
+	driver_log(d, "after it, a DMA buffer within 28 bits again: given, at "
+		   "device address 0x%llx", (unsigned long long)buf.device_addr);
+	driver_dma_free(d, &buf);
 	return 0;
 }
 
