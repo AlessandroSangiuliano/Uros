@@ -175,8 +175,11 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             taken -- the second chora's refused claim, and the kernel's line
 #             refusing it, which names both tasks -- and edu_probe's chora, on
 #             QEMU's educational device (--edu): its interrupt taken by
-#             message, and the device driven; chora_test's count is the note
-#             (#963, #977)
+#             message, the device driven, and a DMA round trip through it at
+#             the address libdriver gave -- an IOVA from 4 GiB up where -I
+#             turned translation on, as entry 70 must, and a physical one
+#             below 4 GiB where it did not; chora_test's count and the
+#             address read are the note (#963, #977, #978)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -287,6 +290,8 @@ ENTRIES="
 67 wakee - 1
 68 chora --iommu_intel_--edu
 68 chora --iommu_intel_--edu 1
+70 chora --edu_--iommu_intel
+70 chora --edu_--iommu_amd
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -550,8 +555,24 @@ alone_ok() {	# -smp log-of-the-harness full-log the-test's-words-on-one-processo
 		NOTE="NOT ASKED: one processor"
 }
 
+# #978: edu_probe's DMA round trip, and the kind of address it went through,
+# echoed for the note.  Where the kernel says -I turned translation on the
+# address is an IOVA, from 4 GiB up (IOMMU_IOVA_BASE), nine hex digits or
+# more; where it did not, it is physical, below 4 GiB on the harness's
+# 512 MiB.  Entry 70 boots with -I and must say so: a round trip there at a
+# physical address is the -I gone from its line, and not a pass.
+chora_dma() {	# entry full-log
+	local rt='edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: a DMA round trip of 4096 bytes through the device.s buffer, at device address ' kind='0x[0-9a-f]{1,8}'
+	if grep -aq -- '-I given: translation IS ON' "$2"; then
+		kind='0x[1-9a-f][0-9a-f]{8,}'
+	elif [ "$1" = 70 ]; then
+		return 1
+	fi
+	grep -aoE "$rt$kind: every byte came back" "$2" | tail -n 1 | grep -oE '0x[0-9a-f]+: every' | cut -d: -f1 | grep .
+}
+
 judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
-	local e=$1 v=$2 h=$3 f=$4 a=$5 n=${6:-} out
+	local e=$1 v=$2 h=$3 f=$4 a=$5 n=${6:-} out dma
 	NOTE=""
 	case $v in
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
@@ -781,6 +802,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# exists to ask.
 	# #977: and the chora on QEMU's edu device, which has MSI and no MSI-X
 	# table: edu_probe took its interrupt by message, and drives the device.
+	# #978: after a DMA round trip through it, at an address of the kind
+	# the boot's translation says (chora_dma).
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
@@ -790,8 +813,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aqE 'REFUSED to task 0x[0-9a-f]+ \(chora_probe@[^)]*\) .*claimed by task 0x[0-9a-f]+ \(chora_probe@' "$f" &&
 		grep -aqE 'edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: took an interrupt, message slot [0-9]+, status 0x977' "$f" &&
 		grep -aqE 'edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: edu_probe drives the device' "$f" &&
+		dma=$(chora_dma "$e" "$f") &&
 		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
-		[ -n "$out" ] && NOTE=$out ;;
+		[ -n "$out" ] && NOTE="$out; DMA round trip at device address $dma" ;;
 	esac
 }
 
