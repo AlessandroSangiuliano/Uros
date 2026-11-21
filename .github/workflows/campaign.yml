@@ -48,11 +48,11 @@ on:
         type: string
         required: false
       rounds:
-        description: "Merge-test rounds per job (empty: 3)"
+        description: "Merge-test rounds per job (empty: 2)"
         type: string
         required: false
       jobs:
-        description: "Jobs side by side, 1 to 20 (empty: 4)"
+        description: "Jobs side by side, 1 to 20 (empty: 6)"
         type: string
         required: false
       mode:
@@ -146,8 +146,13 @@ jobs:
           both) modes='["arch","ubuntu"]' ;;
           *) echo "::error::mode is arch, ubuntu or both, not '$MODE'"; exit 1 ;;
           esac
-          jobs=${JOBS:-4}
-          rounds=${ROUNDS:-3}
+          # #941: six jobs of two rounds boot as many as four of three, on
+          # more runners.  A round of the merge test took 104 to 108 minutes
+          # on 20/11, and three no longer fitted in the step's 330: the push
+          # campaign of 9a6e2ab8 stopped on three jobs of four, all three on
+          # an AMD EPYC 7763.  Two rounds leave about one round's time spare.
+          jobs=${JOBS:-6}
+          rounds=${ROUNDS:-2}
           case "$jobs" in
           ''|*[!0-9]*) echo "::error::jobs is a number from 1 to 20, not '$jobs'"; exit 1 ;;
           esac
