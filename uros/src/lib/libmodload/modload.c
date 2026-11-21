@@ -374,8 +374,18 @@ modload_load_class(const char *class, const char *sym_suffix,
 		return 0;
 	}
 
+	/*
+	 * Its own class's modules, the ones its pool lists, fetched now or
+	 * before -- and no other.  This walked the whole cache from index 0
+	 * (#973): a program's second class dlopened the first class's modules
+	 * again, and looked each up with the second class's suffix.
+	 */
 	for (i = 0; i < n_cached_modules && loaded < max_ops; i++) {
-		void *ops = load_cached(&cached_modules[i], sym_suffix);
+		void *ops;
+
+		if (strcmp(cached_modules[i].class, class) != 0)
+			continue;
+		ops = load_cached(&cached_modules[i], sym_suffix);
 		if (ops != NULL)
 			out_ops[loaded++] = ops;
 	}

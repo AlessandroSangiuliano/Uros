@@ -49,7 +49,8 @@ void	modload_init(const char *tag);
  * Fetch every module in <class> from the bootstrap, dlopen each one,
  * look up the symbol <module_basename><sym_suffix> and write the result
  * into out_ops[].  Returns the number of modules successfully loaded
- * (capped at max_ops).
+ * (capped at max_ops).  Only <class>'s modules: those of a class fetched
+ * before are not loaded again (#973).
  *
  * Example: modload_load_class("block", "_module_ops", ops, 16) pulls
  *          /mach_servers/modules/block/ahci.so and /virtio_blk.so,
