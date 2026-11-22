@@ -1591,7 +1591,7 @@ ct_census(struct ct_census *c)
  * So both tables are asked until both say it.
  */
 /*
- * Two hundred and fifty, with their sixty-two children, against a slack of
+ * Two hundred and fifty, with their sixty-three children, against a slack of
  * thirty-two: a table that kept them is ten times past it.  A thousand cost
  * five seconds a boot and nearly doubled its log, cap_server saying each one
  * asked for, derived and swept (#974, 22/11).
