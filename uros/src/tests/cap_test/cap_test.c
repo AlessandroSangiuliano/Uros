@@ -1581,7 +1581,11 @@ ct_census(struct ct_census *c)
  * for the last deadline, by the clock, and asks for all of them to be gone.  A
  * machine that took longer than their lifetime to ask for them all saw some
  * leave before it could count them present, and cannot say that the census
- * sees them: NOT ASKED.
+ * sees them: NOT ASKED.  So is one on which a derivation came to cap_server
+ * after its parent's deadline, by the clock, and was refused as expired, as it
+ * must be: on i386 under KVM, the first of them swept while the last were
+ * still asked for, cap_server read the derivation from the 185th after that
+ * one's deadline, and the arm said WRONG (#974, 22/11).
  *
  * ⚠️ And it asked again only until cap_server's table was back, taking the
  * kernel's count with that answer.  A sweep begun before the last deadline
@@ -1629,7 +1633,7 @@ a_deadline_leaves_both_tables(void)
     uint64_t         start, issued, last = 0, now = 0;
     long             put, present;
     kern_return_t    kr, k1, k2 = KERN_SUCCESS;
-    int              ok;
+    int              ok, late = 0;
 
     kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
     (void)mach_port_deallocate(mach_task_self(), host);
@@ -1654,12 +1658,16 @@ a_deadline_leaves_both_tables(void)
             kr = cap_derive(&t, CAP_OP_BLK_READ, 0, &child);
             if (kr == KERN_SUCCESS)
                 derived++;
+            else
+                late = kr == CAP_ERR_EXPIRED;
         }
     }
     issued = ct50_now(clk);
+    /* A derivation refused as expired, its parent's deadline past by the clock. */
+    late = late && issued != 0 && issued >= t.expires;
     k1 = ct_census(&c1);
     put = (long)asked + (long)derived;
-    if (kr != KERN_SUCCESS || k1 != KERN_SUCCESS || start == 0 ||
+    if ((kr != KERN_SUCCESS && !late) || k1 != KERN_SUCCESS || start == 0 ||
         issued == 0) {
         printf("cap_test: [55] WRONG — %u of %u capabilities asked for with "
                "%u ms and %u children, then %d; the census %d, the clock %s "
@@ -1668,11 +1676,13 @@ a_deadline_leaves_both_tables(void)
         (void)mach_port_deallocate(mach_task_self(), clk);
         return 0;
     }
-    if (issued - start >= (uint64_t)CT55_MS * 1000000ULL) {
+    if (late || issued - start >= (uint64_t)CT55_MS * 1000000ULL) {
         printf("cap_test: [55] NOT ASKED — asking for %u capabilities took "
                "%llu ms, past their lifetime of %u ms, so some left before "
-               "they could be counted present (#974)\n", asked,
-               (unsigned long long)((issued - start) / 1000000ULL), CT55_MS);
+               "they could be counted present%s (#974)\n", asked,
+               (unsigned long long)((issued - start) / 1000000ULL), CT55_MS,
+               late ? "; cap_server read the last one's derivation after its "
+                      "deadline, and refused it as expired" : "");
         (void)mach_port_deallocate(mach_task_self(), clk);
         return 1;
     }
