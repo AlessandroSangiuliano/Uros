@@ -32,16 +32,16 @@
  * receive notifications -- the HAL's, a token of a pipe it registers with
  * pipe_server, the port of a libflipc2 endpoint it serves itself -- and sends
  * each a message with a notification's id and size through that send right,
- * with a reply port of its own.  What comes back says what the receiver made
- * of it:
+ * with a reply port of its own, and right after it a probe the receiver
+ * answers in order (forge()).  What comes back says what it made of it:
  *
  *   refused   an error reply: MIG_BAD_ID from a demux that does not know the
  *             id, MIG_BAD_ARGUMENTS from a notify stub's check;
- *   believed  no reply, which is what a notification gets from the HAL and
- *             from an endpoint, or KERN_SUCCESS, which a notify stub answers
- *             once its handler has run -- and what it named has ended: the
- *             pipe's token is dead, the endpoint reported its live client
- *             dead.
+ *   believed  no reply, the probe's answer first, which is what a
+ *             notification gets from the HAL and from an endpoint, or
+ *             KERN_SUCCESS, which a notify stub answers once its handler has
+ *             run -- and what it named has ended: the pipe's token is dead,
+ *             the endpoint reported its live client dead.
  *
  * [4] asks the other half: a client of the endpoint that really goes is still
  * reported dead, from the kernel's own notification.
@@ -70,9 +70,10 @@
 #include "pipe_user.h"
 
 #define ARMS		4
-#define FORGE_WAIT_MS	2000		/* for the answer to a forged message */
+#define FORGE_WAIT_MS	20000		/* for the answers, however loaded the boot */
 #define EVENT_WAIT_MS	2000		/* for the endpoint's pump to say a thing */
 #define FORGED_NAME	0x981		/* a name the HAL is not asked to hold */
+#define PROBE_ID	981981		/* an id no server asked here knows */
 
 static int passed;
 
@@ -96,27 +97,16 @@ struct answer {
 };
 
 #define FORGE_SENT	0		/* answered: *ret holds its code */
-#define FORGE_SILENT	1		/* no answer in FORGE_WAIT_MS */
-#define FORGE_FAILED	2		/* it could not be sent or read */
+#define FORGE_SILENT	1		/* no answer, the probe after it answered */
+#define FORGE_STUCK	2		/* no answer to either in FORGE_WAIT_MS */
+#define FORGE_FAILED	3		/* it could not be sent or read */
 
-/*
- * Sends `to' a message with the id given and the word given, through a right
- * of disposition `disp' -- a send right, never a send-once -- and waits for an
- * answer on a reply port made for it.
- */
-static int
-forge(mach_port_t to, mach_msg_type_name_t disp, mach_msg_id_t id,
-      natural_t word, kern_return_t *ret)
+static kern_return_t
+send_one(mach_port_t to, mach_msg_type_name_t disp, mach_port_t reply,
+	 mach_msg_id_t id, natural_t word)
 {
 	struct forged	m;
-	struct answer	a;
-	mach_port_t	reply = MACH_PORT_NULL;
-	kern_return_t	kr;
-	int		r;
 
-	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
-			       &reply) != KERN_SUCCESS)
-		return FORGE_FAILED;
 	memset(&m, 0, sizeof m);
 	m.h.msgh_bits = MACH_MSGH_BITS(disp, MACH_MSG_TYPE_MAKE_SEND_ONCE);
 	m.h.msgh_size = sizeof m;
@@ -125,23 +115,62 @@ forge(mach_port_t to, mach_msg_type_name_t disp, mach_msg_id_t id,
 	m.h.msgh_id = id;
 	m.ndr = NDR_record;
 	m.word = word;
-	kr = mach_msg(&m.h, MACH_SEND_MSG, sizeof m, 0, MACH_PORT_NULL,
-		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	if (kr != MACH_MSG_SUCCESS) {
+	return mach_msg(&m.h, MACH_SEND_MSG, sizeof m, 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+/*
+ * Sends `to' a message with the id and word given, through a right of
+ * disposition `disp' -- a send right, never a send-once -- and right after it,
+ * on the same port and with the same reply port, a probe with an id no server
+ * asked here knows.  Each receiver asked serves that port from one thread, so
+ * it answers the two in order: an answer to the forged message, if it gives
+ * one, comes before the probe's MIG_BAD_ID.  So the first answer says what the
+ * receiver made of it, however loaded the boot: the forged message's own (its
+ * id + 100), or the probe's, and then the forged message got none.  A wait for
+ * the forged message's answer alone could not tell: on 22/11, in a loaded boot,
+ * the HAL refused one more than two seconds after it was sent.  A send-once
+ * notification, for a reply right destroyed unanswered, is passed over.
+ */
+static int
+forge(mach_port_t to, mach_msg_type_name_t disp, mach_msg_id_t id,
+      natural_t word, kern_return_t *ret)
+{
+	struct answer	a;
+	mach_port_t	reply = MACH_PORT_NULL;
+	kern_return_t	kr;
+	int		r = FORGE_FAILED;
+
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &reply) != KERN_SUCCESS)
+		return FORGE_FAILED;
+	kr = send_one(to, disp, reply, id, word);
+	if (kr != MACH_MSG_SUCCESS)
 		printf("notify_forge_test: the forged message was not sent: "
 		       "0x%x\n", kr);
-		r = FORGE_FAILED;
-	} else {
-		memset(&a, 0, sizeof a);
-		kr = mach_msg(&a.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
-			      sizeof a, reply, FORGE_WAIT_MS, MACH_PORT_NULL);
-		if (kr == MACH_RCV_TIMED_OUT)
-			r = FORGE_SILENT;
-		else if (kr != MACH_MSG_SUCCESS)
-			r = FORGE_FAILED;
-		else {
-			*ret = a.ret;
-			r = FORGE_SENT;
+	else {
+		/* The probe may find the port gone, if the forged message was
+		 * believed already and ended it: its own answer then says so. */
+		(void)send_one(to, disp, reply, PROBE_ID, 0);
+		for (;;) {
+			memset(&a, 0, sizeof a);
+			kr = mach_msg(&a.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+				      sizeof a, reply, FORGE_WAIT_MS,
+				      MACH_PORT_NULL);
+			if (kr == MACH_RCV_TIMED_OUT) {
+				r = FORGE_STUCK;
+				break;
+			}
+			if (kr != MACH_MSG_SUCCESS)
+				break;
+			if (a.h.msgh_id == MACH_NOTIFY_SEND_ONCE)
+				continue;
+			if (a.h.msgh_id == id + 100) {
+				*ret = a.ret;
+				r = FORGE_SENT;
+			} else if (a.h.msgh_id == PROBE_ID + 100)
+				r = FORGE_SILENT;
+			break;
 		}
 	}
 	(void)mach_port_mod_refs(mach_task_self(), reply,
@@ -153,10 +182,14 @@ static void
 say_answer(char *buf, size_t n, int r, kern_return_t ret)
 {
 	if (r == FORGE_SILENT)
-		snprintf(buf, n, "no answer in %d ms, as a notification gets "
-			 "none", FORGE_WAIT_MS);
+		snprintf(buf, n, "no answer to it, where the message sent after "
+			 "it on the same port was answered, as a notification "
+			 "gets none");
 	else if (r == FORGE_SENT)
 		snprintf(buf, n, "answered %d", (int)ret);
+	else if (r == FORGE_STUCK)
+		snprintf(buf, n, "no answer in %d ms to it or to the message "
+			 "sent after it", FORGE_WAIT_MS);
 	else
 		snprintf(buf, n, "the exchange failed");
 }
