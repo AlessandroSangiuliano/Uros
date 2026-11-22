@@ -1646,7 +1646,10 @@ struct ct55_round {
  * they must, 0 if not, said WRONG here; -1 if asking for them took past their
  * lifetime and they left, which is all such a round can say and its caller
  * says it.  A slow round waits for both tables as any round does, and says
- * WRONG if they keep them: that half needs no capability counted present.
+ * WRONG if they keep them, since that half needs no capability counted
+ * present -- as far as it put more in them than CT55_SLACK.  One cut short at
+ * its first derivation put one, which a table keeping it holds within the
+ * slack: only the next round can tell (#974, 22/11).
  */
 static int
 ct55_round(mach_port_t clk, unsigned int ms, struct ct55_round *r)
