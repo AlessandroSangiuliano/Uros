@@ -243,6 +243,23 @@ flipc2_ep_cleanup_dead_reactor(struct flipc2_endpoint *ep,
     mach_port_deallocate(mach_task_self(), dead_port);
 }
 
+/*
+ * Whether a message is a client's death, as the kernel tells it (#981).  The
+ * endpoint's port is the one every client sends its connect and disconnect
+ * to, so a client could send a message with a dead-name notification's id
+ * naming another client's token, and have that client's channels destroyed
+ * while it uses them.  One the kernel did not send keeps the MIG_BAD_ID reply
+ * flipc2_endpoint_server() wrote.  Both demuxes ask this one function, so that
+ * the check cannot be in one and not in the other: notify_forge_test asks it
+ * through the reactor's.
+ */
+static int
+flipc2_ep_client_died(const mach_msg_header_t *in)
+{
+    return in->msgh_id == MACH_NOTIFY_DEAD_NAME &&
+           urmach_notification_from_kernel(in);
+}
+
 /* Reactor demux: like flipc2_ep_demux but records dead clients rather
  * than destroying their channels (see flipc2_endpoint_pump). */
 static boolean_t
@@ -251,9 +268,7 @@ flipc2_ep_demux_reactor(mach_msg_header_t *in, mach_msg_header_t *out)
     if (flipc2_endpoint_server(in, out))
         return TRUE;
 
-    /* #981: the kernel's only -- see flipc2_ep_demux(). */
-    if (in->msgh_id == MACH_NOTIFY_DEAD_NAME &&
-        urmach_notification_from_kernel(in)) {
+    if (flipc2_ep_client_died(in)) {
         struct flipc2_endpoint *ep =
             flipc2_ep_from_payload(in->msgh_local_port);
         if (ep != NULL)
@@ -276,16 +291,8 @@ flipc2_ep_demux(mach_msg_header_t *in, mach_msg_header_t *out)
     if (flipc2_endpoint_server(in, out))
         return TRUE;
 
-    /*
-     * Dead-name notifications, the kernel's only (#981).  They arrive on the
-     * endpoint's port, which every client sends its connect and disconnect
-     * to, so a client could send a message with this id naming another
-     * client's token, and have that client's channels destroyed while it uses
-     * them.  One the kernel did not send keeps the MIG_BAD_ID reply
-     * flipc2_endpoint_server() wrote above.
-     */
-    if (in->msgh_id == MACH_NOTIFY_DEAD_NAME &&
-        urmach_notification_from_kernel(in)) {
+    /* Dead-name notifications, the kernel's only (#981). */
+    if (flipc2_ep_client_died(in)) {
         struct flipc2_endpoint *ep =
             flipc2_ep_from_payload(in->msgh_local_port);
         if (ep != NULL)
