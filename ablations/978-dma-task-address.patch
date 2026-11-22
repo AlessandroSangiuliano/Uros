@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #978
+Takes out: the address driver_dma_alloc() hands a module for its device: it hands over the buffer's address in this task, the mapping the module writes through, as if the device could use it.  On entry 70 the IOMMU translates, edu's domain holds only the IOVA from 4 GiB up, and the address given faults: edu_probe's round trip reads back nothing it wrote, and must say so.
+Run: --iommu intel --edu --entry 70 600 -smp 4
+Expect: edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: WRONG -- a DMA round trip of 4096 bytes through the device.s buffer, at device address 0x[0-9a-f]+: [0-9]+ bytes came back different
+Note: on entry 70 only, where the device is confined.  On entry 68 nothing translates, and the task's address would be taken for a physical one: edu would write 4096 bytes there, into someone else's memory.
+
+diff --git a/uros/src/lib/libdriver/libdriver.c b/uros/src/lib/libdriver/libdriver.c
+index 08b30c0a..4c9ac695 100644
+--- a/uros/src/lib/libdriver/libdriver.c
++++ b/uros/src/lib/libdriver/libdriver.c
+@@ -409,7 +409,7 @@ driver_dma_alloc(struct driver *d, vm_size_t size, uint64_t reach,
+ 	memset((void *)uva, 0, size);
+ 	out->va = (volatile void *)uva;
+ 	out->size = size;
+-	out->device_addr = (uint64_t)dma;
++	out->device_addr = (uint64_t)uva;
+ 	out->kva = kva;
+ 	return KERN_SUCCESS;
+ }

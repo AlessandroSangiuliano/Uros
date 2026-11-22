@@ -652,7 +652,7 @@ must_report 'modload_test: started' 'modload_test: [0-9]* of [0-9]* arms passed'
 # own: the pair above is met by the network card's chora alone, and the boot
 # ends on chora_test's count, which may come before edu_probe's last line.
 must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
-	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and says so either way (#977).' \
+	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and three for each half of its DMA round trip, and says so either way (#977, #978).' \
 	edu_probe
 
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
@@ -1029,7 +1029,12 @@ while :; do
 		# interrupt when written.  The one device here the kernel can
 		# ask for a message without a table, which its boot test does.
 		# An option, as --hpet is, so that the merge test can ask.
-		EDU_ARGS="-device edu"
+		# #978: its DMA reaches all 64 bits, where its default is 28:
+		# under -I the address a device is given is an IOVA, from
+		# 4 GiB up, and edu_probe's round trip gives it one.  edu has
+		# no register that says its mask, so edu_probe's EDU_DMA_REACH
+		# is this line's word.
+		EDU_ARGS="-device edu,dma_mask=0xffffffffffffffff"
 		shift ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
