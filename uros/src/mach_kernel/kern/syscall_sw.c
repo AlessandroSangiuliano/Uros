@@ -362,7 +362,7 @@ mach_trap_t	mach_trap_table[] = {
 #else
 	MACH_TRAP(not_implemented, 0),		/* 46 */
 #endif
-	MACH_TRAP(not_implemented, 0),		/* 47 */
+	MACH_TRAP(urmach_cap_census, 2),	/* 47 (#974) */
 	MACH_TRAP(not_implemented, 0),		/* 48 */
 	MACH_TRAP(not_implemented, 0),		/* 49 */
 

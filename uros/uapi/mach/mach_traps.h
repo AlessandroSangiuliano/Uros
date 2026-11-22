@@ -195,6 +195,8 @@ kern_return_t	urmach_cap_register(const struct uros_cap *);
 kern_return_t	urmach_cap_revoke(const struct uros_cap *);
 /* #537: the revocation epoch, in the return word (trap 45) */
 kern_return_t	urmach_cap_epoch(void);
+/* #974: the revocations the kernel holds, and the dated among them (trap 47) */
+kern_return_t	urmach_cap_census(natural_t *, natural_t *);
 
 /*
  * Does `task' own the DMA region named by `region_id'? (#432)

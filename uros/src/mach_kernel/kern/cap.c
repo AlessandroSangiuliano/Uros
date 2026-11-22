@@ -1011,6 +1011,27 @@ cap_revoke_token(const struct uros_cap *t)
     return KERN_SUCCESS;
 }
 
+/*
+ * #974: how many revocations the kernel holds, and how many of them carry a
+ * deadline after which it forgets them -- trap 47, how a test sees an entry
+ * leave.  Any task may ask: a count says nothing about any one capability, as
+ * cap_server's cap_census says nothing either.
+ */
+kern_return_t
+urmach_cap_census(natural_t *user_entries, natural_t *user_dated)
+{
+    natural_t entries, dated;
+
+    simple_lock(&cap_lock);
+    entries = cap_state_entries;
+    dated = cap_state_dated;
+    simple_unlock(&cap_lock);
+    if (copyout((char *)&entries, (char *)user_entries, sizeof(entries)) != 0 ||
+        copyout((char *)&dated, (char *)user_dated, sizeof(dated)) != 0)
+        return KERN_INVALID_ADDRESS;
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 urmach_cap_revoke(const struct uros_cap *user_token)
 {

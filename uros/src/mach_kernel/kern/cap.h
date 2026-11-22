@@ -88,6 +88,13 @@ extern kern_return_t urmach_cap_verify(const struct uros_cap *user_token,
 extern kern_return_t urmach_cap_revoke(const struct uros_cap *user_token);
 
 /*
+ * #974: how many revocations the kernel holds, and how many of those carry a
+ * deadline after which it forgets them (trap 47).  Answered to any task.
+ */
+extern kern_return_t urmach_cap_census(natural_t *user_entries,
+                                       natural_t *user_dated);
+
+/*
  * Setup / bookkeeping entry point:
  *   - If cap_id == 0 the token is a "setup token": the first 32 bytes
  *     of its hmac[] field are installed as the HMAC key, if the caller is
