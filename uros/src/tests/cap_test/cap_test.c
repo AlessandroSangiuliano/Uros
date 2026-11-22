@@ -1529,6 +1529,15 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
  * #974: both tables' counts -- the revocations the kernel holds and how many
  * of them it will forget at their deadlines (trap 47), and the entries
  * cap_server's table holds and the ids it has handed out (cap_census).
+ *
+ * cap_server is asked first.  It hands the kernel a revocation before it
+ * forgets the entry, so a kernel count taken after its answer holds the
+ * revocation of every entry that answer no longer counts.  Taken before it, a
+ * sweep can fall between the two: cap_server answers once the sweep has ended,
+ * while the kernel has been read where the sweep had got to.  On i386 under
+ * KVM, where every revocation is kept, [55] read the kernel's anywhere from 29
+ * to 325 of the 342 it was to hold, with cap_server's table back, and said
+ * WRONG in 8 boots of 9 (#974, 22/11).
  */
 struct ct_census {
     natural_t kernel, dated, server, issued;
@@ -1537,10 +1546,11 @@ struct ct_census {
 static kern_return_t
 ct_census(struct ct_census *c)
 {
-    kern_return_t kr = urmach_cap_census(&c->kernel, &c->dated);
+    kern_return_t kr = mig_cap_census(cap_server_port(), &c->server,
+                                      &c->issued);
 
     if (kr == KERN_SUCCESS)
-        kr = mig_cap_census(cap_server_port(), &c->server, &c->issued);
+        kr = urmach_cap_census(&c->kernel, &c->dated);
     return kr;
 }
 
