@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #981
 Takes out: the HAL's check that a dead-name notification came through a send-once right: any message with that id, on the port the HAL checks in as "hal", is taken for the kernel's, as before #981.  notify_forge_test's [1] sends one from a task and gets no answer to it, the probe it sends after it on the same port answered first.
 Run: --entry 14 600 -smp 4
-Expect: notify_forge_test: \[1\] a message with a dead-name notification's id from a task: no answer to it, where the message sent after it on the same port was answered, as a notification gets none -- WRONG, the HAL took it for the kernel's
+Expect: notify_forge_test: \[1\] a message with a dead-name notification's id from a task: no answer to it, where the message sent after it got one -- WRONG, the HAL took it for the kernel's
 
 diff --git a/uros/src/servers/hal_server/hal_server.c b/uros/src/servers/hal_server/hal_server.c
 index 8ce6b682..c5ea9594 100644
