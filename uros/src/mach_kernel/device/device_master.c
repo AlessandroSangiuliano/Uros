@@ -4898,6 +4898,8 @@ ds_master_device_claim(
 	struct device_claim_entry fresh;
 	unsigned int b;
 	unsigned int		ops = 0, was;
+	uint32_t		check_type;
+	uint64_t		check_id;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -4969,19 +4971,47 @@ ds_master_device_claim(
 	 * operation afterwards needs to read a bit and not verify a token:
 	 * the buffer calls ask for DMA, the register mappings for MMIO, and an
 	 * interrupt of the device's for IRQ.
+	 *
+	 * 🔑 #982: or the capability names this one function, by its bus
+	 * address, as the HAL derives it for a driver it starts: then that
+	 * address is what each operation is checked against, and a token for
+	 * one device claims no other, of the same class or not.  The type is
+	 * read before the check and checked by it, under the MAC.  The bus is
+	 * no function, and is refused such a token.
 	 */
-	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
-				 (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
+	if (cap.resource_type == RESOURCE_PCI_FUNCTION) {
+		if (bdf == DEVICE_BDF_BUS) {
+			printf("device: the bus REFUSED to task 0x%lx — a "
+			       "capability for one function claims no bus\n",
+			       (unsigned long)me);
+			return KERN_NO_ACCESS;
+		}
+		check_type = RESOURCE_PCI_FUNCTION;
+		check_id = (uint64_t)bdf;
+	} else {
+		check_type = RESOURCE_PCI_DEVICE;
+		check_id = class_id;
+	}
+	kr = cap_check_in_kernel(&cap, check_type,
+				 (uint32_t)CAP_OP_PCI_DMA_MAP, check_id);
 	if (kr == KERN_SUCCESS)
 		ops |= (unsigned int)CAP_OP_PCI_DMA_MAP;
-	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
-				 (uint32_t)CAP_OP_PCI_MMIO_MAP, class_id);
+	kr = cap_check_in_kernel(&cap, check_type,
+				 (uint32_t)CAP_OP_PCI_MMIO_MAP, check_id);
 	if (kr == KERN_SUCCESS)
 		ops |= (unsigned int)CAP_OP_PCI_MMIO_MAP;
-	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
-				 (uint32_t)CAP_OP_PCI_IRQ, class_id);
+	kr = cap_check_in_kernel(&cap, check_type,
+				 (uint32_t)CAP_OP_PCI_IRQ, check_id);
 	if (kr == KERN_SUCCESS)
 		ops |= (unsigned int)CAP_OP_PCI_IRQ;
+	if (ops == 0 && check_type == RESOURCE_PCI_FUNCTION) {
+		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "
+		       "capability does not cover this function with any "
+		       "device operation (kr=%d)\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)me, (int)kr);
+		return KERN_NO_ACCESS;
+	}
 	if (ops == 0) {
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "
 		       "capability does not cover class 0x%06lx with any "
