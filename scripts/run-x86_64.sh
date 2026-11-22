@@ -655,6 +655,9 @@ must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_
 	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and three for each half of its DMA round trip, and says so either way (#977, #978).' \
 	edu_probe
 
+must_report 'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
+	'It asks the HAL for two edu devices, claims one, derives a child it never starts and asks its port, and nothing in it waits but for the HAL'"'"'s name, so silence is a stop inside the HAL, cap_server or the kernel'"'"'s claim (#982).  Without two edu devices it says NOT ASKED and counts 0 of 0.'
+
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
 
@@ -1035,6 +1038,12 @@ while :; do
 		# no register that says its mask, so edu_probe's EDU_DMA_REACH
 		# is this line's word.
 		EDU_ARGS="-device edu,dma_mask=0xffffffffffffffff"
+		shift ;;
+	--edu2)
+		# #982: two of them, the same class twice, for
+		# pci_function_test: a capability for one function claims
+		# that one and is refused the other.  Each as --edu makes it.
+		EDU_ARGS="-device edu,dma_mask=0xffffffffffffffff -device edu,dma_mask=0xffffffffffffffff"
 		shift ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
@@ -1742,6 +1751,7 @@ expected_reports() {
 		'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
+		'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
 		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
 		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='
