@@ -1,9 +1,17 @@
 Kind: ablation
 Issue: #821
 Takes out: the queue lock's release in cpm_allocate_below()'s refusal when no run lies low enough, as it was before #821: the free lock is given back and the queue lock kept.  On entry 68 edu's buffer within 20 bits is such a refusal, and the system must not go on.
-Run: --iommu intel --edu --entry 68 600 -smp 4
+Script: scripts/run-x86_64.sh
+Script: --iommu
+Script: intel
+Script: --edu
+Script: --entry
+Script: 68
+Script: 600
+Script: -smp
+Script: 4
 Expect: FAILED: 'edu_probe@.*: claimed ' appeared and 'edu_probe@.*' never did
-Note: the allocation edu_probe makes after the refusal takes the queue lock again and waits for ever, so the chora on edu never says whether its module took the device.  Without that allocation the boot passed with the lock kept, since nothing after the refusal asked for it.
+Note: the allocation edu_probe makes after the refusal takes the queue lock again and waits for ever, so the chora on edu never says whether its module took the device.  Without that allocation the boot passed with the lock kept, since nothing after the refusal asked for it.  Script: lines and not Run:, because what shows it is the harness's FAILED line, in its output: with a Run: line ablate.sh reads the boot's log, where the ablated arm has no line of its own, only a silence after the refusal, and on 22/11 it read 0 of 4 on omen with that FAILED line in each arm's output.
 
 diff --git a/uros/src/mach_kernel/vm/vm_resident.c b/uros/src/mach_kernel/vm/vm_resident.c
 index faed9004..88d15c21 100644
