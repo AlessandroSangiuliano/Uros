@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #982
+Takes out: the instance a child names under a parent's `any': derive_list gives the child the parent's id, so a child written with one function's address is granted any.  pci_function_test's [4] asks the child's port for B, and it is granted.
+Run: --edu2 --entry 14 600 -smp 4
+Expect: pci_function_test: \[4\] a child derived with [0-9a-f]{2}:[0-9a-f]{2}\.[0-7]'s address: for [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] 0x0, for [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] 0x0 -- WRONG, its manifest is not the address it was given
+
+diff --git a/uros/src/servers/cap_server/cap_manifest_table.c b/uros/src/servers/cap_server/cap_manifest_table.c
+index 979de353..b8610359 100644
+--- a/uros/src/servers/cap_server/cap_manifest_table.c
++++ b/uros/src/servers/cap_server/cap_manifest_table.c
+@@ -335,7 +335,7 @@ derive_list(const cap_manifest_entry_t *asked, uint32_t n_asked,
+                 id = may[j].resource_id;
+             else if (may[j].resource_id == CAP_MANIFEST_ANY_ID ||
+                      may[j].resource_id == asked[i].resource_id)
+-                id = asked[i].resource_id;
++                id = may[j].resource_id;
+             else
+                 continue;
+             ops = asked[i].ops & may[j].ops;

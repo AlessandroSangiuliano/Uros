@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #982
+Takes out: the bus's refusal of a capability for one function: one asked with the bus's own number passes the check, and only the HAL's claim on the bus stops it.  pci_function_test's [7] is refused all the same, so what shows it is the kernel's line: the claim is refused because the HAL holds the bus, not because such a capability claims no bus.
+Run: --edu2 --entry 14 600 -smp 4
+Expect: device: ffffff:1f\.6 REFUSED to task 0x[0-9a-f]+ \([^)]*\) .* it is claimed by task 0x[0-9a-f]+
+Note: the kernel prints the bus as ffffff:1f.6, and a task with no name as (-): neither the test nor the HAL names its task.  The merge test's pcifn verdict asks for the kernel's own line, "a capability for one function claims no bus", which this takes away.
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 23537f1b..f194f4a8 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -4980,12 +4980,6 @@ ds_master_device_claim(
+ 	 * no function, and is refused such a token.
+ 	 */
+ 	if (cap.resource_type == RESOURCE_PCI_FUNCTION) {
+-		if (bdf == DEVICE_BDF_BUS) {
+-			printf("device: the bus REFUSED to task 0x%lx — a "
+-			       "capability for one function claims no bus\n",
+-			       (unsigned long)me);
+-			return KERN_NO_ACCESS;
+-		}
+ 		check_type = RESOURCE_PCI_FUNCTION;
+ 		check_id = (uint64_t)bdf;
+ 	} else {

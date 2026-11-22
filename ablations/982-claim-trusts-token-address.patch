@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #982
+Takes out: the address a function capability is checked against: the claim checks it against the address the token itself names, so a token for one device claims any device it is presented for.  pci_function_test's [3] presents A's capability for B, of the same class, and B is claimed.
+Run: --edu2 --entry 14 600 -smp 4
+Expect: pci_function_test: \[3\] the capability for function [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] claimed [0-9a-f]{2}:[0-9a-f]{2}\.[0-7], of the same class: 0x0 -- WRONG, it claims any device of its class
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 23537f1b..f979f1f8 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -4987,7 +4987,7 @@ ds_master_device_claim(
+ 			return KERN_NO_ACCESS;
+ 		}
+ 		check_type = RESOURCE_PCI_FUNCTION;
+-		check_id = (uint64_t)bdf;
++		check_id = cap.resource_id;
+ 	} else {
+ 		check_type = RESOURCE_PCI_DEVICE;
+ 		check_id = class_id;
