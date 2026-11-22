@@ -1581,11 +1581,16 @@ ct_census(struct ct_census *c)
  * for the last deadline, by the clock, and asks for all of them to be gone.  A
  * machine that took longer than their lifetime to ask for them all saw some
  * leave before it could count them present, and cannot say that the census
- * sees them: NOT ASKED.  So is one on which a derivation came to cap_server
- * after its parent's deadline, by the clock, and was refused as expired, as it
- * must be: on i386 under KVM, the first of them swept while the last were
- * still asked for, cap_server read the derivation from the 185th after that
- * one's deadline, and the arm said WRONG (#974, 22/11).
+ * sees them -- only that they left.  Nor can one on which a derivation came to
+ * cap_server after its parent's deadline, by the clock, and was refused as
+ * expired, as it must be: on i386 under KVM, the first of them swept while the
+ * last were still asked for, cap_server read the derivation from the 185th
+ * after that one's deadline, and the arm said WRONG (#974, 22/11).  Such a
+ * round asks whether they left, and the arm asks again with a lifetime four
+ * times what asking for them all took at that round's pace, from twice
+ * CT55_MS to CT55_MS_MOST: on a laptop on battery, i386 under KVM took 4 to
+ * 4.7 s to ask for the 250, and an arm of one round said NOT ASKED in 3 boots
+ * of 4.  A second round as slow is NOT ASKED.
  *
  * ⚠️ And it asked again only until cap_server's table was back, taking the
  * kernel's count with that answer.  A sweep begun before the last deadline
@@ -1602,6 +1607,8 @@ ct_census(struct ct_census *c)
  */
 #define CT55_CAPS	250u
 #define CT55_MS		1000u
+/* The longest lifetime a second round asks for: its wait is bounded by it. */
+#define CT55_MS_MOST	20000u
 #define CT55_ID		0x9740ULL
 #define CT55_SLACK	32
 #define CT55_POLL_MS	50u
@@ -1623,75 +1630,80 @@ ct55_settled(const struct ct_census *c0, const struct ct_census *c, long put)
                                        : kernel_grew >= put);
 }
 
+/*
+ * What one round of [55] asked for, and how long asking took: from before the
+ * first request to after the last, by the capability clock.
+ */
+struct ct55_round {
+    unsigned int asked, derived;
+    uint64_t     took;
+    int          late;	/* a derivation refused as expired, its parent's
+                           deadline past by the clock */
+};
+
+/*
+ * One round of [55], with capabilities of `ms': 1 if both tables said what
+ * they must, 0 if not, said WRONG here; -1 if asking for them took past their
+ * lifetime and they left, which is all such a round can say and its caller
+ * says it.  A slow round waits for both tables as any round does, and says
+ * WRONG if they keep them: that half needs no capability counted present.
+ */
 static int
-a_deadline_leaves_both_tables(void)
+ct55_round(mach_port_t clk, unsigned int ms, struct ct55_round *r)
 {
     struct ct_census c0, c1, c2;
     struct uros_cap  t, child;
-    mach_port_t      host = mach_host_self(), clk = MACH_PORT_NULL;
-    unsigned int     i, asked = 0, derived = 0, waits = 0;
+    unsigned int     i, waits = 0;
     uint64_t         start, issued, last = 0, now = 0;
     long             put, present;
-    kern_return_t    kr, k1, k2 = KERN_SUCCESS;
-    int              ok, late = 0;
+    kern_return_t    kr = KERN_SUCCESS, k1, k2 = KERN_SUCCESS;
+    int              slow, settled;
 
-    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
-    (void)mach_port_deallocate(mach_task_self(), host);
-    if (kr != KERN_SUCCESS || ct_census(&c0) != KERN_SUCCESS) {
-        printf("cap_test: [55] WRONG — the clock (%d) or the census was not "
-               "answered (#974)\n", (int)kr);
-        if (kr == KERN_SUCCESS)
-            (void)mach_port_deallocate(mach_task_self(), clk);
+    memset(r, 0, sizeof(*r));
+    memset(&t, 0, sizeof(t));
+    if (ct_census(&c0) != KERN_SUCCESS) {
+        printf("cap_test: [55] WRONG — the census was not answered (#974)\n");
         return 0;
     }
     start = ct50_now(clk);
     for (i = 0; i < CT55_CAPS && kr == KERN_SUCCESS; i++) {
         memset(&t, 0, sizeof(t));
-        kr = cap_request(RESOURCE_BLK_DEVICE, CT55_ID, CAP_OP_BLK_READ,
-                         CT55_MS, &t);
+        kr = cap_request(RESOURCE_BLK_DEVICE, CT55_ID, CAP_OP_BLK_READ, ms,
+                         &t);
         if (kr != KERN_SUCCESS)
             break;
-        asked++;
+        r->asked++;
         last = t.expires;
         if (i % 4 == 0) {
             memset(&child, 0, sizeof(child));
             kr = cap_derive(&t, CAP_OP_BLK_READ, 0, &child);
             if (kr == KERN_SUCCESS)
-                derived++;
+                r->derived++;
             else
-                late = kr == CAP_ERR_EXPIRED;
+                r->late = kr == CAP_ERR_EXPIRED;
         }
     }
     issued = ct50_now(clk);
     /* A derivation refused as expired, its parent's deadline past by the clock. */
-    late = late && issued != 0 && issued >= t.expires;
+    r->late = r->late && issued != 0 && issued >= t.expires;
     k1 = ct_census(&c1);
-    put = (long)asked + (long)derived;
-    if ((kr != KERN_SUCCESS && !late) || k1 != KERN_SUCCESS || start == 0 ||
+    put = (long)r->asked + (long)r->derived;
+    if ((kr != KERN_SUCCESS && !r->late) || k1 != KERN_SUCCESS || start == 0 ||
         issued == 0) {
         printf("cap_test: [55] WRONG — %u of %u capabilities asked for with "
                "%u ms and %u children, then %d; the census %d, the clock %s "
-               "(#974)\n", asked, CT55_CAPS, CT55_MS, derived, (int)kr,
+               "(#974)\n", r->asked, CT55_CAPS, ms, r->derived, (int)kr,
                (int)k1, start != 0 && issued != 0 ? "read" : "not read");
-        (void)mach_port_deallocate(mach_task_self(), clk);
         return 0;
     }
-    if (late || issued - start >= (uint64_t)CT55_MS * 1000000ULL) {
-        printf("cap_test: [55] NOT ASKED — asking for %u capabilities took "
-               "%llu ms, past their lifetime of %u ms, so some left before "
-               "they could be counted present%s (#974)\n", asked,
-               (unsigned long long)((issued - start) / 1000000ULL), CT55_MS,
-               late ? "; cap_server read the last one's derivation after its "
-                      "deadline, and refused it as expired" : "");
-        (void)mach_port_deallocate(mach_task_self(), clk);
-        return 1;
-    }
+    r->took = issued - start;
+    slow = r->late || r->took >= (uint64_t)ms * 1000000ULL;
 
     /* Past the last deadline, by its clock, and then until both tables say it. */
     do {
         (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
         now = ct50_now(clk);
-    } while (now != 0 && now < last && ++waits < CT55_WAIT_MS / 20);
+    } while (now != 0 && now < last && ++waits < (ms + CT55_WAIT_MS) / 20);
     for (waits = 0; ; waits++) {
         k2 = ct_census(&c2);
         if (k2 != KERN_SUCCESS || ct55_settled(&c0, &c2, put) ||
@@ -1700,18 +1712,17 @@ a_deadline_leaves_both_tables(void)
         (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, CT55_POLL_MS);
     }
     now = ct50_now(clk);
-    (void)mach_port_deallocate(mach_task_self(), clk);
+    settled = k2 == KERN_SUCCESS && ct55_settled(&c0, &c2, put);
+    if (slow && settled)
+        return -1;
 
     present = CT_GREW(c0.server, c1.server);
-    ok = k2 == KERN_SUCCESS
-      && present >= put - CT55_SLACK
-      && ct55_settled(&c0, &c2, put);
-    if (ok) {
+    if (settled && present >= put - CT55_SLACK) {
         printf("cap_test: [55] %u capabilities asked for with %u ms, in %llu "
                "ms, and %u children: cap_server's table went from %u to %u, "
                "and back to %u %llu ms after the last deadline; the kernel's "
-               "from %u to %u, %s (#974)\n", asked, CT55_MS,
-               (unsigned long long)((issued - start) / 1000000ULL), derived,
+               "from %u to %u, %s (#974)\n", r->asked, ms,
+               (unsigned long long)(r->took / 1000000ULL), r->derived,
                (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
                (unsigned long long)(now > last ? (now - last) / 1000000ULL : 0),
                (unsigned)c0.kernel, (unsigned)c2.kernel,
@@ -1720,18 +1731,64 @@ a_deadline_leaves_both_tables(void)
                : "every revocation kept, since this clock can be set");
         return 1;
     }
-    printf("cap_test: [55] WRONG — %u capabilities asked for with %u ms and "
-           "%u children: cap_server's table went from %u to %u, and to %u "
-           "%llu ms after the last deadline; the kernel's from %u to %u (%d); "
-           "where cap_server's must have held them all and then come back "
-           "within %d, and the kernel's %s (#974)\n", asked, CT55_MS, derived,
+    printf("cap_test: [55] WRONG — %u capabilities asked for with %u ms, in "
+           "%llu ms, and %u children: cap_server's table went from %u to %u, "
+           "and to %u %llu ms after the last deadline; the kernel's from %u "
+           "to %u (%d); where cap_server's must have %scome back within %d, "
+           "and the kernel's %s (#974)\n", r->asked, ms,
+           (unsigned long long)(r->took / 1000000ULL), r->derived,
            (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
            (unsigned long long)(now > last ? (now - last) / 1000000ULL : 0),
-           (unsigned)c0.kernel, (unsigned)c2.kernel, (int)k2, CT55_SLACK,
+           (unsigned)c0.kernel, (unsigned)c2.kernel, (int)k2,
+           slow ? "" : "held them all and then ", CT55_SLACK,
            URMACH_CAP_CLOCK_NEVER_SET
            ? "come back within it too, a deadline's revocation given no entry"
            : "grow by every one, since this clock can be set");
     return 0;
+}
+
+static int
+a_deadline_leaves_both_tables(void)
+{
+    struct ct55_round first, again;
+    mach_port_t       host = mach_host_self(), clk = MACH_PORT_NULL;
+    kern_return_t     kr;
+    uint64_t          pace;
+    unsigned int      ms;
+    int               r;
+
+    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [55] WRONG — the capability clock was not given "
+               "(%d) (#974)\n", (int)kr);
+        return 0;
+    }
+    r = ct55_round(clk, CT55_MS, &first);
+    if (r < 0) {
+        /* Four times what all of them would take at the first round's pace. */
+        pace = first.took / 1000000ULL * CT55_CAPS /
+               (first.asked != 0 ? first.asked : 1);
+        ms = pace * 4 < 2ULL * CT55_MS ? 2 * CT55_MS
+           : pace * 4 > CT55_MS_MOST ? CT55_MS_MOST : (unsigned int)(pace * 4);
+        printf("cap_test: [55] asking for %u capabilities took %llu ms, past "
+               "their lifetime of %u ms%s: asked again, with %u ms (#974)\n",
+               first.asked, (unsigned long long)(first.took / 1000000ULL),
+               CT55_MS, first.late ? ", a derivation read after its parent's "
+               "deadline" : "", ms);
+        r = ct55_round(clk, ms, &again);
+        if (r < 0)
+            printf("cap_test: [55] NOT ASKED — asking for %u capabilities took "
+                   "%llu ms, past their lifetime of %u ms, and asked again "
+                   "with %u ms, %llu ms%s: some left before they could be "
+                   "counted present (#974)\n", first.asked,
+                   (unsigned long long)(first.took / 1000000ULL), CT55_MS, ms,
+                   (unsigned long long)(again.took / 1000000ULL),
+                   again.late ? ", a derivation read after its parent's "
+                   "deadline" : "");
+    }
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    return r != 0;
 }
 
 /*
