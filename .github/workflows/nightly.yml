@@ -20,11 +20,20 @@
 # A run's GITHUB_TOKEN starts no workflow by the events it causes, except
 # workflow_dispatch and repository_dispatch, which always create a run
 # (GitHub's documentation on triggering a workflow from a workflow).
+#
+# The weekly sweep (#975): on Sundays a second cron dispatches campaign.yml at
+# the same branch with `sweep: all', every patch of ablations/ booted ablated
+# once, and waits for the run, whose verdict becomes this one's.  A run started
+# here is github-actions[bot]'s, and its failure is told to nobody; a scheduled
+# run's failure is told to whoever last wrote its cron (GitHub's documentation
+# on notifications for workflow runs).  So a patch no longer caught fails this
+# run, and someone hears of it.  campaign.yml's header says why it runs.
 name: nightly
 
 on:
   schedule:
     - cron: "23 1 * * *"
+    - cron: "23 3 * * 0"
 
 permissions:
   actions: write
@@ -33,11 +42,15 @@ permissions:
 jobs:
   dispatch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The nightly's dispatch takes seconds; the sweep's step waits for the
+    # sweep, eight jobs of about 80 patches each.
+    timeout-minutes: 355
+    env:
+      SWEEP_CRON: "23 3 * * 0"
     steps:
-      - name: Dispatch the campaign at NIGHTLY_REF
+      - name: The branch, NIGHTLY_REF's or master
+        id: ref
         env:
-          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WANT: ${{ vars.NIGHTLY_REF }}
         run: |
@@ -50,8 +63,48 @@ jobs:
           fi
           if [ -n "$why" ]; then
             ref=master
-            echo "::warning::$why: the nightly is dispatched at master (#961)"
-            echo "**$why**: the nightly is dispatched at master (#961)" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::$why: the campaign is dispatched at master (#961)"
+            echo "**$why**: the campaign is dispatched at master (#961)" >> "$GITHUB_STEP_SUMMARY"
           fi
-          gh workflow run campaign.yml --repo "$REPO" --ref "$ref" -f nightly=true
-          echo "the nightly: campaign.yml dispatched at $ref, with nightly set (#961)" >> "$GITHUB_STEP_SUMMARY"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Dispatch the campaign at NIGHTLY_REF
+        if: github.event.schedule != env.SWEEP_CRON
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          gh workflow run campaign.yml --repo "$REPO" --ref "$REF" -f nightly=true
+          echo "the nightly: campaign.yml dispatched at $REF, with nightly set (#961)" >> "$GITHUB_STEP_SUMMARY"
+      - name: The weekly sweep, dispatched at NIGHTLY_REF and waited for
+        if: github.event.schedule == env.SWEEP_CRON
+        timeout-minutes: 350
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          # The step's shell is bash -eo pipefail: a failure inside $(...) would
+          # end it before its output were printed, and so would a grep that
+          # finds nothing.
+          if ! out=$(gh workflow run campaign.yml --repo "$REPO" --ref "$REF" -f sweep=all -f jobs=8 2>&1); then
+            printf '%s\n' "$out"
+            echo "::error::the sweep was not dispatched (#975)"
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          id=$(printf '%s\n' "$out" | grep -m 1 -oE '/actions/runs/[0-9]+' | cut -d/ -f4 || true)
+          if [ -z "$id" ]; then
+            echo "::error::gh did not say which run it started, so the sweep cannot be waited for (#975)"
+            echo "**gh did not say which run it started**: the sweep is not waited for (#975)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "the weekly sweep: campaign.yml dispatched at $REF, with sweep all on eight jobs, as run $id (#975)" >> "$GITHUB_STEP_SUMMARY"
+          if gh run watch "$id" --repo "$REPO" --exit-status --interval 300 > /dev/null; then
+            echo "the sweep's run $id passed: every patch caught (#975)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::the sweep's run $id failed: a patch no longer caught, or the run itself (#975)"
+            echo "**the sweep's run $id failed**: a patch no longer caught, or the run itself (#975)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
