@@ -1526,6 +1526,395 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
 }
 
 /*
+ * #974: both tables' counts -- the revocations the kernel holds and how many
+ * of them it will forget at their deadlines (trap 47), and the entries
+ * cap_server's table holds and the ids it has handed out (cap_census).
+ */
+struct ct_census {
+    natural_t kernel, dated, server, issued;
+};
+
+static kern_return_t
+ct_census(struct ct_census *c)
+{
+    kern_return_t kr = urmach_cap_census(&c->kernel, &c->dated);
+
+    if (kr == KERN_SUCCESS)
+        kr = mig_cap_census(cap_server_port(), &c->server, &c->issued);
+    return kr;
+}
+
+/* A count's change since `a', which may be a fall. */
+#define CT_GREW(a, b)	((long)(b) - (long)(a))
+
+/*
+ * Test [55]: what a deadline revokes leaves both tables (#974).
+ *
+ * Every capability asked for with a lifetime is revoked when its deadline
+ * comes (#747), and each one stayed in cap_server's table and in the kernel's
+ * for as long as the system ran.  CT55_CAPS are asked for here with CT55_MS,
+ * every fourth with a child derived from it, and both tables are read before,
+ * once all are issued -- so that a census blind to them says so -- and after
+ * the last deadline, once cap_server's table is back within CT55_SLACK of
+ * where it was or CT55_WAIT_MS have passed.  Other tasks ask and revoke
+ * meanwhile, which CT55_SLACK is for: a table that kept them is past it by
+ * CT55_CAPS and more.
+ *
+ * 🔑 The kernel gives no entry to a revocation whose deadline has come, on a
+ * clock that is never set (URMACH_CAP_CLOCK_NEVER_SET).  i386's can be set,
+ * and keeps every one: there the kernel must have grown by all of them, and
+ * that is what is asked.
+ *
+ * ⚠️ A first form of this arm waited until half of them had left, and passed
+ * a boot in which cap_server's table still held 251 more than at the start --
+ * those whose deadlines had not come yet, as its own sweeps said.  So it waits
+ * for the last deadline, by the clock, and asks for all of them to be gone.  A
+ * machine that took longer than their lifetime to ask for them all saw some
+ * leave before it could count them present, and cannot say that the census
+ * sees them: NOT ASKED.
+ */
+/*
+ * Two hundred and fifty, with their sixty-two children, against a slack of
+ * thirty-two: a table that kept them is ten times past it.  A thousand cost
+ * five seconds a boot and nearly doubled its log, cap_server saying each one
+ * asked for, derived and swept (#974, 22/11).
+ */
+#define CT55_CAPS	250u
+#define CT55_MS		1000u
+#define CT55_ID		0x9740ULL
+#define CT55_SLACK	32
+#define CT55_POLL_MS	50u
+#define CT55_WAIT_MS	30000u
+
+static int
+a_deadline_leaves_both_tables(void)
+{
+    struct ct_census c0, c1, c2;
+    struct uros_cap  t, child;
+    mach_port_t      host = mach_host_self(), clk = MACH_PORT_NULL;
+    unsigned int     i, asked = 0, derived = 0, waits = 0;
+    uint64_t         start, issued, last = 0, now = 0;
+    long             put, present, kernel_grew, server_grew;
+    kern_return_t    kr, k1, k2 = KERN_SUCCESS;
+    int              ok;
+
+    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS || ct_census(&c0) != KERN_SUCCESS) {
+        printf("cap_test: [55] WRONG — the clock (%d) or the census was not "
+               "answered (#974)\n", (int)kr);
+        if (kr == KERN_SUCCESS)
+            (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    start = ct50_now(clk);
+    for (i = 0; i < CT55_CAPS && kr == KERN_SUCCESS; i++) {
+        memset(&t, 0, sizeof(t));
+        kr = cap_request(RESOURCE_BLK_DEVICE, CT55_ID, CAP_OP_BLK_READ,
+                         CT55_MS, &t);
+        if (kr != KERN_SUCCESS)
+            break;
+        asked++;
+        last = t.expires;
+        if (i % 4 == 0) {
+            memset(&child, 0, sizeof(child));
+            kr = cap_derive(&t, CAP_OP_BLK_READ, 0, &child);
+            if (kr == KERN_SUCCESS)
+                derived++;
+        }
+    }
+    issued = ct50_now(clk);
+    k1 = ct_census(&c1);
+    put = (long)asked + (long)derived;
+    if (kr != KERN_SUCCESS || k1 != KERN_SUCCESS || start == 0 ||
+        issued == 0) {
+        printf("cap_test: [55] WRONG — %u of %u capabilities asked for with "
+               "%u ms and %u children, then %d; the census %d, the clock %s "
+               "(#974)\n", asked, CT55_CAPS, CT55_MS, derived, (int)kr,
+               (int)k1, start != 0 && issued != 0 ? "read" : "not read");
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    if (issued - start >= (uint64_t)CT55_MS * 1000000ULL) {
+        printf("cap_test: [55] NOT ASKED — asking for %u capabilities took "
+               "%llu ms, past their lifetime of %u ms, so some left before "
+               "they could be counted present (#974)\n", asked,
+               (unsigned long long)((issued - start) / 1000000ULL), CT55_MS);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 1;
+    }
+
+    /* Past the last deadline, by its clock, and then until the table is back. */
+    do {
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        now = ct50_now(clk);
+    } while (now != 0 && now < last && ++waits < CT55_WAIT_MS / 20);
+    for (waits = 0; ; waits++) {
+        k2 = ct_census(&c2);
+        if (k2 != KERN_SUCCESS || CT_GREW(c0.server, c2.server) <= CT55_SLACK ||
+            waits >= CT55_WAIT_MS / CT55_POLL_MS)
+            break;
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, CT55_POLL_MS);
+    }
+    now = ct50_now(clk);
+    (void)mach_port_deallocate(mach_task_self(), clk);
+
+    present = CT_GREW(c0.server, c1.server);
+    kernel_grew = CT_GREW(c0.kernel, c2.kernel);
+    server_grew = CT_GREW(c0.server, c2.server);
+    ok = k2 == KERN_SUCCESS
+      && present >= put - CT55_SLACK
+      && server_grew <= CT55_SLACK
+      && (URMACH_CAP_CLOCK_NEVER_SET ? kernel_grew <= CT55_SLACK
+                                     : kernel_grew >= put);
+    if (ok) {
+        printf("cap_test: [55] %u capabilities asked for with %u ms, in %llu "
+               "ms, and %u children: cap_server's table went from %u to %u, "
+               "and back to %u %llu ms after the last deadline; the kernel's "
+               "from %u to %u, %s (#974)\n", asked, CT55_MS,
+               (unsigned long long)((issued - start) / 1000000ULL), derived,
+               (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
+               (unsigned long long)(now > last ? (now - last) / 1000000ULL : 0),
+               (unsigned)c0.kernel, (unsigned)c2.kernel,
+               URMACH_CAP_CLOCK_NEVER_SET
+               ? "a revocation that a deadline made given no entry"
+               : "every revocation kept, since this clock can be set");
+        return 1;
+    }
+    printf("cap_test: [55] WRONG — %u capabilities asked for with %u ms and "
+           "%u children: cap_server's table went from %u to %u, and to %u "
+           "%llu ms after the last deadline; the kernel's from %u to %u (%d); "
+           "where cap_server's must have held them all and then come back "
+           "within %d, and the kernel's %s (#974)\n", asked, CT55_MS, derived,
+           (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
+           (unsigned long long)(now > last ? (now - last) / 1000000ULL : 0),
+           (unsigned)c0.kernel, (unsigned)c2.kernel, (int)k2, CT55_SLACK,
+           URMACH_CAP_CLOCK_NEVER_SET
+           ? "come back within it too, a deadline's revocation given no entry"
+           : "grow by every one, since this clock can be set");
+    return 0;
+}
+
+/*
+ * Test [56]: a revocation made before the deadline is kept until it, and
+ * forgotten after (#974).
+ *
+ * CT56_CAPS capabilities asked for with CT56_MS are revoked at once.  Until
+ * their deadline only the kernel's revocation refuses them at the trap, so the
+ * kernel must hold one for each whose deadline has not come when it is
+ * counted, dated, and the trap and cap_server must refuse them as revoked --
+ * cap_server having forgotten them already.  Once the deadline has passed, the
+ * next revocation frees them: here that of one more capability, asked for
+ * after it and revoked at once.  Then the kernel must hold none of them, and
+ * that one, dated.  Others revoke meanwhile, which CT56_SLACK is for.  i386
+ * keeps every revocation, and must have kept these.
+ *
+ * ⚠️ Every revocation frees the entries whose deadlines have come, these
+ * arm's own among them: a first form of this arm counted all CT56_CAPS when it
+ * had asked for them with 300 ms, and in a boot under KVM that took longer the
+ * kernel held 48, the rest freed by the revocations after them.  So what is
+ * counted is the ones whose deadlines have not come, and an arm that took
+ * past half their lifetime to revoke them cannot ask: NOT ASKED.
+ *
+ * ⚠️ Not the revocation a deadline makes, waited for by asking cap_verify:
+ * the deadline is checked before the table, and past it cap_verify answers
+ * CAP_ERR_EXPIRED whether the sweep has come or not.
+ */
+#define CT56_CAPS	64u
+#define CT56_MS		1000u
+#define CT56_ID		0x9741ULL
+#define CT56_SLACK	16
+
+static int
+a_revocation_is_kept_until_its_deadline(void)
+{
+    struct uros_cap  t[CT56_CAPS], later;
+    struct ct_census c0, c1, c2;
+    mach_port_t      host = mach_host_self(), clk = MACH_PORT_NULL;
+    kern_return_t    kr, rkr = KERN_SUCCESS, trap = KERN_SUCCESS,
+                     rpc = KERN_SUCCESS, k1, k2 = KERN_SUCCESS;
+    unsigned int     i, revoked = 0, waits = 0;
+    uint64_t         start, counted, now = 0;
+    long             kept, dated, left, server, due = 0;
+    int              ok;
+
+    kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS || ct_census(&c0) != KERN_SUCCESS) {
+        printf("cap_test: [56] WRONG — the clock (%d) or the census was not "
+               "answered (#974)\n", (int)kr);
+        if (kr == KERN_SUCCESS)
+            (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    start = ct50_now(clk);
+    for (i = 0; i < CT56_CAPS; i++) {
+        memset(&t[i], 0, sizeof(t[i]));
+        kr = cap_request(RESOURCE_BLK_DEVICE, CT56_ID, CAP_OP_BLK_READ,
+                         CT56_MS, &t[i]);
+        if (kr != KERN_SUCCESS)
+            break;
+        rkr = cap_revoke(t[i].cap_id);
+        if (rkr != KERN_SUCCESS)
+            break;
+        revoked++;
+    }
+    if (revoked > 0) {
+        trap = urmach_cap_verify(&t[revoked - 1], cap_self(),
+                                 RESOURCE_BLK_DEVICE, CAP_OP_BLK_READ,
+                                 CT56_ID);
+        rpc = cap_verify(&t[revoked - 1], cap_self(), RESOURCE_BLK_DEVICE,
+                         CAP_OP_BLK_READ, CT56_ID);
+    }
+    counted = ct50_now(clk);
+    k1 = ct_census(&c1);
+    if (kr != KERN_SUCCESS || rkr != KERN_SUCCESS || k1 != KERN_SUCCESS ||
+        start == 0 || counted == 0) {
+        printf("cap_test: [56] WRONG — %u of %u capabilities asked for with "
+               "%u ms and revoked at once, then %d and %d; the census %d, the "
+               "clock %s (#974)\n", revoked, CT56_CAPS, CT56_MS, (int)kr,
+               (int)rkr, (int)k1, start != 0 && counted != 0 ? "read"
+               : "not read");
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    for (i = 0; i < revoked; i++)
+        if (t[i].expires > counted)
+            due++;
+    if (due < (long)revoked / 2) {
+        printf("cap_test: [56] NOT ASKED — asking for %u capabilities and "
+               "revoking them took %llu ms, and only %ld of their deadlines "
+               "of %u ms had not come when they were counted (#974)\n",
+               revoked, (unsigned long long)((counted - start) / 1000000ULL),
+               due, CT56_MS);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 1;
+    }
+    kept = CT_GREW(c0.kernel, c1.kernel);
+    dated = CT_GREW(c0.dated, c1.dated);
+    server = CT_GREW(c0.server, c1.server);
+
+    /* Past their deadline, by its clock, and then one more revocation. */
+    do {
+        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        now = ct50_now(clk);
+    } while (now != 0 && now < t[revoked - 1].expires + 20000000ULL &&
+             ++waits < 1000);
+    memset(&later, 0, sizeof(later));
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT56_ID, CAP_OP_BLK_READ, CT56_MS,
+                     &later);
+    if (kr == KERN_SUCCESS)
+        kr = cap_revoke(later.cap_id);
+    k2 = ct_census(&c2);
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    left = CT_GREW(c0.kernel, c2.kernel);
+
+    ok = now != 0 && kr == KERN_SUCCESS && k2 == KERN_SUCCESS
+      && trap == CAP_ERR_REVOKED && rpc == CAP_ERR_REVOKED
+      && server <= CT56_SLACK
+      && (URMACH_CAP_CLOCK_NEVER_SET
+          ? kept >= due - CT56_SLACK && dated >= due - CT56_SLACK
+            && left <= CT56_SLACK
+          : kept >= (long)revoked && left >= (long)revoked);
+    if (ok) {
+        printf("cap_test: [56] %u capabilities asked for with %u ms and "
+               "revoked at once, in %llu ms, were refused as revoked by the "
+               "trap and by cap_server, which kept none of them (%+ld), while "
+               "the kernel held %+ld, %+ld dated, %ld of them still due; past "
+               "their deadline, %s: %+ld (#974)\n", revoked, CT56_MS,
+               (unsigned long long)((counted - start) / 1000000ULL), server,
+               kept, dated, due,
+               URMACH_CAP_CLOCK_NEVER_SET
+               ? "the next revocation freed them"
+               : "kept, since this clock can be set", left);
+        return 1;
+    }
+    printf("cap_test: [56] WRONG — %u capabilities asked for with %u ms and "
+           "revoked at once, %ld still due: the trap %d and cap_server %d, "
+           "where both must be CAP_ERR_REVOKED(%d); cap_server's table %+ld; "
+           "the kernel's %+ld, %+ld dated, and past the deadline %+ld (one "
+           "more revoked %d, the census %d), where it must hold the ones due "
+           "and %s after, within %d (#974)\n", revoked, CT56_MS, due,
+           (int)trap, (int)rpc, (int)CAP_ERR_REVOKED, server, kept, dated,
+           left, (int)kr, (int)k2,
+           URMACH_CAP_CLOCK_NEVER_SET ? "none of them"
+           : "all of them, since this clock can be set", CT56_SLACK);
+    return 0;
+}
+
+/*
+ * Test [57]: a capability forgotten leaves its parent's list of children
+ * (#974).
+ *
+ * A revoked tree is forgotten, and its links are in the tokens: a parent's
+ * list of children runs through each child's next-sibling link, and a walk
+ * ends at an id it cannot find.  Four children are derived from a parent here
+ * -- newest first in its list, the fourth, the third, the second, the first --
+ * and the fourth and the second are revoked: one that the parent's own link
+ * names, and one that a sibling's does.  Then the parent is revoked, and the
+ * first and the third must be refused with it, by the trap and by cap_server.
+ * A forgotten child left in the list would end the cascade at itself.  And a
+ * revocation of a forgotten id is answered CAP_ERR_REVOKED, and of an id never
+ * issued CAP_ERR_INVALID_TOKEN.  With a lifetime the arm comes nowhere near,
+ * so that the kernel's five revocations are dated, and go.
+ */
+#define CT57_ID		0x9742ULL
+#define CT57_MS		60000u
+
+static int
+a_forgotten_child_leaves_the_list(void)
+{
+    struct uros_cap parent, c[4];
+    kern_return_t   kr, r4, r2, rp, again, never, v[4], w[4];
+    unsigned int    i;
+    int             ok;
+
+    memset(&parent, 0, sizeof(parent));
+    kr = cap_request(RESOURCE_BLK_DEVICE, CT57_ID, CAP_OP_BLK_READ, CT57_MS,
+                     &parent);
+    for (i = 0; i < 4 && kr == KERN_SUCCESS; i++) {
+        memset(&c[i], 0, sizeof(c[i]));
+        kr = cap_derive(&parent, CAP_OP_BLK_READ, 0, &c[i]);
+    }
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [57] WRONG — a parent and its four children were "
+               "not issued: %d (#974)\n", (int)kr);
+        return 0;
+    }
+    r4 = cap_revoke(c[3].cap_id);
+    r2 = cap_revoke(c[1].cap_id);
+    rp = cap_revoke(parent.cap_id);
+    again = cap_revoke(c[1].cap_id);
+    never = cap_revoke(~0ULL);
+    for (i = 0; i < 4; i++) {
+        v[i] = urmach_cap_verify(&c[i], cap_self(), RESOURCE_BLK_DEVICE,
+                                 CAP_OP_BLK_READ, CT57_ID);
+        w[i] = cap_verify(&c[i], cap_self(), RESOURCE_BLK_DEVICE,
+                          CAP_OP_BLK_READ, CT57_ID);
+    }
+    ok = r4 == KERN_SUCCESS && r2 == KERN_SUCCESS && rp == KERN_SUCCESS
+      && again == CAP_ERR_REVOKED && never == CAP_ERR_INVALID_TOKEN;
+    for (i = 0; i < 4; i++)
+        ok = ok && v[i] == CAP_ERR_REVOKED && w[i] == CAP_ERR_REVOKED;
+    if (ok) {
+        printf("cap_test: [57] of four children, the newest and the second "
+               "revoked and forgotten, then their parent: the first and the "
+               "third were refused with it by the trap and by cap_server; "
+               "a forgotten id revoked again answered %d, one never issued "
+               "%d (#974)\n", (int)again, (int)never);
+        return 1;
+    }
+    printf("cap_test: [57] WRONG — four children, the fourth revoked (%d) and "
+           "the second (%d), then their parent (%d): the first %d and %d, the "
+           "third %d and %d by the trap and by cap_server, where all must be "
+           "CAP_ERR_REVOKED(%d); the second revoked again %d, an id never "
+           "issued %d (#974)\n", (int)r4, (int)r2, (int)rp, (int)v[0],
+           (int)w[0], (int)v[2], (int)w[2], (int)CAP_ERR_REVOKED, (int)again,
+           (int)never);
+    return 0;
+}
+
+/*
  * Test [41]: no task gives bootstrap a provisioning port (#743).
  *
  * cap_provision_task answers on one port, and bootstrap provisions through
@@ -6047,6 +6436,13 @@ main(int argc, char **argv)
     if (!a_capability_names_its_owner())
         pass = 0;
     if (!a_capability_is_derived_to_a_named_task())
+        pass = 0;
+    /* #974: what is revoked leaves both tables, and no list it ran through. */
+    if (!a_deadline_leaves_both_tables())
+        pass = 0;
+    if (!a_revocation_is_kept_until_its_deadline())
+        pass = 0;
+    if (!a_forgotten_child_leaves_the_list())
         pass = 0;
 
     /*
