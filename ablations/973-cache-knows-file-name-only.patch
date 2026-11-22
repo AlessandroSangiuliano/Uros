@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #973
+Takes out: the class in the cache's key: a module is known by its file name alone again, so the second pool's twin.so is never fetched, and modload_load_named() hands back the first pool's, opened under the first pool's path.  modload_test's [2] is given modload_a's twin.
+Run: --iommu intel --entry 68 600 -smp 4
+Expect: modload_test: \[2\] modload_load_named\("modload_b", "twin.so"\) gave modload_a/twin.so A, where modload_b/twin.so B was asked for -- WRONG
+
+diff --git a/uros/src/lib/libmodload/modload.c b/uros/src/lib/libmodload/modload.c
+index 1f4b35ed..a3d66113 100644
+--- a/uros/src/lib/libmodload/modload.c
++++ b/uros/src/lib/libmodload/modload.c
+@@ -82,8 +82,7 @@ find_cached_module(const char *class, const char *name)
+ {
+ 	int i;
+ 	for (i = 0; i < n_cached_modules; i++) {
+-		if (strcmp(cached_modules[i].class, class) == 0 &&
+-		    strcmp(cached_modules[i].name, name) == 0)
++		if (strcmp(cached_modules[i].name, name) == 0)	/* 973-cache-knows-file-name-only */
+ 			return &cached_modules[i];
+ 	}
+ 	return NULL;

@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #973
+Takes out: the class modload_load_class() loads: it walks the whole cache from index 0 again, and loads the modules of every class fetched before beside its own.  modload_test's [3] is given modload_a's twin with modload_b's two modules.
+Run: --iommu intel --entry 68 600 -smp 4
+Expect: modload_test: \[3\] modload_load_class\("modload_b"\) gave 3 module\(s\): .* -- WRONG
+
+diff --git a/uros/src/lib/libmodload/modload.c b/uros/src/lib/libmodload/modload.c
+index 1f4b35ed..29bb6cb8 100644
+--- a/uros/src/lib/libmodload/modload.c
++++ b/uros/src/lib/libmodload/modload.c
+@@ -383,8 +383,7 @@ modload_load_class(const char *class, const char *sym_suffix,
+ 	for (i = 0; i < n_cached_modules && loaded < max_ops; i++) {
+ 		void *ops;
+ 
+-		if (strcmp(cached_modules[i].class, class) != 0)
+-			continue;
++		/* 973-load-class-walks-cache: every cached module, whichever class */
+ 		ops = load_cached(&cached_modules[i], sym_suffix);
+ 		if (ops != NULL)
+ 			out_ops[loaded++] = ops;
