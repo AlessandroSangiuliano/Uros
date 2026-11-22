@@ -50,6 +50,7 @@ static uint8_t cap_hmac_key[SHA256_DIGEST_SIZE];
 #define CAP_BUCKETS   256
 
 static struct cap_entry *bucket_by_id[CAP_BUCKETS];
+static size_t            cap_entries;	/* #974: what the table holds */
 
 static uint64_t next_cap_id;
 
@@ -68,6 +69,7 @@ static inline unsigned hash64(uint64_t x) {
 void cap_table_init(void) {
     for (unsigned i = 0; i < CAP_BUCKETS; i++)
         bucket_by_id[i] = NULL;
+    cap_entries = 0;
     next_cap_id = 1;
 }
 
@@ -80,7 +82,32 @@ int cap_table_insert(struct cap_entry *e) {
     unsigned h = hash64(e->token.cap_id);
     e->next_by_id = bucket_by_id[h];
     bucket_by_id[h] = e;
+    cap_entries++;
     return 0;
+}
+
+void cap_table_remove(struct cap_entry *e) {
+    struct cap_entry **p = &bucket_by_id[hash64(e->token.cap_id)];
+
+    while (*p != NULL && *p != e)
+        p = &(*p)->next_by_id;
+    if (*p == e) {
+        *p = e->next_by_id;
+        e->next_by_id = NULL;
+        cap_entries--;
+    }
+}
+
+size_t cap_table_count(void) {
+    return cap_entries;
+}
+
+uint64_t cap_table_issued_count(void) {
+    return __atomic_load_n(&next_cap_id, __ATOMIC_SEQ_CST) - 1;
+}
+
+int cap_table_issued(uint64_t cap_id) {
+    return cap_id != 0 && cap_id <= cap_table_issued_count();
 }
 
 struct cap_entry *cap_table_find_by_id(uint64_t cap_id) {

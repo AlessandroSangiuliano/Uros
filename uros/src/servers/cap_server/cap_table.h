@@ -53,6 +53,24 @@ int  cap_table_insert(struct cap_entry *e);
 struct cap_entry *cap_table_find_by_id(uint64_t cap_id);
 
 /*
+ * #974: take `e' out of the table; the caller frees it.  Its place in the
+ * delegation tree -- the links other tokens hold to it -- is the caller's to
+ * mend: the table knows only its bucket's chain.
+ */
+void cap_table_remove(struct cap_entry *e);
+
+/* #974: how many entries the table holds now. */
+size_t cap_table_count(void);
+
+/*
+ * #974: how many ids have been handed out, and was `cap_id' one of them?  Ids
+ * come from cap_table_alloc_id(), counting up from 1 and never reused, so an
+ * id below the next one was.
+ */
+uint64_t cap_table_issued_count(void);
+int      cap_table_issued(uint64_t cap_id);
+
+/*
  * Every entry, in no order (#747): the first for NULL, the one after `e'
  * otherwise, and NULL after the last.  Marking an entry revoked moves none, so
  * a walk may revoke as it goes; inserting one while walking may or may not be
