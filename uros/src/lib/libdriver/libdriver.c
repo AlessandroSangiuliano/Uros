@@ -176,6 +176,7 @@ driver_open(struct driver *d, const char *module, natural_t bdf)
 	kern_return_t	kr;
 
 	memset(d, 0, sizeof *d);
+	d->dma_reach = UINT64_MAX;	/* until driver_dma_reach() says (#417) */
 	d->bdf  = bdf;
 	d->bus  = (unsigned int)(bdf >> 8) & 0xFF;
 	d->slot = (unsigned int)(bdf >> 3) & 0x1F;
@@ -375,8 +376,22 @@ driver_interrupt(struct driver *d, void (*handler)(struct driver *, void *),
 }
 
 kern_return_t
-driver_dma_alloc(struct driver *d, vm_size_t size, uint64_t reach,
-		 struct driver_dma *out)
+driver_dma_reach(struct driver *d, uint64_t reach)
+{
+	kern_return_t	kr;
+
+	kr = device_dma_reach(d->master_device, d->bdf, (vm_address_t)reach);
+	if (kr != KERN_SUCCESS) {
+		driver_log(d, "the kernel would not take the device's DMA "
+			   "reach, 0x%lx: 0x%x", (unsigned long)reach, kr);
+		return kr;
+	}
+	d->dma_reach = reach;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+driver_dma_alloc(struct driver *d, vm_size_t size, struct driver_dma *out)
 {
 	vm_address_t	kva = 0, uva = 0, dma = 0;
 	uint64_t	region = 0;	/* dma_region_id_t, a cap_u64_t in C */
@@ -390,11 +405,12 @@ driver_dma_alloc(struct driver *d, vm_size_t size, uint64_t reach,
 			   (unsigned long)size, kr);
 		return kr;
 	}
-	if (reach != 0 && ((uint64_t)dma > reach ||
-			   (uint64_t)dma + size - 1 > reach)) {
-		driver_log(d, "a DMA buffer at device address 0x%lx, past the "
-			   "0x%lx this device can reach: given back",
-			   (unsigned long)dma, (unsigned long)reach);
+	if ((uint64_t)dma > d->dma_reach ||
+	    d->dma_reach - (uint64_t)dma < size - 1) {
+		driver_log(d, "the kernel placed a DMA buffer at device address "
+			   "0x%lx, past the 0x%lx it was told the device "
+			   "reaches: given back", (unsigned long)dma,
+			   (unsigned long)d->dma_reach);
 		(void)device_dma_free(d->master_device, d->bdf, kva, size);
 		return KERN_RESOURCE_SHORTAGE;
 	}

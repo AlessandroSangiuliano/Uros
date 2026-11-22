@@ -153,6 +153,32 @@ uint64_t mb2_top_of_ram(uint32_t info_pa)
 	return top;
 }
 
+struct below_arg {
+	uint64_t	limit;
+	uint64_t	top;
+};
+
+static void below_cb(uint64_t addr, uint64_t len, void *arg)
+{
+	struct below_arg *b = arg;
+	uint64_t end = addr + len;
+
+	if (addr >= b->limit)
+		return;
+	if (end < addr || end > b->limit)
+		end = b->limit;
+	if (end > b->top)
+		b->top = end;
+}
+
+uint64_t mb2_top_of_ram_below(uint32_t info_pa, uint64_t limit)
+{
+	struct below_arg b = { limit, 0 };
+
+	mb2_for_each_ram(info_pa, below_cb, &b);
+	return b.top;
+}
+
 uint64_t mb2_usable_ram(uint32_t info_pa)
 {
 	uint64_t sum = 0;

@@ -182,6 +182,14 @@ uint64_t mb2_top_of_ram(uint32_t info_pa);
 uint64_t mb2_usable_ram(uint32_t info_pa);
 
 /*
+ * The end of the highest available RAM below `limit', exclusive, the part of
+ * a range that crosses it cut there; zero when there is none.  The low IOVA
+ * window ends below it with `limit' at 4 GiB: between that RAM and 4 GiB lie
+ * the PCI windows and the interrupt range (#417).
+ */
+uint64_t mb2_top_of_ram_below(uint32_t info_pa, uint64_t limit);
+
+/*
  * Remember where the loader's structure is, so that code running long after
  * boot can still ask.  Called once, from the boot entry (#453).
  *

@@ -1147,7 +1147,8 @@ device_md_dma_isolates(void)
 
 int
 device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
-		    int read, int write, unsigned long *dma_addr)
+		    int read, int write, unsigned long limit,
+		    unsigned long *dma_addr)
 {
 	uint64_t iova = 0;
 	unsigned before;
@@ -1174,7 +1175,7 @@ device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
 	 */
 	before = iommu_domain_count();
 	ok = iommu_grant((uint16_t)bdf, (uint64_t)pa, (uint64_t)size,
-			 read, write, &iova);
+			 read, write, (uint64_t)limit, &iova);
 
 	if (ok && iommu_domain_count() != before)
 		printf("iommu: %02x:%02x.%u is now in a domain of its own, "
@@ -1192,7 +1193,8 @@ device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
 int
 device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 			  unsigned int n, int read, int write,
-			  unsigned long *dma_addr, int *identity)
+			  unsigned long limit, unsigned long *dma_addr,
+			  int *identity)
 {
 	uint64_t iova = 0;
 	unsigned before;
@@ -1213,7 +1215,7 @@ device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 
 	before = iommu_domain_count();
 	ok = iommu_grant_pages((uint16_t)bdf, (const uint64_t *)pa, n,
-			       read, write, &iova, &id);
+			       read, write, (uint64_t)limit, &iova, &id);
 
 	if (ok && iommu_domain_count() != before)
 		printf("iommu: %02x:%02x.%u is now in a domain of its own, "
@@ -1228,6 +1230,15 @@ device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 		*identity = id;
 
 	return ok;
+}
+
+int
+device_md_dma_translates(unsigned int bdf)
+{
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	return iommu_translates((uint16_t)bdf);
 }
 
 int

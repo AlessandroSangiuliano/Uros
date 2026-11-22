@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #417
+Takes out: the low window's cursor: every search starts at the window's base, so a freed address is handed out again at once, while the window still has room above it.  The boot's placement check must say so.
+Run: --entry 14 600 -smp 4
+Expect: UrMach x86-64: [0-9]+ IOVA placement cases, [1-9][0-9]* wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index c938cbf3..1793dceb 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -2644,7 +2644,7 @@ static const struct iommu_granted *grant_over(const struct device_domain *s,
+ static int low_take(struct device_domain *s, uint64_t size, uint64_t top,
+ 		    uint64_t *out)
+ {
+-	uint64_t start = s->next_low;
++	uint64_t start = IOMMU_IOVA_LOW_BASE;
+ 
+ 	if (s->low_closed || top < IOMMU_IOVA_LOW_BASE
+ 	    || top - IOMMU_IOVA_LOW_BASE < size - 1)

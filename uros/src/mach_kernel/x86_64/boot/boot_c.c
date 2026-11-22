@@ -6875,6 +6875,45 @@ static void iommu_selftest(void)
 			   " it is not\r\n");
 	}
 
+	/*
+	 * #417: the low IOVA window, for a device that cannot reach the one
+	 * from 4 GiB, ends below the RAM under 4 GiB as the loader's map says
+	 * it -- above that lie the PCI windows, where a transfer may reach
+	 * another device before any engine, and the interrupt range.  Then the
+	 * placement itself, on scratch domains: like the decode, on every
+	 * board, since it needs no engine to be asked.
+	 */
+	{
+		uint64_t top = mb2_top_of_ram_below(mb2_info(),
+						    IOMMU_IOVA_BASE);
+		unsigned ran = 0, wrong = 0;
+		int ok;
+
+		iommu_set_low_window(top);
+		kputs("UrMach x86-64: the low IOVA window is ");
+		kputhex64(IOMMU_IOVA_LOW_BASE);
+		kputs(" up to the top of the RAM below 4 GiB, ");
+		kputhex64(top);
+		kputs(top > IOMMU_IOVA_LOW_BASE
+		      ? ", for a device whose DMA cannot reach 4 GiB (#417)\r\n"
+		      : " -- none: a device that cannot reach 4 GiB is refused"
+			" (#417)\r\n");
+
+		ok = iommu_iova_check(&ran, &wrong);
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" IOVA placement cases, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — a reach short of 4 GiB is placed from 1 MiB,"
+			   " where a freed address comes back only after the"
+			   " window has gone round and never over a live one;"
+			   " the table's depth bounds the window, and an"
+			   " identity frame is held to the reach (#417, #610)\r\n"
+			 : " — WRONG, a device would be given an address it"
+			   " cannot reach, or one in use (#417)\r\n");
+	}
+
 	/* #599: the per-device refusal count, on a scratch table. */
 	{
 		unsigned ran = 0, wrong = 0;

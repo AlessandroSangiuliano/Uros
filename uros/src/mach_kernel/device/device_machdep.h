@@ -373,6 +373,10 @@ extern int		device_md_dma_isolates(void);
  * The caller must treat that as a failed allocation: a half-granted buffer is
  * one a device will fault on at an address its driver believes it owns.
  *
+ * #417: `limit' is the highest address the device can use, the reach its
+ * owner declared (device_dma_reach), and `*dma_addr' is at or below it -- the
+ * engine places the address there, as Linux places one below a device's mask.
+ *
  * i386 answers zero, and device_md_dma_isolates() answering zero is what says
  * that is a property of the machine rather than a failure.
  */
@@ -380,6 +384,7 @@ extern int		device_md_dma_grant(unsigned int bdf,
 					    unsigned long pa,
 					    unsigned long size,
 					    int read, int write,
+					    unsigned long limit,
 					    unsigned long *dma_addr);
 
 /*
@@ -398,8 +403,17 @@ extern int		device_md_dma_grant_pages(unsigned int bdf,
 						  const unsigned long *pa,
 						  unsigned int n,
 						  int read, int write,
+						  unsigned long limit,
 						  unsigned long *dma_addr,
 						  int *identity);
+
+/*
+ * #417: whether an address given to this device is translated -- an IOVA the
+ * engine places -- rather than the frame's own.  Zero where nothing isolates,
+ * i386 always, and for a device that asked for physical addresses.  Where it
+ * is zero, memory placed for the device must itself lie within its reach.
+ */
+extern int		device_md_dma_translates(unsigned int bdf);
 
 /*
  * Take a granted range back.  Answers non-zero when the device can no longer
