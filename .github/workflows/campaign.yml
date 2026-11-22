@@ -15,6 +15,18 @@
 # `sweep`, the jobs share out the patches and run each once, the ablated arm
 # alone: whether every patch still applies, builds and is caught (#643).
 #
+# A sweep of every patch runs once a week, and by hand before a release (#975).
+# On Sundays master's nightly.yml dispatches this file with `sweep: all' at
+# NIGHTLY_REF, and waits for the run, whose verdict becomes its own: a run
+# another workflow starts by dispatch is github-actions[bot]'s, and its failure
+# is told to nobody, where a scheduled run's is told to whoever last wrote its
+# cron.  Before a release, by hand:
+#   gh workflow run campaign.yml --ref BRANCH -f sweep=all -f jobs=8
+# A patch the sweep says is no longer caught is a hole in what the tests guard:
+# its test no longer looks, its Expect: no longer matches what the test says
+# (973-modload-test-not-started's, once #977 had changed entry 68's line), or
+# it no longer takes its fix out.
+#
 # ── Where this file lives, and which copy each run takes (#961) ─────────
 #
 # It is on master and on the epic.  A push runs the copy of the branch pushed,
