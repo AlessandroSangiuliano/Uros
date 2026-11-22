@@ -261,7 +261,20 @@ dump_registry(void)
 static boolean_t
 hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
-	if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
+	/*
+	 * #981: a dead-name notification is the kernel's, sent through the
+	 * send-once right hal_register_driver() made for it.  This port is the
+	 * one the HAL checks in as "hal", which any task can look up, and a
+	 * message from one of them with this id would make the HAL forget a live
+	 * driver and drop a reference to whichever of its rights has the name in
+	 * the body.  One the kernel did not send goes on to MIG, which refuses an
+	 * id it does not know, to the sender's reply port.
+	 */
+	if (in->msgh_id == MACH_NOTIFY_DEAD_NAME &&
+	    !urmach_notification_from_kernel(in))
+		printf("hal: refused a message with a dead-name "
+		       "notification's id, which the kernel did not send\n");
+	else if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
 		const mach_dead_name_notification_t *n =
 			(const mach_dead_name_notification_t *)in;
 		hal_driver_reg_handle_dead_name(n->not_port);
