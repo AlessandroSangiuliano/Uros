@@ -1290,6 +1290,31 @@ QEMU_REAPED=""
 lock_id() {
 	LC_ALL=C stat -c '%d:%i:%.9Z' "$LOCK" 2>/dev/null || true
 }
+# 🔴 #984: A QEMU TOLD TO GO MAY NOT GO.  In the sweep of 22/11
+# 807-pmap-enter-takes-the-leaf's guest ran on in one processor after its
+# panic under TCG: qemu, sent TERM, said "terminating on signal 15" and never
+# ended -- its vCPU thread at full speed, the rest of it asleep -- and the wait
+# for it, which had no bound, held the run, ablate.sh and the sweep's job for
+# their last 2 h 39 min.  So a qemu still there QEMU_TERM_WAIT seconds after its
+# TERM is killed, and the run says so.  Before its wait a qemu that has gone is
+# a zombie, which kill -0 cannot tell from one still running: /proc can.
+QEMU_TERM_WAIT=15
+qemu_end() {	# PID: this script's qemu, sent TERM, waited for, killed if it stays
+	kill "$1" 2>/dev/null || return 0
+	_qe_i=0
+	while [ "$_qe_i" -lt $((QEMU_TERM_WAIT * 5)) ]; do
+		_qe_st=$(cat "/proc/$1/stat" 2>/dev/null) || break
+		_qe_st=${_qe_st##*) }
+		[ "${_qe_st%% *}" = Z ] && break
+		sleep 0.2
+		_qe_i=$((_qe_i + 1))
+	done
+	if [ "$_qe_i" -ge $((QEMU_TERM_WAIT * 5)) ]; then
+		echo "  qemu (pid $1) did not end $QEMU_TERM_WAIT s after SIGTERM, and was killed (#984)"
+		kill -KILL "$1" 2>/dev/null || true
+	fi
+	wait "$1" 2>/dev/null || true
+}
 give_back() {
 	# Before the line that sets QPID, the qemu just started is $!, the only
 	# job this script has put in the background by then: the wait's own
@@ -1304,8 +1329,7 @@ give_back() {
 		set -- ${_stat##*) }
 		case "$(cat "/proc/$_qpid/comm" 2>/dev/null):${2:-}" in
 		qemu-system*:"$$")
-			kill "$_qpid" 2>/dev/null || true
-			wait "$_qpid" 2>/dev/null || true ;;
+			qemu_end "$_qpid" ;;
 		esac
 	fi
 	QEMU_REAPED=1
@@ -1852,8 +1876,7 @@ if [ "$CUT_SHORT" = 1 ] && printf '%s\n' "$@" | grep -qx -- '-s'; then
 	echo "  cut short with the stub on: the threads were walked before the kill, $LOG.walk.txt"
 fi
 
-kill "$QPID" 2>/dev/null || true
-wait "$QPID" 2>/dev/null || true
+qemu_end "$QPID"
 QEMU_ENDED_EPOCH=$(date +%s)	# #290: and as it has ended
 QEMU_REAPED=1		# its PID is the system's again: the trap leaves it alone
 
