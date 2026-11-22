@@ -5,14 +5,14 @@ Run: --entry 14 1200 -smp 1
 Expect: WRONG, the cache outlived the revocation
 
 diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
-index 424d5b88..ca827e71 100644
+index 0a456ec3..35e16a94 100644
 --- a/uros/src/mach_kernel/kern/cap.c
 +++ b/uros/src/mach_kernel/kern/cap.c
-@@ -771,7 +771,6 @@ urmach_cap_revoke(uint64_t cap_id)
-         return CAP_ERR_NO_MEMORY;
+@@ -989,7 +989,6 @@ cap_revoke_token(const struct uros_cap *t)
+         }
+         e->flags |= CAP_FLAG_REVOKED;
      }
-     e->flags |= CAP_FLAG_REVOKED;
 -    cap_epoch++;			/* #537: no verified token outlives it */
      simple_unlock(&cap_lock);
+     cap_state_free(gone);
  
-     /*
