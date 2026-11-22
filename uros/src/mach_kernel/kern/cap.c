@@ -362,7 +362,6 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
  */
 static kern_return_t cap_fields_check(const struct uros_cap *, uint64_t,
                                       uint32_t, uint32_t, uint64_t);
-static kern_return_t cap_revoke_token(const struct uros_cap *);	/* #974 */
 
 /* The fields, and the look-up among the revoked.  Must be called with cap_lock held. */
 static kern_return_t
@@ -813,6 +812,8 @@ cap_probe_run(void)
  * cap_server's registration, so cap_revoke_token() finds its caller allowed.
  * ablations/537-epoch-kept.patch is how this is shown able to say WRONG.
  */
+static kern_return_t cap_revoke_token(const struct uros_cap *);	/* #974 */
+
 static void
 cap_cache_selftest(void)
 {
