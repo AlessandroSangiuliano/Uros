@@ -1028,12 +1028,23 @@ cap_expiry_waiter(void *arg)
  * tree, and the waiter is given the earliest deadline left.  A tree's
  * deadlines are never past its root's, so its capabilities have all come to
  * theirs too.
+ *
+ * #974: and then forgotten, as cap_revoke() forgets what it revokes -- but
+ * not during the walk, which goes from each entry to the next: forgetting a
+ * tree frees entries the walk has yet to reach, the one it would go to next
+ * among them.  So the walk keeps the id of every revoked entry it meets, and
+ * those are forgotten after it, each found again by its id: one that went with
+ * a tree forgotten before it is not found.  An entry revoked earlier and left
+ * in the table is met and forgotten too.  Should there be no memory to keep
+ * the ids in, the ones kept are forgotten, and the rest wait, revoked, for a
+ * later sweep to meet them.
  */
 static void
 cap_expiry_sweep(void)
 {
     struct cap_entry *e;
-    uint64_t          now, next = 0;
+    uint64_t          now, next = 0, *gone = NULL, *more;
+    size_t            ngone = 0, room = 0, i;
     int               n;
 
     if (!cap_now_ns(&now)) {
@@ -1043,22 +1054,37 @@ cap_expiry_sweep(void)
         return;
     }
     for (e = cap_table_next(NULL); e != NULL; e = cap_table_next(e)) {
-        if (e->token.revoked || e->token.expires == 0)
-            continue;
-        if (e->token.expires > now) {
+        if (!e->token.revoked && e->token.expires != 0 &&
+            e->token.expires > now) {
             if (next == 0 || e->token.expires < next)
                 next = e->token.expires;
             continue;
         }
-        /* A refusal by the kernel is said by cap_revoke_tree(). */
-        (void)cap_revoke_tree(e, &n);
-        printf("cap: cap %llu reached its deadline %llu ms ago and was "
-               "revoked, %d cap(s) with its tree (#747)\n",
-               (unsigned long long)e->token.cap_id,
-               (unsigned long long)((now - e->token.expires) / 1000000ULL),
-               n);
-        cap_revoke_tell(e, n);
+        if (!e->token.revoked && e->token.expires != 0) {
+            /* A refusal by the kernel is said by cap_revoke_tree(). */
+            (void)cap_revoke_tree(e, &n);
+            printf("cap: cap %llu reached its deadline %llu ms ago and was "
+                   "revoked, %d cap(s) with its tree (#747)\n",
+                   (unsigned long long)e->token.cap_id,
+                   (unsigned long long)((now - e->token.expires) / 1000000ULL),
+                   n);
+            cap_revoke_tell(e, n);
+        }
+        if (!e->token.revoked)
+            continue;
+        if (ngone == room) {
+            more = realloc(gone, (room == 0 ? 64 : 2 * room) * sizeof(*gone));
+            if (more == NULL)
+                continue;
+            gone = more;
+            room = room == 0 ? 64 : 2 * room;
+        }
+        gone[ngone++] = e->token.cap_id;
     }
+    for (i = 0; i < ngone; i++)
+        if ((e = cap_table_find_by_id(gone[i])) != NULL)
+            cap_forget_tree(e);
+    free(gone);
     pthread_mutex_lock(&cap_expiry_lock);
     cap_expiry_due = next;
     pthread_mutex_unlock(&cap_expiry_lock);
