@@ -49,7 +49,7 @@ table on the checking path.
 | actor | holds | does |
 |---|---|---|
 | **kernel** (`kern/cap.c`) | the HMAC key, which task may install it, a revocation table and its epoch, the facts about resources it created | verifies tokens; answers ownership questions; tears down materialised authority on revocation; gives every task an identity of its own and stamps it in the trailer of what the task sends (#747) |
-| **cap_server** | the issuance table (by id / by owner / by parent), the per-task manifests | draws the key; applies policy and mints tokens; cascades revocation |
+| **cap_server** | the issuance table, by id (#974: the indexes by owner and by parent were never read), the per-task manifests | draws the key; applies policy and mints tokens; cascades revocation |
 | **bootstrap** | the boot bundle, cap_server's port | makes cap_server's port and names its task to the kernel; installs each task's manifest before the task runs |
 | **name server** | the names, the mount registry | publishes "cap_server" for bootstrap's port; checks a mount in only on a capability for its prefix |
 | **resource servers** (block, device master, name server, …) | nothing special | check tokens presented to them |
@@ -333,6 +333,7 @@ section is not.
 | `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy for the task its identity port names, return the principal port; refuse a port that carries more than identity (#938) |
 | `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`, for the child its identity port names (#938); refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
 | `cap_slots() → in_use, size, derived, quota, family, family_max` | anyone | how many manifest slots are taken, how many by derived ports, and their bounds: how a test sees a slot come back (#743) and a bound met (#937) |
+| `cap_census() → entries, issued` | anyone | how many capabilities the issuance table holds, and how many ids it has handed out: how a test sees a revoked capability leave the table (#974) |
 
 ### Traps — `syscall_sw.h`
 
@@ -344,10 +345,11 @@ itself.
 | trap | slot | who | question |
 |---|---|---|---|
 | `urmach_cap_verify(token, presenter, type, op, id)` | 37 | any resource server | is this token good for this, presented by this task? |
-| `urmach_cap_revoke(cap_id)` | 39 | cap_server only | mark it dead in the kernel |
+| `urmach_cap_revoke(token)` | 39 | cap_server only | mark its id dead in the kernel, for as long as its deadline does not refuse it first; the token is cap_server's own copy, whose MAC the kernel checks (#974) |
 | `urmach_cap_register(setup)` | 40 | the task bootstrap named, once | hand the kernel the HMAC key |
 | `urmach_dma_region_owner(id, task)` | 43 | cap_server | does that task own this DMA buffer? |
 | `urmach_cap_epoch()` | 45 | a server that keeps verified handles | has anything been revoked since I last looked? |
+| `urmach_cap_census(&entries, &dated)` | 47 | anyone | how many revocations the kernel holds, and how many of them it will forget when their deadlines come (#974) |
 
 Slot 38 was `urmach_cap_use`, the verification that also counted a use against
 a token's `max_uses`. Nothing called it and every token was minted with no
@@ -512,6 +514,42 @@ and answered as done while the trap went on verifying the token. It says each
 refusal now, goes on with the rest of the tree, and answers the request with
 the first.
 
+🔑 **What the two tables keep, and for how long (#974).** Neither freed an
+entry: cap_server's held one for every capability it ever issued, and the
+kernel's one for every id ever revoked, and since #747 a deadline revokes
+every capability asked for with a lifetime, so a task asking for short-lived
+ones grew both without bound. An entry is now freed once it can no longer
+decide an answer.
+
+- **cap_server forgets a revoked tree** once its notices are sent, after
+  `cap_revoke` and after a deadline's sweep. Its parent may live, and the
+  parent's list of children runs through it, and a walk ends at an id it
+  cannot find: so the link that names it -- the parent's first child, or the
+  previous sibling's next -- is pointed past it first, and that token signed
+  again. `cap_verify` answers `CAP_ERR_REVOKED` for an id the table no longer
+  holds: a token whose MAC verifies was issued by this server, whose key is
+  new each time it starts, and only a revoked entry leaves. A revocation of
+  such an id is answered `CAP_ERR_REVOKED`, one of an id never issued
+  `CAP_ERR_INVALID_TOKEN`.
+- **The kernel reads the deadline from the token.** `urmach_cap_revoke` is
+  handed cap_server's own copy and checks its MAC, so the deadline it acts on
+  is the issuer's and not cap_server's word. The deadline is checked before
+  the revocation table, on every call and never from the cache (§6.2), so a
+  token past it is refused before the table is asked: an id revoked when its
+  deadline has come -- every revocation a deadline makes -- is given no
+  entry; one revoked before it is kept, in a list by deadline, until the first
+  revocation after the deadline frees it; one whose token has no deadline is
+  kept for good, since nothing else would ever refuse it. The epoch moves and
+  the mappings are torn down for every revocation all the same.
+- ⚠️ **Only on a clock that is never set.** x86-64's capability clock is its
+  monotonic clock, which has no `c_settime`. i386's is `REALTIME_CLOCK`, which
+  `rtc_settime()` can set back, and with it a deadline that has come; so i386
+  keeps every revocation (`URMACH_CAP_CLOCK_NEVER_SET`, `<mach/clock_types.h>`).
+
+`cap_census` and trap 47 are how `cap_test` [55] to [57] see the entries go.
+The capabilities of a task that has died, never revoked, still stay in
+cap_server's table: #983.
+
 🔴 **The trap is the half that cannot wait for a message.** Some authority is
 *materialised*: a capability for a PCI device becomes an IOMMU domain, which is
 a page table the device walks without consulting anything. Revoking the token
@@ -578,7 +616,8 @@ cap_acquire / cap_derive* ── a deadline written ──▶ cap_expiry_due, lo
                                                          │ ring
                      the receive loop: every token past its deadline,
                      with its tree, revoked as cap_revoke revokes it;
-                     cap_expiry_due set to the earliest left
+                     cap_expiry_due set to the earliest left; and then
+                     every revoked tree it met forgotten (#974)
 ```
 
 🔴 **A deadline took back nothing a token had bought (#747).** Past it the
