@@ -33,6 +33,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>		/* #974: ct_line() */
 #include <string.h>
 #include <mach.h>
 #include <mach/mig_errors.h>	/* #443: MIG_BAD_ARGUMENTS, mig_reply_error_t */
@@ -1554,6 +1555,33 @@ ct_census(struct ct_census *c)
     return kr;
 }
 
+/*
+ * A line of [55] or [56], whole: libmach's printf keeps a line whole up to 256
+ * bytes, and past that another task's output can land inside it (#802), where
+ * ablate.sh, reading the raw log, misses its end -- as it missed a probe's
+ * Expect after [56]'s WRONG was cut (#974, 22/11).  A longer line is said, as
+ * a WRONG, as notify_forge_test's verdict() does (#981).
+ */
+static void ct_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+static void
+ct_line(const char *fmt, ...)
+{
+    char    line[256];
+    va_list ap;
+    int     n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= sizeof line)
+        printf("cap_test: a line of %d bytes, past the %u the console keeps "
+               "whole, begins \"%.48s\" -- WRONG (#974)\n", n,
+               (unsigned)(sizeof line - 1), line);
+    else
+        printf("%s", line);
+}
+
 /* A count's change since `a', which may be a fall. */
 #define CT_GREW(a, b)	((long)(b) - (long)(a))
 
@@ -1665,7 +1693,7 @@ ct55_round(mach_port_t clk, unsigned int ms, struct ct55_round *r)
     memset(r, 0, sizeof(*r));
     memset(&t, 0, sizeof(t));
     if (ct_census(&c0) != KERN_SUCCESS) {
-        printf("cap_test: [55] WRONG — the census was not answered (#974)\n");
+        ct_line("cap_test: [55] WRONG — the census was not answered (#974)\n");
         return 0;
     }
     start = ct50_now(clk);
@@ -1693,10 +1721,10 @@ ct55_round(mach_port_t clk, unsigned int ms, struct ct55_round *r)
     put = (long)r->asked + (long)r->derived;
     if ((kr != KERN_SUCCESS && !r->late) || k1 != KERN_SUCCESS || start == 0 ||
         issued == 0) {
-        printf("cap_test: [55] WRONG — %u of %u capabilities asked for with "
-               "%u ms and %u children, then %d; the census %d, the clock %s "
-               "(#974)\n", r->asked, CT55_CAPS, ms, r->derived, (int)kr,
-               (int)k1, start != 0 && issued != 0 ? "read" : "not read");
+        ct_line("cap_test: [55] WRONG — %u of %u capabilities asked for with "
+                "%u ms and %u children, then %d; the census %d, the clock %s "
+                "(#974)\n", r->asked, CT55_CAPS, ms, r->derived, (int)kr,
+                (int)k1, start != 0 && issued != 0 ? "read" : "not read");
         return 0;
     }
     r->took = issued - start;
@@ -1721,32 +1749,32 @@ ct55_round(mach_port_t clk, unsigned int ms, struct ct55_round *r)
 
     present = CT_GREW(c0.server, c1.server);
     if (settled && present >= put - CT55_SLACK) {
-        printf("cap_test: [55] %u capabilities asked for with %u ms, in %llu "
-               "ms, and %u children: cap_server's table went from %u to %u, "
-               "and back to %u %llu ms after the last deadline; the kernel's "
-               "from %u to %u, %s (#974)\n", r->asked, ms,
-               (unsigned long long)(r->took / 1000000ULL), r->derived,
-               (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
-               (unsigned long long)(now > last ? (now - last) / 1000000ULL : 0),
-               (unsigned)c0.kernel, (unsigned)c2.kernel,
-               URMACH_CAP_CLOCK_NEVER_SET
-               ? "a revocation that a deadline made given no entry"
-               : "every revocation kept, since this clock can be set");
+        ct_line("cap_test: [55] %u capabilities asked for with %u ms, in %llu "
+                "ms, and %u children: cap_server's table went from %u to %u, "
+                "and back to %u %llu ms after the last deadline (#974)\n",
+                r->asked, ms, (unsigned long long)(r->took / 1000000ULL),
+                r->derived, (unsigned)c0.server, (unsigned)c1.server,
+                (unsigned)c2.server, (unsigned long long)(now > last
+                ? (now - last) / 1000000ULL : 0));
+        ct_line("cap_test: [55] the kernel's table went from %u to %u, %s "
+                "(#974)\n", (unsigned)c0.kernel, (unsigned)c2.kernel,
+                URMACH_CAP_CLOCK_NEVER_SET
+                ? "a revocation that a deadline made given no entry"
+                : "every revocation kept, since this clock can be set");
         return 1;
     }
-    printf("cap_test: [55] WRONG — %u capabilities asked for with %u ms, in "
-           "%llu ms, and %u children: cap_server's table went from %u to %u, "
-           "and to %u %llu ms after the last deadline; the kernel's from %u "
-           "to %u (%d); where cap_server's must have %scome back within %d, "
-           "and the kernel's %s (#974)\n", r->asked, ms,
-           (unsigned long long)(r->took / 1000000ULL), r->derived,
-           (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
-           (unsigned long long)(now > last ? (now - last) / 1000000ULL : 0),
-           (unsigned)c0.kernel, (unsigned)c2.kernel, (int)k2,
-           slow ? "" : "held them all and then ", CT55_SLACK,
-           URMACH_CAP_CLOCK_NEVER_SET
-           ? "come back within it too, a deadline's revocation given no entry"
-           : "grow by every one, since this clock can be set");
+    ct_line("cap_test: [55] WRONG — %u capabilities asked for with %u ms, in "
+            "%llu ms, and %u children: cap_server's table went from %u to %u, "
+            "and to %u %llu ms after the last deadline (#974)\n", r->asked, ms,
+            (unsigned long long)(r->took / 1000000ULL), r->derived,
+            (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
+            (unsigned long long)(now > last ? (now - last) / 1000000ULL : 0));
+    ct_line("cap_test: [55] WRONG — the kernel's table went from %u to %u "
+            "(%d), where cap_server's must have %scome back within %d, and the "
+            "kernel's %s (#974)\n", (unsigned)c0.kernel, (unsigned)c2.kernel,
+            (int)k2, slow ? "" : "held them all and then ", CT55_SLACK,
+            URMACH_CAP_CLOCK_NEVER_SET ? "come back within it too"
+            : "grown by every one, since this clock can be set");
     return 0;
 }
 
@@ -1763,8 +1791,8 @@ a_deadline_leaves_both_tables(void)
     kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
     (void)mach_port_deallocate(mach_task_self(), host);
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [55] WRONG — the capability clock was not given "
-               "(%d) (#974)\n", (int)kr);
+        ct_line("cap_test: [55] WRONG — the capability clock was not given "
+                "(%d) (#974)\n", (int)kr);
         return 0;
     }
     r = ct55_round(clk, CT55_MS, &first);
@@ -1774,21 +1802,21 @@ a_deadline_leaves_both_tables(void)
                (first.asked != 0 ? first.asked : 1);
         ms = pace * 4 < 2ULL * CT55_MS ? 2 * CT55_MS
            : pace * 4 > CT55_MS_MOST ? CT55_MS_MOST : (unsigned int)(pace * 4);
-        printf("cap_test: [55] asking for %u capabilities took %llu ms, past "
-               "their lifetime of %u ms%s: asked again, with %u ms (#974)\n",
-               first.asked, (unsigned long long)(first.took / 1000000ULL),
-               CT55_MS, first.late ? ", a derivation read after its parent's "
-               "deadline" : "", ms);
+        ct_line("cap_test: [55] asking for %u capabilities took %llu ms, past "
+                "their lifetime of %u ms%s: asked again, with %u ms (#974)\n",
+                first.asked, (unsigned long long)(first.took / 1000000ULL),
+                CT55_MS, first.late ? ", a derivation read after its parent's "
+                "deadline" : "", ms);
         r = ct55_round(clk, ms, &again);
         if (r < 0)
-            printf("cap_test: [55] NOT ASKED — asking for %u capabilities took "
-                   "%llu ms, past their lifetime of %u ms, and asked again "
-                   "with %u ms, %llu ms%s: some left before they could be "
-                   "counted present (#974)\n", first.asked,
-                   (unsigned long long)(first.took / 1000000ULL), CT55_MS, ms,
-                   (unsigned long long)(again.took / 1000000ULL),
-                   again.late ? ", a derivation read after its parent's "
-                   "deadline" : "");
+            ct_line("cap_test: [55] NOT ASKED — asking for %u capabilities took "
+                    "%llu ms, past their lifetime of %u ms, and asked again "
+                    "with %u ms, %llu ms%s: some left before they could be "
+                    "counted present (#974)\n", first.asked,
+                    (unsigned long long)(first.took / 1000000ULL), CT55_MS, ms,
+                    (unsigned long long)(again.took / 1000000ULL),
+                    again.late ? ", a derivation read after its parent's "
+                    "deadline" : "");
     }
     (void)mach_port_deallocate(mach_task_self(), clk);
     return r != 0;
@@ -1876,7 +1904,7 @@ ct56_round(mach_port_t clk, unsigned int ms, struct ct56_round *r)
     memset(r, 0, sizeof(*r));
     memset(t, 0, sizeof(t));
     if (ct_census(&c0) != KERN_SUCCESS) {
-        printf("cap_test: [56] WRONG — the census was not answered (#974)\n");
+        ct_line("cap_test: [56] WRONG — the census was not answered (#974)\n");
         return 0;
     }
     start = ct50_now(clk);
@@ -1907,11 +1935,11 @@ ct56_round(mach_port_t clk, unsigned int ms, struct ct56_round *r)
     k1 = ct_census(&c1);
     if (kr != KERN_SUCCESS || (rkr != KERN_SUCCESS && !r->swept) ||
         k1 != KERN_SUCCESS || start == 0 || counted == 0 || r->asked == 0) {
-        printf("cap_test: [56] WRONG — %u of %u capabilities asked for with "
-               "%u ms and revoked at once, then %d and %d; the census %d, the "
-               "clock %s (#974)\n", r->revoked, CT56_CAPS, ms, (int)kr,
-               (int)rkr, (int)k1, start != 0 && counted != 0 ? "read"
-               : "not read");
+        ct_line("cap_test: [56] WRONG — %u of %u capabilities asked for with "
+                "%u ms and revoked at once, then %d and %d; the census %d, the "
+                "clock %s (#974)\n", r->revoked, CT56_CAPS, ms, (int)kr,
+                (int)rkr, (int)k1, start != 0 && counted != 0 ? "read"
+                : "not read");
         return 0;
     }
     r->took = counted - start;
@@ -1952,34 +1980,37 @@ ct56_round(mach_port_t clk, unsigned int ms, struct ct56_round *r)
     if (ok && slow)
         return -1;
     if (ok) {
-        printf("cap_test: [56] %u capabilities asked for with %u ms and "
-               "revoked at once, in %llu ms, were refused as revoked by the "
-               "trap and by cap_server, which kept none of them (%+ld), while "
-               "the kernel held %+ld, %+ld dated, %ld of them still due; past "
-               "their deadline, %s: %+ld (#974)\n", r->revoked, ms,
-               (unsigned long long)(r->took / 1000000ULL), server, kept, dated,
-               r->due,
-               URMACH_CAP_CLOCK_NEVER_SET
-               ? "the next revocation freed them"
-               : "kept, since this clock can be set", left);
+        ct_line("cap_test: [56] %u capabilities asked for with %u ms and "
+                "revoked at once, in %llu ms, were refused as revoked by the "
+                "trap and by cap_server, which kept none of them (%+ld) "
+                "(#974)\n", r->revoked, ms,
+                (unsigned long long)(r->took / 1000000ULL), server);
+        ct_line("cap_test: [56] the kernel held %+ld, %+ld dated, %ld of them "
+                "still due; past their deadline, %s: %+ld (#974)\n", kept,
+                dated, r->due,
+                URMACH_CAP_CLOCK_NEVER_SET
+                ? "the next revocation freed them"
+                : "kept, since this clock can be set", left);
         return 1;
     }
-    printf("cap_test: [56] WRONG — %u capabilities asked for with %u ms and "
-           "revoked at once, in %llu ms, %ld still due: the trap %d and "
-           "cap_server %d, where both must be CAP_ERR_REVOKED(%d)%s; "
-           "cap_server's table %+ld; the kernel's %+ld, %+ld dated, and past "
-           "the deadline %+ld (one more revoked %d, the census %d), where it "
-           "must hold %s; the slack is %d (#974)\n", r->revoked, ms,
-           (unsigned long long)(r->took / 1000000ULL), r->due, (int)trap,
-           (int)rpc, (int)CAP_ERR_REVOKED,
-           r->late && !r->swept ? " unless read past the deadline, as they "
-           "were" : r->swept ? ", one swept by its deadline first" : "",
-           server, kept, dated, left, (int)kr, (int)k2,
-           !URMACH_CAP_CLOCK_NEVER_SET
-           ? "all of them, then and past the deadline, since this clock can "
-             "be set"
-           : slow ? "none of them past the deadline"
-           : "the ones due, and none of them past the deadline", CT56_SLACK);
+    ct_line("cap_test: [56] WRONG — %u capabilities asked for with %u ms and "
+            "revoked at once, in %llu ms, %ld still due: the trap %d and "
+            "cap_server %d, where both must be CAP_ERR_REVOKED%s (#974)\n",
+            r->revoked, ms, (unsigned long long)(r->took / 1000000ULL), r->due,
+            (int)trap, (int)rpc,
+            r->swept ? ", one swept by its deadline first"
+            : r->late ? " unless read past the deadline" : "");
+    ct_line("cap_test: [56] WRONG — cap_server's table %+ld; the kernel's "
+            "%+ld, %+ld dated, and past the deadline %+ld, where it must hold "
+            "%s; the slack is %d (#974)\n", server, kept, dated, left,
+            !URMACH_CAP_CLOCK_NEVER_SET
+            ? "all of them, then and after: this clock can be set"
+            : slow ? "none past the deadline"
+            : "the ones due, and none past the deadline", CT56_SLACK);
+    if (kr != KERN_SUCCESS || k2 != KERN_SUCCESS)
+        ct_line("cap_test: [56] WRONG — past the deadline one more capability "
+                "asked for and revoked: %d, the census %d (#974)\n", (int)kr,
+                (int)k2);
     return 0;
 }
 
@@ -1996,8 +2027,8 @@ a_revocation_is_kept_until_its_deadline(void)
     kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
     (void)mach_port_deallocate(mach_task_self(), host);
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [56] WRONG — the capability clock was not given "
-               "(%d) (#974)\n", (int)kr);
+        ct_line("cap_test: [56] WRONG — the capability clock was not given "
+                "(%d) (#974)\n", (int)kr);
         return 0;
     }
     r = ct56_round(clk, CT56_MS, &first);
@@ -2007,24 +2038,24 @@ a_revocation_is_kept_until_its_deadline(void)
                (first.revoked != 0 ? first.revoked : 1);
         ms = pace * 4 < 2ULL * CT56_MS ? 2 * CT56_MS
            : pace * 4 > CT56_MS_MOST ? CT56_MS_MOST : (unsigned int)(pace * 4);
-        printf("cap_test: [56] asking for %u capabilities and revoking them "
-               "took %llu ms, and %ld of their deadlines of %u ms had not come "
-               "when they were counted%s: asked again, with %u ms (#974)\n",
-               first.revoked, (unsigned long long)(first.took / 1000000ULL),
-               first.due, CT56_MS, first.swept ? ", one swept by its deadline "
-               "before its revocation was read" : first.late ? ", the "
-               "verifications read past the last one's deadline" : "", ms);
+        ct_line("cap_test: [56] asking for %u capabilities and revoking them "
+                "took %llu ms, and %ld of their deadlines of %u ms had not come "
+                "when they were counted%s: asked again, with %u ms (#974)\n",
+                first.revoked, (unsigned long long)(first.took / 1000000ULL),
+                first.due, CT56_MS, first.swept ? ", one swept by its deadline "
+                "before its revocation was read" : first.late ? ", the "
+                "verifications read past the last one's deadline" : "", ms);
         r = ct56_round(clk, ms, &again);
         if (r < 0)
-            printf("cap_test: [56] NOT ASKED — asking for %u capabilities and "
-                   "revoking them took %llu ms, past half their lifetime of "
-                   "%u ms, and asked again with %u ms, %llu ms, %ld still "
-                   "due%s (#974)\n", first.revoked,
-                   (unsigned long long)(first.took / 1000000ULL), CT56_MS, ms,
-                   (unsigned long long)(again.took / 1000000ULL), again.due,
-                   again.swept ? ", one swept by its deadline before its "
-                   "revocation was read" : again.late ? ", the verifications "
-                   "read past the last one's deadline" : "");
+            ct_line("cap_test: [56] NOT ASKED — asking for %u capabilities and "
+                    "revoking them took %llu ms, past half their lifetime of "
+                    "%u ms, and asked again with %u ms, %llu ms, %ld still "
+                    "due%s (#974)\n", first.revoked,
+                    (unsigned long long)(first.took / 1000000ULL), CT56_MS, ms,
+                    (unsigned long long)(again.took / 1000000ULL), again.due,
+                    again.swept ? ", one swept by its deadline before its "
+                    "revocation was read" : again.late ? ", the verifications "
+                    "read past the last one's deadline" : "");
     }
     (void)mach_port_deallocate(mach_task_self(), clk);
     return r != 0;
