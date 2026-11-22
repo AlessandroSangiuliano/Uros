@@ -325,16 +325,17 @@ driver_interrupt(struct driver *d, void (*handler)(struct driver *, void *),
 		return kr;
 
 	/*
-	 * MSI-X entry 0 where the device has a table.  MAKE_SEND: the kernel
-	 * keeps a send right made from this receive right, so none is inserted
-	 * here.
+	 * A message: entry 0 of the device's MSI-X table where it has one, its
+	 * plain MSI where it has none (#977) -- the kernel chooses.  MAKE_SEND:
+	 * the kernel keeps a send right made from this receive right, so none
+	 * is inserted here.
 	 */
 	msix = device_msi_register(d->master_device, d->bus, d->slot, d->func,
 				   0, d->irq_port, MACH_MSG_TYPE_MAKE_SEND,
 				   &slot);
 	if (msix == KERN_SUCCESS) {
 		d->irq_slot = slot;
-		d->irq_msix = 1;
+		d->irq_message = 1;
 	} else {
 		unsigned int line;
 
@@ -347,7 +348,7 @@ driver_interrupt(struct driver *d, void (*handler)(struct driver *, void *),
 						  d->irq_port,
 						  MACH_MSG_TYPE_MAKE_SEND);
 		if (kr != KERN_SUCCESS) {
-			driver_log(d, "no interrupt: MSI-X answered 0x%x, and "
+			driver_log(d, "no interrupt: a message answered 0x%x, and "
 				   "INTx line %u 0x%x", msix, line, kr);
 			(void)mach_port_mod_refs(mach_task_self(), d->irq_port,
 						 MACH_PORT_RIGHT_RECEIVE, -1);
@@ -355,7 +356,7 @@ driver_interrupt(struct driver *d, void (*handler)(struct driver *, void *),
 			return kr;
 		}
 		d->irq_slot = line;
-		d->irq_msix = 0;
+		d->irq_message = 0;
 	}
 
 	d->irq_handler = handler;

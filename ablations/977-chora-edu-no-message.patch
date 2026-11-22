@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #977
+Takes out: the plain MSI device_md_msi_register() gives a function with no MSI-X table, as 977-no-plain-msi does, and this one asks chora: edu_probe, on QEMU's edu device in entry 68, is given no message, and on q35 no line either, since libdriver takes no INTx line above 15.  It says it has no interrupt to take, and the chora does not drive the device.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: WRONG -- (no interrupt to take|given INTx line [0-9]+, where its MSI was a message to take)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index c420b74e..7f5e68a5 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -1078,8 +1078,7 @@ device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
+ 
+ 	/* #977: MSI-X first, and plain MSI where there is no table. */
+ 	if (!pci_msix_probe(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, &m))
+-		return msi_register_plain(bus, dev, func, entry, handler,
+-					  slot_out);
++		return 0;	/* 977-chora-edu-no-message: no table, no message */
+ 
+ 	if (entry >= m.vectors)
+ 		return 0;

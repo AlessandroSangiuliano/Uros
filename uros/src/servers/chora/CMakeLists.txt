@@ -149,3 +149,30 @@ set_target_properties(chora_absent_module PROPERTIES
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv -Wl,-init,chora_absent_loaded"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/net")
+
+# ===========================================================================
+# edu_probe: a module of the class `misc', for QEMU's educational device
+# ===========================================================================
+#
+# edu has MSI with one message and no MSI-X table: the kind of device that got
+# no message before #977.  chora_test starts a chora on it, where the board
+# has one (run-x86_64.sh --edu).
+
+add_library(edu_probe_module SHARED edu_probe/edu_probe.c)
+
+add_dependencies(edu_probe_module mig_mach_public_headers)
+
+target_compile_options(edu_probe_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(edu_probe_module PRIVATE MACH_IPC_COMPAT=0)
+
+target_include_directories(edu_probe_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(edu_probe_module PROPERTIES
+  OUTPUT_NAME "edu_probe"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")

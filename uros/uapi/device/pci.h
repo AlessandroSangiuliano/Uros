@@ -212,4 +212,25 @@
 #define	PCI_MSIX_ENTRY_CTL	0xC
 #define	PCI_MSIX_ENTRY_MASKED	0x1u
 
+/*
+ * #977: MSI's capability, the one without a table: the message is in
+ * configuration space itself, and one enable bit is all the masking a
+ * function without per-vector masking has.
+ *
+ * As Serial ATA AHCI 1.3.1 lays it out, §2.3 (pages 12-13), an HBA's
+ * implementation of it: the PCI specification is not on our machines, and
+ * PCI-SIG gives it to its members.  Where the data sits moves with the
+ * 64-bit bit, since the upper half of the address takes its place.
+ */
+#define	PCI_MSI_CONTROL		0x02	/* MC, 16 bits, from the capability */
+#define	PCI_MSI_ADDR		0x04	/* MA, the low 32 bits, dword aligned */
+#define	PCI_MSI_ADDR_HI		0x08	/* MUA, with PCI_MSI_CTL_64BIT only */
+#define	PCI_MSI_DATA_32		0x08	/* MD, 16 bits, without it */
+#define	PCI_MSI_DATA_64		0x0C	/* MD, 16 bits, with it */
+
+#define	PCI_MSI_CTL_ENABLE	0x0001u	/* MSIE: messages, and not the pin */
+#define	PCI_MSI_CTL_MMC		0x000Eu	/* messages it can ask for, as log2 */
+#define	PCI_MSI_CTL_MME		0x0070u	/* messages enabled, as log2: 0 = one */
+#define	PCI_MSI_CTL_64BIT	0x0080u	/* C64: it can write a 64-bit address */
+
 #endif	/* _DEVICE_PCI_H_ */

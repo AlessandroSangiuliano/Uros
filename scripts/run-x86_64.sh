@@ -539,6 +539,13 @@ must_report 'UrMach x86-64: PCID ' 'pcid_test: ' \
 must_report 'UrMach x86-64: global pages ' 'UrMach x86-64: \(a page narrowed after a split\|global pages are off, so a split\|no frame for the global split probe\|the probe.s frame has no entry\|no processor online besides the one that\|the direct map is already 4 KiB\|the probe.s page did not split\)' \
 	'The global split probe ends in its summary line or in one of the lines that say why it could not ask (#437).' \
 	'global split probe'
+# #977: the boot's plain-MSI test, on a board with QEMU's edu device (--edu).
+# Its one wait, for the device's message, is bounded and said either way; a
+# stop after its first line is a stop inside device_md_msi_register() or in
+# the device's configuration space.
+must_report 'UrMach x86-64: plain MSI: the edu device at ' 'UrMach x86-64: plain MSI: \(given back, \|the edu device at .*WRONG\)' \
+	'The plain-MSI test names the device it found, then ends in the line that says what giving it back left, or in a WRONG that says why it could not go on (#977).' \
+	'plain MSI test'
 must_report 'preempt_test: starting' 'preempt_test: \(PASS\|NOT ASKED\)' \
 	'Its failure mode is silence: a processor never taken from a thread that will not yield prints nothing at all (#459/#461).'
 must_report 'fpu_stress: 3 threads' 'fpu_stress: \(PASS\|NOT ASKED\)' \
@@ -640,6 +647,13 @@ must_report '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9
 
 must_report 'modload_test: started' 'modload_test: [0-9]* of [0-9]* arms passed' \
 	'It fetches the modules of two pools from bootstrap and dlopens them, and nothing in it waits, so silence is a stop inside the module pool, inside libdl or inside the code of a module (#973).  chora.conf waits for it before it starts chora_test.'
+
+# #977: and edu_probe's chora, on QEMU's educational device, in a pair of its
+# own: the pair above is met by the network card's chora alone, and the boot
+# ends on chora_test's count, which may come before edu_probe's last line.
+must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
+	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and says so either way (#977).' \
+	edu_probe
 
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
@@ -963,6 +977,7 @@ IOMMU_NAME="none"
 BOARD=""
 KVM_ARGS=""
 HPET_ARGS=""
+EDU_ARGS=""
 SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
@@ -1007,6 +1022,15 @@ while :; do
 			exit 2 ;;
 		esac
 		shift 2 ;;
+	--edu)
+		# #977: QEMU's educational device, vendor 1234h and device
+		# 11e8h (docs/specs/edu.rst in QEMU 11.1.2): MSI with one
+		# message and no MSI-X table, and a register that raises an
+		# interrupt when written.  The one device here the kernel can
+		# ask for a message without a table, which its boot test does.
+		# An option, as --hpet is, so that the merge test can ask.
+		EDU_ARGS="-device edu"
+		shift ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
 		#
@@ -1517,7 +1541,7 @@ QERR="$LOG.qemu-stderr"
 # sets what the boot wrote in a superblock against it.
 QEMU_STARTED_EPOCH=$(date +%s)
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $EDU_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
@@ -1710,6 +1734,7 @@ expected_reports() {
 		'chora_test: started'   'chora_test: [0-9]* of [0-9]* arms passed' \
 		'modload_test: started' 'modload_test: [0-9]* of [0-9]* arms passed' \
 		'@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' '@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(.* drives the device\|.* did not take the device\|modules/.* did not load\)' \
+		'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \

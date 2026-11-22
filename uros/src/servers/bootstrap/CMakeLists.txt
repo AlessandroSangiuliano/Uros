@@ -850,6 +850,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             modules/modload_a/only_a.so:${_MOD}/modload_a/only_a.so
             modules/modload_b/twin.so:${_MOD}/modload_b/twin.so
             modules/modload_b/only_b.so:${_MOD}/modload_b/only_b.so
+            # #977: chora's module for QEMU's educational device, which
+            # has MSI and no MSI-X table.
+            modules/misc/edu_probe.so:${_MOD}/misc/edu_probe.so
             ${_CHAR_FILES}
             ${_MUSL_FILES}
             ${_IPC_BENCH_FILE}
@@ -879,6 +882,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             chora_probe_module chora_absent_module chora_bin
             modload_test_bin modload_test_twin_a modload_test_twin_b
             modload_test_only_a modload_test_only_b
+            edu_probe_module
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 

@@ -57,7 +57,7 @@ struct driver {
 
 	mach_port_t	irq_port;		/* MACH_PORT_NULL: none asked for */
 	natural_t	irq_slot;		/* what device_intr_enable() takes */
-	int		irq_msix;		/* 1: MSI-X entry 0; 0: the INTx line */
+	int		irq_message;		/* 1: a message; 0: the INTx line */
 	void	      (*irq_handler)(struct driver *, void *);
 	void	       *irq_arg;
 };
@@ -92,12 +92,14 @@ kern_return_t	driver_unmap_region(const struct driver *d, volatile void *va,
 				    vm_size_t size);
 
 /*
- * Deliver the device's interrupt to `handler', on a thread of its own: entry
- * 0 of the device's MSI-X table where it has one, its INTx line otherwise.
+ * Deliver the device's interrupt to `handler', on a thread of its own: a
+ * message where the device has one -- entry 0 of its MSI-X table, or its plain
+ * MSI where it has no table (#977) -- and its INTx line otherwise.
  * After each call of the handler the slot is unmasked, so the handler must
  * have quieted the device by then -- a level-triggered line still asserted
- * would ring again at once.  d->irq_msix says which it got, and a module that
- * routes the device's causes to an entry needs to know.
+ * would ring again at once.  d->irq_message says whether it got a message,
+ * and a module that routes the device's causes to an entry needs to know.
+ * Which kind of message is the kernel's to choose (device_master.defs).
  */
 kern_return_t	driver_interrupt(struct driver *d,
 				 void (*handler)(struct driver *, void *),

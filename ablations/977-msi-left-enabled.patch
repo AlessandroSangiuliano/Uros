@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #977
+Takes out: the disable that giving the slot back does: the function keeps its message enabled after its slot is gone, and a device that sent it would reach a vector nobody handles.  The boot's plain-MSI test reads the control word back after giving the slot back, with the enable bit still set.
+Run: --edu --entry 14 600 -smp 4
+Expect: plain MSI: given back, its control word reads .* WRONG, given back and still enabled
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pci_msi.c b/uros/src/mach_kernel/x86_64/cpu/pci_msi.c
+index 41f66c2e..c84721d8 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/pci_msi.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pci_msi.c
+@@ -120,8 +120,7 @@ pci_msi_disarm(const struct pci_msi *m)
+ {
+ 	if (m == 0 || m->cap == 0)
+ 		return;
+-	msi_control_write(m, (uint16_t)(msi_control_read(m)
+-					& ~PCI_MSI_CTL_ENABLE));
++	(void) msi_control_read(m);	/* 977-msi-left-enabled: given back, still enabled */
+ }
+ 
+ void

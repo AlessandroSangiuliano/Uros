@@ -120,6 +120,12 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             at the prompt printed its lines and gave the prompt back -- a
 #             program's stdout on the controlling terminal, fork and execve
 #             from a shell, a forked child's write on its terminal (#952)
+#   msiplain  the harness's verdict, with QEMU's edu device (--edu): the
+#             boot's plain-MSI test gave it a slot, enabled with one message
+#             at the local APICs' address, rang it on that slot, was refused
+#             a second slot for its one message, and found it disabled once
+#             given back -- what "harness" would pass a kernel that never ran
+#             the test, since no WRONG says so (#977)
 #   stop13    the name server stops at service_checkin, which grub.cfg says is
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in.  Since #744 it checks in on its
@@ -168,9 +174,11 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             chora.conf: bootstrap's line that -f chose it, the first chora's
 #             three lines -- the claim, its registers mapped, an interrupt
 #             taken -- the second chora's refused claim, and the kernel's line
-#             refusing it, which names both tasks -- and modload_test's count,
-#             which chora.conf runs first; chora_test's and modload_test's
-#             counts are the note (#963, #973)
+#             refusing it, which names both tasks -- modload_test's count,
+#             which chora.conf runs first -- and edu_probe's chora, on
+#             QEMU's educational device (--edu): its interrupt taken by
+#             message, and the device driven; chora_test's and
+#             modload_test's counts are the note (#963, #973, #977)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -195,11 +203,13 @@ ENTRIES="
 14 harness --socket1-cpu 1,sockets=2,cores=64,maxcpus=128
 14 char @char
 14 ush @ush
+14 msiplain --edu
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
 36 harness --iommu_intel
 37 harness --iommu_intel
+37 msiplain --iommu_intel_--edu
 38 harness --iommu_intel
 36 harness --iommu_amd
 37 harness --iommu_amd
@@ -277,8 +287,8 @@ ENTRIES="
 65 harness - 1
 67 wakee
 67 wakee - 1
-68 chora --iommu_intel
-68 chora --iommu_intel 1
+68 chora --iommu_intel_--edu
+68 chora --iommu_intel_--edu 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -617,6 +627,17 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ||
 		alone_ok "$n" "$h" "$f" 'msi_race: NOT ASKED — alone' ;;
+	# #977: the boot's plain-MSI test of QEMU's edu device (--edu), on the
+	# default board and on entry 37, whose -i remaps interrupts where the
+	# engine can: under TCG, so that the message is the remapped one, and
+	# not under KVM, where QEMU's intel-iommu remaps nothing without
+	# intremap=on.  The harness reads its WRONG lines; these are the four
+	# lines that make its claims, since a test that never ran says no WRONG.
+	msiplain) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'plain MSI: the edu device at 00:[0-9]+\.0 was given slot [0-9]+, .* enabled, one message, at the local APICs. address' "$f" &&
+		grep -aq 'plain MSI: edu was asked to raise .* a device wrote the message the kernel put in its capability, and it arrived as an interrupt' "$f" &&
+		grep -aq 'plain MSI: asked again, the same function was refused a second slot' "$f" &&
+		grep -aq 'plain MSI: given back, its control word reads .* disabled, so the device can no longer send it' "$f" ;;
 	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
 	# while interrupts are remapped takes its pin instead, for the reason
 	# it gives: QEMU's tables name no HPET, and its message could not go
@@ -796,6 +817,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# #973: and modload_test's count.  The harness waits for a test that
 	# said it started; one chora.conf never started says nothing, and only
 	# a verdict that asks for its count sees it gone.
+	# #977: and the chora on QEMU's edu device, which has MSI and no MSI-X
+	# table: edu_probe took its interrupt by message, and drives the device.
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
@@ -803,6 +826,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: took an interrupt, ' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the claim on .* was refused' "$f" &&
 		grep -aqE 'REFUSED to task 0x[0-9a-f]+ \(chora_probe@[^)]*\) .*claimed by task 0x[0-9a-f]+ \(chora_probe@' "$f" &&
+		grep -aqE 'edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: took an interrupt, message slot [0-9]+, status 0x977' "$f" &&
+		grep -aqE 'edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: edu_probe drives the device' "$f" &&
 		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		mod=$(grep -aoE 'modload_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		[ -n "$out" ] && [ -n "$mod" ] && NOTE="$out; $mod" ;;

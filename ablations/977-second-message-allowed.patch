@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #977
+Takes out: the refusal of a second registration of a function's one message: it is given a second slot, and its message pointed at the second vector over the first, whose driver would wait on a slot the device no longer writes.  The boot's plain-MSI test registers edu a second time and is given a slot.
+Run: --edu --entry 14 600 -smp 4
+Expect: plain MSI: asked again, the same function was given a second slot, [0-9]+ .* WRONG, its one message pointed at another vector over the first
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index c420b74e..a04ede26 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -994,7 +994,7 @@ msi_attach_plain(unsigned int slot, const struct pci_msi *p,
+ 	int		ok;
+ 
+ 	hw_lock_lock(&msi_function_lock);
+-	ok = !msi_plain_taken(p);
++	ok = 1;	/* 977-second-message-allowed */
+ 	if (ok) {
+ 		msi_plain[i] = *p;
+ 		if (!pci_msi_arm(p, addr, data)) {
+@@ -1047,8 +1047,7 @@ msi_register_plain(unsigned int bus, unsigned int dev, unsigned int func,
+ 		return 0;
+ 	if (!pci_msi_probe(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, &p))
+ 		return 0;
+-	if (msi_plain_held(&p))
+-		return 0;
++	/* 977-second-message-allowed: a function's MSI is never asked whether it is held */
+ 	if (!msi_claim_vector(handler, &slot, &addr, &data))
+ 		return 0;
+ 	if (!msi_remap_vector(slot, bus, dev, func, &addr, &data)) {

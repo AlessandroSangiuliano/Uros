@@ -29,6 +29,7 @@
 #include <cpu/acpi.h>
 #include <cpu/pci_cfg.h>
 #include <cpu/pci_msix.h>
+#include <cpu/pci_msi.h>	/* #977: a message without a table */
 #include "pci_bar.h"		/* #457: the decode, in the kernel too */	/* #457: a device's own MSI-X table */
 #include <device/device_machdep.h>
 #include <device/pci.h>		/* #457: the capability list */	/* #457: claim a line as a driver does */
@@ -7695,12 +7696,12 @@ static void iommu_selftest(void)
 				kputs("\r\n");
 			} else {
 				kputs(iommu_vendor() == IOMMU_AMD
-				      ? "IS ON — every pin and MSI-X slot"
-					" through an entry this kernel wrote,"
+				      ? "IS ON — every pin and message-signalled"
+					" slot through an entry this kernel wrote,"
 					" and a message with no entry refused"
 					"\r\n"
-				      : "IS ON — every pin and MSI-X slot"
-					" through an entry this kernel wrote, a"
+				      : "IS ON — every pin and message-signalled"
+					" slot through an entry this kernel wrote, a"
 					" message in the old format refused"
 					"\r\n");
 				for (unsigned i = 0; i < iommu_unit_count(); i++) {
@@ -8235,6 +8236,171 @@ static void msix_table_selftest(void)
 	pci_msix_disarm(&m, 0);
 	msi_unremap_vector(slot, 0, nic, 0);
 	device_md_msi_unregister(slot);
+}
+
+/*
+ * ── #977: a plain MSI, given and rung ─────────────────────────────────
+ *
+ * The capability without a table, which device_md_msi_register() gives a
+ * function that has no MSI-X.  Asked through it, as a driver's registration
+ * is, of QEMU's educational device: run-x86_64.sh's --edu, vendor 1234h and
+ * device 11e8h, docs/specs/edu.rst in QEMU 11.1.2.  It has MSI with one
+ * message and no MSI-X table, and raises an interrupt when its register 60h
+ * is written: the value is in its status, 24h, until it is written to 64h.
+ * Nothing else here can be asked for a message without a table, so a board
+ * without it says so.
+ *
+ * Three claims, as the test above makes them for a table: the function holds
+ * the message, enabled and one; the device writes it, and the slot it was
+ * given runs; and once given back it is disabled, read back from the device.
+ *
+ * ⚠️ It spends a fourth message-signalled slot on a board that has the
+ * device, for the reason msi_release_vector() gives.
+ */
+#define	EDU_ID			0x11E81234u	/* device 11e8h, vendor 1234h */
+#define	EDU_INTR_STATUS		0x24
+#define	EDU_INTR_RAISE		0x60
+#define	EDU_INTR_ACK		0x64
+#define	EDU_INTR_VALUE		0x977u
+
+static void msi_plain_selftest(void)
+{
+	struct pci_msix		table;
+	struct pci_msi		p;
+	unsigned int		slot = 0;
+	unsigned		dev, edu = 0, found = 0;
+	uint64_t		back_addr = 0, regs_base = 0, before;
+	uint32_t		back_data = 0, status;
+	uint16_t		control = 0;
+	volatile uint32_t	*regs;
+
+	for (dev = 0; dev < 32 && !found; dev++)
+		if (pci_cfg_read(0, 0, (uint8_t)dev, 0, PCI_VENDOR_ID)
+		    == EDU_ID) {
+			edu = dev;
+			found = 1;
+		}
+	if (!found) {
+		kputs("UrMach x86-64: plain MSI: no edu device on this board,"
+		      " so no device here can be asked for a message without"
+		      " a table (#977)\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: plain MSI: the edu device at 00:");
+	kputdec(edu);
+	kputs(".0");
+	if (pci_msix_probe(0, 0, (uint8_t)edu, 0, &table)) {
+		kputs(" has an MSI-X table, which this test of a message"
+		      " without one cannot use — WRONG\r\n");
+		return;
+	}
+	if (!pci_msi_probe(0, 0, (uint8_t)edu, 0, &p)) {
+		kputs(" has no MSI capability — WRONG\r\n");
+		return;
+	}
+
+	/* BAR 0, its registers, decoded: a slot is not a region (#427). */
+	{
+		uint32_t		slots[PCI_NUM_BAR_SLOTS];
+		struct pci_bar_region	r[PCI_NUM_BAR_SLOTS];
+		unsigned int		n, i;
+
+		for (i = 0; i < PCI_NUM_BAR_SLOTS; i++)
+			slots[i] = pci_cfg_read(0, 0, (uint8_t)edu, 0,
+						PCI_BAR(i));
+		n = pci_bars_decode(slots, PCI_NUM_BAR_SLOTS, r,
+				    PCI_NUM_BAR_SLOTS);
+		for (i = 0; i < n; i++)
+			if (r[i].slot == 0 && !(r[i].flags & PCI_REGION_IO))
+				regs_base = r[i].base;
+	}
+	regs = regs_base == 0 ? 0 : (volatile uint32_t *)(uintptr_t)
+				    pmap_map_device(regs_base, 0x1000);
+	if (regs == 0) {
+		kputs(" has registers that could not be mapped — WRONG\r\n");
+		return;
+	}
+
+	if (!device_md_msi_register(0, edu, 0, 0, msi_handler, &slot)) {
+		kputs(" was given no slot by device_md_msi_register() — WRONG,"
+		      " a function with MSI and no table got no message\r\n");
+		return;
+	}
+
+	pci_msi_read(&p, &back_addr, &back_data, &control);
+	kputs(" was given slot ");
+	kputdec(slot);
+	kputs(", and its capability reads back address ");
+	kputhex64(back_addr);
+	kputs(" data ");
+	kputhex64(back_data);
+	kputs(" control ");
+	kputhex64(control);
+	kputs((control & PCI_MSI_CTL_ENABLE) && !(control & PCI_MSI_CTL_MME)
+	      && (back_addr >> 20) == 0xFEEu
+	      ? " — enabled, one message, at the local APICs' address\r\n"
+	      : " — WRONG, the device will not send a message to the"
+		" processors\r\n");
+
+	/*
+	 * And now the device sends it.  At least once, as the test above says
+	 * of a table, and on the slot device_md_msi_register() gave: nothing
+	 * else on the machine knows that number but the message it wrote.
+	 */
+	before = msi_hits;
+	regs[EDU_INTR_RAISE / 4] = EDU_INTR_VALUE;
+	for (unsigned spin = 0; spin < 5000000u && msi_hits == before; spin++)
+		cpu_pause();
+	status = regs[EDU_INTR_STATUS / 4];
+	regs[EDU_INTR_ACK / 4] = status;	/* and lower it */
+
+	kputs("UrMach x86-64: plain MSI: edu was asked to raise ");
+	kputhex64(EDU_INTR_VALUE);
+	kputs(", its status read ");
+	kputhex64(status);
+	kputs(", and slot ");
+	kputdec((unsigned)msi_slot_seen);
+	kputs(" ran ");
+	kputdec((unsigned)(msi_hits - before));
+	kputs(" times");
+	kputs(msi_hits - before >= 1 && msi_slot_seen == (int)slot
+	      && (status & EDU_INTR_VALUE) == EDU_INTR_VALUE
+	      ? " — a device wrote the message the kernel put in its"
+		" capability, and it arrived as an interrupt\r\n"
+	      : " — WRONG, the capability is written and the device's message"
+		" did not arrive on its slot\r\n");
+
+	/*
+	 * The function has one message, so a second registration is refused
+	 * rather than given another vector over the first -- whose driver
+	 * would wait on a slot the device no longer writes.
+	 */
+	{
+		unsigned int second = 0;
+
+		if (device_md_msi_register(0, edu, 0, 0, msi_handler,
+					   &second)) {
+			kputs("UrMach x86-64: plain MSI: asked again, the same"
+			      " function was given a second slot, ");
+			kputdec(second);
+			kputs(" — WRONG, its one message pointed at another"
+			      " vector over the first\r\n");
+			device_md_msi_unregister(second);
+		} else {
+			kputs("UrMach x86-64: plain MSI: asked again, the same"
+			      " function was refused a second slot — its one"
+			      " message is the first slot's\r\n");
+		}
+	}
+
+	device_md_msi_unregister(slot);
+	pci_msi_read(&p, 0, 0, &control);
+	kputs("UrMach x86-64: plain MSI: given back, its control word reads ");
+	kputhex64(control);
+	kputs(!(control & PCI_MSI_CTL_ENABLE)
+	      ? " — disabled, so the device can no longer send it\r\n"
+	      : " — WRONG, given back and still enabled\r\n");
 }
 
 /* #598's C12: a handler for the line the range question claims. */
@@ -10911,6 +11077,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	}
 	msi_selftest();
 	msix_table_selftest();
+	msi_plain_selftest();	/* #977 */
 	ioapic_selftest();
 	ioapic_level_selftest();
 	spl_selftest();

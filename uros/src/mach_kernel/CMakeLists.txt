@@ -820,6 +820,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     # fifth copy of the thing that file exists to have deleted.
     ${CMAKE_SOURCE_DIR}/src/lib/libpci/pci_bar.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pci_msix.c
+    # #977: MSI, the message without a table, for the functions that have
+    # no MSI-X.
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pci_msi.c
     ${X86_64_MIG_DIR}/device/device_reply_user.c
     ${X86_64_MIG_DIR}/device/device_server.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/device_stubs.c
