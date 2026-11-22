@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #981
 Takes out: libflipc2's check that a client's death came from the kernel, in the one function both demuxes ask: an endpoint takes a dead-name notification from whoever sends one, as before #981.  notify_forge_test's [3] sends its own endpoint one naming its live client's token, and the endpoint's pump reports the client dead.
 Run: --entry 14 600 -smp 4
-Expect: notify_forge_test: \[3\] a message with a dead-name notification's id from a task, naming a live client's token: no answer in [0-9]+ ms, as a notification gets none, and the endpoint reported the client dead -- WRONG, it took it for the kernel's
+Expect: notify_forge_test: \[3\] a message with a dead-name notification's id from a task, naming a live client's token: no answer to it, where the message sent after it on the same port was answered, as a notification gets none, and the endpoint reported the client dead -- WRONG, it took it for the kernel's
 
 diff --git a/uros/src/lib/libflipc2/flipc2_endpoint.c b/uros/src/lib/libflipc2/flipc2_endpoint.c
 index f54051bd..8defb35b 100644
