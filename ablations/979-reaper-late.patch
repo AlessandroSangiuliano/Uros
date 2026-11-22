@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #979
+Takes out: the reaper's pace for act_test [53]'s threads, and theirs alone: each thread stopped at the address the arm makes them fault at, 0x5300000, takes the reaper 100 ms more, so that the arm's 32 tasks of 4 threads leave the zone of tasks in about 13 s, after its 500 waits and before its 30 s more by the clock.  The arm has to say the reaper was late, and by how much, where it said only that the tasks were still there.
+Run: --entry 14 300 -smp 4
+Expect: act_test: \[53\] [0-9]+ tasks of 4 threads faulted together, and the zone of tasks read [0-9]+ before and [0-9]+ after [0-9]+ waits: they are still there, and the zone came back to [0-9]+ [0-9]+ ms later by the clock: the reaper was late
+Note: a delay for every thread the reaper destroys put it behind for the whole boot, with 373 tasks in the zone before [53] began, and the arm said they did not leave; one wait over 414-widen-reaper's 2 ms a thread left nothing late.  So the delay is kept to the arm's threads.
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index cadf1c0e..11aab44a 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -2079,6 +2079,14 @@ reaper_thread(void)
+ 			rpc_unlock(thread);
+ 			if (pool_port != IP_NULL) ip_unlock(pool_port);
+ 			act_unlock(thr_act);
++#ifdef __x86_64__
++			/* 979-reaper-late: act_test [53]'s threads, stopped at 0x5300000, take 100 ms each */
++			if (thr_act->mact.pcb != 0 && thr_act->mact.pcb->user != 0 &&
++			    thr_act->mact.pcb->user->rip == 0x5300000) {
++				extern void delay(int);
++				delay(100000);
++			}
++#endif
+ 
+ 			/* Remove the reference held by a rooted thread */
+ 			if (pool_port == IP_NULL) act_deallocate(thr_act);
