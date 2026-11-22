@@ -26,8 +26,9 @@
  *                       reference held; only it may install or refresh the
  *                       key or revoke caps (#744 -- it used to be whichever
  *                       task installed a key first)
- *   cap_state_table[]   hash set of cap_ids that are revoked and/or
- *                       have been consumed (for use-once tokens).
+ *   cap_state_table[]   hash set of cap_ids that are revoked; #974: those
+ *                       of them the kernel may forget when a deadline comes
+ *                       are also in a list by deadline (cap_dated_first).
  *
  * Threading: a single global simple_lock guards the whole subsystem.
  * Suitable for v1 where cap_server is the only writer and verify is
@@ -39,6 +40,7 @@
 #include <mach/kern_return.h>
 #include <mach/cap_types.h>
 
+#include <kern/assert.h>		/* #974 */
 #include <kern/cap.h>
 #include <kern/hmac_sha256.h>
 #include <kern/kalloc.h>
@@ -77,13 +79,56 @@
 
 #define CAP_FLAG_REVOKED        0x1
 
+/*
+ * A revoked id, in its bucket's chain.  #974: with the deadline of the token
+ * it was revoked as, and, while that deadline is to come, in the list of the
+ * dated entries, earliest first.
+ */
 struct cap_state_entry {
     struct cap_state_entry *next;
+    struct cap_state_entry *earlier;	/* #974: in the list by deadline */
+    struct cap_state_entry *later;
     uint64_t  cap_id;
+    uint64_t  expires;			/* #974: 0 -- kept for good */
     uint32_t  flags;
 };
 
 static struct cap_state_entry *cap_state_table[CAP_STATE_BUCKETS];
+
+/*
+ * ── What the kernel may forget, and when (#974) ──────────────────────────────
+ *
+ * An entry was made for every id revoked and none was ever freed, and since
+ * #747 a deadline revokes every capability asked for with a lifetime: a task
+ * that asked for short-lived ones steadily grew kernel memory, and the chains
+ * cap_rest_locked() walks on every verification the cache misses, without
+ * bound.
+ *
+ * 🔑 An entry decides an answer only while its token could otherwise verify.
+ * The deadline is checked before this table, on every call and never from the
+ * cache (cap_deadline_check()), so a token past its deadline is refused before
+ * the table is asked, and its entry can no longer decide anything.  So:
+ *
+ *  - an id revoked when its deadline has already come gets no entry -- which is
+ *    every revocation a deadline makes, cap_server's sweep coming after it;
+ *  - an id revoked before its deadline gets one with that deadline, kept in
+ *    cap_dated_first's list by deadline, and freed by the first revocation
+ *    after the deadline comes (cap_dated_prune_locked());
+ *  - an id whose token has no deadline keeps its entry for good: nothing else
+ *    would ever refuse the token.
+ *
+ * ⚠️ ONLY ON A CLOCK THAT IS NEVER SET.  A passed deadline stays passed on
+ * x86-64's monotonic clock; i386's REALTIME_CLOCK can be set back
+ * (URMACH_CAP_CLOCK_NEVER_SET, <mach/clock_types.h>), and with it a deadline
+ * that has come, so there every entry is kept, as before.
+ *
+ * The epoch moves with every revocation all the same, and the token's
+ * mappings are torn down all the same: what is skipped is the entry, never the
+ * revocation.
+ */
+static struct cap_state_entry *cap_dated_first, *cap_dated_last;
+static unsigned int             cap_state_entries;	/* all of them */
+static unsigned int             cap_state_dated;	/* in the list */
 
 static uint8_t   cap_hmac_key[CAP_HMAC_SIZE];
 /* #537: the key made ready when it is set -- its two padded blocks hashed once */
@@ -143,12 +188,82 @@ cap_state_lookup(uint64_t cap_id)
 }
 
 /*
- * Fetch-or-create an entry for cap_id.  Must be called with cap_lock
- * held; may temporarily drop it to kalloc.  Returns NULL on allocation
- * failure.
+ * #974: `e' into the list by deadline, after every entry whose deadline is not
+ * later than its own.  Looked for from the latest end: a task's capabilities
+ * mostly come to their deadlines in the order they were asked for.  cap_lock
+ * held.
+ */
+static void
+cap_dated_insert(struct cap_state_entry *e)
+{
+    struct cap_state_entry *p = cap_dated_last;
+
+    while (p != NULL && p->expires > e->expires)
+        p = p->earlier;
+    e->earlier = p;
+    e->later = p != NULL ? p->later : cap_dated_first;
+    if (e->later != NULL)
+        e->later->earlier = e;
+    else
+        cap_dated_last = e;
+    if (p != NULL)
+        p->later = e;
+    else
+        cap_dated_first = e;
+    cap_state_dated++;
+}
+
+/*
+ * #974: every dated entry whose deadline has come by `now', out of the list
+ * and out of its bucket, chained by `next' for cap_state_free() once cap_lock
+ * is dropped -- the lock masks interrupts on x86-64, and kfree() need not run
+ * under it.  The list is by deadline, so this stops at the first that has not
+ * come.  cap_lock held.
  */
 static struct cap_state_entry *
-cap_state_get_or_create(uint64_t cap_id)
+cap_dated_prune_locked(uint64_t now)
+{
+    struct cap_state_entry *e, **p, *gone = NULL;
+
+    while ((e = cap_dated_first) != NULL && e->expires <= now) {
+        cap_dated_first = e->later;
+        if (cap_dated_first != NULL)
+            cap_dated_first->earlier = NULL;
+        else
+            cap_dated_last = NULL;
+        cap_state_dated--;
+        for (p = &cap_state_table[cap_bucket(e->cap_id)];
+             *p != NULL && *p != e; p = &(*p)->next)
+            ;
+        assert(*p == e);
+        *p = e->next;
+        cap_state_entries--;
+        e->next = gone;
+        gone = e;
+    }
+    return gone;
+}
+
+static void
+cap_state_free(struct cap_state_entry *gone)
+{
+    struct cap_state_entry *e;
+
+    while ((e = gone) != NULL) {
+        gone = e->next;
+        kfree((vm_offset_t)e, sizeof(*e));
+    }
+}
+
+/*
+ * Fetch-or-create an entry for cap_id.  Must be called with cap_lock
+ * held; may temporarily drop it to kalloc.  Returns NULL on allocation
+ * failure.  #974: `expires' is the deadline after which it may be
+ * forgotten, 0 for none; an entry already there was made for the same
+ * token, with the same deadline.
+ */
+static struct cap_state_entry *
+cap_state_get_or_create(uint64_t cap_id, uint64_t expires)
 {
     struct cap_state_entry *e = cap_state_lookup(cap_id);
     if (e != NULL)
@@ -168,10 +283,16 @@ cap_state_get_or_create(uint64_t cap_id)
     }
 
     e->cap_id    = cap_id;
+    e->expires   = expires;		/* #974 */
     e->flags     = 0;
+    e->earlier   = NULL;
+    e->later     = NULL;
     unsigned b = cap_bucket(cap_id);
     e->next = cap_state_table[b];
     cap_state_table[b] = e;
+    cap_state_entries++;		/* #974 */
+    if (expires != 0)
+        cap_dated_insert(e);		/* #974 */
     return e;
 }
 
@@ -265,6 +386,26 @@ cap_rest_locked(const struct uros_cap *t,
 }
 
 /*
+ * Now on URMACH_CAP_CLOCK, nanoseconds since boot; FALSE when it cannot be
+ * read.  #974: the deadline check's reading, and the revocation's, which asks
+ * whether a deadline has come by the same clock and the same arithmetic.
+ */
+static boolean_t
+cap_clock_now(uint64_t *ns)
+{
+    clock_t clock;
+    tvalspec_t now;
+
+    if (URMACH_CAP_CLOCK >= clock_count)
+        return FALSE;
+    clock = &clock_list[URMACH_CAP_CLOCK];
+    if (clock->cl_ops == 0 || (*clock->cl_ops->c_gettime)(&now) != KERN_SUCCESS)
+        return FALSE;
+    *ns = (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
+    return TRUE;
+}
+
+/*
  * #747: is the token past its deadline?  `expires' is nanoseconds since boot on
  * URMACH_CAP_CLOCK, written by cap_server from that clock when it issued the
  * token, and 0 for a token asked for with no lifetime.  It was written 0 in
@@ -283,18 +424,12 @@ cap_rest_locked(const struct uros_cap *t,
 static kern_return_t
 cap_deadline_check(const struct uros_cap *t)
 {
-    clock_t clock;
-    tvalspec_t now;
     uint64_t ns;
 
     if (t->expires == 0)
         return KERN_SUCCESS;
-    if (URMACH_CAP_CLOCK >= clock_count)
+    if (!cap_clock_now(&ns))
         return CAP_ERR_EXPIRED;
-    clock = &clock_list[URMACH_CAP_CLOCK];
-    if (clock->cl_ops == 0 || (*clock->cl_ops->c_gettime)(&now) != KERN_SUCCESS)
-        return CAP_ERR_EXPIRED;
-    ns = (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
     return ns < t->expires ? KERN_SUCCESS : CAP_ERR_EXPIRED;
 }
 
@@ -811,6 +946,9 @@ cap_revoke_token(const struct uros_cap *t)
 {
     task_t caller = current_task();
     uint64_t cap_id = t->cap_id;
+    struct cap_state_entry *e, *gone;
+    boolean_t have_now;
+    uint64_t now = 0;
     kern_return_t kr;
 
     simple_lock(&cap_lock);
@@ -823,6 +961,12 @@ cap_revoke_token(const struct uros_cap *t)
     kr = cap_mac_check_unlocked(t);
     if (kr != KERN_SUCCESS)
         return kr;
+    /*
+     * #974: whether deadlines have come, read before cap_lock as the check
+     * reads it -- and only on a clock that is never set.  Read a moment early,
+     * it forgets less, never more.
+     */
+    have_now = URMACH_CAP_CLOCK_NEVER_SET && cap_clock_now(&now);
 
     simple_lock(&cap_lock);
     if (!cap_key_set || caller != cap_server_task) {
@@ -830,14 +974,24 @@ cap_revoke_token(const struct uros_cap *t)
         return CAP_ERR_UNAUTHORIZED;
     }
 
-    struct cap_state_entry *e = cap_state_get_or_create(cap_id);
-    if (e == NULL) {
-        simple_unlock(&cap_lock);
-        return CAP_ERR_NO_MEMORY;
+    gone = have_now ? cap_dated_prune_locked(now) : NULL;	/* #974 */
+    /*
+     * #974: a token whose deadline has come is refused by it before this table
+     * is asked, so its id is given no entry.  The deadline's own revocation,
+     * which cap_server's sweep makes after it, is always such a one.
+     */
+    if (!have_now || t->expires == 0 || now < t->expires) {
+        e = cap_state_get_or_create(cap_id, have_now ? t->expires : 0);
+        if (e == NULL) {
+            simple_unlock(&cap_lock);
+            cap_state_free(gone);
+            return CAP_ERR_NO_MEMORY;
+        }
+        e->flags |= CAP_FLAG_REVOKED;
     }
-    e->flags |= CAP_FLAG_REVOKED;
     cap_epoch++;			/* #537: no verified token outlives it */
     simple_unlock(&cap_lock);
+    cap_state_free(gone);
 
     /*
      * 🔴 AND THE MAPPINGS THIS TOKEN BOUGHT, torn down (#432).
