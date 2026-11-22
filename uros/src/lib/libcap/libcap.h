@@ -32,6 +32,7 @@
 
 #include <mach.h>
 #include <mach/cap_types.h>
+#include <mach/cap_manifest.h>	/* cap_manifest_build() (#982) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -181,6 +182,24 @@ kern_return_t cap_derive_child(mach_port_t parent_cap_port,
                                const void *manifest_blob,
                                unsigned int manifest_len,
                                mach_port_t *out_task_cap_port);
+
+/*
+ * cap_manifest_build() — a manifest blob composed at run time, laid out as
+ * mkmanifest writes one (#982): the header, the required entries, the
+ * delegatable ones, the name with its NUL, zeros up to a multiple of four.
+ * For a task that starts another and writes into the child's manifest what only
+ * it knows -- the HAL, the address of the device a driver is started for.  The
+ * blob goes to cap_derive_child(), which cuts it to what the caller's own
+ * manifest may hand on, so this grants nothing by itself.  Answers the blob's
+ * length, or 0 when it does not fit in `size', or a list or the name is longer
+ * than a manifest may have.
+ */
+unsigned int cap_manifest_build(const char *name,
+                                const cap_manifest_entry_t *required,
+                                unsigned int n_required,
+                                const cap_manifest_entry_t *delegatable,
+                                unsigned int n_delegatable,
+                                void *buf, unsigned int size);
 
 #ifdef __cplusplus
 }
