@@ -101,6 +101,17 @@ struct answer {
 #define FORGE_STUCK	2		/* no answer to either in FORGE_WAIT_MS */
 #define FORGE_FAILED	3		/* it could not be sent or read */
 
+/* What say_answer() writes in the two longer cases, and its buffer. */
+#define SAID_SILENT	"no answer to it, where the message sent after it " \
+			"on the same port was answered, as a notification " \
+			"gets none"
+#define SAID_STUCK	"no answer in %d ms to it or to the message sent " \
+			"after it"
+#define SAID_MAX	160
+_Static_assert(sizeof SAID_SILENT <= SAID_MAX &&
+	       sizeof SAID_STUCK + 11 <= SAID_MAX,
+	       "a text of say_answer() would be cut");
+
 static kern_return_t
 send_one(mach_port_t to, mach_msg_type_name_t disp, mach_port_t reply,
 	 mach_msg_id_t id, natural_t word)
@@ -182,14 +193,11 @@ static void
 say_answer(char *buf, size_t n, int r, kern_return_t ret)
 {
 	if (r == FORGE_SILENT)
-		snprintf(buf, n, "no answer to it, where the message sent after "
-			 "it on the same port was answered, as a notification "
-			 "gets none");
+		snprintf(buf, n, "%s", SAID_SILENT);
 	else if (r == FORGE_SENT)
 		snprintf(buf, n, "answered %d", (int)ret);
 	else if (r == FORGE_STUCK)
-		snprintf(buf, n, "no answer in %d ms to it or to the message "
-			 "sent after it", FORGE_WAIT_MS);
+		snprintf(buf, n, SAID_STUCK, FORGE_WAIT_MS);
 	else
 		snprintf(buf, n, "the exchange failed");
 }
@@ -203,7 +211,7 @@ arm_hal(void)
 {
 	mach_port_t	hal = MACH_PORT_NULL;
 	kern_return_t	ret = KERN_SUCCESS;
-	char		said[96];
+	char		said[SAID_MAX];
 	int		r;
 
 	if (netname_wait(name_server_port, "hal", &hal) != KERN_SUCCESS ||
@@ -240,7 +248,7 @@ arm_pipe(void)
 	mach_port_type_t	type = 0;
 	flipc2_channel_t	ch = 0;
 	kern_return_t		kr, ret = KERN_SUCCESS;
-	char			said[96];
+	char			said[SAID_MAX];
 	int			r, alive;
 
 	if (netname_wait(name_server_port, "pipe_server", &service)
@@ -347,7 +355,7 @@ arm_endpoint(void)
 	flipc2_channel_t	fwd = 0, rev = 0;
 	pthread_t		t;
 	kern_return_t		ret = KERN_SUCCESS;
-	char			said[96];
+	char			said[SAID_MAX];
 	int			r, dead;
 
 	if (flipc2_endpoint_create("notify_forge_test", 2,
