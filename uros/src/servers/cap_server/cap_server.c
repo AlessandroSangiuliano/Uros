@@ -1430,7 +1430,14 @@ cap_verify(mach_port_t             server,
     /* Also consult the live table: a token may have been revoked
      * after issuance but the in-flight copy can still carry revoked=0. */
     struct cap_entry *live = cap_table_find_by_id(token.cap_id);
-    if (live && live->token.revoked) return CAP_ERR_REVOKED;
+    /*
+     * 🔴 #974: AND AN ID THE TABLE NO LONGER HOLDS WAS REVOKED.  This answered
+     * such a token as good, which was right only while nothing ever left the
+     * table.  A token whose MAC verifies was signed with this server's key,
+     * made anew each time it starts, so this server issued it; and an entry
+     * leaves the table only once it is revoked (cap_forget_tree()).
+     */
+    if (live == NULL || live->token.revoked) return CAP_ERR_REVOKED;
 
     return KERN_SUCCESS;
 }
