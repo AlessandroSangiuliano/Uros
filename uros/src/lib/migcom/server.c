@@ -732,6 +732,21 @@ WriteRetCArgFinishError(FILE *file, routine_t *rt)
     retcode->argMsgField = "KERN_SUCCESS";
 }
 
+/*
+ * #981: whether a routine's request port is a send-once right, and only one:
+ * MOVE_SEND_ONCE or MAKE_SEND_ONCE, never a polymorphic name, which lets the
+ * sender choose another disposition (dev_forward.defs's reply port).
+ */
+static boolean_t
+RequestPortIsSendOnce(routine_t *rt)
+{
+    ipc_type_t *it = rt->rtRequestPort->argType;
+
+    return it != itNULL &&
+	it->itOutName == MACH_MSG_TYPE_PORT_SEND_ONCE &&
+	it->itInName != MACH_MSG_TYPE_POLYMORPHIC;
+}
+
 static void
 WriteCheckHead(FILE *file, routine_t *rt)
 {
@@ -776,6 +791,21 @@ WriteCheckHead(FILE *file, routine_t *rt)
     WriteReturnMsgError(file, rt, FALSE, argNULL, "MIG_BAD_ARGUMENTS");
     fprintf(file, "#endif\t/* TypeCheck */\n");
     fprintf(file, "\n");
+
+    /*
+     * #981: a routine whose request port is a send-once right -- every
+     * notification of notify.defs -- is sent the way the kernel sends it,
+     * through the send-once right its request made.  A task that holds a send
+     * right to the same port can send a message with the same id and the same
+     * size, and it arrives with other bits.  So the request is refused unless
+     * it came through a send-once right.  Outside TypeCheck: this is not a
+     * check of the message's shape but of who could have sent it.
+     */
+    if (RequestPortIsSendOnce(rt)) {
+	fprintf(file, "\tif (MACH_MSGH_BITS_LOCAL(In0P->Head.msgh_bits) != MACH_MSG_TYPE_PORT_SEND_ONCE)\n");
+	WriteReturnMsgError(file, rt, FALSE, argNULL, "MIG_BAD_ARGUMENTS");
+	fprintf(file, "\n");
+    }
 }
 
 static void
