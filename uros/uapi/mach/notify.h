@@ -111,6 +111,21 @@
 			/* Send or send-once right died, leaving a dead-name */
 #define MACH_NOTIFY_LAST		(MACH_NOTIFY_FIRST + 015)
 
+/*
+ * #981: whether a message with a notification's id came from the kernel.  The
+ * kernel sends a notification through the send-once right that
+ * mach_port_request_notification() made for it, so it arrives with a send-once
+ * right in its local bits.  A task that holds a send right to the same port can
+ * send a message with the same id and the same size, and it arrives as a send
+ * right's.  A demux written by hand asks this before it acts on one; MIG's
+ * stubs for notify.defs ask the same.
+ */
+static __inline__ int
+urmach_notification_from_kernel(const mach_msg_header_t *h)
+{
+	return MACH_MSGH_BITS_LOCAL(h->msgh_bits) == MACH_MSG_TYPE_PORT_SEND_ONCE;
+}
+
 typedef struct {
     mach_msg_header_t	not_header;
     NDR_record_t	NDR;
