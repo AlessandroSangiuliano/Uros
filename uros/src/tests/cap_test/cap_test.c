@@ -1565,8 +1565,8 @@ ct_census(struct ct_census *c)
  * for as long as the system ran.  CT55_CAPS are asked for here with CT55_MS,
  * every fourth with a child derived from it, and both tables are read before,
  * once all are issued -- so that a census blind to them says so -- and after
- * the last deadline, once cap_server's table is back within CT55_SLACK of
- * where it was or CT55_WAIT_MS have passed.  Other tasks ask and revoke
+ * the last deadline, again and again until both say what they must, or
+ * CT55_WAIT_MS have passed (ct55_settled()).  Other tasks ask and revoke
  * meanwhile, which CT55_SLACK is for: a table that kept them is past it by
  * CT55_CAPS and more.
  *
@@ -1582,6 +1582,13 @@ ct_census(struct ct_census *c)
  * machine that took longer than their lifetime to ask for them all saw some
  * leave before it could count them present, and cannot say that the census
  * sees them: NOT ASKED.
+ *
+ * ⚠️ And it asked again only until cap_server's table was back, taking the
+ * kernel's count with that answer.  A sweep begun before the last deadline
+ * leaves the latest for the next one, and cap_server's table can be back
+ * within the slack while some of them are still to be swept: where every
+ * revocation is kept, the kernel's count is short of them until that sweep.
+ * So both tables are asked until both say it.
  */
 /*
  * Two hundred and fifty, with their sixty-two children, against a slack of
@@ -1596,6 +1603,22 @@ ct_census(struct ct_census *c)
 #define CT55_POLL_MS	50u
 #define CT55_WAIT_MS	30000u
 
+/*
+ * Whether both tables say, in `c', what they must once the last deadline has
+ * passed: cap_server's is back within CT55_SLACK of `c0', and so is the
+ * kernel's where a deadline's revocation is given no entry, while where the
+ * clock can be set and every revocation is kept it has grown by all `put'.
+ */
+static int
+ct55_settled(const struct ct_census *c0, const struct ct_census *c, long put)
+{
+    long kernel_grew = CT_GREW(c0->kernel, c->kernel);
+
+    return CT_GREW(c0->server, c->server) <= CT55_SLACK &&
+           (URMACH_CAP_CLOCK_NEVER_SET ? kernel_grew <= CT55_SLACK
+                                       : kernel_grew >= put);
+}
+
 static int
 a_deadline_leaves_both_tables(void)
 {
@@ -1604,7 +1627,7 @@ a_deadline_leaves_both_tables(void)
     mach_port_t      host = mach_host_self(), clk = MACH_PORT_NULL;
     unsigned int     i, asked = 0, derived = 0, waits = 0;
     uint64_t         start, issued, last = 0, now = 0;
-    long             put, present, kernel_grew, server_grew;
+    long             put, present;
     kern_return_t    kr, k1, k2 = KERN_SUCCESS;
     int              ok;
 
@@ -1654,14 +1677,14 @@ a_deadline_leaves_both_tables(void)
         return 1;
     }
 
-    /* Past the last deadline, by its clock, and then until the table is back. */
+    /* Past the last deadline, by its clock, and then until both tables say it. */
     do {
         (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
         now = ct50_now(clk);
     } while (now != 0 && now < last && ++waits < CT55_WAIT_MS / 20);
     for (waits = 0; ; waits++) {
         k2 = ct_census(&c2);
-        if (k2 != KERN_SUCCESS || CT_GREW(c0.server, c2.server) <= CT55_SLACK ||
+        if (k2 != KERN_SUCCESS || ct55_settled(&c0, &c2, put) ||
             waits >= CT55_WAIT_MS / CT55_POLL_MS)
             break;
         (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, CT55_POLL_MS);
@@ -1670,13 +1693,9 @@ a_deadline_leaves_both_tables(void)
     (void)mach_port_deallocate(mach_task_self(), clk);
 
     present = CT_GREW(c0.server, c1.server);
-    kernel_grew = CT_GREW(c0.kernel, c2.kernel);
-    server_grew = CT_GREW(c0.server, c2.server);
     ok = k2 == KERN_SUCCESS
       && present >= put - CT55_SLACK
-      && server_grew <= CT55_SLACK
-      && (URMACH_CAP_CLOCK_NEVER_SET ? kernel_grew <= CT55_SLACK
-                                     : kernel_grew >= put);
+      && ct55_settled(&c0, &c2, put);
     if (ok) {
         printf("cap_test: [55] %u capabilities asked for with %u ms, in %llu "
                "ms, and %u children: cap_server's table went from %u to %u, "
