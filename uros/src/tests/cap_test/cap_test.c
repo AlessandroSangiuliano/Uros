@@ -1561,23 +1561,34 @@ ct_census(struct ct_census *c)
  * ablate.sh, reading the raw log, misses its end -- as it missed a probe's
  * Expect after [56]'s WRONG was cut (#974, 22/11).  A longer line is said, as
  * a WRONG, as notify_forge_test's verdict() does (#981).
+ *
+ * ⚠️ The compiler's va_start, not sa_mach's: on i386 <stdarg.h> takes the
+ * address of the last named parameter and steps past it, and GCC at -O3
+ * copied `fmt' into ct_line()'s own frame first, so the arguments were read
+ * from there -- every line of [55] and [56] came out as garbage, or cap_test
+ * died reading through one, in 4 boots of 4 (#974, 22/11).  And twice the
+ * console's 255 bytes, asked apart: libmach's vsnprintf() answers what it
+ * wrote, never more than its buffer holds, so against the buffer's own size
+ * no line would ever have been too long.
  */
 static void ct_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+#define CT_LINE_MOST	255
 
 static void
 ct_line(const char *fmt, ...)
 {
-    char    line[256];
+    char    line[2 * (CT_LINE_MOST + 1)];
     va_list ap;
     int     n;
 
-    va_start(ap, fmt);
+    __builtin_va_start(ap, fmt);
     n = vsnprintf(line, sizeof line, fmt, ap);
-    va_end(ap);
-    if (n < 0 || (size_t)n >= sizeof line)
-        printf("cap_test: a line of %d bytes, past the %u the console keeps "
-               "whole, begins \"%.48s\" -- WRONG (#974)\n", n,
-               (unsigned)(sizeof line - 1), line);
+    __builtin_va_end(ap);
+    if (n < 0 || n > CT_LINE_MOST)
+        printf("cap_test: a line of %d bytes or more, past the %d the console "
+               "keeps whole, begins \"%.48s\" -- WRONG (#974)\n", n,
+               CT_LINE_MOST, line);
     else
         printf("%s", line);
 }
