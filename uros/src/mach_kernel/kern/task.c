@@ -383,11 +383,42 @@
 
 #include <mach/mach_server.h>
 #include <mach/mach_host_server.h>
-
-security_token_t DEFAULT_USER_SECURITY_TOKEN = { {930624, 610120} };
+#include <mach/urmach_identity.h>	/* #747: URMACH_IDENTITY_TASK_BIT */
 
 task_t	kernel_task;
 zone_t	task_zone;
+
+/*
+ * ── Each task's identity (#747) ───────────────────────────────────────
+ *
+ * 🔴 A TASK'S SECURITY TOKEN TOLD NOBODY APART.  It was inherited from the
+ * parent, and a task with none got DEFAULT_USER_SECURITY_TOKEN, so every user
+ * task in the system had the same one -- and the trailer of a message a task
+ * sent did not carry it anyway (ipc_kmsg_get()).  A capability could not be
+ * issued to a task, because nothing could tell a task from another.
+ *
+ * 🔑 So every task is given one of its own when it is made, from a counter that
+ * is never reused, and nothing inherits it or sets it afterwards: see
+ * <mach/urmach_identity.h>.  The kernel task keeps the kernel's own,
+ * KERNEL_SECURITY_TOKEN, which is what the kernel stamps on what it sends.
+ */
+decl_simple_lock_data(static, task_identity_lock)
+static uint64_t	task_identity_next = 1;
+
+static security_token_t
+task_identity_new(void)
+{
+	security_token_t	t;
+	uint64_t		id;
+
+	simple_lock(&task_identity_lock);
+	id = task_identity_next++;
+	simple_unlock(&task_identity_lock);
+	id |= URMACH_IDENTITY_TASK_BIT;
+	t.val[0] = (unsigned int)id;
+	t.val[1] = (unsigned int)(id >> 32);
+	return t;
+}
 
 /*
  * Define glue vector used by short-circuited RPC, and a pointer
@@ -442,6 +473,7 @@ task_init(void)
 			"tasks");
 
 	ipc_task_rights_init();		/* #927: before the first task */
+	simple_lock_init(&task_identity_lock, ETAP_NO_TRACE);	/* #747 */
 	eml_init();
 
 	/*
@@ -454,6 +486,8 @@ task_init(void)
 		panic("task_init\n");
 	vm_map_deallocate(kernel_task->map);
 	kernel_task->map = kernel_map;
+	kernel_task->sec_token = KERNEL_SECURITY_TOKEN;	/* #747 */
+	kernel_task->itk_space->is_identity = 0;	/* no task to derive to */
 
 #if	MACH_ASSERT
 	if (watchacts & WA_TASK)
@@ -653,25 +687,19 @@ task_create_security_token(
 	boolean_t	inherit_memory,
 	task_t		*child_task)		/* OUT */
 {
-        kern_return_t sts;
-#ifdef	lint
-	num_ledger_ports++;
-	ledger_ports++;
-#endif	/* lint */
-        
-	if (parent_task == TASK_NULL)
-		return(KERN_INVALID_ARGUMENT);
-
-	if (host_security == HOST_NULL)
-		return(KERN_INVALID_SECURITY);
-
-	sts = task_create_local(parent_task, inherit_memory, FALSE, child_task);
-
-        if (sts != KERN_SUCCESS)
-                return(sts);
-
-        return(task_set_security_token(*child_task, host_security,
-                                       sec_token));
+	/*
+	 * #747: a task made with a security token of the caller's choosing is a
+	 * task with somebody else's identity, which task_set_security_token()
+	 * refuses -- and refused here before the task is made, not after.
+	 */
+	(void)parent_task;
+	(void)host_security;
+	(void)sec_token;
+	(void)ledger_ports;
+	(void)num_ledger_ports;
+	(void)inherit_memory;
+	(void)child_task;
+	return(KERN_NO_ACCESS);
 }
 
 kern_return_t
@@ -757,7 +785,6 @@ task_create_local(
 		new_task->max_priority = parent_task->max_priority;
 		new_task->sched_data = parent_task->sched_data;
 		new_task->policy = parent_task->policy;
-		new_task->sec_token = parent_task->sec_token;
                 new_task->wired_ledger_port = ledger_copy(
 			convert_port_to_ledger(parent_task->wired_ledger_port));
                 new_task->paged_ledger_port = ledger_copy(
@@ -769,10 +796,11 @@ task_create_local(
                 new_task->max_priority = BASEPRI_USER;
                 new_task->sched_data = 0;
                 new_task->policy = POLICY_TIMESHARE;
-                new_task->sec_token = DEFAULT_USER_SECURITY_TOKEN;
                 new_task->wired_ledger_port = ledger_copy(root_wired_ledger);
                 new_task->paged_ledger_port = ledger_copy(root_paged_ledger);
 	}
+	new_task->sec_token = task_identity_new();	/* #747: its own */
+	new_task->itk_space->is_identity = urmach_identity_of(new_task->sec_token);
 	pset_lock(pset);
 	pset_add_task(pset, new_task);
 	pset_unlock(pset);
@@ -1536,17 +1564,18 @@ task_set_security_token(
         host_t		host_security,
         security_token_t sec_token)
 {
-	if (task == TASK_NULL)
-		return(KERN_INVALID_ARGUMENT);
-
-	if (host_security == HOST_NULL)
-		return(KERN_INVALID_SECURITY);
-
-        task_lock(task);
-        task->sec_token = sec_token;
-        task_unlock(task);
-
-        return(KERN_SUCCESS);
+	/*
+	 * 🔴 #747: A TASK'S IDENTITY IS NOT SET, BY ANYBODY.  The security token
+	 * is the identity the kernel gave the task when it made it, stamped on
+	 * every message the task sends, and capabilities are issued to it: a
+	 * holder of the host security port that could set it could make a task
+	 * any other task, and hold that task's capabilities.  Nothing in the
+	 * tree called this.
+	 */
+	(void)task;
+	(void)host_security;
+	(void)sec_token;
+	return(KERN_NO_ACCESS);
 }
 
 /*

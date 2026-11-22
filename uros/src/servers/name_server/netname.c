@@ -51,6 +51,8 @@
 #include <string.h>
 #define	MACH_INIT_SLOTS		1
 #include <mach.h>
+#include <mach/urmach_identity.h>	/* #747 */
+#include "snames.h"			/* #747 */
 #include <mach/message.h>
 #include <mach/bootstrap.h>
 #include <mach/notify.h>
@@ -287,15 +289,19 @@ main(int argc, char **argv)
 			 do_notify_subsystem_MAX_MESSAGE ?
 			 do_netname_subsystem_MAX_MESSAGE :
 			 do_notify_subsystem_MAX_MESSAGE,
-			 pset, MACH_MSG_OPTION_NONE);
+			 pset, URMACH_RCV_SENDER);	/* #747: who asks */
     panic("%s: mach_msg_server: %s\n",
 	    program, mach_error_string(kr));
     return(1);
 }
 
+uint64_t snames_request_sender;
+
 static boolean_t
 snames_demux(mach_msg_header_t *request, mach_msg_header_t *reply)
 {
+    /* #747: who sent it, for a mount's capability it may carry. */
+    snames_request_sender = urmach_msg_sender(request);
     if (request->msgh_local_port == netname_port)
 	return netname_server(request, reply);
     else if (request->msgh_local_port == notify_port)

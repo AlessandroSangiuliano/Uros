@@ -10321,6 +10321,8 @@ arm_fifty_two_fs_base_goes_with_the_thread(void)
 #define	A53_WAIT_MS	5000
 #define	A53_GONE_WAITS	500	/* ten milliseconds each, on a tick */
 #define	A53_SLACK	4	/* tasks of the rest of the system */
+#define	A53_LATE_MS	30000	/* #979: then by the clock, late or never */
+#define	A53_LATE_NAP_MS	100
 
 static int
 a53_round(mach_port_t me)
@@ -10383,6 +10385,59 @@ a53_round(mach_port_t me)
 	return gone;
 }
 
+/*
+ * #979: the zone still high after the waits -- late, or never?  A reaper that
+ * got no processor in time and a task that is never freed read the same at
+ * that point: once in a nightly (entry 45, TCG at four processors) six were
+ * still there, and nothing said which.  So the zone is asked on, every
+ * A53_LATE_NAP_MS by the clock, up to A53_LATE_MS, and the line says how long
+ * the tasks took to leave, or that they did not.  Either way it is WRONG: the
+ * waits are the bound, and #979 decides from these numbers whether they are
+ * the right one.  The line's first half is the one it always had, which
+ * 414-reaper-left-behind reads.
+ */
+static void
+a53_late_or_never(mach_port_t host, int before, int after, unsigned waited)
+{
+	struct timespec	t0, t1;
+	char		tail[96];
+	long		ms = 0, late = -1;
+	int		now = after, read;
+
+	read = getclock(TIMEOFDAY, &t0) == 0;
+	while (read && ms < A53_LATE_MS) {
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+				     A53_LATE_NAP_MS);
+		if (!a43_zone(host, "tasks", &now) ||
+		    getclock(TIMEOFDAY, &t1) != 0) {
+			read = 0;
+			break;
+		}
+		ms = (long) (t1.tv_sec - t0.tv_sec) * 1000 +
+		     (t1.tv_nsec - t0.tv_nsec) / 1000000;
+		if (now <= before + A53_SLACK) {
+			late = ms;
+			break;
+		}
+	}
+	/* One printf for the line: the console keeps a call together (#757). */
+	if (late >= 0)
+		(void) snprintf(tail, sizeof tail, "the zone came back to %d %ld "
+				"ms later by the clock: the reaper was late",
+				now, late);
+	else if (read)
+		(void) snprintf(tail, sizeof tail, "the zone still read %d %ld ms "
+				"later by the clock: they did not leave", now,
+				ms);
+	else
+		(void) snprintf(tail, sizeof tail, "the zone or the clock stopped "
+				"answering after %ld ms, at %d", ms, now);
+	printf("act_test: [53] %u tasks of %u threads faulted together, and the "
+	       "zone of tasks read %d before and %d after %u waits: they are "
+	       "still there, and %s — WRONG\n", A53_TASKS, A53_THREADS, before,
+	       after, waited, tail);
+}
+
 static int
 arm_fifty_three_threads_fault_together(void)
 {
@@ -10403,19 +10458,18 @@ arm_fifty_three_threads_fault_together(void)
 			break;
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 	}
-	(void) mach_port_deallocate(me, host);
 	if (!asked) {
+		(void) mach_port_deallocate(me, host);
 		printf("act_test: [53] the zone of tasks does not answer here "
 		       "— NOT ASKED\n");
 		return 1;
 	}
 	if (after > before + A53_SLACK) {
-		printf("act_test: [53] %u tasks of %u threads faulted together, "
-		       "and the zone of tasks read %d before and %d after %u "
-		       "waits: they are still there — WRONG\n", A53_TASKS,
-		       A53_THREADS, before, after, waited);
+		a53_late_or_never(host, before, after, waited);
+		(void) mach_port_deallocate(me, host);
 		return 0;
 	}
+	(void) mach_port_deallocate(me, host);
 	printf("act_test: [53] %u tasks of %u threads faulted together, no "
 	       "exception port, and each went: the zone of tasks read %d "
 	       "before and %d after (#414)\n", A53_TASKS, A53_THREADS, before,

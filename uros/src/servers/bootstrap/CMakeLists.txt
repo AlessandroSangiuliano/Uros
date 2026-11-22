@@ -736,9 +736,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # chora_test last, so that its last line ends the run (run-x86_64.sh).
   # chora itself is on the root disk and not in the bundle: exec_server reads
   # the programs it starts through libvfs.
+  # #973: modload_test before it, waited for (-w): libmodload is how a chora
+  # fetches its module, and the test's two pools are in the bundle.
   set(_CHORA_CONF ${CMAKE_CURRENT_BINARY_DIR}/chora.conf)
   file(GENERATE OUTPUT ${_CHORA_CONF}
-       CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-D chora_test chora_test\n")
+       CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-w modload_test modload_test\n-D chora_test chora_test\n")
   set(_CHORA_TEST_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/chora_test.cmf")
   add_custom_command(
@@ -841,6 +843,13 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             chora_test:${_SBIN}/chora_test
             modules/net/chora_probe.so:${_MOD}/net/chora_probe.so
             modules/net/chora_absent.so:${_MOD}/net/chora_absent.so
+            # #973: libmodload's test, and its two pools, each with a
+            # twin.so and a module of its own.
+            modload_test:${_SBIN}/modload_test
+            modules/modload_a/twin.so:${_MOD}/modload_a/twin.so
+            modules/modload_a/only_a.so:${_MOD}/modload_a/only_a.so
+            modules/modload_b/twin.so:${_MOD}/modload_b/twin.so
+            modules/modload_b/only_b.so:${_MOD}/modload_b/only_b.so
             # #977: chora's module for QEMU's educational device, which
             # has MSI and no MSI-X table.
             modules/misc/edu_probe.so:${_MOD}/misc/edu_probe.so
@@ -871,6 +880,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # without it, and run-x86_64.sh builds the bundle, not ALL.
             ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
             chora_probe_module chora_absent_module chora_bin
+            modload_test_bin modload_test_twin_a modload_test_twin_b
+            modload_test_only_a modload_test_only_b
             edu_probe_module
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)

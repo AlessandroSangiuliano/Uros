@@ -267,7 +267,12 @@ fi
 # catch -- a Measure: line names a number for a person to read, and a widen
 # catches nothing alone -- and of those the J-th of every N, so that the jobs
 # of a campaign split one list without any of them being told the others'.
+# #975: and `all' leaves out a patch judged on a machine's metal (Machine:),
+# which ablate.sh refuses under QEMU: taken, it stopped every sweep at its
+# plan.  The plan says how many it left out, and which.  Named by hand, such a
+# patch is still asked of ablate.sh, and refused with its line.
 SWEPT=()
+METAL=()
 if [ -n "$SWEEP" ]; then
 	[ -z "$ABLATE" ] || die 2 "--ablate is one A/B and --sweep every patch once: give one or the other"
 	[ $ROUNDS_SET = 0 ] && [ -z "$ENTRIES" ] ||
@@ -293,6 +298,10 @@ if [ -n "$SWEEP" ]; then
 			hdr=$(sed -n '/^diff --git /q;p' "$p")
 			grep -qx 'Kind:[[:space:]]*ablation' <<< "$hdr" || continue
 			grep -q '^Expect:' <<< "$hdr" || continue
+			if grep -q '^Machine:' <<< "$hdr"; then
+				METAL+=("$(basename "$p" .patch)")
+				continue
+			fi
 			NAMES+=("$(basename "$p" .patch)")
 		done
 	else
@@ -498,6 +507,8 @@ if [ -n "$ABLATE" ]; then
 elif [ -n "$SWEEP" ]; then
 	echo "job: a sweep instead of the merge test: ${#SWEPT[@]} of the ${#NAMES[@]} patches (share $SHARE), each once in an ablate.sh run of its own, the ablated arm alone, $SW_WANT boots under $ACCS but where a patch's Accel: line says otherwise:"
 	printf 'job:   %s\n' "${SW_PLAN[@]}"
+	[ ${#METAL[@]} = 0 ] ||
+		echo "job: ${#METAL[@]} patch(es) left out of all, as judged on a machine's metal (their Machine:), which ablate.sh refuses under QEMU: ${METAL[*]}"
 	echo "job: rows: $CSV; every boot's log: $OUT/ablate/runs/; what ablate.sh said of each patch: $OUT/sweep/"
 else
 	echo "job: $ROUNDS round(s) of $MT -a $MT_ACC -o $OUT/logs/rN${ENTRIES:+ -e \"$ENTRIES\"}"

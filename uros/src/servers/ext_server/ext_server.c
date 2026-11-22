@@ -447,7 +447,7 @@ writeback_thread(void *arg)
 static kern_return_t
 ext2_lend_buffer(struct mount_context *mnt, uint64_t region_id)
 {
-	struct uros_cap	t;
+	struct uros_cap	t, lent;
 	kern_return_t	kr;
 
 	memset(&t, 0, sizeof(t));
@@ -459,8 +459,25 @@ ext2_lend_buffer(struct mount_context *mnt, uint64_t region_id)
 		       (unsigned long long)region_id, (int)kr);
 		return kr;
 	}
-	kr = device_register_dma(mnt->dev.dev_port, (char *)&t, sizeof(t));
+	/*
+	 * #747: lent as a child derived for the block server, named by the
+	 * handle this mount reads through.  A capability is good for the task
+	 * it was issued to, and the block server is the one that presents this
+	 * one to the kernel, page by page; the parent stays this server's, and
+	 * revoking it takes the child with it.
+	 */
+	kr = cap_derive_for(&t, t.allowed_ops, 0, mnt->dev.dev_port, &lent);
 	memset(&t, 0, sizeof(t));
+	if (kr != KERN_SUCCESS) {
+		printf("ext2: cap_server would not derive the capability for "
+		       "page-cache buffer %llu for the block server (kr=%d) — "
+		       "the cache will copy\n", (unsigned long long)region_id,
+		       (int)kr);
+		return kr;
+	}
+	kr = device_register_dma(mnt->dev.dev_port, (char *)&lent,
+				 sizeof(lent));
+	memset(&lent, 0, sizeof(lent));
 	if (kr != KERN_SUCCESS) {
 		printf("ext2: the block server would not take the capability "
 		       "for page-cache buffer %llu (kr=%d) — the cache will "

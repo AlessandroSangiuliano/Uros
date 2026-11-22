@@ -179,11 +179,13 @@ boolean_t	swtch_pri(int);
  *	kernel's.  const, because none of the three writes through the pointer
  *	-- they copyin and work on the copy.
  */
-/* #599: (token, resource type, op, resource id) -- the type is checked too */
-kern_return_t	urmach_cap_verify(const struct uros_cap *, uint32_t, uint32_t,
-				  uint64_t);
-kern_return_t	urmach_cap_use(const struct uros_cap *, uint32_t, uint32_t,
-			       uint64_t);
+/*
+ * #599: (token, resource type, op, resource id) -- the type is checked too.
+ * #747: and the presenter after the token, the identity of the task that
+ * presents it, which a server reads from the request's trailer.
+ */
+kern_return_t	urmach_cap_verify(const struct uros_cap *, uint64_t, uint32_t,
+				  uint32_t, uint64_t);
 kern_return_t	urmach_cap_register(const struct uros_cap *);
 kern_return_t	urmach_cap_revoke(uint64_t);
 /* #537: the revocation epoch, in the return word (trap 45) */

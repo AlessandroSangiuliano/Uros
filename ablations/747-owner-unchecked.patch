@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #747
+Takes out: the owner in the kernel's check -- cap_fields_check() does not compare the owner with the presenter, as before; cap_test's [53] must say WRONG when the trap verifies another task's capability presented by this one
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[53\] WRONG
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index a07704f6..3163ca1b 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -376,8 +376,7 @@ cap_fields_check(const struct uros_cap *t,
+      * server's.  A presenter of 0 is nobody, and an owner of 0 was never
+      * issued, so neither matches.
+      */
+-    if (presenter == 0 || t->owner != presenter)
+-        return CAP_ERR_NOT_OWNER;
++    (void)presenter;
+     /*
+      * #599: and the KIND of resource the token names, for every caller --
+      * the kernel's own and the two traps.  None compared it, so a token for

@@ -6,15 +6,15 @@ Run: --entry 14 1200 -smp 1
 Expect: cap_test: \[5\] post-revoke read FAIL
 
 diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
-index db466096..e3269836 100644
+index 9a7b7038..ddf907be 100644
 --- a/uros/src/servers/block_device_server/block_device.c
 +++ b/uros/src/servers/block_device_server/block_device.c
-@@ -111,7 +111,7 @@ blk_authed_handle(mach_port_t device)
- 	 * leaves it behind the kernel's, and the next use asks again.
+@@ -120,7 +120,7 @@ blk_authed_handle(mach_port_t device)
+ 	 * its deadline: a handle opened on a capability asked for 300 ms reads
+ 	 * up to its revocation, milliseconds after the 300 ms (cap_test [54]).
  	 */
- 	now = (uint32_t)urmach_cap_epoch();
 -	if (h->cap_epoch != now) {
 +	if (0 && h->cap_epoch != now) {
- 		kr = blk_token_check(&h->cap, RESOURCE_BLK_DEVICE, h->cap_op,
+ 		kr = blk_token_check(&h->cap, h->presenter,	/* #747 */
+ 				     RESOURCE_BLK_DEVICE, h->cap_op,
  				     h->cap_resource_id);
- 		if (kr != KERN_SUCCESS) {

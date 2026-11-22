@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the owner in cap_server's cap_verify, as before; cap_test's [53] must say WRONG when cap_server verifies another task's capability presented by this one
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[53\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 5e14484a..50998ee5 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1203,7 +1203,7 @@ cap_verify(mach_port_t             server,
+      * server verifying, so it says who presented the token, as it does to the
+      * trap: the identity in the trailer of the request that carried it.
+      */
+-    if (presenter == 0 || token.owner != presenter) return CAP_ERR_NOT_OWNER;
++    (void)presenter;
+     /* #745: the kind as well as the id, as the trap has since #599. */
+     if (token.resource_type != resource_type) return CAP_ERR_RESOURCE_MISMATCH;
+     if (token.resource_id != resource_id)   return CAP_ERR_RESOURCE_MISMATCH;

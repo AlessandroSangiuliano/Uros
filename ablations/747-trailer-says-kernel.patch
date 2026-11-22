@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #747
+Takes out: the sender in ipc_kmsg_get() -- a message sent apart from a receive carries KERNEL_SECURITY_TOKEN again; cap_test's [51] must say WRONG when a message this task sends itself in two calls comes with the kernel's identity
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[51\] WRONG
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+index 0f780604..f5dadc60 100644
+--- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
++++ b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+@@ -962,7 +962,7 @@ ipc_kmsg_get(
+ 	 * path in mach_msg.c stamps it too; ipc_kmsg_get_from_kernel() below
+ 	 * keeps the kernel's own, for what the kernel sends.
+ 	 */
+-	trailer->msgh_sender = current_task()->sec_token;
++	trailer->msgh_sender = KERNEL_SECURITY_TOKEN;
+ 	trailer->msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
+ 	trailer->msgh_trailer_size = MACH_MSG_TRAILER_MINIMUM_SIZE;
+ 

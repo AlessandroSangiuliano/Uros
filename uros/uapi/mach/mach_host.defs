@@ -873,3 +873,20 @@ routine urmach_task_port_rights(
 		host		: host_t;
 		port		: mach_port_t;
 	out	rights		: natural_t);
+
+/*
+ *	The identity of the task that receives on `port' (#747): what a
+ *	capability is derived to when its owner names the delegate by a port
+ *	the delegate receives on -- cap_server asks it for cap_derive_for().
+ *	KERN_INVALID_ARGUMENT for a port no task receives on: the kernel's
+ *	own, one in transit, a dead one.  Asked of the host, as
+ *	urmach_task_port_rights() is, so that a port which is no kernel
+ *	object is answered too.  Appended: MIG numbers routines by position.
+ */
+import <mach/urmach_identity.h>;
+type urmach_identity_t = unsigned64 ctype: urmach_identity_t;
+
+routine urmach_port_receiver(
+		host		: host_t;
+		port		: mach_port_t;
+	out	identity	: urmach_identity_t);

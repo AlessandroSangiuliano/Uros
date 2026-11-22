@@ -96,6 +96,7 @@
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_radix.h>
 #include <ipc/ipc_types.h>
+#include <stdint.h>		/* #747: is_identity, on both targets */
 
 /*
  *	Every task has a space of IPC capabilities.
@@ -157,6 +158,15 @@ struct ipc_space {
 	 * the write lock, so the odd/even discipline needs no atomics.
 	 */
 	volatile natural_t is_seq;
+
+	/*
+	 * #747: the identity of the task this space is, as a value: what a
+	 * capability is derived to when its owner names the delegate by a port
+	 * the delegate receives on (urmach_port_receiver()).  A copy of the
+	 * task's, written once when the task is made, so that answering it
+	 * follows no pointer to a task; 0 for a space that is no task's.
+	 */
+	uint64_t is_identity;
 };
 
 #define	IS_NULL			((ipc_space_t) 0)

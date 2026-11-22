@@ -72,6 +72,18 @@ kern_return_t cap_derive(const struct uros_cap *parent,
                          struct uros_cap *out);
 
 /*
+ * cap_derive_for() — a child for another task, named by a port that task
+ * receives on (#747): the child's owner is that task, so only it can present
+ * the child.  CAP_ERR_NO_DELEGATE for a port no task receives on.  Only the
+ * parent's owner derives.
+ */
+kern_return_t cap_derive_for(const struct uros_cap *parent,
+                             uint64_t reduced_ops,
+                             uint32_t lifetime_ms,
+                             mach_port_t delegate,
+                             struct uros_cap *out);
+
+/*
  * cap_revoke() — revoke a capability and its whole subtree.
  */
 kern_return_t cap_revoke(uint64_t cap_id);
@@ -81,9 +93,13 @@ kern_return_t cap_revoke(uint64_t cap_id);
  * on the resource of kind `resource_type` named `resource_id` using
  * `token`.  In Issue A this is an RPC; once Issue B lands it routes to
  * the UrMach fast-path trap.  The kind is asked as the trap asks it
- * (#599, #745).
+ * (#599, #745), and so is who presents it (#747): the identity of the task
+ * presenting the token, which a server reads from the request's trailer
+ * with urmach_msg_sender(), and a task asking of its own token reads with
+ * cap_self().
  */
 kern_return_t cap_verify(const struct uros_cap *token,
+                         uint64_t presenter,	/* #747: who presents it */
                          uint32_t resource_type,
                          uint64_t op,
                          uint64_t resource_id);
@@ -105,20 +121,17 @@ kern_return_t cap_subscribe_revoke(mach_port_t notify_port);
  * cap_verify() when cap_server-specific policy is needed.
  */
 kern_return_t cap_verify_local(const struct uros_cap *token,
+                              uint64_t presenter,     /* #747 */
                               uint32_t resource_type, /* #599 */
                               uint32_t op,
                               uint64_t resource_id);
 
 /*
- * cap_use_local() — fast path for consume-one-use tokens.  Equivalent
- * to cap_verify_local() plus atomic bookkeeping: when the token was
- * issued with max_uses != 0, the kernel decrements a per-cap_id use
- * counter and returns CAP_ERR_EXHAUSTED once it hits zero.
+ * cap_self() — this task's identity (#747), the presenter of a token it asks
+ * about itself: read once with task_info(TASK_SECURITY_TOKEN) and kept, since
+ * nothing changes it.  0 if it cannot be read, which no token is issued to.
  */
-kern_return_t cap_use_local(const struct uros_cap *token,
-                              uint32_t resource_type, /* #599 */
-                              uint32_t op,
-                              uint64_t resource_id);
+uint64_t cap_self(void);
 
 /*
  * cap_provision() — bootstrap-side wrapper around the

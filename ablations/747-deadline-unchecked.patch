@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #747
+Takes out: the deadline in the kernel -- cap_check_unlocked() asks the MAC, the fields and the revocation and not the deadline, as the trap did when expires was written 0 and read nowhere; cap_test's [50] must say WRONG when the trap verifies a capability past its deadline
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[50\] WRONG
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index a07704f6..73ce3ea4 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -345,9 +345,6 @@ cap_check_unlocked(const struct uros_cap *t,
+     kern_return_t kr;
+ 
+     kr = cap_mac_check_unlocked(t);
+-    if (kr != KERN_SUCCESS)
+-        return kr;
+-    kr = cap_deadline_check(t);		/* #747 */
+     if (kr != KERN_SUCCESS)
+         return kr;
+     simple_lock(&cap_lock);

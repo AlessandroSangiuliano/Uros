@@ -12,3 +12,8 @@ name fork_cap_test
 
 # RESOURCE_BLK_DEVICE (4), id 0x945 alone, READ (0x1).
 required 4 0x945 0x1
+
+# #747: block device disk0a, the boot disk, READ -- the one partition [4] opens:
+# this task with its own capability, and its forked child with the same bytes,
+# which the block server must refuse, since the capability is this task's.
+required 4 name:disk0a 0x1

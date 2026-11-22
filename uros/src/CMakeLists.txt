@@ -640,6 +640,8 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   # starts it.
   add_subdirectory(servers/chora)
   add_subdirectory(tests/chora_test)
+  # #973: libmodload's test, two pools with a module of the same file name.
+  add_subdirectory(tests/modload_test)
 endif()
 
 # The textbook program, static against musl, the first of the kind on this

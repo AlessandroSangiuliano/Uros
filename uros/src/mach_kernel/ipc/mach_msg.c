@@ -1550,6 +1550,8 @@ urmach_msg_overwrite_trap_call(
 		bcopy(  (char *)&trailer_template,
 			(char *)trailer,
 			sizeof(trailer_template));
+		/* #747: the template says the kernel; the sender is this task. */
+		trailer->msgh_sender = current_task()->sec_token;
 
 		/*
 		 * 🔥 #392: THE SEND-SIDE COPY, and half of the ceiling on what

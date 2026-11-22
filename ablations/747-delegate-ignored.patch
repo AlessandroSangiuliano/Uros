@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #747
+Takes out: the delegate in cap_derive_for -- the child is issued to the task that asked, whatever port it named; cap_test's [53] must say WRONG when the child does not name the task it was derived for
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[53\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 5e14484a..c1e38330 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -657,8 +657,8 @@ cap_derive_for(mach_port_t             server,
+                "(kr=%d) (#747)\n", (unsigned)delegate, (int)kr);
+         return CAP_ERR_NO_DELEGATE;
+     }
+-    kr = cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms, id,
+-                       child_buf, child_len);
++    kr = cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms,
++                       g_request_sender, child_buf, child_len);
+     if (kr == KERN_SUCCESS)
+         (void)mach_port_deallocate(mach_task_self(), delegate);
+     return kr;

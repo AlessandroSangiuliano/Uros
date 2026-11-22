@@ -32,6 +32,8 @@
 #include <mach.h>
 #include <mach/mach_port.h>
 #include <mach/cap_types.h>
+#include <mach/urmach_identity.h>	/* #747: who sent a request */
+#include <libcap.h>			/* #747: cap_self */
 #include <device/device.h>
 #include <device/device_types.h>
 #include <stdio.h>
@@ -71,7 +73,7 @@ static struct blk_handle *blk_handles_head = NULL;
  * are NOT considered authenticated for I/O: callers must first invoke
  * device_open_cap to obtain a handle.  Returns NULL on any other case.
  */
-static kern_return_t blk_token_check(const struct uros_cap *, uint32_t,
+static kern_return_t blk_token_check(const struct uros_cap *, uint64_t, uint32_t,
 				     uint32_t, uint64_t);	/* #744 */
 
 static struct blk_handle *
@@ -111,14 +113,25 @@ blk_authed_handle(mach_port_t device)
 	 * leaves it behind the kernel's, and the next use asks again.
 	 */
 	now = (uint32_t)urmach_cap_epoch();
+	/*
+	 * #747: a deadline reaches the handle the same way.  cap_server revokes
+	 * a capability when its deadline comes, which moves the epoch and sends
+	 * the notice, and the trap, asked again, answers that the token is past
+	 * its deadline: a handle opened on a capability asked for 300 ms reads
+	 * up to its revocation, milliseconds after the 300 ms (cap_test [54]).
+	 */
 	if (h->cap_epoch != now) {
-		kr = blk_token_check(&h->cap, RESOURCE_BLK_DEVICE, h->cap_op,
+		kr = blk_token_check(&h->cap, h->presenter,	/* #747 */
+				     RESOURCE_BLK_DEVICE, h->cap_op,
 				     h->cap_resource_id);
 		if (kr != KERN_SUCCESS) {
 			h->revoked = 1;
-			printf("blk: handle for %s revoked: its token no longer "
+			printf("blk: handle for %s %s: its token no longer "
 			       "verifies (kr=%d, #744)\n",
-			       h->part ? h->part->name : "(unknown)", (int)kr);
+			       h->part ? h->part->name : "(unknown)",
+			       kr == CAP_ERR_EXPIRED ? "past its deadline (#747)"
+						     : "revoked",
+			       (int)kr);
 			return NULL;
 		}
 		h->cap_epoch = now;
@@ -168,10 +181,10 @@ blk_part_from_authed_handle(mach_port_t device, dev_mode_t dir)
  * written.
  */
 static kern_return_t
-blk_token_check(const struct uros_cap *t, uint32_t type, uint32_t op,
-		uint64_t id)
+blk_token_check(const struct uros_cap *t, uint64_t presenter, uint32_t type,
+		uint32_t op, uint64_t id)
 {
-	return urmach_cap_verify(t, type, op, id);
+	return urmach_cap_verify(t, presenter, type, op, id);	/* #747 */
 }
 
 /*
@@ -418,11 +431,18 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	uint64_t resource_id = cap_name_hash(part->name);
 	/* #744: before the check, as blk_authed_handle() reads it */
 	uint32_t epoch = (uint32_t)urmach_cap_epoch();
-	kern_return_t kr = blk_token_check(&token, RESOURCE_BLK_DEVICE, op,
+	/*
+	 * #747: presented by the task that sent the open, by the identity in its
+	 * trailer, and kept with the handle for every check after this one.
+	 */
+	uint64_t presenter = blk_request_sender;
+	kern_return_t kr = blk_token_check(&token, presenter,
+					   RESOURCE_BLK_DEVICE, op,
 					   resource_id);	/* #599: typed */
 	if (kr != KERN_SUCCESS && part->stable_name[0] != '\0') {
 		uint64_t alias_id = cap_name_hash(part->stable_name);
-		kr = blk_token_check(&token, RESOURCE_BLK_DEVICE, op, alias_id);
+		kr = blk_token_check(&token, presenter, RESOURCE_BLK_DEVICE, op,
+				     alias_id);
 		if (kr == KERN_SUCCESS)
 			resource_id = alias_id;
 	}
@@ -438,7 +458,8 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 
 		snprintf(lname, sizeof(lname), "label:%s", part->label);
 		label_id = cap_name_hash(lname);
-		kr = blk_token_check(&token, RESOURCE_BLK_DEVICE, op, label_id);
+		kr = blk_token_check(&token, presenter, RESOURCE_BLK_DEVICE, op,
+				     label_id);
 		if (kr == KERN_SUCCESS)
 			resource_id = label_id;
 	}
@@ -478,6 +499,7 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	h->revoked   = 0;
 	h->mode      = mode & (D_READ | D_WRITE);	/* #614 */
 	h->cap       = token;			/* #744 */
+	h->presenter = presenter;		/* #747 */
 	h->cap_op    = op;
 	h->cap_resource_id = resource_id;
 	h->cap_epoch = epoch;
@@ -1002,10 +1024,17 @@ ds_device_register_dma(mach_port_t device, mach_port_t reply,
 		return KERN_INVALID_ARGUMENT;
 
 	memcpy(&t, token, sizeof(t));
-	kr = blk_token_check(&t, RESOURCE_DMA_BUFFER, CAP_OP_DMA_DEVICE_READ,
-			     t.resource_id);
+	/*
+	 * #747: a buffer's capability lent to this server is one derived for it
+	 * -- this server presents it to the kernel for every page, and the
+	 * kernel takes it from its owner alone -- so it is asked as this
+	 * server's own.  The client's own capability, handed over as it was, is
+	 * refused here rather than at the first page.
+	 */
+	kr = blk_token_check(&t, cap_self(), RESOURCE_DMA_BUFFER,
+			     CAP_OP_DMA_DEVICE_READ, t.resource_id);
 	if (kr != KERN_SUCCESS)
-		kr = blk_token_check(&t, RESOURCE_DMA_BUFFER,
+		kr = blk_token_check(&t, cap_self(), RESOURCE_DMA_BUFFER,
 				     CAP_OP_DMA_DEVICE_WRITE, t.resource_id);
 	if (kr != KERN_SUCCESS) {
 		printf("blk: %s: a buffer capability was refused (kr=%d) — "
@@ -1461,11 +1490,13 @@ blk_xlate_held(struct blk_handle *h, unsigned int used,
 	for (i = 0; i < h->n_dma_caps; i++) {
 		struct blk_xlate *x = &h->dma_xlate[i];
 
+		/* #747: a deadline moves the epoch too, by its revocation. */
 		if (x->npages == 0 || x->epoch == now)
 			continue;
 		r = blk_tsc();
-		why[i] = blk_token_check(&h->dma_cap[i], RESOURCE_DMA_BUFFER,
-					 0, h->dma_cap[i].resource_id);
+		why[i] = blk_token_check(&h->dma_cap[i], cap_self(),
+					 RESOURCE_DMA_BUFFER, 0,
+					 h->dma_cap[i].resource_id);
 		h->held_moved++;
 		h->held_moved_cyc += blk_tsc() - r;
 		if (why[i] == KERN_SUCCESS)

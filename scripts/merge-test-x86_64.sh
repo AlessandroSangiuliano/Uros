@@ -48,7 +48,8 @@
 #       for, and say so: 0 if so, 1 if not.  ci/job.sh asks it before it
 #       builds (#755, #776)
 #   -P  only ask whether every patch of ablations/ still applies to this tree,
-#       and say so: 0 if each does, 1 if not (#769).  A whole run asks it too
+#       and whether the sweep of every patch plans (#975), and say so: 0 if
+#       both, 1 if not (#769).  A whole run asks them too
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
 # default is tested the same way; its char build, which the entries marked @char
 # boot, is that build's path with -char after it (#765).  A run that refuses to
@@ -173,7 +174,8 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             chora.conf: bootstrap's line that -f chose it, the first chora's
 #             three lines -- the claim, its registers mapped, an interrupt
 #             taken -- the second chora's refused claim, and the kernel's line
-#             refusing it, which names both tasks -- and edu_probe's chora, on
+#             refusing it, which names both tasks -- modload_test's count,
+#             which chora.conf runs first -- and edu_probe's chora, on
 #             QEMU's educational device (--edu): its interrupt taken by
 #             message, the device driven, and a DMA round trip through it at
 #             the address libdriver gave -- an IOVA from 4 GiB up where -I
@@ -181,7 +183,8 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             below 4 GiB where it did not, then again within the 28 bits
 #             its reach is declared as, through the low IOVA window or memory
 #             below 256 MiB, and a buffer within 20 bits refused; chora_test's
-#             count and the address read are the note (#963, #977, #978, #417)
+#             and modload_test's counts and the address read are the note
+#             (#963, #973, #977, #978, #417)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -446,6 +449,31 @@ patches_apply() {
 	PATCHES_SAID="merge-test: ablations: ablate.sh --check-all did not answer (status $rc)"
 	return 2
 }
+# #975: whether the sweep of every patch plans, asked of ci/job.sh --dry-run
+# --sweep all, which is what the campaign's plan step runs.  A patch the sweep
+# takes and ablate.sh refuses stops every sweep at its plan: six of #804's,
+# judged on a machine's metal, did so from 02/11, and nobody started a sweep
+# to see it.  Returns 0 if it plans, 1 if it refuses, 2 if the question could
+# not be asked; the verdict, one line, in SWEEP_SAID.
+SWEEP_SAID=""
+sweep_plans() {
+	local out rc n left
+	out=$("$HERE/scripts/ci/job.sh" --dry-run --no-install --sweep all 2>&1)
+	rc=$?
+	case $rc in
+	0)	n=$(sed -n 's/^job: a sweep instead of the merge test: [0-9]* of the \([0-9]*\) patches .*$/\1/p' <<< "$out")
+		left=$(sed -n 's/^job: \([0-9]*\) patch(es) left out of all, .*$/\1/p' <<< "$out")
+		if [ -n "$n" ]; then
+			SWEEP_SAID="merge-test: ablations: the sweep of every patch plans, $n patches, ${left:-none} left out as judged on a machine's metal"
+			return 0
+		fi ;;
+	2)	SWEEP_SAID=$(sed -n 's/^job: \(ablate\.sh refuses [0-9]* of the [0-9]* patches of this sweep\)$/merge-test: ablations: the sweep of every patch does not plan, \1 -- WRONG (#975)/p' <<< "$out")
+		[ -n "$SWEEP_SAID" ] && return 1 ;;
+	esac
+	printf '%s\n' "$out" | tail -n 10 >&2
+	SWEEP_SAID="merge-test: ablations: ci/job.sh --dry-run --sweep all did not answer (status $rc)"
+	return 2
+}
 if [ $LISTS_ONLY = 1 ]; then
 	lists_cover
 	exit
@@ -454,6 +482,10 @@ if [ $PATCHES_ONLY = 1 ]; then
 	patches_apply
 	rc=$?
 	echo "$PATCHES_SAID"
+	sweep_plans
+	src=$?
+	echo "$SWEEP_SAID"
+	[ $src -le $rc ] || rc=$src
 	exit $rc
 fi
 # #951: a run sent SIGTERM stops the boot it is running, says so of that boot
@@ -482,6 +514,10 @@ patches_apply
 ROTTEN=$?
 echo "$PATCHES_SAID"
 [ $ROTTEN -le 1 ] || exit 2
+sweep_plans
+UNSWEPT=$?
+echo "$SWEEP_SAID"
+[ $UNSWEPT -le 1 ] || exit 2
 mkdir -p "$OUT"
 
 # #412: the PCID entries' half of judge().  "Not offered" is taken at the
@@ -821,6 +857,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# names are the same because the name is the device's.  A boot with no
 	# card answers NOT ASKED in chora_test and fails here, since this entry
 	# exists to ask.
+	# #973: and modload_test's count.  The harness waits for a test that
+	# said it started; one chora.conf never started says nothing, and only
+	# a verdict that asks for its count sees it gone.
 	# #977: and the chora on QEMU's edu device, which has MSI and no MSI-X
 	# table: edu_probe took its interrupt by message, and drives the device.
 	# #978: after a DMA round trip through it, at an address of the kind
@@ -837,7 +876,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aqE 'edu_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: edu_probe drives the device' "$f" &&
 		dma=$(chora_dma "$e" "$f") &&
 		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
-		[ -n "$out" ] && NOTE="$out; DMA round trip at device address $dma" ;;
+		mod=$(grep -aoE 'modload_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
+		[ -n "$out" ] && [ -n "$mod" ] && NOTE="$out; $mod; DMA round trip at device address $dma" ;;
 	esac
 }
 
@@ -1122,8 +1162,9 @@ echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK
 echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 # #769: said again here, beside the totals a reader looks at, and outside the
 # total: ci/job.sh counts that as the entries' WRONG lines, and asks the
-# patches itself.
+# patches itself.  #975: the sweep's plan, the same way.
 echo "$PATCHES_SAID"
+echo "$SWEEP_SAID"
 echo "merge-test: $WRONG wrong"
 # #951: and a stopped run dies of the signal, as run-x86_64.sh does, so that
 # whoever sent it sees it obeyed.
@@ -1132,5 +1173,5 @@ if [ -n "$STOP" ]; then
 	kill -TERM $$
 fi
 # #782: whether, not how many -- see the header.
-[ $((WRONG + ROTTEN)) -eq 0 ] || exit 1
+[ $((WRONG + ROTTEN + UNSWEPT)) -eq 0 ] || exit 1
 exit 0
