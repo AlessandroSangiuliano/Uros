@@ -728,6 +728,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # and without it /proc was never registered.
   set(_PROC_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/proc_server.cmf")
+  # #982: pci_function_test may ask for any one function, and hand one on.
+  set(_PCIFN_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/pci_function_test.cmf")
   # #963: chora_test's own list, which the GRUB entry that gives bootstrap
   # `-f chora.conf' reads.  Every other bundle entry reads bootstrap.conf,
   # where irq_claim_test owns the network card.  This one runs what a chora
@@ -743,9 +746,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
        CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-w modload_test modload_test\n-D chora_test chora_test\n")
   set(_CHORA_TEST_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/chora_test.cmf")
-  # #982: pci_function_test may ask for any one function, and hand one on.
-  set(_PCIFN_CMF
-    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/pci_function_test.cmf")
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}

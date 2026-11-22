@@ -1737,6 +1737,7 @@ expected_reports() {
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
+		'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
 		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
 		'musl_test: started'    'musl_test: [0-9]* of [0-9]* arms passed' \
@@ -1751,7 +1752,6 @@ expected_reports() {
 		'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
-		'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
 		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
 		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='
