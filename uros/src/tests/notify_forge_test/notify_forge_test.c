@@ -59,6 +59,7 @@
 #include <mach_init.h>			/* name_server_port */
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -103,14 +104,40 @@ struct answer {
 
 /* What say_answer() writes in the two longer cases, and its buffer. */
 #define SAID_SILENT	"no answer to it, where the message sent after it " \
-			"on the same port was answered, as a notification " \
-			"gets none"
-#define SAID_STUCK	"no answer in %d ms to it or to the message sent " \
-			"after it"
+			"got one"
+#define SAID_STUCK	"no answer to it or to the message after it in " \
+			"%d ms"
 #define SAID_MAX	160
 _Static_assert(sizeof SAID_SILENT <= SAID_MAX &&
 	       sizeof SAID_STUCK + 11 <= SAID_MAX,
 	       "a text of say_answer() would be cut");
+
+/*
+ * Every line of the test, whole: the console keeps a line whole up to 256
+ * bytes (#578), and past that another task's output can land inside it,
+ * where ablate.sh, reading the raw log, misses its end (#943) -- as it
+ * missed [3]'s WRONG at 299 bytes.  A longer line is said, as a WRONG.
+ */
+static void	verdict(const char *fmt, ...)
+	__attribute__((format(printf, 1, 2)));
+
+static void
+verdict(const char *fmt, ...)
+{
+	char	line[256];
+	va_list	ap;
+	int	n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(line, sizeof line, fmt, ap);
+	va_end(ap);
+	if (n < 0 || (size_t)n >= sizeof line)
+		printf("notify_forge_test: a line of %d bytes, past the %u the "
+		       "console keeps whole, begins \"%.48s\" -- WRONG\n", n,
+		       (unsigned)(sizeof line - 1), line);
+	else
+		printf("%s", line);
+}
 
 static kern_return_t
 send_one(mach_port_t to, mach_msg_type_name_t disp, mach_port_t reply,
@@ -157,8 +184,8 @@ forge(mach_port_t to, mach_msg_type_name_t disp, mach_msg_id_t id,
 		return FORGE_FAILED;
 	kr = send_one(to, disp, reply, id, word);
 	if (kr != MACH_MSG_SUCCESS)
-		printf("notify_forge_test: the forged message was not sent: "
-		       "0x%x\n", kr);
+		verdict("notify_forge_test: the forged message was not sent: "
+		        "0x%x\n", kr);
 	else {
 		/* The probe may find the port gone, if the forged message was
 		 * believed already and ended it: its own answer then says so. */
@@ -216,22 +243,22 @@ arm_hal(void)
 
 	if (netname_wait(name_server_port, "hal", &hal) != KERN_SUCCESS ||
 	    hal == MACH_PORT_NULL) {
-		printf("notify_forge_test: [1] the HAL's name could not be "
-		       "had -- WRONG\n");
+		verdict("notify_forge_test: [1] the HAL's name could not be "
+		        "had -- WRONG\n");
 		return;
 	}
 	r = forge(hal, MACH_MSG_TYPE_COPY_SEND, MACH_NOTIFY_DEAD_NAME,
 		  FORGED_NAME, &ret);
 	say_answer(said, sizeof said, r, ret);
 	if (r == FORGE_SENT && ret == MIG_BAD_ID) {
-		printf("notify_forge_test: [1] the HAL refused a message with "
-		       "a dead-name notification's id from a task: %s, "
-		       "MIG_BAD_ID\n", said);
+		verdict("notify_forge_test: [1] the HAL refused a message with "
+		        "a dead-name notification's id from a task: %s, "
+		        "MIG_BAD_ID\n", said);
 		passed++;
 	} else
-		printf("notify_forge_test: [1] a message with a dead-name "
-		       "notification's id from a task: %s -- WRONG, the HAL "
-		       "took it for the kernel's\n", said);
+		verdict("notify_forge_test: [1] a message with a dead-name "
+		        "notification's id from a task: %s -- WRONG, the HAL "
+		        "took it for the kernel's\n", said);
 	(void)mach_port_deallocate(mach_task_self(), hal);
 }
 
@@ -253,8 +280,8 @@ arm_pipe(void)
 
 	if (netname_wait(name_server_port, "pipe_server", &service)
 	    != KERN_SUCCESS || service == MACH_PORT_NULL) {
-		printf("notify_forge_test: [2] pipe_server's name could not "
-		       "be had -- WRONG\n");
+		verdict("notify_forge_test: [2] pipe_server's name could not "
+		        "be had -- WRONG\n");
 		return;
 	}
 	/* A pipe of this task's, as pipe() registers one (posix_pipe.c). */
@@ -264,8 +291,8 @@ arm_pipe(void)
 	    flipc2_channel_make_entry(ch, PIPE_CHANNEL_SIZE,
 				      FLIPC2_ROLE_PRODUCER, &entry)
 	    != FLIPC2_SUCCESS) {
-		printf("notify_forge_test: [2] no channel for a pipe -- "
-		       "WRONG\n");
+		verdict("notify_forge_test: [2] no channel for a pipe -- "
+		        "WRONG\n");
 		return;
 	}
 	kr = pipe_register(service, entry, PIPE_CHANNEL_SIZE, &pipe);
@@ -276,8 +303,8 @@ arm_pipe(void)
 		kr = pipe_token(pipe, PIPE_END_WRITE, FORGED_NAME,
 				&tok[PIPE_END_WRITE]);
 	if (kr != KERN_SUCCESS) {
-		printf("notify_forge_test: [2] pipe_server would not register "
-		       "a pipe and its tokens: 0x%x -- WRONG\n", kr);
+		verdict("notify_forge_test: [2] pipe_server would not register "
+		        "a pipe and its tokens: 0x%x -- WRONG\n", kr);
 		return;
 	}
 
@@ -287,17 +314,17 @@ arm_pipe(void)
 	(void)mach_port_type(mach_task_self(), tok[PIPE_END_READ], &type);
 	alive = (type & MACH_PORT_TYPE_SEND) != 0;
 	if (r == FORGE_SENT && ret == MIG_BAD_ARGUMENTS && alive) {
-		printf("notify_forge_test: [2] pipe_server refused a message "
-		       "with a no-senders notification's id from a task, on a "
-		       "token it holds: %s, MIG_BAD_ARGUMENTS, and the token is "
-		       "still a send right\n", said);
+		verdict("notify_forge_test: [2] pipe_server refused a message "
+		        "with a no-senders notification's id from a task, on a "
+		        "token it holds: %s, MIG_BAD_ARGUMENTS, and the token is "
+		        "still a send right\n", said);
 		passed++;
 	} else
-		printf("notify_forge_test: [2] a message with a no-senders "
-		       "notification's id from a task, on a token: %s, and the "
-		       "token is %s -- WRONG, pipe_server took it for the "
-		       "kernel's\n", said,
-		       alive ? "still a send right" : "dead");
+		verdict("notify_forge_test: [2] a message with a no-senders "
+		        "notification's id from a task, on a token: %s, and the "
+		        "token is %s -- WRONG, pipe_server took it for the "
+		        "kernel's\n", said,
+		        alive ? "still a send right" : "dead");
 
 	/* The pipe goes with its tokens' and its port's last senders. */
 	(void)mach_port_deallocate(mach_task_self(), tok[PIPE_END_READ]);
@@ -362,25 +389,25 @@ arm_endpoint(void)
 				   FLIPC2_CHANNEL_SIZE_MIN,
 				   FLIPC2_RING_ENTRIES_MIN, 0, &ep)
 	    != FLIPC2_SUCCESS) {
-		printf("notify_forge_test: [3] no endpoint -- WRONG\n");
-		printf("notify_forge_test: [4] no endpoint -- WRONG\n");
+		verdict("notify_forge_test: [3] no endpoint -- WRONG\n");
+		verdict("notify_forge_test: [4] no endpoint -- WRONG\n");
 		return;
 	}
 	if (pthread_create(&t, NULL, pump, NULL) != 0) {
-		printf("notify_forge_test: [3] no thread for the endpoint -- "
-		       "WRONG\n");
-		printf("notify_forge_test: [4] no thread for the endpoint -- "
-		       "WRONG\n");
+		verdict("notify_forge_test: [3] no thread for the endpoint -- "
+		        "WRONG\n");
+		verdict("notify_forge_test: [4] no thread for the endpoint -- "
+		        "WRONG\n");
 		return;
 	}
 	if (flipc2_endpoint_connect_port(flipc2_endpoint_port(ep),
 					 FLIPC2_CHANNEL_SIZE_MIN,
 					 FLIPC2_RING_ENTRIES_MIN, &fwd, &rev)
 	    != FLIPC2_SUCCESS || !wait_for(&ep_new, 1, EVENT_WAIT_MS)) {
-		printf("notify_forge_test: [3] the client did not connect -- "
-		       "WRONG\n");
-		printf("notify_forge_test: [4] the client did not connect -- "
-		       "WRONG\n");
+		verdict("notify_forge_test: [3] the client did not connect -- "
+		        "WRONG\n");
+		verdict("notify_forge_test: [4] the client did not connect -- "
+		        "WRONG\n");
 		ep_stop = 1;
 		return;
 	}
@@ -395,35 +422,35 @@ arm_endpoint(void)
 	say_answer(said, sizeof said, r, ret);
 	dead = wait_for(&ep_dead, 1, EVENT_WAIT_MS / 4);
 	if (r == FORGE_SENT && ret == MIG_BAD_ID && !dead) {
-		printf("notify_forge_test: [3] the endpoint refused a message "
-		       "with a dead-name notification's id from a task, naming "
-		       "a live client's token: %s, MIG_BAD_ID, and the client is "
-		       "still connected\n", said);
+		verdict("notify_forge_test: [3] the endpoint refused a message "
+		        "with a dead-name notification's id from a task, naming "
+		        "a live client's token: %s, MIG_BAD_ID, and the client is "
+		        "still connected\n", said);
 		passed++;
 	} else
-		printf("notify_forge_test: [3] a message with a dead-name "
-		       "notification's id from a task, naming a live client's "
-		       "token: %s, and the endpoint %s -- WRONG, it took it for "
-		       "the kernel's\n", said,
-		       dead ? "reported the client dead" :
-		       "said nothing of it");
+		verdict("notify_forge_test: [3] a message with a dead-name "
+		        "notification's id from a task, naming a live client's "
+		        "token: %s, and the endpoint %s -- WRONG, it took it for "
+		        "the kernel's\n", said,
+		        dead ? "reported the client dead" :
+		        "said nothing of it");
 
 	/* [4] The client really goes: its token's receive right with it. */
 	if (dead)
-		printf("notify_forge_test: [4] the client was given up by [3]'s "
-		       "message, so its real going cannot be asked -- WRONG\n");
+		verdict("notify_forge_test: [4] the client was given up by [3]'s "
+		        "message, so its real going cannot be asked -- WRONG\n");
 	else {
 		(void)flipc2_endpoint_disconnect(fwd, rev);
 		if (wait_for(&ep_dead, 1, EVENT_WAIT_MS)) {
-			printf("notify_forge_test: [4] a client that went was "
-			       "reported dead, from the kernel's dead-name "
-			       "notification\n");
+			verdict("notify_forge_test: [4] a client that went was "
+			        "reported dead, from the kernel's dead-name "
+			        "notification\n");
 			passed++;
 		} else
-			printf("notify_forge_test: [4] a client that went was "
-			       "not reported dead within %d ms -- WRONG, the "
-			       "kernel's own notification was refused\n",
-			       EVENT_WAIT_MS);
+			verdict("notify_forge_test: [4] a client that went was "
+			        "not reported dead within %d ms -- WRONG, the "
+			        "kernel's own notification was refused\n",
+			        EVENT_WAIT_MS);
 	}
 	ep_stop = 1;
 	(void)pthread_join(t, NULL);
@@ -436,10 +463,10 @@ main(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 
-	printf("notify_forge_test: started\n");
+	verdict("notify_forge_test: started\n");
 	arm_hal();
 	arm_pipe();
 	arm_endpoint();
-	printf("notify_forge_test: %d of %d arms passed\n", passed, ARMS);
+	verdict("notify_forge_test: %d of %d arms passed\n", passed, ARMS);
 	return 0;
 }
