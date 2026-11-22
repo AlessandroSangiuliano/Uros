@@ -135,7 +135,7 @@ kernel_trap(evc_wait,-17,1)
  *	urmach_cap_use, which counted uses nothing asked for (#747).
  */
 kernel_trap(urmach_cap_verify,-37,7)
-kernel_trap(urmach_cap_revoke,-39,2)
+kernel_trap(urmach_cap_revoke,-39,1)
 kernel_trap(urmach_cap_register,-40,1)
 
 /*

@@ -79,11 +79,13 @@ extern kern_return_t urmach_cap_verify(const struct uros_cap *user_token,
                                        uint64_t resource_id);
 
 /*
- * Add `cap_id` to the revocation set.  Only the cap_server task (the
- * one bootstrap named, urmach_cap_server_set()) may call this; others get
- * CAP_ERR_UNAUTHORIZED.
+ * Add the id of `user_token' to the revocation set.  Only the cap_server task
+ * (the one bootstrap named, urmach_cap_server_set()) may call this; others get
+ * CAP_ERR_UNAUTHORIZED.  #974: the token itself, cap_server's own copy, whose
+ * MAC is checked -- CAP_ERR_INVALID_TOKEN if it does not verify -- so that what
+ * the kernel reads of it, its id and its deadline, is the issuer's.
  */
-extern kern_return_t urmach_cap_revoke(uint64_t cap_id);
+extern kern_return_t urmach_cap_revoke(const struct uros_cap *user_token);
 
 /*
  * Setup / bookkeeping entry point:

@@ -241,6 +241,7 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
  */
 static kern_return_t cap_fields_check(const struct uros_cap *, uint64_t,
                                       uint32_t, uint32_t, uint64_t);
+static kern_return_t cap_revoke_token(const struct uros_cap *);	/* #974 */
 
 /* The fields, and the look-up among the revoked.  Must be called with cap_lock held. */
 static kern_return_t
@@ -671,10 +672,10 @@ cap_probe_run(void)
 /*
  * #537: the cache asked once the key exists.  A token checked twice on one
  * processor is answered from the cache the second time -- the hit counted --
- * and once revoked through the real path, urmach_cap_revoke(), its next check
+ * and once revoked through the real path, cap_revoke_token(), its next check
  * is refused, the cache notwithstanding.  cap_id ~0 - 1 is one cap_server
  * never issues; its revocation entry stays, and shadows nothing.  Run in
- * cap_server's registration, so urmach_cap_revoke() finds its caller allowed.
+ * cap_server's registration, so cap_revoke_token() finds its caller allowed.
  * ablations/537-epoch-kept.patch is how this is shown able to say WRONG.
  */
 static void
@@ -706,7 +707,7 @@ cap_cache_selftest(void)
     hits1 = v->hits;
     enable_preemption();
 
-    (void)urmach_cap_revoke(t.cap_id);
+    (void)cap_revoke_token(&t);
     after = cap_check_in_kernel(&t, RESOURCE_DMA_BUFFER,
                                 CAP_OP_DMA_DEVICE_READ, 0x537);
 
@@ -795,10 +796,33 @@ urmach_cap_epoch(void)
     return (kern_return_t)cap_epoch;
 }
 
-kern_return_t
-urmach_cap_revoke(uint64_t cap_id)
+/*
+ * The revocation of `t', a token in kernel memory: urmach_cap_revoke's, on the
+ * copy it made, and the cache's self-test's.
+ *
+ * #974: a token and not an id.  The trap took cap_server's word for the id; it
+ * is told the token now, cap_server's own copy, and checks its MAC, so that
+ * what it reads of it -- the id, and the deadline it may forget the revocation
+ * after -- is what the issuer signed.  Who may revoke is asked first, as
+ * before, and the MAC outside cap_lock, as every check computes it.
+ */
+static kern_return_t
+cap_revoke_token(const struct uros_cap *t)
 {
     task_t caller = current_task();
+    uint64_t cap_id = t->cap_id;
+    kern_return_t kr;
+
+    simple_lock(&cap_lock);
+    if (!cap_key_set || caller != cap_server_task) {
+        simple_unlock(&cap_lock);
+        return CAP_ERR_UNAUTHORIZED;
+    }
+    simple_unlock(&cap_lock);
+
+    kr = cap_mac_check_unlocked(t);
+    if (kr != KERN_SUCCESS)
+        return kr;
 
     simple_lock(&cap_lock);
     if (!cap_key_set || caller != cap_server_task) {
@@ -831,6 +855,19 @@ urmach_cap_revoke(uint64_t cap_id)
      */
     device_master_cap_revoked(cap_id);
     return KERN_SUCCESS;
+}
+
+kern_return_t
+urmach_cap_revoke(const struct uros_cap *user_token)
+{
+    struct uros_cap t;
+    kern_return_t kr = cap_copyin_token(user_token, &t);
+
+    if (kr != KERN_SUCCESS)
+        return kr;
+    kr = cap_revoke_token(&t);
+    bzero((char *)&t, sizeof(t));	/* a signed token does not linger */
+    return kr;
 }
 
 /*

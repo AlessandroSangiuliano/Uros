@@ -803,7 +803,12 @@ cap_revoke_tree(struct cap_entry *root, int *count)
          * verifying the token.  The rest of the tree is still revoked, and
          * the request is answered with the first refusal.
          */
-        kr = urmach_cap_revoke(id);
+        /*
+         * #974: the token, this server's own copy, signed as revoked just
+         * above: the kernel checks its MAC and reads from it the deadline it
+         * may forget the revocation after.
+         */
+        kr = urmach_cap_revoke(&e->token);
         if (kr != KERN_SUCCESS) {
             printf("cap: the kernel refused the revocation of cap %llu "
                    "(kr=%d) -- the trap still verifies it (#745)\n",
