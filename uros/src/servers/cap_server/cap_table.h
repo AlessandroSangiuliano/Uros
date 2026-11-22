@@ -18,9 +18,14 @@
 /*
  * cap_table.h — cap_server internal storage for issued capabilities.
  *
- * v1 layout: single-shard, mutex-protected, with three hash indexes
- * (by_id / by_owner / by_parent) over the same cap_entry pool.
- * 64-shard + 4-thread sharding is out-of-scope per plan.
+ * One hash index, by id, used by the receive loop alone: no lock.
+ *
+ * #974: there were three, by id, by sender and by parent, and the two others
+ * were written on every insertion and read by nothing.  The delegation tree is
+ * walked by the links in the token itself (first_child_cap_id,
+ * next_sibling_cap_id, parent_cap_id) since #745, and nothing looks an entry
+ * up by the port it was asked on.  An entry that leaves the table now leaves
+ * one chain.
  */
 
 #ifndef _CAP_SERVER_CAP_TABLE_H_
@@ -35,8 +40,6 @@ struct cap_entry {
     struct uros_cap  token;           /* signed + wire-format */
     mach_port_t      sender;          /* emission-time requester port */
     struct cap_entry *next_by_id;
-    struct cap_entry *next_by_owner;
-    struct cap_entry *next_by_parent;
 };
 
 void cap_table_init(void);
@@ -48,7 +51,6 @@ void cap_table_init(void);
 int  cap_table_insert(struct cap_entry *e);
 
 struct cap_entry *cap_table_find_by_id(uint64_t cap_id);
-struct cap_entry *cap_table_find_children(uint64_t parent_id);
 
 /*
  * Every entry, in no order (#747): the first for NULL, the one after `e'
@@ -59,9 +61,9 @@ struct cap_entry *cap_table_find_children(uint64_t parent_id);
 struct cap_entry *cap_table_next(struct cap_entry *e);
 
 /*
- * Mark a single entry revoked (token.revoked = 1).  Callers iterate
- * the delegation tree themselves via cap_table_find_children() to
- * implement cascade revocation.
+ * Mark a single entry revoked (token.revoked = 1).  Callers walk the
+ * delegation tree themselves, by the links in the token, to implement
+ * cascade revocation (cap_subtree_next() in cap_server.c).
  */
 void cap_table_mark_revoked(struct cap_entry *e);
 

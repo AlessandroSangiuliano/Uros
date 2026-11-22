@@ -49,9 +49,7 @@ static uint8_t cap_hmac_key[SHA256_DIGEST_SIZE];
  */
 #define CAP_BUCKETS   256
 
-static struct cap_entry *bucket_by_id    [CAP_BUCKETS];
-static struct cap_entry *bucket_by_owner [CAP_BUCKETS];
-static struct cap_entry *bucket_by_parent[CAP_BUCKETS];
+static struct cap_entry *bucket_by_id[CAP_BUCKETS];
 
 static uint64_t next_cap_id;
 
@@ -67,16 +65,9 @@ static inline unsigned hash64(uint64_t x) {
     return (unsigned)(x & (CAP_BUCKETS - 1));
 }
 
-static inline unsigned hash_port(mach_port_t p) {
-    return hash64((uint64_t)p);
-}
-
 void cap_table_init(void) {
-    for (unsigned i = 0; i < CAP_BUCKETS; i++) {
-        bucket_by_id[i]     = NULL;
-        bucket_by_owner[i]  = NULL;
-        bucket_by_parent[i] = NULL;
-    }
+    for (unsigned i = 0; i < CAP_BUCKETS; i++)
+        bucket_by_id[i] = NULL;
     next_cap_id = 1;
 }
 
@@ -89,18 +80,6 @@ int cap_table_insert(struct cap_entry *e) {
     unsigned h = hash64(e->token.cap_id);
     e->next_by_id = bucket_by_id[h];
     bucket_by_id[h] = e;
-
-    h = hash_port(e->sender);
-    e->next_by_owner = bucket_by_owner[h];
-    bucket_by_owner[h] = e;
-
-    if (e->token.parent_cap_id != 0) {
-        h = hash64(e->token.parent_cap_id);
-        e->next_by_parent = bucket_by_parent[h];
-        bucket_by_parent[h] = e;
-    } else {
-        e->next_by_parent = NULL;
-    }
     return 0;
 }
 
@@ -110,12 +89,6 @@ struct cap_entry *cap_table_find_by_id(uint64_t cap_id) {
         if (p->token.cap_id == cap_id) return p;
     }
     return NULL;
-}
-
-struct cap_entry *cap_table_find_children(uint64_t parent_id) {
-    return bucket_by_parent[hash64(parent_id)];
-    /* Caller walks via next_by_parent and filters on token.parent_cap_id
-     * (since a bucket may hold entries with different parents). */
 }
 
 /* #747: by the id buckets, each chain and then the next bucket that has one. */
