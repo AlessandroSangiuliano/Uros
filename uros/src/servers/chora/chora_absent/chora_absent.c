@@ -21,11 +21,7 @@
  * (#963).
  *
  * And it declares no device (#964): the HAL starts a module only for a device
- * the module names, so nobody starts this one.  A HAL that loaded the pool to
- * read the declarations would meet this file's WRONG at once.  One that took a
- * module with no declaration for one that drives everything would put this
- * beside chora_probe for the card, and meet it as soon as it started what it
- * chose.
+ * the module names, so nobody starts this one.
  *
  * A chora fetches the one module it was named, and a task that drives one
  * device must not hold the code of the other drivers of its class.  With one
@@ -41,6 +37,15 @@
  * it loads this file -- DT_INIT, which the link names, since libdl calls
  * DT_INIT and not .init_array, where a constructor would go -- and the WRONG
  * it prints fails the boot, whichever program loaded it.
+ *
+ * 🔴 WHICHEVER PROGRAM: SO IT ASKS NOTHING OF LIBDRIVER (#964).  libdl
+ * resolves every symbol of a module before it runs DT_INIT, and refuses the
+ * module if one is missing.  This file called driver_log(), which only a
+ * program linked with libdriver exports, so in any other program it was refused
+ * before its WRONG, and said nothing but a dlopen failure.  The HAL is such a
+ * program, and reading a pool by loading it is the mistake #964 must not make:
+ * the ablation that made the HAL load its pools was not caught.  printf is
+ * every program's.
  */
 
 #include <stdio.h>
@@ -60,8 +65,8 @@ chora_absent_loaded(void)
 static int
 absent_attach(struct driver *d)
 {
-	driver_log(d, "WRONG -- chora_absent was attached, and no chora is "
-		   "ever told to load it");
+	printf("%s: WRONG -- chora_absent was attached, and no chora is ever "
+	       "told to load it\n", d->name);
 	return -1;
 }
 
