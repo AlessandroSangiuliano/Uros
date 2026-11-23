@@ -75,4 +75,18 @@ int	modload_load_class(const char *class, const char *sym_suffix,
 void   *modload_load_named(const char *class, const char *name,
 			   const char *sym_suffix);
 
+/*
+ * #964: a module given as bytes by whoever started this task, loaded as
+ * <class>/<name> -- the path dlopen() is given -- and its symbol
+ * <basename><sym_suffix> returned, as modload_load_named() returns one
+ * bootstrap gives.  `data' is vm_allocate'd in this task, as bootstrap's
+ * bytes are, and the cache keeps it from here.  Nothing is asked of
+ * bootstrap: the module that runs is the one given -- a chora's, which the
+ * HAL read and checked.  NULL, said, when a name does not fit a pool's, the
+ * cache already holds <class>/<name> or is full, or the module does not load.
+ */
+void   *modload_load_given(const char *class, const char *name,
+			   vm_offset_t data, vm_size_t size,
+			   const char *sym_suffix);
+
 #endif /* _MODLOAD_H_ */
