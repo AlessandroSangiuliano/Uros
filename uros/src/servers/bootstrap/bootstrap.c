@@ -2591,6 +2591,173 @@ do_bootstrap_get_module(mach_port_t bootstrap,
 	return KERN_SUCCESS;
 }
 
+/*
+ * #964: a program of the bundle, loaded into a task the caller made, and
+ * started with these arguments: a driver, for the HAL.
+ *
+ * 🔑 THE HAL MAKES THE TASK; THIS ONLY LOADS IT.  The HAL supervises its
+ * drivers, so a driver's task is the HAL's from birth: it derives the task's
+ * capability from its own before the task has a thread, and it hears of the
+ * task's death and starts the driver again.  What bootstrap alone has is the
+ * bundle, in memory before any filesystem exists -- the disk's driver is one of
+ * the HAL's -- and the loader that puts one of its programs into a task.
+ *
+ * 🔴 A DRIVER GETS THE DRIVER'S PORT, NOT THE MASTER PORT.  The task is given
+ * a bootstrap port of its own, flagged SERVER_DRIVER_F, whose bootstrap_ports()
+ * answers in its device slot the kernel's driver's port: the routines of
+ * device_master.defs a driver calls, each bound to its claim, and not
+ * device_open(), the debugger or the I/O ports (device_master.c).  Its console
+ * comes from bootstrap_console(), as any task's does.
+ *
+ * ⚠️ Asked only on the port of a server that holds the master device port
+ * (-D): who may drive is the master port's holder's to decide, as the kernel's
+ * device_driver_port is asked on the master port.  A driver cannot load one.
+ *
+ * The task's port is kept, as a server's is: bootstrap_arguments() finds the
+ * driver's arguments by it, and its death gives the slot back (driver_dead()).
+ * A load that fails leaves the task to the caller, which made it.
+ */
+#define DRIVER_PATH_PREFIX	"/dev/boot_device/mach_servers/"
+
+kern_return_t
+do_bootstrap_load_program(mach_port_t bootstrap,
+			  task_port_t task,
+			  module_name_t program,
+			  bootstrap_argv_t arguments)
+{
+	struct server	*sp = server_by_bootstrap_port(bootstrap);
+	struct server	*dp = NULL;
+	thread_port_t	thread = MACH_PORT_NULL;
+	mach_port_t	prev = MACH_PORT_NULL;
+	kern_return_t	kr;
+	const char	*a;
+	char		*args, *sym;
+	size_t		n, at;
+	int		i;
+
+	if (sp == NULL || !(sp->flags & SERVER_DEVICE_F) ||
+	    (sp->flags & SERVER_DRIVER_F)) {
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: bootstrap_load_program: refused to %s, which holds no "
+		   "master device port (#964)\n", program_name,
+		   sp == NULL ? "a task asking on the shared service port"
+			      : sp->symtab_name);
+	    BOOTSTRAP_IO_UNLOCK();
+	    return KERN_NO_ACCESS;
+	}
+	/* sa_mach has no strnlen(): the arguments' NUL, within their bound */
+	for (n = 0; n < BOOTSTRAP_ARGV_MAX && arguments[n] != '\0'; n++)
+	    ;
+	if (!valid_module_component(program) || n == BOOTSTRAP_ARGV_MAX)
+	    return KERN_INVALID_ARGUMENT;
+	if (bootstrap_driver_device_port == MACH_PORT_NULL) {
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: bootstrap_load_program: %s for %s refused, the kernel "
+		   "having given no driver's port (#964)\n", program_name,
+		   program, sp->symtab_name);
+	    BOOTSTRAP_IO_UNLOCK();
+	    return KERN_FAILURE;
+	}
+	for (i = 0; i < BOOTSTRAP_MAX_DRIVERS && dp == NULL; i++)
+	    if (drivers[i].task_port == MACH_PORT_NULL)
+		dp = &drivers[i];
+	if (dp == NULL) {
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: bootstrap_load_program: %s for %s refused, all %d "
+		   "drivers' slots taken (#964)\n", program_name, program,
+		   sp->symtab_name, BOOTSTRAP_MAX_DRIVERS);
+	    BOOTSTRAP_IO_UNLOCK();
+	    return KERN_RESOURCE_SHORTAGE;
+	}
+
+	/*
+	 * "<path>\0<word>\0<word>\0", as a server's line of bootstrap.conf
+	 * becomes in server_name: bootstrap_arguments() hands the whole.
+	 */
+	n = sizeof (DRIVER_PATH_PREFIX) + strlen(program) + strlen(arguments) + 2;
+	args = malloc(n);
+	sym = malloc(strlen(program) + 1);
+	if (args == NULL || sym == NULL) {
+	    free(args);
+	    free(sym);
+	    return KERN_RESOURCE_SHORTAGE;
+	}
+	strcpy(sym, program);
+	at = (size_t)snprintf(args, n, "%s%s", DRIVER_PATH_PREFIX, program) + 1;
+	for (a = arguments; *a != '\0'; ) {
+	    while (*a == ' ')
+		a++;
+	    if (*a == '\0')
+		break;
+	    while (*a != '\0' && *a != ' ')
+		args[at++] = *a++;
+	    args[at++] = '\0';
+	}
+	dp->server_name = args;
+	dp->args_size = (int)at;
+	dp->symtab_name = sym;
+	dp->flags = SERVER_DRIVER_F;
+
+	(void) task_set_exception_ports(task,
+					EXC_MASK_ALL &
+					~(EXC_MASK_SYSCALL |
+					  EXC_MASK_MACH_SYSCALL |
+					  EXC_MASK_RPC_ALERT),
+					bootstrap_exception_port,
+					EXCEPTION_STATE_IDENTITY,
+					MACHINE_THREAD_STATE);
+	dp->bootstrap_port = server_bootstrap_port_make();
+	kr = task_set_bootstrap_port(task, dp->bootstrap_port);
+	(void) mach_port_deallocate(bootstrap_self, dp->bootstrap_port);
+	if (kr == KERN_SUCCESS)
+	    kr = thread_create(task, &thread);
+	if (kr == KERN_SUCCESS &&
+	    boot_load_program(bootstrap_master_host_port,
+			      bootstrap_master_device_port, task, thread,
+			      dp->flags, dp->symtab_name, dp->server_name,
+			      0) != 0)
+	    kr = KERN_FAILURE;
+	if (kr == KERN_SUCCESS)
+	    kr = thread_resume(thread);
+	/*
+	 * ⚠️ THE DEATH NOTIFICATION LAST, AND NO ERROR AFTER IT.  A right
+	 * with a dead-name request on it that bootstrap lets go brings a
+	 * port-deleted notice to bootstrap_notification_port, where
+	 * service.c's handler panics -- and an error answered here is exactly
+	 * that: the server loop destroys the request, the task's right with
+	 * it.  So nothing that can fail comes after the request.
+	 */
+	if (kr == KERN_SUCCESS)
+	    kr = mach_port_request_notification(bootstrap_self, task,
+						MACH_NOTIFY_DEAD_NAME, 0,
+						bootstrap_notification_port,
+						MACH_MSG_TYPE_MAKE_SEND_ONCE,
+						&prev);
+	if (kr != KERN_SUCCESS) {
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: bootstrap_load_program: %s for %s not loaded (0x%x) "
+		   "(#964)\n", program_name, program, sp->symtab_name, kr);
+	    BOOTSTRAP_IO_UNLOCK();
+	    if (thread != MACH_PORT_NULL) {
+		(void) thread_terminate(thread);
+		(void) mach_port_deallocate(bootstrap_self, thread);
+	    }
+	    driver_slot_free(dp);
+	    return kr;
+	}
+	if (prev != MACH_PORT_NULL)
+	    (void) mach_port_deallocate(bootstrap_self, prev);
+	(void) mach_port_deallocate(bootstrap_self, thread);
+
+	/* Taken, as the request's right: given back by driver_dead(). */
+	dp->task_port = task;
+	BOOTSTRAP_IO_LOCK();
+	printf("%s: loaded %s into a task of %s's, its arguments \"%s\" (#964)\n",
+	       program_name, program, sp->symtab_name, arguments);
+	BOOTSTRAP_IO_UNLOCK();
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 bootstrap_notify_dead_name(mach_port_t name)
 {

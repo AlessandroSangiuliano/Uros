@@ -139,3 +139,25 @@ routine bootstrap_cap_provisioner(
 skip;	/* bootstrap_cap_provisioner — userspace only */
 #endif
 
+
+/*
+ *	#964: a program of the bundle, loaded into a task the caller made, with
+ *	these arguments -- words parted by spaces, as a line of bootstrap.conf
+ *	gives them -- and started: a driver, for the HAL, which makes the task,
+ *	derives its capability and keeps it.  The task gets a bootstrap port of
+ *	its own, whose bootstrap_ports() answers the kernel's driver's port in
+ *	place of the master device port.  Asked only on the bootstrap port of a
+ *	server that holds the master device port (-D).  Appended: MIG numbers
+ *	routines by position.
+ */
+#if	!KERNEL_SERVER
+type bootstrap_argv_t = c_string[*:256];
+
+routine bootstrap_load_program(
+		bootstrap		: mach_port_t;
+		task			: task_t;
+		program			: module_name_t;
+		arguments		: bootstrap_argv_t);
+#else
+skip;	/* bootstrap_load_program — userspace only */
+#endif
