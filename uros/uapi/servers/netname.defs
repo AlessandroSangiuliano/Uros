@@ -216,3 +216,17 @@ routine netname_list_mounts(
     out	prefixes	: netname_path_t;
     out	count		: int);
 
+
+/*
+ * #964: netname_notify for the mount registry.  A one-shot notification on
+ * `notify_port' when a mount is checked in at exactly `prefix' -- at once when
+ * there is one -- carrying the mount's port as a send right, in the message
+ * netname_notify sends, with NETNAME_NOTIFY_MOUNT_MSID (netname_defs.h).
+ * Exactly: a mount at "/mnt" is not one at "/mnt/disk", which the look-up
+ * would route there.  The HAL waits on it for "/", whose disk holds the
+ * modules the bundle does not.
+ */
+routine netname_notify_mount(
+	server_port	: mach_port_t;
+	prefix		: netname_name_in_t;
+	notify_port	: mach_port_make_send_once_t);
