@@ -1,18 +1,18 @@
 Kind: ablation
 Issue: #963
-Takes out: what chora_test may hand on: the AHCI class instead of any function (#977, #964).  chora asks for the capability for its one function and holds what its parent hands on, so it holds no function, cap_server refuses it the network card's, and it never claims it: its authority is its parent's to give.
+Takes out: what the HAL may hand on: the AHCI class instead of any function (#964).  A chora holds what its parent hands on, cut by exec_server to the parent's delegatable lines: the HAL's chora on the card holds no function, cap_server refuses it the card's, and it never claims it -- its authority is its parent's to give.
 Run: --iommu intel --entry 68 600 -smp 4
 Expect: @[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: no capability for function [0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: cap_request 0x
-Expect: chora_test: \[2\] WRONG -- a chora started on the card, and 30 s on the kernel says nobody claims it
-Note: made again over #964, where chora asks for its function's capability and chora_test hands on any function.
+Expect: chora_test: \[2\] WRONG -- the HAL.s chora on the card, and 30 s on the kernel says nobody claims it
+Note: made again over #964, where the HAL starts the chora on the card and writes its manifest; it took chora_test's own line before, when chora_test started it.
 
-diff --git a/uros/src/tests/chora_test/chora_test.manifest b/uros/src/tests/chora_test/chora_test.manifest
-index 4f0f58f4..ca218f38 100644
---- a/uros/src/tests/chora_test/chora_test.manifest
-+++ b/uros/src/tests/chora_test/chora_test.manifest
-@@ -11,4 +11,4 @@
- # refused by the claim the first holds, not by a capability it lacks.
- 
- name chora_test
+diff --git a/uros/src/servers/hal_server/hal_server.manifest b/uros/src/servers/hal_server/hal_server.manifest
+index 6818dfbf..180beb88 100644
+--- a/uros/src/servers/hal_server/hal_server.manifest
++++ b/uros/src/servers/hal_server/hal_server.manifest
+@@ -31,4 +31,4 @@ required 5 any 0x7
+ # into the chora's manifest, at run time, the one function's address (#982).
+ # exec_server cuts that manifest to this line.  `any' because no manifest
+ # names an address.
 -delegatable 12 any 0x7
 +delegatable 5 0x010601 0x7
