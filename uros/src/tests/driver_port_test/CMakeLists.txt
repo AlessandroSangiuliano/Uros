@@ -28,7 +28,8 @@ set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 set(UROS_MIG_USERLAND_INCLUDES
     -I${UROS_ARCH_INCLUDE}
     -I${_K}
-    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
+    -I${CMAKE_SOURCE_DIR}/src/servers/exec_server)
 
 set(_DP_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
 set(DP_MIG_GENERATED)
@@ -38,6 +39,11 @@ set(DP_HAL_GENERATED)
 add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
                         ${_DP_OUT} DP_HAL)
 list(APPEND DP_MIG_GENERATED ${DP_HAL_GENERATED})
+# #964: exec_server's client, for the image load the HAL will ask.
+set(DP_EXEC_GENERATED)
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs
+                        ${_DP_OUT} DP_EXEC)
+list(APPEND DP_MIG_GENERATED ${DP_EXEC_GENERATED})
 
 add_executable(driver_port_test_bin driver_port_test.c ${DP_MIG_GENERATED})
 target_compile_options(driver_port_test_bin PRIVATE
@@ -48,6 +54,7 @@ target_include_directories(driver_port_test_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/src/servers/hal_server
   ${CMAKE_SOURCE_DIR}/src/lib/libpci
+  ${CMAKE_SOURCE_DIR}/src/servers/exec_server
   ${_DP_OUT}
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/lib/libmach

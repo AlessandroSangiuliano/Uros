@@ -40,10 +40,14 @@
  * routine.  [6] is not set beside the master port: there the line would be
  * taken, and kept by this task.
  *
- * And bootstrap's half, as the HAL will ask it:
+ * And the road a chora the HAL starts will take:
  *
- *   [8] bootstrap loads this program, with the argument "child", into a task
- *       this one made: a driver, as a chora the HAL makes will be.
+ *   [8] a task this one made, given the drivers' bootstrap port, and this
+ *       program's bytes from the bundle, loaded by exec_server as an image
+ *       with the argument "child": a driver, as the HAL will make one;
+ *   [9] a file load asked on exec_server's image port is refused;
+ *  [10] an image load asked on exec_server's file port is refused -- an image
+ *       load must never wait behind a file read.
  *
  * The child says, under "driver_port_test: child:", what it was given:
  *
@@ -52,7 +56,7 @@
  *   [3] the driver's port: device_dma_faults() refuses on it a device the
  *       child does not hold, where any other port is no port of the device
  *       master's at all;
- *   [4] no power to load a driver itself: bootstrap refuses it.
+ *   [4] no power to give the drivers' port on: bootstrap refuses it.
  */
 
 #include <mach.h>
@@ -66,8 +70,10 @@
 #include "hal_server.h"			/* struct hal_device_info */
 #include "hal.h"			/* hal_list_devices */
 #include "device_master.h"		/* device_driver_port, and the rest */
+#include "exec_types.h"			/* EXEC_OK, EXEC_ERR_WRONG_PORT */
+#include "exec.h"			/* exec_load, exec_load_image */
 
-#define ARMS		8
+#define ARMS		10
 #define LEGACY_LINES	16		/* IRQ_FORWARD_LINES */
 
 static int		passed, asked;
@@ -139,8 +145,6 @@ child(void)
 	mach_port_t		t = MACH_PORT_NULL;
 	natural_t		confined, count, lost, undrained;
 	vm_address_t		address;
-	module_name_t		prog;
-	bootstrap_argv_t	args;
 	kern_return_t		kr;
 	char			line[160];
 
@@ -176,16 +180,11 @@ child(void)
 	said(3, kr == KERN_NO_ACCESS, line);
 
 	/* [4] */
-	strcpy(prog, "driver_port_test");
-	strcpy(args, "child");
-	kr = task_create(mach_task_self(), NULL, 0, FALSE, &t);
-	if (kr == KERN_SUCCESS) {
-		kr = bootstrap_load_program(bootstrap_port, t, prog, args);
-		(void)task_terminate(t);
+	kr = bootstrap_drivers_port(bootstrap_port, &t);
+	if (kr == KERN_SUCCESS)
 		(void)mach_port_deallocate(mach_task_self(), t);
-	}
-	snprintf(line, sizeof line, "bootstrap_load_program() asked by a "
-		 "driver: %s, 0x%x", kr == KERN_SUCCESS ? "loaded" : "refused",
+	snprintf(line, sizeof line, "bootstrap_drivers_port() asked by a "
+		 "driver: %s, 0x%x", kr == KERN_SUCCESS ? "given" : "refused",
 		 kr);
 	said(4, kr == KERN_NO_ACCESS, line);
 
@@ -322,26 +321,111 @@ main(int argc, char **argv)
 		 kr == KERN_SUCCESS ? "answered" : "refused", kr);
 	said(7, kr != KERN_SUCCESS, line);
 
-	/* [8] */
+	/* [8], [9], [10] */
 	{
-		mach_port_t		t = MACH_PORT_NULL;
+		/* NUL-separated, an empty string last (exec_types.h) */
+		static const char	argv_blob[] = "driver_port_test\0child\0";
+		static const char	envp_blob[] = "";
+		mach_port_t		t = MACH_PORT_NULL, drivers = MACH_PORT_NULL;
+		mach_port_t		image_port = MACH_PORT_NULL;
+		mach_port_t		file_port = MACH_PORT_NULL;
+		mach_port_t		thread = MACH_PORT_NULL;
+		vm_offset_t		image = 0;
+		mach_msg_type_number_t	image_len = 0;
 		module_name_t		prog;
-		bootstrap_argv_t	args;
+		exec_path_t		path;
+		int			rc = EXEC_OK;
 
 		strcpy(prog, "driver_port_test");
-		strcpy(args, "child");
-		kr = task_create(mach_task_self(), NULL, 0, FALSE, &t);
+		kr = bootstrap_drivers_port(bootstrap_port, &drivers);
 		if (kr == KERN_SUCCESS)
-			kr = bootstrap_load_program(bootstrap_port, t, prog,
-						    args);
-		snprintf(line, sizeof line, "bootstrap loaded this program, "
-			 "\"child\", into a task of this one's, as a driver: "
-			 "0x%x", kr);
-		said(8, kr == KERN_SUCCESS, line);
-		if (kr != KERN_SUCCESS && t != MACH_PORT_NULL)
+			kr = bootstrap_get_program(bootstrap_port, prog, &image,
+						   &image_len);
+		if (kr == KERN_SUCCESS)
+			kr = netname_wait(name_server_port, "exec_image",
+					  &image_port);
+		if (kr == KERN_SUCCESS)
+			kr = task_create(mach_task_self(), NULL, 0, FALSE, &t);
+		if (kr == KERN_SUCCESS)
+			kr = task_set_bootstrap_port(t, drivers);
+		if (kr == KERN_SUCCESS)
+			kr = exec_load_image(image_port, t, MACH_PORT_NULL,
+					     (pointer_t)image, image_len,
+					     (pointer_t)0, 0,
+					     (pointer_t)argv_blob,
+					     sizeof argv_blob,
+					     (pointer_t)envp_blob,
+					     sizeof envp_blob, &thread, &rc);
+		if (kr == KERN_SUCCESS && rc == EXEC_OK)
+			kr = thread_resume(thread);
+		snprintf(line, sizeof line, "a task of this one's, the drivers' "
+			 "bootstrap port, its %u bytes from the bundle, loaded "
+			 "by exec_server as an image: 0x%x, %d",
+			 (unsigned)image_len, kr, rc);
+		said(8, kr == KERN_SUCCESS && rc == EXEC_OK, line);
+		if ((kr != KERN_SUCCESS || rc != EXEC_OK) &&
+		    t != MACH_PORT_NULL)
 			(void)task_terminate(t);
 		if (t != MACH_PORT_NULL)
 			(void)mach_port_deallocate(mach_task_self(), t);
+		if (thread != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), thread);
+
+		/* [9] */
+		t = thread = MACH_PORT_NULL;
+		rc = EXEC_OK;
+		strcpy(path, "/sbin/driver_port_test");
+		kr = image_port == MACH_PORT_NULL ? KERN_FAILURE :
+		     task_create(mach_task_self(), NULL, 0, FALSE, &t);
+		if (kr == KERN_SUCCESS)
+			kr = exec_load(image_port, t, MACH_PORT_NULL, path,
+				       (pointer_t)argv_blob, sizeof argv_blob,
+				       (pointer_t)envp_blob, sizeof envp_blob,
+				       &thread, &rc);
+		snprintf(line, sizeof line, "a file load asked on exec_server's "
+			 "image port: 0x%x, %d", kr, rc);
+		said(9, kr == KERN_SUCCESS && rc == EXEC_ERR_WRONG_PORT, line);
+		if (t != MACH_PORT_NULL) {
+			(void)task_terminate(t);
+			(void)mach_port_deallocate(mach_task_self(), t);
+		}
+		if (thread != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), thread);
+
+		/* [10] */
+		t = thread = MACH_PORT_NULL;
+		rc = EXEC_OK;
+		kr = image == 0 ? KERN_FAILURE :
+		     netname_wait(name_server_port, "exec_server", &file_port);
+		if (kr == KERN_SUCCESS)
+			kr = task_create(mach_task_self(), NULL, 0, FALSE, &t);
+		if (kr == KERN_SUCCESS)
+			kr = exec_load_image(file_port, t, MACH_PORT_NULL,
+					     (pointer_t)image, image_len,
+					     (pointer_t)0, 0,
+					     (pointer_t)argv_blob,
+					     sizeof argv_blob,
+					     (pointer_t)envp_blob,
+					     sizeof envp_blob, &thread, &rc);
+		snprintf(line, sizeof line, "an image load asked on "
+			 "exec_server's file port: 0x%x, %d", kr, rc);
+		said(10, kr == KERN_SUCCESS && rc == EXEC_ERR_WRONG_PORT, line);
+		if (t != MACH_PORT_NULL) {
+			(void)task_terminate(t);
+			(void)mach_port_deallocate(mach_task_self(), t);
+		}
+		if (thread != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), thread);
+
+		if (image != 0)
+			(void)vm_deallocate(mach_task_self(), image, image_len);
+		if (drivers != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), drivers);
+		if (image_port != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(),
+						   image_port);
+		if (file_port != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), file_port);
 	}
 
 	printf("driver_port_test: %d of %d arms passed\n", passed, asked);
