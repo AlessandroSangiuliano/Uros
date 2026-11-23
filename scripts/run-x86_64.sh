@@ -655,6 +655,19 @@ must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_
 	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and three for each half of its DMA round trip, and says so either way (#977, #978).' \
 	edu_probe
 
+# #964: the HAL says, for each device it finds, which module of the device's
+# pool declares it.  Each pair here is a device's line and the decision that
+# line must end in: the network card's chora_probe, which declares QEMU's two
+# cards by vendor and device, and edu's edu_probe, on a board with --edu.  A
+# HAL that decided otherwise writes the device's line all the same, with
+# another ending, and the pair says which.
+must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: net/chora_probe\.so declares it' \
+	'The HAL named the network card and did not say that chora_probe drives it, which declares the card by its vendor and device: its line says what it decided instead (#964).' \
+	'the HAL on the network card'
+must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class [0-9a-f]*: misc/edu_probe\.so declares it' \
+	'The HAL named the edu device and did not say that edu_probe drives it, which declares edu by its vendor and device: its line says what it decided instead (#964).' \
+	'the HAL on edu'
+
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
 
