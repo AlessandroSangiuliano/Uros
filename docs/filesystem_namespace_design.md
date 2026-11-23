@@ -276,8 +276,20 @@ The cage holds only as well as its weakest point:
   filesystem to write on its behalf. Servers must act with the **client's**
   authority, not their own — the direction of #911, and the problem seen in
   #932.
+  *Toward it, in #964 (23/11/2026):* exec_server derives a program's
+  capability port from its **caller's**. A manifest the caller writes for
+  the program — the HAL's, naming the one PCI function a driver is started
+  for — is cut to what the caller may hand on, as the program's own would
+  be: no task gains, through exec_server, more than it holds.
 - **The raw disk.** block_device_server must be reachable only by filesystem
   servers; otherwise writes go underneath the filesystem.
+  *Toward it, in #964:* the kernel's master device port, whose
+  `device_open()` opens the boot disk underneath every filesystem, is no
+  longer a driver's. A driver holds the **driver's port**, which takes only
+  the routines bound to its claim. Bootstrap gives it on the drivers'
+  bootstrap port, and every driver checks as it starts that its port does
+  not open the console, and stops otherwise. The servers of bootstrap.conf
+  that still hold the master port (`-D`) remain to be narrowed the same way.
 - **The network.** Exfiltration goes through it, so the network is a
   capability of its own, not handed out by default.
 - **RAM.** The overlay needs a quota, or it becomes a way to exhaust memory.
@@ -295,7 +307,11 @@ discard?"
 This is the **first real consumer** of the namespace manipulation API
 (section 5): an overlay mount and a reduced root at spawn. It needs:
 
-- a tmpfs server (already planned for `/tmp` and `/run`);
+- a tmpfs server (already planned for `/tmp` and `/run`). A server that
+  answers the vfs protocol from memory, mounted under a prefix, exists
+  already: mount_test's `mount_liar.c` (#716), which lies on purpose to test
+  libvfs. Its clients, exec_server included, cannot tell it from ext_server:
+  a virtual root is one more server the namespace points to;
 - union/overlay semantics in the namespace (section 5's operations);
 - the root as an inherited capability (section 3), and a powerbox: a trusted
   launcher that holds the real root and hands it on only on the user's
