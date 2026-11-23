@@ -667,6 +667,12 @@ must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) c
 must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class [0-9a-f]*: misc/edu_probe\.so declares it' \
 	'The HAL named the edu device and did not say that edu_probe drives it, which declares edu by its vendor and device: its line says what it decided instead (#964).' \
 	'the HAL on edu'
+# And where the HAL's line leaves the network class to others, the card is left:
+# irq_claim_test drives it there, and a chora the HAL started would fight it for
+# the claim.  The pair's first line is the HAL's own, said only in those lists.
+must_report 'hal: class 0x020000 left to others by its line' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: net/chora_probe\.so declares it, and the HAL.s line leaves class 020000' \
+	'The HAL was told to leave the network class to others and did not say the card was left: its line says what it decided instead (#964).' \
+	'the HAL leaving the card'
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
