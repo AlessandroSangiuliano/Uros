@@ -380,6 +380,9 @@ edu_attach(struct driver *d)
 	return edu_reaches(d);
 }
 
+/* edu, vendor 1234h and device 11e8h, and nothing else (#964). */
+CHORA_DRIVES(CHORA_DRIVES_PCI_ID(0x1234, 0x11e8));
+
 const struct chora_module_ops edu_probe_chora_ops = {
 	.name	= "edu_probe",
 	.attach	= edu_attach,

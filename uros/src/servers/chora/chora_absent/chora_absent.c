@@ -20,6 +20,13 @@
  * chora_absent -- a module of the class `net' that no chora is told to load
  * (#963).
  *
+ * And it declares no device (#964): the HAL starts a module only for a device
+ * the module names, so nobody starts this one.  A HAL that loaded the pool to
+ * read the declarations would meet this file's WRONG at once.  One that took a
+ * module with no declaration for one that drives everything would put this
+ * beside chora_probe for the card, and meet it as soon as it started what it
+ * chose.
+ *
  * A chora fetches the one module it was named, and a task that drives one
  * device must not hold the code of the other drivers of its class.  With one
  * module in a class, a chora that fetched the whole class would look exactly
