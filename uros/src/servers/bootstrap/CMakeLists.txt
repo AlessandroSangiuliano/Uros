@@ -68,6 +68,12 @@ mig_server_stub(
 mig_server_stub(
   "${CMAKE_SOURCE_DIR}/src/servers/gpu_server/gpu_server.defs"
   gpu_server  ${MIG_OUT})
+# 6) device_master.defs -- bootstrap asks the kernel for the driver's port,
+#    which it gives the drivers it loads for the HAL (#964).  The user stub
+#    alone; the server side is the kernel's.
+mig_server_stub(
+  "${UROS_UAPI_DIR}/device/device_master.defs"
+  device_master  ${MIG_OUT})
 
 set(MIG_SERVER_SOURCES
   ${MIG_OUT}/bootstrapServer.c
@@ -75,6 +81,7 @@ set(MIG_SERVER_SOURCES
   ${MIG_OUT}/notifyServer.c
   ${MIG_OUT}/serviceServer.c
   ${MIG_OUT}/gpu_serverUser.c
+  ${MIG_OUT}/device_masterUser.c
 )
 
 # ===========================================================================
