@@ -1014,6 +1014,7 @@ BOARD=""
 KVM_ARGS=""
 HPET_ARGS=""
 EDU_ARGS=""
+TESTDEV_ARGS=""
 SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
@@ -1071,6 +1072,12 @@ while :; do
 		# no register that says its mask, so edu_probe's EDU_DMA_REACH
 		# is this line's word.
 		EDU_ARGS="-device edu,dma_mask=0xffffffffffffffff"
+		shift ;;
+	--testdev)
+		# #964: QEMU's pci-testdev, vendor 1b36h and device 0005h, which
+		# crash_probe declares: a module that dies at its start every
+		# time, for the HAL to start again up to its limit and give up.
+		TESTDEV_ARGS="-device pci-testdev"
 		shift ;;
 	--edu2)
 		# #982: two of them, the same class twice, for
@@ -1612,7 +1619,7 @@ QERR="$LOG.qemu-stderr"
 # sets what the boot wrote in a superblock against it.
 QEMU_STARTED_EPOCH=$(date +%s)
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $EDU_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $EDU_ARGS $TESTDEV_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 

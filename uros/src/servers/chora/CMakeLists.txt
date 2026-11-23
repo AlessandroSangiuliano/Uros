@@ -158,6 +158,28 @@ set_target_properties(chora_absent_module PROPERTIES
 # no message before #977.  chora_test starts a chora on it, where the board
 # has one (run-x86_64.sh --edu).
 
+# #964: a module that dies at its start, every time, on QEMU's pci-testdev
+# (run-x86_64.sh --testdev): the HAL starts it again up to its limit, and
+# chora_test counts the starts.
+add_library(crash_probe_module SHARED crash_probe/crash_probe.c)
+
+add_dependencies(crash_probe_module mig_mach_public_headers)
+
+target_compile_options(crash_probe_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(crash_probe_module PRIVATE MACH_IPC_COMPAT=0)
+
+target_include_directories(crash_probe_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(crash_probe_module PROPERTIES
+  OUTPUT_NAME "crash_probe"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
+
 add_library(edu_probe_module SHARED edu_probe/edu_probe.c)
 
 add_dependencies(edu_probe_module mig_mach_public_headers)

@@ -876,6 +876,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # #977: chora's module for QEMU's educational device, which
             # has MSI and no MSI-X table.
             modules/misc/edu_probe.so:${_MOD}/misc/edu_probe.so
+            # #964: a module that dies at its start every time, on QEMU's
+            # pci-testdev, which the HAL starts again up to its limit.
+            modules/misc/crash_probe.so:${_MOD}/misc/crash_probe.so
             ${_CHAR_FILES}
             ${_MUSL_FILES}
             ${_IPC_BENCH_FILE}
@@ -908,7 +911,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             chora_probe_module chora_absent_module chora_bin
             modload_test_bin modload_test_twin_a modload_test_twin_b
             modload_test_only_a modload_test_only_b
-            edu_probe_module
+            edu_probe_module crash_probe_module
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
