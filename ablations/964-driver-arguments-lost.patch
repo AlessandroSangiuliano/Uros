@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: a driver's arguments in bootstrap_arguments(): bootstrap looks among the servers alone, and the driver starts with none.  driver_port_test's child starts without "child", as a second parent, and asks for the driver's port on the port it holds, which is not the master's.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: \[1\] the driver's port, asked on the master port: 0x[0-9a-f]+, none -- WRONG
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index ebaf6411..69cacd41 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -2320,7 +2320,7 @@ do_bootstrap_arguments(mach_port_t bootstrap,
+ 	    if (task_port == sp->task_port)
+ 		break;
+ 	}
+-	if (i == nservers && (sp = driver_by_task(task_port)) == NULL)
++	if (i == nservers)
+ 	    return KERN_INVALID_ARGUMENT;
+ 	args_size = round_page(sp->args_size);
+ 	kr = vm_allocate(mach_task_self(), args, args_size, TRUE);
