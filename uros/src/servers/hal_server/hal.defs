@@ -125,3 +125,23 @@ routine get_device_state(
 	in	slot		: unsigned;
 	in	func		: unsigned;
 	out	state		: unsigned);
+
+/*
+ * #964 — the name of the driver the HAL started for a device: the task's own,
+ * as urmach_task_get_name() reads it, MODULE@BB:DD.F once libdriver has named
+ * it.  Empty when the HAL started none for the device, or it is gone.
+ * KERN_INVALID_ARGUMENT for a device the HAL does not know.  For a test, or an
+ * administrator, to see which task drives a device without holding it.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+#include <mach/task_name.h>
+type hal_driver_name_t = array[*:URMACH_TASK_NAME_MAX] of char
+	ctype: urmach_task_name_t;	/* <mach/mach_types.h>, a task name */
+
+routine get_device_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	out	name		: hal_driver_name_t, CountInOut);

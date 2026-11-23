@@ -81,6 +81,31 @@ static struct pool	pools[HAL_MAX_POOLS];
 static int		n_pools;
 
 /*
+ * The choras the HAL started, one per device (#964): the task's port, which
+ * the HAL alone holds, with bootstrap's loader long done with it.  A slot is
+ * free while its task is MACH_PORT_NULL.  DEVICE_MAX_CLAIMS bounds them anyway:
+ * a chora holds a claim.
+ */
+#define HAL_MAX_CHORAS		16
+
+static struct chora_record {
+	unsigned int	bus, slot, func;
+	mach_port_t	task;
+} choras[HAL_MAX_CHORAS];
+
+mach_port_t
+hal_chora_task(unsigned int bus, unsigned int slot, unsigned int func)
+{
+	int	i;
+
+	for (i = 0; i < HAL_MAX_CHORAS; i++)
+		if (choras[i].task != MACH_PORT_NULL && choras[i].bus == bus &&
+		    choras[i].slot == slot && choras[i].func == func)
+			return choras[i].task;
+	return MACH_PORT_NULL;
+}
+
+/*
  * The classes the HAL's line leaves to others, "--leave CODE" (#964): a
  * device of one is said and not started, while another server drives that
  * class -- irq_claim_test the network card, block_device_server the disks,

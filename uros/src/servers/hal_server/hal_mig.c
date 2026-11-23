@@ -34,6 +34,7 @@
 #include <string.h>
 #include "hal_server.h"
 #include "device_master.h"	/* #513: ask the kernel who holds it */
+#include <mach/mach_interface.h>	/* urmach_task_get_name() (#964) */
 
 kern_return_t
 hal_list_devices(mach_port_t hal_port,
@@ -316,5 +317,28 @@ hal_get_device_state(mach_port_t hal_port,
 		return KERN_INVALID_ARGUMENT;
 
 	*state = (unsigned int)s;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #964: the name of the chora the HAL started for a device, as the task says
+ * it -- empty when there is none.  The task's port stays the HAL's: only its
+ * name is given.
+ */
+kern_return_t
+hal_get_device_driver(mach_port_t hal_port,
+		      unsigned int bus, unsigned int slot, unsigned int func,
+		      char *name, mach_msg_type_number_t *nameCnt)
+{
+	mach_port_t	task;
+
+	(void)hal_port;
+
+	if (hal_registry_get(bus, slot, func) == NULL)
+		return KERN_INVALID_ARGUMENT;
+	task = hal_chora_task(bus, slot, func);
+	if (task == MACH_PORT_NULL ||
+	    urmach_task_get_name(task, name, nameCnt) != KERN_SUCCESS)
+		*nameCnt = 0;
 	return KERN_SUCCESS;
 }

@@ -321,6 +321,10 @@ void hal_module_report(const struct hal_device_info *dev);
  */
 int  hal_modules_leave(const char *arg);
 
+/* The task of the chora the HAL started for a device, or MACH_PORT_NULL. */
+mach_port_t hal_chora_task(unsigned int bus, unsigned int slot,
+			   unsigned int func);
+
 /* ================================================================
  * Global state (defined in hal_server.c)
  * ================================================================ */
