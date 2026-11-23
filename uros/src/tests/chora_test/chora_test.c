@@ -65,7 +65,7 @@
 #include "device_master.h"		/* device_dma_owned() */
 #include "hal_server.h"			/* struct hal_device_info */
 #include "hal.h"			/* hal_list_devices() */
-#include "exec.h"			/* exec_load() */
+#include "exec.h"			/* exec_load_image() */
 #include "exec_types.h"			/* EXEC_OK */
 
 /*
@@ -243,21 +243,29 @@ blob_add(char *blob, size_t at, size_t cap, const char *s)
 }
 
 /*
- * A chora on `bdf' with the module `module' of the class `class', started as
- * a driver's parent starts one: a task made here and lent to exec_server,
- * with this task's capability port to derive the child's from.  Its first
- * thread is resumed.
+ * A chora on `bdf' with the module `module' of the class `class', started the
+ * way the HAL starts one (#964): a task made here, given the drivers' bootstrap
+ * port, and loaded by exec_server from chora's image, which bootstrap gives,
+ * with a manifest naming this one function.  So it holds the driver's port and
+ * the one capability, as the HAL's does, and passes the checks every driver
+ * makes as it starts.  Its first thread is resumed.
  */
 static kern_return_t
-start_chora(mach_port_t exec_port, natural_t bdf, const char *class,
+start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 	    const char *module, mach_port_t *task_out, int *rc_out)
 {
-	static char	envp_blob[] = "";
-	char		blob[64], where[8];
-	size_t		at = 0;
-	mach_port_t	task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
-	kern_return_t	kr;
-	int		rc = -1;
+	static char		envp_blob[] = "";
+	char			blob[64], where[8], manifest[256];
+	size_t			at = 0;
+	mach_port_t		task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
+	mach_port_t		drivers = MACH_PORT_NULL;
+	vm_offset_t		image = 0;
+	mach_msg_type_number_t	image_len = 0;
+	module_name_t		prog;
+	cap_manifest_entry_t	want;
+	unsigned int		mlen;
+	kern_return_t		kr;
+	int			rc = -1;
 
 	(void)snprintf(where, sizeof where, "%02x:%02x.%x",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
@@ -269,47 +277,49 @@ start_chora(mach_port_t exec_port, natural_t bdf, const char *class,
 	if (at >= sizeof blob)
 		return KERN_INVALID_ARGUMENT;
 	blob[at++] = '\0';
+	memset(&want, 0, sizeof want);
+	want.type = RESOURCE_PCI_FUNCTION;
+	want.resource_id = bdf;
+	want.ops = CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP | CAP_OP_PCI_IRQ;
+	mlen = cap_manifest_build("chora", &want, 1, NULL, 0, manifest,
+				  sizeof manifest);
+	if (mlen == 0)
+		return KERN_INVALID_ARGUMENT;
 
-	kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
-	if (kr != KERN_SUCCESS)
-		return kr;
-	kr = exec_load(exec_port, task, mach_cap_port, (char *)"/chora",
-		       (pointer_t)blob, (mach_msg_type_number_t)at,
-		       (pointer_t)envp_blob, (mach_msg_type_number_t)1,
-		       &thread, &rc);
+	strcpy(prog, "chora");
+	kr = bootstrap_drivers_port(bootstrap_port, &drivers);
+	if (kr == KERN_SUCCESS)
+		kr = bootstrap_get_program(bootstrap_port, prog, &image,
+					   &image_len);
+	if (kr == KERN_SUCCESS)
+		kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
+	if (kr == KERN_SUCCESS)
+		kr = task_set_bootstrap_port(task, drivers);
+	if (kr == KERN_SUCCESS)
+		kr = exec_load_image(image_port, task, mach_cap_port,
+				     (pointer_t)image, image_len,
+				     (pointer_t)manifest, mlen,
+				     (pointer_t)blob, (mach_msg_type_number_t)at,
+				     (pointer_t)envp_blob,
+				     (mach_msg_type_number_t)1, &thread, &rc);
 	*rc_out = rc;
 	if (kr == KERN_SUCCESS && rc == EXEC_OK)
 		kr = thread_resume(thread);
 	if (MACH_PORT_VALID(thread))
 		(void)mach_port_deallocate(mach_task_self(), thread);
+	if (image != 0)
+		(void)vm_deallocate(mach_task_self(), image, image_len);
+	if (MACH_PORT_VALID(drivers))
+		(void)mach_port_deallocate(mach_task_self(), drivers);
 	if (kr != KERN_SUCCESS || rc != EXEC_OK) {
-		(void)task_terminate(task);
-		(void)mach_port_deallocate(mach_task_self(), task);
+		if (MACH_PORT_VALID(task)) {
+			(void)task_terminate(task);
+			(void)mach_port_deallocate(mach_task_self(), task);
+		}
 		return kr != KERN_SUCCESS ? kr : KERN_FAILURE;
 	}
 	*task_out = task;
 	return KERN_SUCCESS;
-}
-
-/*
- * Whether "/" is served, by the name server's table of mounts, as mount_test
- * asks it (#716).  chora is a program on the root disk, which exec_server
- * reads through libvfs, so an exec before ext_server has mounted "/" finds
- * nothing.  This entry's first boot asked 34 lines before ext2 mounted and
- * was told EXEC_ERR_NOT_FOUND: #706's race, for a program that is not ush.
- */
-static int
-root_is_served(void)
-{
-	mach_port_t	root = MACH_PORT_NULL;
-	netname_name_t	matched;
-	kern_return_t	kr;
-
-	matched[0] = '\0';
-	kr = netname_look_up_mount(name_server_port, "/", &root, matched);
-	if (MACH_PORT_VALID(root))
-		(void)mach_port_deallocate(mach_task_self(), root);
-	return kr == NETNAME_SUCCESS && strcmp(matched, "/") == 0;
 }
 
 /* Whether somebody holds a claim on `bdf'; this task holds none. */
@@ -370,26 +380,20 @@ run_the_arms(void)
 	verdict(3, strcmp(name, want) == 0, "the HAL says the card's driver is "
 		"\"%s\", and the card's name is \"%s\"", name, want);
 
-	/* [4]: a chora this task starts, from the root disk */
+	/* [4]: a chora this task starts, the HAL's way */
 	for (i = 0; i < CT_WAIT_STEPS; i++) {
-		if (netname_look_up(name_server_port, "", (char *)"exec_server",
+		if (netname_look_up(name_server_port, "", (char *)"exec_image",
 				    &exec_port) == KERN_SUCCESS)
 			break;
 		nap(100);
 	}
 	if (!MACH_PORT_VALID(exec_port)) {
-		not_asked(4, "exec_server's name did not come in 30 s");
-		return;
-	}
-	for (i = 0; i < CT_WAIT_STEPS && !root_is_served(); i++)
-		nap(100);
-	if (!root_is_served()) {
-		not_asked(4, "no \"/\" in 30 s, and chora is a program on it");
+		not_asked(4, "exec_server's image port did not come in 30 s");
 		return;
 	}
 	kr = start_chora(exec_port, bdf, "net", "chora_probe", &second, &rc);
 	if (kr != KERN_SUCCESS) {
-		verdict(4, 0, "a second /chora did not start: kr 0x%x, result %d",
+		verdict(4, 0, "a second chora did not start: kr 0x%x, result %d",
 			kr, rc);
 		return;
 	}

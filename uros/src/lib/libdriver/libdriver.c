@@ -24,6 +24,7 @@
 
 #include <mach.h>
 #include <mach/bootstrap.h>		/* bootstrap_ports() */
+#include <device/device.h>		/* device_open(), the check (#964) */
 #include <mach/mach_interface.h>	/* urmach_task_set_name() */
 #include <mach/message.h>
 #include <mach/thread_switch.h>
@@ -104,14 +105,24 @@ name_the_task(struct driver *d, const char *module)
 }
 
 /*
- * The master device port, from bootstrap: what the line that started this
- * task's parent was given (-D), which a task created by it inherits with its
- * bootstrap port.  What it opens is the claim's to decide: configuration
- * space, regions and interrupts are refused to a task that holds no claim.
+ * The device port, from bootstrap: the kernel's driver's port, which the
+ * drivers' bootstrap port answers in bootstrap_ports()'s device slot (#964).
+ * It takes the routines a driver calls, each bound to its claim, and not
+ * device_open(), the debugger or the I/O ports.  d->master_device keeps its
+ * name from when it was the master port.
+ *
+ * 🔴 AND THE DRIVER CHECKS IT, AS IT STARTS.  A driver that holds the master
+ * port -- inherited from a parent's bootstrap port, as a task created by a -D
+ * server's would be -- could open the boot disk under every filesystem.  The
+ * master port opens the console, and the driver's port refuses it: a driver
+ * whose port opens it says WRONG and stops, whoever started it.
  */
+static security_token_t	no_token;
+
 static int
 take_master_device(struct driver *d)
 {
+	mach_port_t	console = MACH_PORT_NULL;
 	mach_port_t	host = MACH_PORT_NULL, root_wired = MACH_PORT_NULL;
 	mach_port_t	root_paged = MACH_PORT_NULL, security = MACH_PORT_NULL;
 	kern_return_t	kr;
@@ -127,8 +138,18 @@ take_master_device(struct driver *d)
 	if (MACH_PORT_VALID(security))
 		(void)mach_port_deallocate(mach_task_self(), security);
 	if (kr != KERN_SUCCESS || !MACH_PORT_VALID(d->master_device)) {
-		driver_log(d, "no master device port (bootstrap_ports 0x%x): "
-			   "whoever started this was not given one", kr);
+		driver_log(d, "no device port (bootstrap_ports 0x%x): whoever "
+			   "started this was not given the drivers' bootstrap "
+			   "port", kr);
+		return -1;
+	}
+	if (device_open(d->master_device, MACH_PORT_NULL, D_READ, no_token,
+			(char *)"console", &console) == KERN_SUCCESS) {
+		(void)device_close(console);
+		(void)mach_port_deallocate(mach_task_self(), console);
+		driver_log(d, "WRONG -- the port bootstrap gave it opens the "
+			   "console: the master device port, which no driver "
+			   "holds (#964)");
 		return -1;
 	}
 	return 0;
@@ -206,6 +227,30 @@ driver_open(struct driver *d, const char *module, natural_t bdf)
 		driver_log(d, "no capability for function %02x:%02x.%x: "
 			   "cap_request 0x%x", d->bus, d->slot, d->func, kr);
 		return -1;
+	}
+
+	/*
+	 * 🔴 AND NOT FOR ANOTHER (#964).  The task's port was derived from a
+	 * manifest naming this one function: one that names any function --
+	 * chora's own, `required 12 any', had it been started without the
+	 * HAL's -- would let it claim any device it was told.  The function
+	 * beside its own, by the last bit, is asked, and must be refused.
+	 */
+	{
+		struct uros_cap	other;
+		natural_t	not_mine = d->bdf ^ 1;
+
+		if (cap_request(RESOURCE_PCI_FUNCTION, (uint64_t)not_mine,
+				CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+				| CAP_OP_PCI_IRQ, 0, &other) == KERN_SUCCESS) {
+			driver_log(d, "WRONG -- a capability for function "
+				   "%02x:%02x.%x, which is not its own: its "
+				   "manifest names more than its device (#964)",
+				   (unsigned)(not_mine >> 8),
+				   (unsigned)((not_mine >> 3) & 0x1F),
+				   (unsigned)(not_mine & 0x7));
+			return -1;
+		}
 	}
 
 	kr = device_claim(d->master_device, d->bdf, (char *)&d->token,
