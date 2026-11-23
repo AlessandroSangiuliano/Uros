@@ -126,6 +126,13 @@ int nservers;
 #define BOOTSTRAP_MAX_DRIVERS	32
 static struct server	drivers[BOOTSTRAP_MAX_DRIVERS];
 
+/*
+ * #964: the drivers' bootstrap port, one for every driver, made at start:
+ * bootstrap_ports() on it answers the driver's port, and bootstrap keeps
+ * nothing of the tasks that hold it -- a driver's task is its supervisor's.
+ */
+static struct server	drivers_server;
+
 struct server *datadev;
 int ndatadev;
 
@@ -1052,6 +1059,12 @@ main(int argc, char **argv)
 	if (kr != KERN_SUCCESS)
 		panic(my_name);
 
+	/* #964: the drivers' bootstrap port, in the set its answers come from */
+	drivers_server.symtab_name = "a driver";
+	drivers_server.server_name = "(the drivers' bootstrap port)";
+	drivers_server.flags = SERVER_DRIVER_F;
+	drivers_server.bootstrap_port = server_bootstrap_port_make();
+
 	/*
 	 * Allocate the service server ports and add them to our
 	 * port set.
@@ -1944,6 +1957,10 @@ server_by_bootstrap_port(mach_port_t port)
 	    if (drivers[i].task_port != MACH_PORT_NULL &&
 		drivers[i].bootstrap_port == port)
 		return &drivers[i];
+	/* #964: and the port every driver shares */
+	if (drivers_server.bootstrap_port != MACH_PORT_NULL &&
+	    port == drivers_server.bootstrap_port)
+	    return &drivers_server;
 	return 0;
 }
 
@@ -2547,25 +2564,23 @@ open_module_file(const char *class, const char *name, struct file *fp)
 	return open_file(bootstrap_master_device_port, pathname, fp);
 }
 
-kern_return_t
-do_bootstrap_get_module(mach_port_t bootstrap,
-			module_name_t class,
-			module_name_t name,
-			vm_offset_t *data,
-			mach_msg_type_number_t *data_count)
+/* #964: where a program of the bundle is named, as a server's line names it */
+#define PROGRAM_PATH_PREFIX	"/dev/boot_device/mach_servers/"
+
+/*
+ * #964: an open file's bytes, given whole, out-of-line, and the file closed:
+ * a module's (do_bootstrap_get_module()) and a program's
+ * (do_bootstrap_get_program()).
+ */
+static kern_return_t
+give_file(struct file *fp, vm_offset_t *data,
+	  mach_msg_type_number_t *data_count)
 {
-	struct file f;
+	struct file f = *fp;
 	int rc;
 	size_t fsize;
 	vm_size_t alloc_size;
 	kern_return_t kr;
-
-	if (!valid_module_component(class) || !valid_module_component(name))
-		return KERN_INVALID_ARGUMENT;
-
-	rc = open_module_file(class, name, &f);
-	if (rc != 0)
-		return KERN_INVALID_ARGUMENT;
 
 	fsize = file_size(&f);
 	if (fsize == 0) {
@@ -2589,6 +2604,82 @@ do_bootstrap_get_module(mach_port_t bootstrap,
 
 	*data_count = fsize;
 	return KERN_SUCCESS;
+}
+
+kern_return_t
+do_bootstrap_get_module(mach_port_t bootstrap,
+			module_name_t class,
+			module_name_t name,
+			vm_offset_t *data,
+			mach_msg_type_number_t *data_count)
+{
+	struct file f;
+
+	if (!valid_module_component(class) || !valid_module_component(name))
+		return KERN_INVALID_ARGUMENT;
+	if (open_module_file(class, name, &f) != 0)
+		return KERN_INVALID_ARGUMENT;
+	return give_file(&f, data, data_count);
+}
+
+/*
+ * #964: the drivers' bootstrap port, for a child the caller makes to drive a
+ * device -- asked only by a server that holds the master device port (-D),
+ * since giving a task the driver's port is the master port's holder's to
+ * decide; a driver cannot give it on.
+ */
+kern_return_t
+do_bootstrap_drivers_port(mach_port_t bootstrap, mach_port_t *drivers_p)
+{
+	struct server	*sp = server_by_bootstrap_port(bootstrap);
+
+	if (sp == NULL || !(sp->flags & SERVER_DEVICE_F) ||
+	    (sp->flags & SERVER_DRIVER_F)) {
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: bootstrap_drivers_port: refused to %s, which holds no "
+		   "master device port (#964)\n", program_name,
+		   sp == NULL ? "a task asking on the shared service port"
+			      : sp->symtab_name);
+	    BOOTSTRAP_IO_UNLOCK();
+	    return KERN_NO_ACCESS;
+	}
+	*drivers_p = drivers_server.bootstrap_port;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #964: a program's bytes, from the bundle -- for the HAL, which hands them to
+ * exec_server to load a driver before any disk is served.  Asked only by a -D
+ * server, as the drivers' port is.
+ */
+kern_return_t
+do_bootstrap_get_program(mach_port_t bootstrap,
+			 module_name_t program,
+			 vm_offset_t *data,
+			 mach_msg_type_number_t *data_count)
+{
+	struct server	*sp = server_by_bootstrap_port(bootstrap);
+	struct file	f;
+	char		path[sizeof (PROGRAM_PATH_PREFIX) + MODULE_NAME_MAX];
+
+	if (sp == NULL || !(sp->flags & SERVER_DEVICE_F) ||
+	    (sp->flags & SERVER_DRIVER_F)) {
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: bootstrap_get_program: refused to %s, which holds no "
+		   "master device port (#964)\n", program_name,
+		   sp == NULL ? "a task asking on the shared service port"
+			      : sp->symtab_name);
+	    BOOTSTRAP_IO_UNLOCK();
+	    return KERN_NO_ACCESS;
+	}
+	if (!valid_module_component(program))
+	    return KERN_INVALID_ARGUMENT;
+	(void) snprintf(path, sizeof (path), "%s%s", PROGRAM_PATH_PREFIX,
+			program);
+	memset(&f, 0, sizeof (f));
+	if (boot_open_file(path, &f) != 0)
+	    return KERN_INVALID_ARGUMENT;
+	return give_file(&f, data, data_count);
 }
 
 /*
