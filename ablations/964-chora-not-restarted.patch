@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #964
+Takes out: the restart of a chora that dies: the HAL hears of the death, gives the task's right back and starts nothing.  chora_test's [10] kills the card's chora and waits 30 s for a second start that never comes; crash_probe is started once.
+Run: --iommu intel --edu --testdev --entry 68 600 -smp 4
+Expect: chora_test: \[10\] WRONG -- the card.s chora killed by this task: the HAL says state 1 \(running is 1\) after 1 start\(s\); asked again under "chora_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", no answer from a new port
+Note: [9] fails too, the HAL saying crash_probe runs after one start.
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+index f3d8e694..be5a8d35 100644
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -645,7 +645,8 @@ hal_chora_dead(mach_port_t name)
+ 					 MACH_PORT_RIGHT_DEAD_NAME,
+ 					 -(mach_port_delta_t)refs);
+ 	choras[i].task = MACH_PORT_NULL;
+-	chora_died(&choras[i]);
++	if (0)
++		chora_died(&choras[i]);
+ 	return 1;
+ }
+ 

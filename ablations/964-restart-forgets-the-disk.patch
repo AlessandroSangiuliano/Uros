@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: where a restarted chora's module comes from: the restart asks bootstrap for it, as for a module of the bundle, and the card's, chora_probe, is on the disk alone.  Each restart fails, counts as a death that came soon, and the HAL gives the card up; chora_test's [10] gets no answer from a new port.
+Run: --iommu intel --edu --testdev --entry 68 600 -smp 4
+Expect: chora_test: \[10\] WRONG -- the card.s chora killed by this task: the HAL says state [23] \(running is 1\) after [0-9]+ start\(s\); asked again under "chora_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", no answer from a new port
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+index f3d8e694..6326a234 100644
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -615,6 +615,7 @@ hal_modules_restart_due(const mach_msg_header_t *in)
+ 	    r->ticket != m->ticket)
+ 		return;
+ 	record_where(r, where, sizeof where);
++	r->disk = 0;
+ 	if (chora_launch(r) == 0)
+ 		printf("hal: the chora of %s is started again: start %d (#964)\n",
+ 		       where, r->starts);

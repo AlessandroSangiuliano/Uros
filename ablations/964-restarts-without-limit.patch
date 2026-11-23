@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: the limit on a chora's restarts: one that dies soon after every start is started again for good, each delay twice the last.  chora_test's [9] waits 30 s for the HAL to give crash_probe up, and the HAL never does.
+Run: --iommu intel --edu --testdev --entry 68 600 -smp 4
+Expect: chora_test: \[9\] WRONG -- crash_probe on the pci-testdev at [0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: the HAL says state [12] \(given up is 3\) after [0-9]+ start\(s\), where the limit is 5
+Note: the delays grow to seconds within the 30 s, so the starts it counts are few beyond the limit; that the state is not given up is what the arm reads.
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+index f3d8e694..c2d7fda2 100644
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -567,7 +567,7 @@ chora_died(struct chora_record *r)
+ 	if (hal_now(&now) == 0 && r->started.tv_sec != 0 &&
+ 	    now.tv_sec - r->started.tv_sec >= HAL_CHORA_STEADY_S)
+ 		r->quick = 0;
+-	if (r->quick >= HAL_CHORA_STARTS_MAX) {
++	if (0 && r->quick >= HAL_CHORA_STARTS_MAX) {
+ 		r->state = HAL_DRIVER_GAVE_UP;
+ 		printf("hal: the chora of %s died soon after each of its last %d "
+ 		       "starts: it is not started again (#964)\n", where,

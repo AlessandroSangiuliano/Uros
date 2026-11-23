@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: the check-in of a chora's control port: the chora serves a port nobody can find, and says it is checked in.  chora_test's [10] looks the card's chora up by its name, as a consumer would, and the name server has no such name.
+Run: --iommu intel --edu --testdev --entry 68 600 -smp 4
+Expect: chora_test: \[10\] WRONG -- the card.s chora, asked on the control port checked in as "chora_probe@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]" before the kill: 0x[0-9a-f]+, module "", device 0x0
+
+diff --git a/uros/src/servers/chora/chora.c b/uros/src/servers/chora/chora.c
+index 2e61a92e..686d3d38 100644
+--- a/uros/src/servers/chora/chora.c
++++ b/uros/src/servers/chora/chora.c
+@@ -102,8 +102,7 @@ control_port(void)
+ 		kr = urmach_netname_signature(&sig);
+ 	for (tries = 0; kr == KERN_SUCCESS && tries < CHORA_NAME_TRIES;
+ 	     tries++) {
+-		kr = netname_check_in(name_server_port, the_device.name, sig,
+-				      port);
++		kr = NETNAME_SUCCESS;
+ 		if (kr != NETNAME_NOT_YOURS)
+ 			break;
+ 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
