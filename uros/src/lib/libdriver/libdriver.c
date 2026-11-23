@@ -193,16 +193,18 @@ driver_open(struct driver *d, const char *module, natural_t bdf)
 		return -1;
 
 	/*
-	 * The capability, from this task's own port: the one exec_server
-	 * derived for it from what its parent may hand on (#743).  chora asks
-	 * for any PCI class, and holds only the class it was handed.
+	 * The capability for this one function (#982, #964), from this task's
+	 * own port: the one its parent derived for it from what the parent may
+	 * hand on (#743) -- the HAL, which wrote this address into it, or
+	 * exec_server, for a parent that started chora with exec_load().  A
+	 * class capability would let a driver claim any device of its class.
 	 */
-	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)(d->class_rev >> 8),
+	kr = cap_request(RESOURCE_PCI_FUNCTION, (uint64_t)d->bdf,
 			 CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
 			 | CAP_OP_PCI_IRQ, 0, &d->token);
 	if (kr != KERN_SUCCESS) {
-		driver_log(d, "no capability for class 0x%06x: cap_request "
-			   "0x%x", (unsigned)(d->class_rev >> 8), kr);
+		driver_log(d, "no capability for function %02x:%02x.%x: "
+			   "cap_request 0x%x", d->bus, d->slot, d->func, kr);
 		return -1;
 	}
 
