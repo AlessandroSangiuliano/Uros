@@ -741,11 +741,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # #963: chora_test's own list, which the GRUB entry that gives bootstrap
   # `-f chora.conf' reads.  Every other bundle entry reads bootstrap.conf,
   # where irq_claim_test owns the network card.  This one runs what a chora
-  # needs -- cap_server for its port, the HAL to name the card, the disk and
-  # the root that chora is read from, exec_server to start it -- and
-  # chora_test last, so that its last line ends the run (run-x86_64.sh).
-  # chora itself is on the root disk and not in the bundle: exec_server reads
-  # the programs it starts through libvfs.
+  # needs -- cap_server for its port, exec_server to load it and the HAL to
+  # start one on each device, with chora's image from this bundle (#964) --
+  # then the disk and the root, and chora_test last, so that its last line
+  # ends the run (run-x86_64.sh).  The HAL's line leaves no class to others
+  # here: the card and edu are its choras'.
   # #973: modload_test before it, waited for (-w): libmodload is how a chora
   # fetches its module, and the test's two pools are in the bundle.
   set(_CHORA_CONF ${CMAKE_CURRENT_BINARY_DIR}/chora.conf)
