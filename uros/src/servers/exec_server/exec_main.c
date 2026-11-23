@@ -37,6 +37,7 @@
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 #include <libvfs.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -51,7 +52,18 @@ static mach_port_t      security_port;
 static mach_port_t      root_ledger_wired;
 static mach_port_t      root_ledger_paged;
 
-static mach_port_t      exec_port;      /* our service port */
+static mach_port_t      exec_port;      /* our service port: file loads */
+
+/*
+ * #964: the image port, "exec_image", served by a thread of its own: an image
+ * load reads no file, and never waits behind one that does (exec.defs).  The
+ * file port is served by EXEC_FILE_THREADS threads, so that one execve held on
+ * a file does not hold the next.  The loader keeps no state outside its stack
+ * and its allocations, and libmach's malloc takes its lock from the second
+ * thread on (#540).
+ */
+static mach_port_t      exec_image_port;
+#define EXEC_FILE_THREADS       4
 
 /* ------------------------------------------------------------------ */
 /*  MIG handler — called from the generated exec_server() dispatcher  */
@@ -72,14 +84,18 @@ exec_S_load(
 {
     int rc;
 
-    (void)server_port;
-
     *new_thread = MACH_PORT_NULL;
 
-    rc = exec_do_load(task, parent_caps, path,
-                      (const void *)argv_blob, argv_blobCnt,
-                      (const void *)envp_blob, envp_blobCnt,
-                      new_thread);
+    /* #964: the image port loads images alone, so that it never waits. */
+    if (server_port == exec_image_port) {
+        printf("exec: a file load, %s, asked on the image port: refused "
+               "(#964)\n", path);
+        rc = EXEC_ERR_WRONG_PORT;
+    } else
+        rc = exec_do_load(task, parent_caps, path,
+                          (const void *)argv_blob, argv_blobCnt,
+                          (const void *)envp_blob, envp_blobCnt,
+                          new_thread);
     *result_code = rc;
 
     /*
@@ -112,6 +128,74 @@ exec_S_load(
     /* MIG demands KERN_SUCCESS on the message-level return; the
      * application-level result lives in result_code. */
     return KERN_SUCCESS;
+}
+
+/*
+ * #964: an image the caller hands, asked on the image port alone.  What the
+ * request brought -- the task, the caller's port, the four buffers -- is this
+ * server's to give back, whatever the result, as exec_S_load() gives back its.
+ */
+kern_return_t
+exec_S_load_image(
+    mach_port_t                 server_port,
+    mach_port_t                 task,
+    mach_port_t                 parent_caps,
+    pointer_t                   image,
+    mach_msg_type_number_t      imageCnt,
+    pointer_t                   manifest,
+    mach_msg_type_number_t      manifestCnt,
+    pointer_t                   argv_blob,
+    mach_msg_type_number_t      argv_blobCnt,
+    pointer_t                   envp_blob,
+    mach_msg_type_number_t      envp_blobCnt,
+    mach_port_t                *new_thread,
+    int                        *result_code)
+{
+    int rc;
+
+    *new_thread = MACH_PORT_NULL;
+
+    if (server_port != exec_image_port) {
+        printf("exec: an image load asked on exec_server's port, where it "
+               "could wait behind a file: refused (#964)\n");
+        rc = EXEC_ERR_WRONG_PORT;
+    } else
+        rc = exec_do_load_image(task, parent_caps,
+                                (void *)image, imageCnt,
+                                manifestCnt != 0 ? (const void *)manifest
+                                                 : NULL,
+                                (uint32_t)manifestCnt,
+                                (const void *)argv_blob, argv_blobCnt,
+                                (const void *)envp_blob, envp_blobCnt,
+                                new_thread);
+    *result_code = rc;
+
+    if (MACH_PORT_VALID(task))
+        (void)mach_port_deallocate(mach_task_self(), task);
+    if (MACH_PORT_VALID(parent_caps))
+        (void)mach_port_deallocate(mach_task_self(), parent_caps);
+    if (image)
+        vm_deallocate(mach_task_self(), (vm_address_t)image, imageCnt);
+    if (manifest)
+        vm_deallocate(mach_task_self(), (vm_address_t)manifest, manifestCnt);
+    if (argv_blob)
+        vm_deallocate(mach_task_self(), (vm_address_t)argv_blob,
+                      argv_blobCnt);
+    if (envp_blob)
+        vm_deallocate(mach_task_self(), (vm_address_t)envp_blob,
+                      envp_blobCnt);
+    return KERN_SUCCESS;
+}
+
+/* #964: one port's loop, for a thread of the pool or the image's own. */
+static void *
+serve(void *port)
+{
+    for (;;)
+        (void)mach_msg_server(exec_server, 8192,
+                              (mach_port_t)(uintptr_t)port,
+                              MACH_MSG_OPTION_NONE);
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,13 +258,51 @@ main(int argc, char **argv)
     }
     printf("exec: registered as \"exec_server\"\n");
 
+    /*
+     * #964: the image port, on a thread of its own, and the pool on the file
+     * port: both served before bootstrap is told, so that the HAL, which
+     * comes after this server, finds them answering.
+     */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &exec_image_port);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_insert_right(mach_task_self(), exec_image_port,
+                                    exec_image_port, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr == KERN_SUCCESS)
+        kr = netname_check_in(name_server_port, (char *)"exec_image", sig,
+                              exec_image_port);
+    if (kr != KERN_SUCCESS) {
+        printf("exec: the image port not published (kr=%d): no driver can "
+               "be loaded (#964)\n", kr);
+        return 1;
+    }
+    {
+        pthread_t   t;
+        int         i;
+
+        if (pthread_create(&t, NULL, serve,
+                           (void *)(uintptr_t)exec_image_port) != 0) {
+            printf("exec: no thread for the image port (#964)\n");
+            return 1;
+        }
+        for (i = 1; i < EXEC_FILE_THREADS; i++)
+            if (pthread_create(&t, NULL, serve,
+                               (void *)(uintptr_t)exec_port) != 0) {
+                printf("exec: the file port has %d thread(s), not %d "
+                       "(#964)\n", i, EXEC_FILE_THREADS);
+                break;
+            }
+    }
+    printf("exec: registered as \"exec_image\", on a thread of its own; "
+           "file loads on %d threads (#964)\n", EXEC_FILE_THREADS);
+
     /* Tell bootstrap we are ready. */
     bootstrap_completed(bootstrap_port, mach_task_self());
 
     printf("exec: ready, entering message loop\n");
 
-    /* MIG-generated dispatcher does the heavy lifting. */
-    mach_msg_server(exec_server, 8192, exec_port, MACH_MSG_OPTION_NONE);
+    /* This thread is one of the file port's. */
+    (void)serve((void *)(uintptr_t)exec_port);
 
     printf("exec: mach_msg_server exited unexpectedly\n");
     return 1;
