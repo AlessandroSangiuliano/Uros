@@ -5,15 +5,15 @@ Run: --iommu intel --edu --entry 68 600 -smp 4
 Expect: chora_test: \[2\] WRONG -- the HAL.s chora on the card, and 30 s on the kernel says nobody claims it
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
-index 0591fa7e..77800239 100644
+index f3d8e694..07993d86 100644
 --- a/uros/src/servers/hal_server/hal_modules.c
 +++ b/uros/src/servers/hal_server/hal_modules.c
-@@ -292,7 +292,7 @@ chora_start(const struct hal_device_info *dev, const char *pool,
- 	kern_return_t		kr;
- 	int			rc = EXEC_OK, i, slot = -1;
- 
+@@ -338,7 +338,7 @@ chora_launch(struct chora_record *r)
+ 	r->starts++;
+ 	r->quick++;
+ 	(void)hal_now(&r->started);
 -	if (start_ready() != 0)
 +	if (1 || start_ready() != 0)
  		return -1;
- 	for (i = 0; i < HAL_MAX_CHORAS && slot < 0; i++)
- 		if (choras[i].task == MACH_PORT_NULL)
+ 
+ 	/* The module's name without its .so, which chora puts back. */
