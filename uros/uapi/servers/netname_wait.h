@@ -23,4 +23,14 @@
 extern kern_return_t netname_wait(mach_port_t server, const char *name,
 				  mach_port_t *port);
 
+/*
+ * #964: the same for a mount: wait until one is checked in at exactly
+ * `prefix', and put a send right to its port in *port.  At once when there is
+ * one.  The HAL waits for "/" so.
+ *
+ * ⚠️ A prefix never mounted is waited for as long as the caller lives.
+ */
+extern kern_return_t netname_wait_mount(mach_port_t server, const char *prefix,
+					mach_port_t *port);
+
 #endif	/* _SERVERS_NETNAME_WAIT_H_ */
