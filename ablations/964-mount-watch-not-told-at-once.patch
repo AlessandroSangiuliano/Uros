@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: netname_notify_mount() telling a watcher at once when the prefix is already mounted: the watcher is kept for a check-in that never comes, and whoever waits for "/" after ext_server mounted it waits for good -- the HAL, for the disk's modules.  mount_test's [33] watches "/", and finds nothing on its port when the request comes back.
+Run: --entry 14 600 -smp 4
+Expect: mount_test: \[33\] WRONG — a watcher of "/": 0x10004003, not told its port; one of /mount_test: before the mount 0x10004003 \(nothing is 0x10004003\), mounted, at the check-in 0x0, its port; netname_wait_mount\("/"\): not asked
+Note: [33] asks netname_wait_mount() only once "/" has been told at once, so that this arm ends with a WRONG and not with a wait.
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+index 237973c6..9f7b541e 100644
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -884,7 +884,7 @@ do_netname_notify_mount(mach_port_t server, netname_name_in_t prefix,
+     if (prefix[0] != '/')
+ 	return NETNAME_NOT_YOURS;	/* as a check-in of it would be */
+ 
+-    for (this = mounts; this != NULL; this = this->next)
++    for (this = mounts; 0 && this != NULL; this = this->next)
+ 	if (strncmp(this->prefix, prefix, sizeof(this->prefix)) == 0) {
+ 	    notify_watcher_with(notify, this->port, NETNAME_NOTIFY_MOUNT_MSID);
+ 	    return NETNAME_SUCCESS;
