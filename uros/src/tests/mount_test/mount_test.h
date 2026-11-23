@@ -43,6 +43,17 @@ extern volatile uint32_t liar_opens;
 extern volatile uint32_t liar_opens_with_a_task;
 
 /*
+ * #964 [32]: an open of LIAR_STALL is held at the liar until liar_stall_let_go()
+ * is called, and then refused as a name the liar does not have.  How many
+ * such opens it has begun to hold, so that whoever asked knows its request is
+ * there.  The liar answers one request at a time: while it holds, it serves
+ * nothing else.
+ */
+#define LIAR_STALL		"stall"
+extern volatile uint32_t liar_stall_held;
+void liar_stall_let_go(void);
+
+/*
  * #911: whether `name', in this task's space, is a task port, asked of the
  * kernel by a trap that sends nothing: vm_deallocate() of nothing answers
  * KERN_SUCCESS for a task and refuses every other port.  A message would be

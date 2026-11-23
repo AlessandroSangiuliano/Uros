@@ -74,8 +74,20 @@ add_custom_command(
   VERBATIM
 )
 
+# #964 [32]: exec_server's client, for two loads in flight at once -- made by
+# add_mig_userland_client, as chora_test's and driver_port_test's are.
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
+    -I${CMAKE_SOURCE_DIR}/src/servers/exec_server)
+set(_MT_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
+set(MT_EXEC_GENERATED)
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs
+                        ${_MT_OUT} MT_EXEC)
+
 add_executable(mount_test_bin mount_test.c mount_liar.c mount_notify.c
-               ${VFS_SERVER_C} ${NOTIFY_SERVER_C})
+               ${VFS_SERVER_C} ${NOTIFY_SERVER_C} ${MT_EXEC_GENERATED})
 
 set_source_files_properties(${VFS_SERVER_C} PROPERTIES
   COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/liar_names.h")
@@ -100,6 +112,8 @@ target_include_directories(mount_test_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   ${CMAKE_BINARY_DIR}/src/lib/libvfs             # vfs.h: fs_open() by hand, #911
   ${CMAKE_BINARY_DIR}/src/lib/libflipc2          # flipc2_endpoint.h, #911
+  ${_MT_OUT}                                     # exec.h, #964
+  ${CMAKE_SOURCE_DIR}/src/servers/exec_server    # exec_types.h, #964
 )
 
 # libvfs exports the rest of its include directories, which are this
