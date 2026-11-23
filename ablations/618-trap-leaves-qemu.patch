@@ -7,10 +7,10 @@ Script: signals
 Expect: lifecycle: signal [A-Z]+: .*STILL RUNNING
 
 diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
-index 892ee446..9e314954 100755
+index 2172b725..a7c6667e 100755
 --- a/scripts/run-x86_64.sh
 +++ b/scripts/run-x86_64.sh
-@@ -1007,17 +1007,6 @@ give_back() {
+@@ -1322,16 +1322,6 @@ give_back() {
  	# it is a qemu and this script's child: a job added before it one day,
  	# or a PID the system gave to someone else once qemu was reaped, is
  	# never the one killed.
@@ -21,8 +21,7 @@ index 892ee446..9e314954 100755
 -		set -- ${_stat##*) }
 -		case "$(cat "/proc/$_qpid/comm" 2>/dev/null):${2:-}" in
 -		qemu-system*:"$$")
--			kill "$_qpid" 2>/dev/null || true
--			wait "$_qpid" 2>/dev/null || true ;;
+-			qemu_end "$_qpid" ;;
 -		esac
 -	fi
  	QEMU_REAPED=1

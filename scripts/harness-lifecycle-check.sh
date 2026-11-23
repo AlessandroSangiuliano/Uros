@@ -52,6 +52,11 @@
 #              could not open /dev/kvm as a fault, on a line of its own, and
 #              nothing of the kind of one that opened it, nor of a job run
 #              here: the nightly's jobs of 11/11 to 18/11 (#961)
+#   deafqemu   a run whose qemu does not go on SIGTERM ends all the same,
+#              at its own end and when it is sent TERM: its qemu killed once
+#              the bound after the TERM is over, that said, and the lock given
+#              back -- a stand-in in front of the real qemu on PATH, which says
+#              what qemu says and stays, as the sweep of 22/11 met (#984)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
@@ -87,7 +92,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm,deafqemu
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -880,6 +885,82 @@ if wanted jobnokvm; then
 	else
 		say jobnokvm "pull-results.sh --job says the job of run 4242424242 that could not open /dev/kvm BOOTED WITHOUT KVM, a fault, and nothing of the kind of the one that could, nor of a job run here" PASS
 	fi
+fi
+
+# ── deafqemu ──────────────────────────────────────────────────────────
+# #984: a qemu told to go that does not go.  In the sweep of 22/11,
+# 807-pmap-enter-takes-the-leaf's guest ran on in one processor after its
+# panic under TCG: run-x86_64.sh sent its qemu TERM, qemu said "terminating on
+# signal 15" and never ended, and the wait for it, which had no bound, took the
+# job's last 2 h 39 min and its last 23 patches.  A stand-in in front of the
+# real qemu on PATH does what that one did: it says so, and stays.  The run
+# must end anyway: at its own end, after 10 s of silence, and sent TERM with
+# its qemu up -- the trap's kill, which ablate.sh, stopped at a job's time
+# limit, waited 180 s for in vain.
+if wanted deafqemu; then
+	DEAF=$OUT/deafqemu-bin
+	mkdir -p "$DEAF"
+	cat > "$DEAF/qemu-system-x86_64" <<'DEAFEOF'
+#!/bin/bash
+# A qemu that does not go when told to (#984): on SIGTERM it says what qemu
+# says, and stays.
+trap 'echo "qemu-system-x86_64: terminating on signal 15" >&2' TERM
+while :; do sleep 1 & wait $!; done
+DEAFEOF
+	chmod +x "$DEAF/qemu-system-x86_64"
+	KEPT_PATH=$PATH
+	PATH=$DEAF:$PATH
+	UROS_X86_64_LOG="$OUT/deaf-end.log" "$REPO/scripts/run-x86_64.sh" "${KVM[@]}" \
+		--entry "$ENTRY" 10 > "$OUT/deaf-end.out" 2>&1 &
+	RUN=$!
+	STARTED+=("$RUN")
+	if ! q=$(first_qemu_of "$RUN"); then
+		wait "$RUN"
+		say "deafqemu end" "the run never started its qemu ($OUT/deaf-end.out)" "NOT ASKED"
+	elif ! ended_within "$RUN" 120; then
+		kill -KILL "$q" 2>/dev/null
+		ended_within "$RUN" 30 || kill -KILL "$RUN" 2>/dev/null
+		wait "$RUN" 2>/dev/null
+		say "deafqemu end" "its boot over after 10 s of silence, the run WENT ON for 120 s waiting for a qemu (pid $q) that does not go on SIGTERM$(leftovers "$q")" WRONG
+	else
+		wait "$RUN"
+		left=$(leftovers "$q")
+		grep -q 'did not end [0-9]* s after SIGTERM, and was killed' "$OUT/deaf-end.out" ||
+			left="$left; it did not say that its qemu was killed"
+		if [ -n "$left" ]; then
+			say "deafqemu end" "its boot over after 10 s of silence, with a qemu (pid $q) that does not go on SIGTERM${left}" WRONG
+		else
+			say "deafqemu end" "its boot over after 10 s of silence, the run ended, its qemu (pid $q), deaf to SIGTERM, killed after the bound and said so, and the lock given back" PASS
+		fi
+	fi
+	run_harness_watched deaf-term
+	if [ -z "$RUN" ] || ! q=$(first_qemu_of "$RUN"); then
+		wait "$JOB"
+		say "deafqemu term" "the run never started its qemu (it ended by $(cat "$OUT/deaf-term.ended" 2>/dev/null || echo 'nothing said'), $OUT/deaf-term.out)" "NOT ASKED"
+	else
+		sleep 2
+		kill -s TERM "$RUN"
+		if ! ended_within "$RUN" 60; then
+			kill -KILL "$q" 2>/dev/null
+			ended_within "$RUN" 30 || kill -KILL "$RUN" 2>/dev/null
+			wait "$JOB" 2>/dev/null
+			say "deafqemu term" "sent SIGTERM with a qemu (pid $q) up that does not go on it, the run WENT ON for 60 s$(leftovers "$q")" WRONG
+		else
+			wait "$JOB"
+			ended=$(cat "$OUT/deaf-term.ended" 2>/dev/null)
+			left=$(leftovers "$q")
+			[ "$ended" = "signal $(kill -l TERM)" ] ||
+				left="$left; it ended by ${ended:-nothing said}, not by signal $(kill -l TERM)"
+			grep -q 'did not end [0-9]* s after SIGTERM, and was killed' "$OUT/deaf-term.out" ||
+				left="$left; it did not say that its qemu was killed"
+			if [ -n "$left" ]; then
+				say "deafqemu term" "sent SIGTERM with a qemu (pid $q) up that does not go on it${left}" WRONG
+			else
+				say "deafqemu term" "sent SIGTERM with a qemu (pid $q) up that does not go on it, the run ended by the signal, its qemu killed after the bound and said so, and the lock given back" PASS
+			fi
+		fi
+	fi
+	PATH=$KEPT_PATH
 fi
 
 echo "lifecycle: $pass PASS, $wrong WRONG, $unasked NOT ASKED -- $OUT"

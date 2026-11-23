@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #984
+Takes out: the bound on the wait for a qemu sent TERM -- qemu_end() waits for it to go for as long as it takes, as run-x86_64.sh did before #984, and a qemu that says "terminating on signal 15" and stays holds the run, and whoever waits for the run, for ever.  harness-lifecycle-check.sh's deafqemu puts such a qemu in front of the real one on PATH: the run goes on past the check's 120 s at its own end, and past its 60 s when sent TERM.
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: deafqemu
+Expect: lifecycle: deafqemu (end|term): .* -- WRONG
+Note: the stand-in boots nothing, so the accelerator does not change what is asked; under KVM ablate.sh passes --kvm, which run-x86_64.sh hands to the stand-in, and it ignores it.
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 2172b725..e1837e39 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1302,7 +1302,7 @@ QEMU_TERM_WAIT=15
+ qemu_end() {	# PID: this script's qemu, sent TERM, waited for, killed if it stays
+ 	kill "$1" 2>/dev/null || return 0
+ 	_qe_i=0
+-	while [ "$_qe_i" -lt $((QEMU_TERM_WAIT * 5)) ]; do
++	while :; do
+ 		_qe_st=$(cat "/proc/$1/stat" 2>/dev/null) || break
+ 		_qe_st=${_qe_st##*) }
+ 		[ "${_qe_st%% *}" = Z ] && break
