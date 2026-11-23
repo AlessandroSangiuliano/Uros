@@ -300,10 +300,10 @@ ENTRIES="
 65 harness - 1
 67 wakee
 67 wakee - 1
-68 chora --iommu_intel_--edu_--testdev
-68 chora --iommu_intel_--edu_--testdev 1
-70 chora --edu_--iommu_intel_--testdev
-70 chora --edu_--iommu_amd_--testdev
+68 chora --testdev_--iommu_intel_--edu
+68 chora --testdev_--iommu_intel_--edu 1
+70 chora --testdev_--edu_--iommu_intel
+70 chora --testdev_--edu_--iommu_amd
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
