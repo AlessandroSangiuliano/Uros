@@ -288,6 +288,34 @@ void hal_driver_reg_handle_dead_name(mach_port_t dead_port);
 int  hal_driver_reg_known(mach_port_t port);
 
 /* ================================================================
+ * Which module drives a device (hal_modules.c, #964)
+ *
+ * The module of the device's pool that says it drives the device, read from
+ * the module's file and never loaded: chora_drives.h.
+ * ================================================================ */
+
+enum hal_module_verdict {
+	HAL_MODULE_NONE,	/* no module of its pool declares it */
+	HAL_MODULE_ONE,		/* `module', of `pool' */
+	HAL_MODULE_TIE,		/* `module' and `rival' declare it alike */
+	HAL_MODULE_UNREAD,	/* its pool could not be read */
+};
+
+struct hal_module_choice {
+	int		verdict;	/* enum hal_module_verdict */
+	const char	*pool;
+	const char	*module;	/* ONE, TIE */
+	const char	*rival;		/* TIE */
+};
+
+/* The choice for one device, and its verdict.  The names live as long as the HAL. */
+int  hal_module_for(const struct hal_device_info *dev,
+		    struct hal_module_choice *c);
+
+/* The choice, said on one line: the HAL says what it decided for each device. */
+void hal_module_report(const struct hal_device_info *dev);
+
+/* ================================================================
  * Global state (defined in hal_server.c)
  * ================================================================ */
 

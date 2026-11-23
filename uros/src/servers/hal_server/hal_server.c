@@ -181,6 +181,13 @@ hal_run_discovery(void)
 			/* #173: only fresh devices trigger hal_device_added
 			 * — repeated rescans over a stable bus stay quiet. */
 			hal_driver_reg_notify_match(&scan_buf[i]);
+
+			/*
+			 * #964: and which module of its pool drives it, said
+			 * for every device the HAL finds, the boot's and a
+			 * rescan's, once: here, where a device is new.
+			 */
+			hal_module_report(&scan_buf[i]);
 			new_devs++;
 		}
 

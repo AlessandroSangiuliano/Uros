@@ -187,6 +187,11 @@ set(HAL_SOURCES
   hal_registry.c
   hal_driver_reg.c
   hal_mig.c
+  # #964: which module of its pool drives a device, read from the module's
+  # file; chora_drives.c is the pure reading of a declaration, beside the
+  # format in libdriver, compiled here as pci_scan compiles libpci's pci_bar.c.
+  hal_modules.c
+  ${CMAKE_SOURCE_DIR}/src/lib/libdriver/chora_drives.c
   ${DM_USER_C}
   ${HAL_SERVER_C}
   ${HAL_NOTIFY_USER_C}
@@ -207,10 +212,16 @@ target_compile_definitions(hal_server PRIVATE
   MACH_IPC_COMPAT=0
 )
 
-target_include_directories(hal_server PRIVATE ${HAL_INCLUDE_DIRS})
+# chora_drives.h only, of libdriver's headers (#964): the HAL reads what a
+# module declares and links nothing of libdriver.
+target_include_directories(hal_server PRIVATE ${HAL_INCLUDE_DIRS}
+  ${CMAKE_SOURCE_DIR}/src/lib/libdriver)
 
+# libelf by name (#964): hal_modules.c reads a module's sections with it.
+# libdl links it too, for its own reading, and that is libdl's business.
 target_link_libraries(hal_server PRIVATE
   -Wl,--start-group
+  libelf
   libmodload
   libdl
   libpthreads
