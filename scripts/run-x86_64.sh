@@ -655,6 +655,9 @@ must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_
 	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and three for each half of its DMA round trip, and says so either way (#977, #978).' \
 	edu_probe
 
+must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
+	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
+
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
 
@@ -1742,6 +1745,7 @@ expected_reports() {
 		'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
 		'mount_test (die): started' 'mount_test (die): dying' \
+		'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 		'taskpanic_load: started' 'taskpanic_load: .*no load' \
 		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
 		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='

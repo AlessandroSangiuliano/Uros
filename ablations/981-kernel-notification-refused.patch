@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #981
+Takes out: the kernel's own notification, which urmach_notification_from_kernel() takes: it refuses every message, as a check too strict would.  notify_forge_test's [4] has its endpoint's client really go, and the endpoint never reports it dead.
+Run: --entry 14 600 -smp 4
+Expect: notify_forge_test: \[4\] a client that went was not reported dead within [0-9]+ ms -- WRONG, the kernel's own notification was refused
+Note: [1] and [3] pass under it, refused as they should be: what this one asks is the other half.
+
+diff --git a/uros/uapi/mach/notify.h b/uros/uapi/mach/notify.h
+index 34d851e1..10abaabb 100644
+--- a/uros/uapi/mach/notify.h
++++ b/uros/uapi/mach/notify.h
+@@ -123,7 +123,8 @@
+ static __inline__ int
+ urmach_notification_from_kernel(const mach_msg_header_t *h)
+ {
+-	return MACH_MSGH_BITS_LOCAL(h->msgh_bits) == MACH_MSG_TYPE_PORT_SEND_ONCE;
++	(void)h;
++	return 0;
+ }
+ 
+ typedef struct {

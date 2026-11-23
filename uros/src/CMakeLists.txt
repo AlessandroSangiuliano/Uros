@@ -578,6 +578,12 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/mount_test)
 endif()
 
+# A notification the kernel did not send is refused (#981): the HAL, a
+# pipe_server token and a libflipc2 endpoint, each sent one by a task.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/notify_forge_test)
+endif()
+
 # A right a server kept must survive the server's next message (#583): the
 # loop in libmach every server runs, asked directly.  Also built in the i386
 # half below -- the loop is the same code on both.

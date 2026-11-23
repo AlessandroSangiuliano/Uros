@@ -13,12 +13,12 @@ Expect: merge-test: entry 14 kvm -smp 4 \(@char\) -- WRONG \(char\)
 Note: under KVM, asked of the merge test with -a kvm, as 765-char-test-uncounted is. The fixed arm is the tree with the widen only and passes.
 
 diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
-index 97aebde9..5477ee95 100755
+index 06f2aa72..61d0253a 100755
 --- a/scripts/run-x86_64.sh
 +++ b/scripts/run-x86_64.sh
-@@ -1664,7 +1664,6 @@ expected_reports() {
- 		'mount_test: started'   'mount_test: [0-9]* of [0-9]* arms passed' \
+@@ -1747,7 +1747,6 @@ expected_reports() {
  		'mount_test (die): started' 'mount_test (die): dying' \
+ 		'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
  		'taskpanic_load: started' 'taskpanic_load: .*no load' \
 -		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed' \
  		'=== OSFMK IPC Performance Benchmark ===' '=== Benchmark complete ==='

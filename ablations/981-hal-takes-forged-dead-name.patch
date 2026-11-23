@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #981
+Takes out: the HAL's check that a dead-name notification came through a send-once right: any message with that id, on the port the HAL checks in as "hal", is taken for the kernel's, as before #981.  notify_forge_test's [1] sends one from a task and gets no answer to it, the probe it sends after it on the same port answered first.
+Run: --entry 14 600 -smp 4
+Expect: notify_forge_test: \[1\] a message with a dead-name notification's id from a task: no answer to it, where the message sent after it got one -- WRONG, the HAL took it for the kernel's
+
+diff --git a/uros/src/servers/hal_server/hal_server.c b/uros/src/servers/hal_server/hal_server.c
+index 8ce6b682..c5ea9594 100644
+--- a/uros/src/servers/hal_server/hal_server.c
++++ b/uros/src/servers/hal_server/hal_server.c
+@@ -270,11 +270,7 @@ hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
+ 	 * the body.  One the kernel did not send goes on to MIG, which refuses an
+ 	 * id it does not know, to the sender's reply port.
+ 	 */
+-	if (in->msgh_id == MACH_NOTIFY_DEAD_NAME &&
+-	    !urmach_notification_from_kernel(in))
+-		printf("hal: refused a message with a dead-name "
+-		       "notification's id, which the kernel did not send\n");
+-	else if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
++	if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
+ 		const mach_dead_name_notification_t *n =
+ 			(const mach_dead_name_notification_t *)in;
+ 		hal_driver_reg_handle_dead_name(n->not_port);

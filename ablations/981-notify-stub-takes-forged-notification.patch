@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #981
+Takes out: the check migcom writes into a stub whose request port is a send-once right: the five notify servers take a notification from whoever sends one, as before #981.  notify_forge_test's [2] sends pipe_server a no-senders on a token of its own, and pipe_server answers KERN_SUCCESS and ends the token.
+Run: --entry 14 600 -smp 4
+Expect: notify_forge_test: \[2\] a message with a no-senders notification's id from a task, on a token: answered 0, and the token is dead -- WRONG, pipe_server took it for the kernel's
+Note: the stubs still compile the refusal, under if (0), so that nothing else in them moves.
+
+diff --git a/uros/src/lib/migcom/server.c b/uros/src/lib/migcom/server.c
+index 6cf742d5..901e1a7b 100644
+--- a/uros/src/lib/migcom/server.c
++++ b/uros/src/lib/migcom/server.c
+@@ -802,7 +802,7 @@ WriteCheckHead(FILE *file, routine_t *rt)
+      * check of the message's shape but of who could have sent it.
+      */
+     if (RequestPortIsSendOnce(rt)) {
+-	fprintf(file, "\tif (MACH_MSGH_BITS_LOCAL(In0P->Head.msgh_bits) != MACH_MSG_TYPE_PORT_SEND_ONCE)\n");
++	fprintf(file, "\tif (0)\n");
+ 	WriteReturnMsgError(file, rt, FALSE, argNULL, "MIG_BAD_ARGUMENTS");
+ 	fprintf(file, "\n");
+     }
