@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: the cookie vfs_readdir() hands back when fewer entries were asked for than the server sent: it hands back the server's, which goes on after the last entry sent and not after the last one copied, and the entries in between are never read.  xfile_test's [10] reads /mnt/disk2 one entry a call, and gets the first and nothing more.
+Run: --entry 14 600 -smp 4
+Expect: xfile_write: \[10\] WRONG — /mnt/disk2 by vfs_readdir\(\): one entry a call 1 entries, from_x86_64\.dat 0 times; 64 a call [0-9]+ entries, from_x86_64\.dat 1 times
+Note: a reading of as many as a call brings is the same either way, which is why [10] reads one at a time.
+
+diff --git a/uros/src/lib/libvfs/libvfs.c b/uros/src/lib/libvfs/libvfs.c
+index 1c404fdb..d086dca5 100644
+--- a/uros/src/lib/libvfs/libvfs.c
++++ b/uros/src/lib/libvfs/libvfs.c
+@@ -750,7 +750,7 @@ vfs_readdir(vfs_fd_t fd, vfs_dirent_t *out, unsigned int max, uint64_t *cookie)
+         memcpy(out, (const void *)entries, (size_t)n * sizeof(vfs_dirent_t));
+     if (entries != 0)
+         (void)vm_deallocate(mach_task_self(), (vm_address_t)entries, count);
+-    *cookie = (n < got) ? out[n - 1].d_cookie : (uint64_t)next;
++    *cookie = (uint64_t)next;
+     return (int)n;
+ }
+ 
