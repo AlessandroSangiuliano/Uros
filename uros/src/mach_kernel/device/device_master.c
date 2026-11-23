@@ -441,6 +441,32 @@ check_master_port(ipc_port_t port)
 }
 
 /*
+ * #964: the master port, or the driver's port, for the routines a driver
+ * calls.  Each of them is bound to the caller's claim by current_task(), so
+ * that with no claim none of them does anything to a device, whichever port
+ * the call came on -- read routine by routine on 23/11.  Two do something
+ * without one, and on the driver's port they bind themselves to the caller's
+ * device, asking port_is_driver(): device_intr_register(), which takes a line
+ * no claimed device raises, and device_dma_faults(), which answers for any
+ * device.
+ */
+static kern_return_t
+check_driver_port(ipc_port_t port)
+{
+	if (port == IP_NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (port != master_device_port && port != driver_device_port)
+		return KERN_INVALID_ARGUMENT;
+	return KERN_SUCCESS;
+}
+
+static boolean_t
+port_is_driver(ipc_port_t port)
+{
+	return port != IP_NULL && port == driver_device_port;
+}
+
+/*
  * ── Which task drives which device (#432) ────────────────────────────
  *
  * 🔴 HOLDING THE MASTER PORT USED TO BE THE WHOLE ANSWER, and that is the gap
@@ -993,7 +1019,7 @@ ds_master_device_pci_config_read(
 #if NPCI > 0
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1023,7 +1049,7 @@ ds_master_device_pci_config_write(
 #if NPCI > 0
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1302,7 +1328,7 @@ ds_master_device_intr_register(
 	spl_t s;
 	natural_t bdf = DEVICE_DMA_NO_BDF;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1321,6 +1347,20 @@ ds_master_device_intr_register(
 	kr = check_irq_owner(irq, &bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
+
+	/*
+	 * #964: a line no claimed device raises is taken by whoever asks on the
+	 * master port -- ISA's servers, the keyboard's and the serial port's,
+	 * hold no claim.  On the driver's port it is refused: a driver has its
+	 * device's line and no other, and would otherwise take the keyboard's
+	 * before its server did.
+	 */
+	if (bdf == DEVICE_DMA_NO_BDF && port_is_driver(master_port)) {
+		printf("device_intr_register: irq %u is raised by no device "
+		       "task 0x%lx holds, and it asked on a driver's port "
+		       "(#964)\n", irq, (unsigned long)me);
+		return KERN_NO_ACCESS;
+	}
 
 	if (notify_port == IP_NULL)
 		return KERN_INVALID_ARGUMENT;
@@ -1408,7 +1448,7 @@ ds_master_device_msi_register(
 	spl_t		s;
 	unsigned int	slot = 0;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1500,7 +1540,7 @@ ds_master_device_intr_unregister(
 	kern_return_t kr;
 	spl_t s;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1569,7 +1609,7 @@ ds_master_device_intr_enable(
 	kern_return_t kr;
 	spl_t s;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2213,7 +2253,7 @@ ds_master_device_dma_alloc(
 	vm_offset_t max_pa;
 	uint64_t region_id = 0;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2324,7 +2364,7 @@ ds_master_device_dma_free(
 {
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2839,7 +2879,7 @@ ds_master_device_dma_map_user(
 	vm_offset_t	pa;
 	kern_return_t	kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -3240,7 +3280,7 @@ ds_master_device_region_map(
 	unsigned	n;
 	uint64_t	rbase, rsize;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -3314,7 +3354,7 @@ ds_master_device_mmio_unmap(
 	task_t		task;
 	kern_return_t	kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -4008,10 +4048,13 @@ ds_master_device_dma_faults(
 	struct device_md_faults a;
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
+	/* #964: on the driver's port, the faults of the caller's own device. */
+	if (port_is_driver(master_port) && check_claim(bdf) != KERN_SUCCESS)
+		return KERN_NO_ACCESS;
 	/*
 	 * #599: a bdf that is not a device is refused.  It was answered
 	 * "confined 0, count 0" -- a question about nothing, answered as data.
@@ -4126,7 +4169,7 @@ ds_master_device_dma_reach(
 	kern_return_t	kr;
 	unsigned	i;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -4926,7 +4969,7 @@ ds_master_device_claim(
 	uint32_t		check_type;
 	uint64_t		check_id;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
