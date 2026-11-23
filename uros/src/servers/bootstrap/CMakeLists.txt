@@ -671,7 +671,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-H proc_server proc_server\npipe_server pipe_server\n-D char_server char_server\nush ush\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D pci_function_test pci_function_test\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nmount_test mount_test\nmount_test mount_test die\nexec_server exec_server\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\nnotify_forge_test notify_forge_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D pci_function_test pci_function_test\n-D driver_port_test driver_port_test\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nmount_test mount_test\nmount_test mount_test die\nexec_server exec_server\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\nnotify_forge_test notify_forge_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
   endif()
 
@@ -789,6 +789,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             hal_server:${_SBIN}/hal_server
             # #982: after the HAL, whose device list it reads.
             pci_function_test:${_SBIN}/pci_function_test
+            # #964: the driver's port, asked with the master port; after
+            # the HAL, whose device list gives it a line no device raises.
+            driver_port_test:${_SBIN}/driver_port_test
             modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
             block_device_server:${_SBIN}/block_device_server
             # #427: last, and after the block server on purpose.  It
@@ -885,6 +888,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             exec_server_bin proc_server_bin pipe_server_bin sig_test_bin
             notify_forge_test_bin
             pci_function_test_bin
+            driver_port_test_bin
             ${_IPC_BENCH_DEP}
             ${_CONF}
             # #963: chora is on the disk, which make-disk-x86_64.sh refuses

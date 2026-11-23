@@ -594,6 +594,12 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/pci_function_test)
 endif()
 
+# The driver's port: what it takes and what it refuses, asked by a task that
+# holds the master port and no device (#964).
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/driver_port_test)
+endif()
+
 # A right a server kept must survive the server's next message (#583): the
 # loop in libmach every server runs, asked directly.  Also built in the i386
 # half below -- the loop is the same code on both.
