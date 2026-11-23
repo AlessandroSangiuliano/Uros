@@ -350,6 +350,34 @@ int  hal_chora_dead(mach_port_t name);
 mach_port_t hal_chora_task(unsigned int bus, unsigned int slot,
 			   unsigned int func);
 
+/*
+ * #964: the state of the driver the HAL started for a device, which
+ * get_driver_state() answers, and how many times it was started.  A chora
+ * that dies is started again after a delay, HAL_CHORA_BACKOFF_MS doubled with
+ * each death that comes within HAL_CHORA_STEADY_S of its start; after
+ * HAL_CHORA_STARTS_MAX such starts in a row the HAL gives up, and says so.
+ */
+#define HAL_DRIVER_NONE		0	/* the HAL started no driver for it */
+#define HAL_DRIVER_RUNNING	1	/* its chora runs */
+#define HAL_DRIVER_RESTARTING	2	/* it died, and is started again soon */
+#define HAL_DRIVER_GAVE_UP	3	/* it died soon after each of its last starts */
+
+#define HAL_CHORA_STARTS_MAX	5
+#define HAL_CHORA_STEADY_S	10
+#define HAL_CHORA_BACKOFF_MS	100
+
+/* HAL_DRIVER_* for a device, with its starts in *starts. */
+int  hal_chora_state(unsigned int bus, unsigned int slot, unsigned int func,
+		     int *starts);
+
+/*
+ * #964: the HAL's own port for its restarts: a timer's message on it says a
+ * chora's delay is over.  The HAL alone holds a send right to it, so a message
+ * on it is one of the HAL's timers.  hal_modules_restart_due() takes it.
+ */
+mach_port_t hal_modules_restart_port(void);
+void hal_modules_restart_due(const mach_msg_header_t *in);
+
 /* ================================================================
  * Global state (defined in hal_server.c)
  * ================================================================ */

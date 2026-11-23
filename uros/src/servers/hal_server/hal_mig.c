@@ -342,3 +342,17 @@ hal_get_device_driver(mach_port_t hal_port,
 		*nameCnt = 0;
 	return KERN_SUCCESS;
 }
+
+/* #964: the state of a device's driver, and its starts (hal.defs). */
+kern_return_t
+hal_get_driver_state(mach_port_t hal_port,
+		     unsigned int bus, unsigned int slot, unsigned int func,
+		     int *state, int *starts)
+{
+	(void)hal_port;
+
+	if (hal_registry_get(bus, slot, func) == NULL)
+		return KERN_INVALID_ARGUMENT;
+	*state = hal_chora_state(bus, slot, func, starts);
+	return KERN_SUCCESS;
+}

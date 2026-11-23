@@ -145,3 +145,22 @@ routine get_device_driver(
 	in	slot		: unsigned;
 	in	func		: unsigned;
 	out	name		: hal_driver_name_t, CountInOut);
+
+/*
+ * #964 — what the HAL knows of the driver it started for a device: its state,
+ * one of HAL_DRIVER_* (hal_server.h), and how many times it was started.  The
+ * HAL starts a chora again when it dies, after a delay that doubles with each
+ * death that comes soon after a start, and gives up after HAL_CHORA_STARTS_MAX
+ * such starts in a row.  HAL_DRIVER_NONE and 0 for a device the HAL started
+ * no driver for; KERN_INVALID_ARGUMENT for a device it does not know.  A test
+ * counts the starts with it.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+routine get_driver_state(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	out	state		: int;
+	out	starts		: int);

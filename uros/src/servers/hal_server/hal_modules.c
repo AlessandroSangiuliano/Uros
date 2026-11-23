@@ -48,7 +48,12 @@
 #include <mach.h>
 #include <mach/module_pool.h>		/* before <mach/bootstrap.h> */
 #include <mach/bootstrap.h>
+#include <mach/clock.h>			/* how long a chora lived, #964 */
+#include <mach/clock_types.h>		/* URMACH_CAP_CLOCK, time since boot */
+#include <mach/thread_switch.h>		/* a restart's delay, #964 */
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <servers/netname_wait.h>
@@ -105,15 +110,26 @@ static int		n_pools;
 
 /*
  * The choras the HAL started, one per device (#964): the task's port, which
- * the HAL alone holds, with bootstrap's loader long done with it.  A slot is
- * free while its task is MACH_PORT_NULL.  DEVICE_MAX_CLAIMS bounds them anyway:
- * a chora holds a claim.
+ * the HAL alone holds, with exec_server long done with it.  A record is a
+ * device's from its first start on, and keeps what a start needs -- the
+ * device, its module and where the module is -- so that the chora is started
+ * again when it dies (hal_chora_dead()).  DEVICE_MAX_CLAIMS bounds them
+ * anyway: a chora holds a claim.
  */
 #define HAL_MAX_CHORAS		16
 
 static struct chora_record {
-	unsigned int	bus, slot, func;
-	mach_port_t	task;
+	int			used;		/* the record is a device's */
+	struct hal_device_info	dev;
+	char			pool[MODULE_NAME_MAX];
+	char			file[MODULE_NAME_MAX];
+	int			disk;		/* its module from the disk's pool */
+	mach_port_t		task;		/* MACH_PORT_NULL while none runs */
+	int			state;		/* HAL_DRIVER_* */
+	int			starts;		/* every start */
+	int			quick;		/* starts in a row that died soon */
+	tvalspec_t		started;	/* its last start, by the clock */
+	unsigned int		ticket;		/* the restart it waits for */
 } choras[HAL_MAX_CHORAS];
 
 /*
@@ -265,19 +281,46 @@ module_give(mach_port_t task, vm_offset_t data, mach_msg_type_number_t len,
 }
 
 /*
- * A chora for `dev', told the module `file' of the pool `pool' (#964): 0 when
- * it is started, -1 said.  The task is made here, given the drivers' bootstrap
+ * #964: the clock a chora's life is measured by, asked for once.  -1 when
+ * there is none: every death then counts as one that came soon.
+ */
+static int
+hal_now(tvalspec_t *t)
+{
+	static mach_port_t	clk = MACH_PORT_NULL;
+	static int		asked;
+
+	if (!asked) {
+		asked = 1;
+		if (host_get_clock_service(host_port, URMACH_CAP_CLOCK, &clk)
+		    != KERN_SUCCESS)
+			clk = MACH_PORT_NULL;
+	}
+	if (clk == MACH_PORT_NULL || clock_get_time(clk, t) != KERN_SUCCESS) {
+		t->tv_sec = 0;
+		t->tv_nsec = 0;
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * A start of the chora of the record `r', for its device, told its module
+ * (#964): 0 when it is started, -1 said.  The task is made here, given the drivers' bootstrap
  * port -- the driver's port, never the master port -- and loaded by exec_server
  * from chora's image, with a manifest naming this one function, which
  * exec_server cuts to the HAL's `delegatable' line.  It is given the module's
  * bytes, read again here and checked again for `dev', on a port of its own
  * whose name is its fifth argument.  It is recorded and its death asked
- * before its thread runs, so that the HAL hears of every end.
+ * before its thread runs, so that the HAL hears of every end.  A start is
+ * counted as it begins: one that fails is a chora that died soon.
  */
 static int
-chora_start(const struct hal_device_info *dev, const char *pool,
-	    const char *file, int disk)
+chora_launch(struct chora_record *r)
 {
+	const struct hal_device_info	*dev = &r->dev;
+	const char			*pool = r->pool, *file = r->file;
+	int				disk = r->disk;
 	static const char	envp_blob[] = "";
 	char			argv_blob[3 * MODULE_NAME_MAX + 32];
 	char			module[MODULE_NAME_MAX], where[16], boxname[16];
@@ -290,18 +333,13 @@ chora_start(const struct hal_device_info *dev, const char *pool,
 	vm_offset_t		mod = 0;
 	mach_msg_type_number_t	mod_len = 0;
 	kern_return_t		kr;
-	int			rc = EXEC_OK, i, slot = -1;
+	int			rc = EXEC_OK;
 
+	r->starts++;
+	r->quick++;
+	(void)hal_now(&r->started);
 	if (start_ready() != 0)
 		return -1;
-	for (i = 0; i < HAL_MAX_CHORAS && slot < 0; i++)
-		if (choras[i].task == MACH_PORT_NULL)
-			slot = i;
-	if (slot < 0) {
-		printf("hal: all %d choras' slots are taken (#964)\n",
-		       HAL_MAX_CHORAS);
-		return -1;
-	}
 
 	/* The module's name without its .so, which chora puts back. */
 	n = strlen(file);
@@ -378,10 +416,7 @@ chora_start(const struct hal_device_info *dev, const char *pool,
 		return -1;
 	}
 
-	choras[slot].bus = dev->bus;
-	choras[slot].slot = dev->slot;
-	choras[slot].func = dev->func;
-	choras[slot].task = task;
+	r->task = task;
 	kr = mach_port_request_notification(mach_task_self(), task,
 					    MACH_NOTIFY_DEAD_NAME, 0,
 					    hal_service_port,
@@ -389,7 +424,7 @@ chora_start(const struct hal_device_info *dev, const char *pool,
 	if (kr != KERN_SUCCESS) {
 		printf("hal: the chora of %s, its death not asked (0x%x): "
 		       "ended (#964)\n", where, kr);
-		choras[slot].task = MACH_PORT_NULL;
+		r->task = MACH_PORT_NULL;
 		(void)task_terminate(task);
 		(void)mach_port_deallocate(mach_task_self(), task);
 		(void)mach_port_deallocate(mach_task_self(), thread);
@@ -397,31 +432,211 @@ chora_start(const struct hal_device_info *dev, const char *pool,
 	}
 	if (prev != MACH_PORT_NULL)
 		(void)mach_port_deallocate(mach_task_self(), prev);
+	r->state = HAL_DRIVER_RUNNING;
 	kr = thread_resume(thread);
 	(void)mach_port_deallocate(mach_task_self(), thread);
 	if (kr != KERN_SUCCESS) {
-		/* Its death notice gives the slot back. */
+		/* Its death notice comes, as any chora's that died soon. */
 		printf("hal: the chora of %s not resumed (0x%x): ended (#964)\n",
 		       where, kr);
 		(void)task_terminate(task);
+	}
+	return 0;
+}
+
+/*
+ * A chora for `dev', told the module `file' of the pool `pool', from the disk
+ * when `disk' (#964): 0 when it is started, -1 said.  Its record keeps what a
+ * restart needs; a first start that fails leaves no record.
+ */
+static int
+chora_start(const struct hal_device_info *dev, const char *pool,
+	    const char *file, int disk)
+{
+	struct chora_record	*r = NULL;
+	int			i;
+
+	for (i = 0; i < HAL_MAX_CHORAS && r == NULL; i++)
+		if (!choras[i].used)
+			r = &choras[i];
+	if (r == NULL) {
+		printf("hal: all %d choras' slots are taken (#964)\n",
+		       HAL_MAX_CHORAS);
+		return -1;
+	}
+	if (strlen(pool) >= sizeof r->pool || strlen(file) >= sizeof r->file)
+		return -1;
+	memset(r, 0, sizeof *r);
+	r->used = 1;
+	r->dev = *dev;
+	strcpy(r->pool, pool);
+	strcpy(r->file, file);
+	r->disk = disk;
+	if (chora_launch(r) != 0) {
+		memset(r, 0, sizeof *r);
 		return -1;
 	}
 	return 0;
+}
+
+/*
+ * #964: a restart's delay, on a thread of its own: it sleeps, then sends the
+ * HAL's restart port its slot and ticket, and ends.  The HAL never waits for
+ * a chora, nor for a delay: its loop goes on serving, and the restart is a
+ * message like any other.
+ */
+#define HAL_RESTART_ID		29640	/* the timers' messages */
+
+struct restart_msg {
+	mach_msg_header_t	head;
+	unsigned int		slot;
+	unsigned int		ticket;
+};
+
+struct restart_timer {
+	unsigned int		slot, ticket, ms;
+};
+
+static mach_port_t		restart_port = MACH_PORT_NULL;
+
+static void *
+restart_timer(void *arg)
+{
+	struct restart_timer	t = *(struct restart_timer *)arg;
+	struct restart_msg	m;
+
+	free(arg);
+	(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, t.ms);
+	memset(&m, 0, sizeof m);
+	m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.head.msgh_size = sizeof m;
+	m.head.msgh_remote_port = restart_port;
+	m.head.msgh_local_port = MACH_PORT_NULL;
+	m.head.msgh_id = HAL_RESTART_ID;
+	m.slot = t.slot;
+	m.ticket = t.ticket;
+	(void)mach_msg(&m.head, MACH_SEND_MSG, sizeof m, 0, MACH_PORT_NULL,
+		       MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	return NULL;
+}
+
+mach_port_t
+hal_modules_restart_port(void)
+{
+	kern_return_t	kr;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&restart_port);
+	if (kr == KERN_SUCCESS)
+		kr = mach_port_insert_right(mach_task_self(), restart_port,
+					    restart_port,
+					    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("hal: no restart port (0x%x): a chora that dies is not "
+		       "started again (#964)\n", kr);
+		restart_port = MACH_PORT_NULL;
+	}
+	return restart_port;
+}
+
+/* `where', "BB:DD.F", of a record's device. */
+static void
+record_where(const struct chora_record *r, char *where, size_t size)
+{
+	(void)snprintf(where, size, "%02x:%02x.%x", r->dev.bus, r->dev.slot,
+		       r->dev.func);
+}
+
+/*
+ * #964: the chora of `r' has died, or a start of it failed.  One that lived
+ * HAL_CHORA_STEADY_S had run: its next start begins a new row.  After
+ * HAL_CHORA_STARTS_MAX starts in a row that each died soon, the HAL gives up
+ * and says so; otherwise it starts it again after HAL_CHORA_BACKOFF_MS,
+ * doubled with each start of the row.
+ */
+static void
+chora_died(struct chora_record *r)
+{
+	struct restart_timer	*t;
+	tvalspec_t		now;
+	pthread_t		th;
+	char			where[16];
+	unsigned int		ms;
+
+	record_where(r, where, sizeof where);
+	if (hal_now(&now) == 0 && r->started.tv_sec != 0 &&
+	    now.tv_sec - r->started.tv_sec >= HAL_CHORA_STEADY_S)
+		r->quick = 0;
+	if (r->quick >= HAL_CHORA_STARTS_MAX) {
+		r->state = HAL_DRIVER_GAVE_UP;
+		printf("hal: the chora of %s died soon after each of its last %d "
+		       "starts: it is not started again (#964)\n", where,
+		       HAL_CHORA_STARTS_MAX);
+		return;
+	}
+	ms = HAL_CHORA_BACKOFF_MS << (r->quick > 0 ? r->quick - 1 : 0);
+	r->state = HAL_DRIVER_RESTARTING;
+	r->ticket++;
+	t = malloc(sizeof *t);
+	if (t != NULL && MACH_PORT_VALID(restart_port)) {
+		t->slot = (unsigned int)(r - choras);
+		t->ticket = r->ticket;
+		t->ms = ms;
+		if (pthread_create(&th, NULL, restart_timer, t) == 0) {
+			(void)pthread_detach(th);
+			printf("hal: the chora of %s is started again in %u ms, "
+			       "after %d start(s) (#964)\n", where, ms, r->starts);
+			return;
+		}
+	}
+	free(t);
+	r->state = HAL_DRIVER_GAVE_UP;
+	printf("hal: the chora of %s has no timer to start it again: it is not "
+	       "started again (#964)\n", where);
+}
+
+void
+hal_modules_restart_due(const mach_msg_header_t *in)
+{
+	const struct restart_msg	*m = (const struct restart_msg *)in;
+	struct chora_record		*r;
+	char				where[16];
+
+	if (in->msgh_id != HAL_RESTART_ID || in->msgh_size < sizeof *m ||
+	    m->slot >= HAL_MAX_CHORAS) {
+		printf("hal: a message on the restart port that is no timer's: "
+		       "id %d, %u bytes (#964)\n", (int)in->msgh_id,
+		       (unsigned)in->msgh_size);
+		return;
+	}
+	r = &choras[m->slot];
+	/* A ticket that is not the record's is a delay that no longer counts. */
+	if (!r->used || r->state != HAL_DRIVER_RESTARTING ||
+	    r->ticket != m->ticket)
+		return;
+	record_where(r, where, sizeof where);
+	if (chora_launch(r) == 0)
+		printf("hal: the chora of %s is started again: start %d (#964)\n",
+		       where, r->starts);
+	else
+		chora_died(r);
 }
 
 int
 hal_chora_dead(mach_port_t name)
 {
 	mach_port_urefs_t	refs = 0;
+	char			where[16];
 	int			i;
 
 	for (i = 0; i < HAL_MAX_CHORAS; i++)
-		if (choras[i].task != MACH_PORT_NULL && choras[i].task == name)
+		if (choras[i].used && choras[i].task != MACH_PORT_NULL &&
+		    choras[i].task == name)
 			break;
 	if (i == HAL_MAX_CHORAS)
 		return 0;
-	printf("hal: the chora of %02x:%02x.%x has ended (#964)\n",
-	       choras[i].bus, choras[i].slot, choras[i].func);
+	record_where(&choras[i], where, sizeof where);
+	printf("hal: the chora of %s has ended (#964)\n", where);
 	/* The right the HAL held, now dead, and the one the notice brought. */
 	if (mach_port_get_refs(mach_task_self(), name,
 			       MACH_PORT_RIGHT_DEAD_NAME, &refs) == KERN_SUCCESS &&
@@ -430,19 +645,38 @@ hal_chora_dead(mach_port_t name)
 					 MACH_PORT_RIGHT_DEAD_NAME,
 					 -(mach_port_delta_t)refs);
 	choras[i].task = MACH_PORT_NULL;
+	chora_died(&choras[i]);
 	return 1;
+}
+
+static struct chora_record *
+record_of(unsigned int bus, unsigned int slot, unsigned int func)
+{
+	int	i;
+
+	for (i = 0; i < HAL_MAX_CHORAS; i++)
+		if (choras[i].used && choras[i].dev.bus == bus &&
+		    choras[i].dev.slot == slot && choras[i].dev.func == func)
+			return &choras[i];
+	return NULL;
 }
 
 mach_port_t
 hal_chora_task(unsigned int bus, unsigned int slot, unsigned int func)
 {
-	int	i;
+	struct chora_record	*r = record_of(bus, slot, func);
 
-	for (i = 0; i < HAL_MAX_CHORAS; i++)
-		if (choras[i].task != MACH_PORT_NULL && choras[i].bus == bus &&
-		    choras[i].slot == slot && choras[i].func == func)
-			return choras[i].task;
-	return MACH_PORT_NULL;
+	return r != NULL ? r->task : MACH_PORT_NULL;
+}
+
+int
+hal_chora_state(unsigned int bus, unsigned int slot, unsigned int func,
+		int *starts)
+{
+	struct chora_record	*r = record_of(bus, slot, func);
+
+	*starts = r != NULL ? r->starts : 0;
+	return r != NULL ? r->state : HAL_DRIVER_NONE;
 }
 
 /*

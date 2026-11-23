@@ -268,6 +268,9 @@ dump_registry(void)
 /* #964: the port the name server tells when "/" is mounted, while watched. */
 static mach_port_t	disk_watch = MACH_PORT_NULL;
 
+/* #964: the HAL's own port for its restarts' timers. */
+static mach_port_t	restart_port = MACH_PORT_NULL;
+
 static boolean_t
 hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
@@ -277,6 +280,19 @@ hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	 * name server's, and comes once: the watch ends with it.  The message
 	 * brings a right to the mount's port, which the HAL does not keep.
 	 */
+	/*
+	 * #964: a restart's delay is over.  The HAL alone holds a send right to
+	 * this port, for its timers, so what arrives on it is theirs.
+	 */
+	if (MACH_PORT_VALID(restart_port) &&
+	    in->msgh_local_port == restart_port) {
+		hal_modules_restart_due(in);
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	if (MACH_PORT_VALID(disk_watch) && in->msgh_local_port == disk_watch) {
 		if (in->msgh_id == NETNAME_NOTIFY_MOUNT_MSID)
 			hal_modules_disk_served();
@@ -461,34 +477,36 @@ main(int argc, char **argv)
 	dump_registry();
 
 	/*
-	 * #964: the devices that wait for the disk's pools are decided when "/"
-	 * is served, which the name server says on a port of the HAL's own,
-	 * received beside the service port in one set.
+	 * #964: two ports of the HAL's own, received beside the service port in
+	 * one set: its restarts' timers, and, while some device waits for the
+	 * disk's pools, the name server's word that "/" is served.
 	 */
 	{
 		mach_port_t	set = MACH_PORT_NULL, served = hal_service_port;
 
+		restart_port = hal_modules_restart_port();
 		disk_watch = hal_modules_disk_watch();
-		if (MACH_PORT_VALID(disk_watch)) {
-			kr = mach_port_allocate(mach_task_self(),
-						MACH_PORT_RIGHT_PORT_SET, &set);
-			if (kr == KERN_SUCCESS)
-				kr = mach_port_move_member(mach_task_self(),
-							   hal_service_port, set);
-			if (kr == KERN_SUCCESS)
-				kr = mach_port_move_member(mach_task_self(),
-							   disk_watch, set);
-			if (kr == KERN_SUCCESS)
-				served = set;
-			else {
-				/* The service port is received alone again. */
-				(void)mach_port_move_member(mach_task_self(),
-							    hal_service_port,
-							    MACH_PORT_NULL);
-				printf("hal: no port set for the watch of "
-				       "\"/\" (0x%x): the disk's pools are not "
-				       "read (#964)\n", kr);
-			}
+		kr = mach_port_allocate(mach_task_self(),
+					MACH_PORT_RIGHT_PORT_SET, &set);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_move_member(mach_task_self(),
+						   hal_service_port, set);
+		if (kr == KERN_SUCCESS && MACH_PORT_VALID(restart_port))
+			kr = mach_port_move_member(mach_task_self(),
+						   restart_port, set);
+		if (kr == KERN_SUCCESS && MACH_PORT_VALID(disk_watch))
+			kr = mach_port_move_member(mach_task_self(),
+						   disk_watch, set);
+		if (kr == KERN_SUCCESS)
+			served = set;
+		else {
+			/* The service port is received alone again. */
+			(void)mach_port_move_member(mach_task_self(),
+						    hal_service_port,
+						    MACH_PORT_NULL);
+			printf("hal: no port set (0x%x): no chora is started "
+			       "again, and the disk's pools are not read "
+			       "(#964)\n", kr);
 		}
 
 		printf("hal: init complete, entering message loop\n");
