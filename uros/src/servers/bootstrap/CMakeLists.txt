@@ -860,6 +860,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # pool of its class, and a module of that class no chora is told
             # to load, which a chora that loaded its class would load too.
             chora_test:${_SBIN}/chora_test
+            # #964: and chora itself, whose image the HAL hands exec_server:
+            # a driver starts before any disk is served.
+            chora:${_SBIN}/chora
             modules/net/chora_probe.so:${_MOD}/net/chora_probe.so
             modules/net/chora_absent.so:${_MOD}/net/chora_absent.so
             # #973: libmodload's test, and its two pools, each with a

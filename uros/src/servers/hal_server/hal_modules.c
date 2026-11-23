@@ -40,9 +40,15 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <servers/netname_wait.h>
+#include <libcap.h>			/* cap_manifest_build, mach_cap_port */
+#include <mach/cap_types.h>		/* RESOURCE_PCI_FUNCTION, CAP_OP_PCI_* */
+
 #include "hal_server.h"
 #include "chora_drives.h"
 #include "libelf.h"
+#include "exec_types.h"			/* EXEC_OK */
+#include "exec.h"			/* exec_load_image */
 
 /*
  * The pool of a class, by its base class: what the build installs into
@@ -92,6 +98,212 @@ static struct chora_record {
 	unsigned int	bus, slot, func;
 	mach_port_t	task;
 } choras[HAL_MAX_CHORAS];
+
+/*
+ * What a start needs, fetched the first time and kept (#964): chora's image,
+ * from the bundle -- so that a chora starts again without the disk, which may
+ * be the one it drives -- the drivers' bootstrap port, and exec_server's image
+ * port.  Every chora is the one program, chora, told its module and device.
+ */
+static vm_offset_t		chora_image;
+static mach_msg_type_number_t	chora_image_len;
+static mach_port_t		drivers_bootstrap = MACH_PORT_NULL;
+static mach_port_t		exec_image = MACH_PORT_NULL;
+
+static int
+start_ready(void)
+{
+	module_name_t	prog;
+	kern_return_t	kr;
+
+	if (chora_image == 0) {
+		strcpy(prog, "chora");
+		kr = bootstrap_get_program(bootstrap_port, prog, &chora_image,
+					   &chora_image_len);
+		if (kr != KERN_SUCCESS || chora_image_len == 0) {
+			printf("hal: bootstrap gave no image of chora (0x%x): "
+			       "no driver is started (#964)\n", kr);
+			chora_image = 0;
+			return -1;
+		}
+		printf("hal: chora's image, %u bytes from the bundle, kept for "
+		       "every start (#964)\n", (unsigned)chora_image_len);
+	}
+	if (drivers_bootstrap == MACH_PORT_NULL) {
+		kr = bootstrap_drivers_port(bootstrap_port, &drivers_bootstrap);
+		if (kr != KERN_SUCCESS) {
+			printf("hal: bootstrap gave no drivers' bootstrap port "
+			       "(0x%x): no driver is started (#964)\n", kr);
+			drivers_bootstrap = MACH_PORT_NULL;
+			return -1;
+		}
+	}
+	if (exec_image == MACH_PORT_NULL) {
+		kr = netname_wait(name_server_port, "exec_image", &exec_image);
+		if (kr != KERN_SUCCESS) {
+			printf("hal: no \"exec_image\" (0x%x): no driver is "
+			       "started (#964)\n", kr);
+			exec_image = MACH_PORT_NULL;
+			return -1;
+		}
+	}
+	return 0;
+}
+
+/* NUL-separated strings, then the empty string that ends them (exec_types.h). */
+static size_t
+blob_put(char *blob, size_t at, size_t cap, const char *s)
+{
+	size_t	len = strlen(s) + 1;
+
+	if (at >= cap || at + len >= cap)
+		return cap;
+	memcpy(blob + at, s, len);
+	return at + len;
+}
+
+/*
+ * A chora for `dev', told the module `file' of the pool `pool' (#964): 0 when
+ * it is started, -1 said.  The task is made here, given the drivers' bootstrap
+ * port -- the driver's port, never the master port -- and loaded by exec_server
+ * from chora's image, with a manifest naming this one function, which
+ * exec_server cuts to the HAL's `delegatable' line.  It is recorded and its
+ * death asked before its thread runs, so that the HAL hears of every end.
+ */
+static int
+chora_start(const struct hal_device_info *dev, const char *pool,
+	    const char *file)
+{
+	static const char	envp_blob[] = "";
+	char			argv_blob[3 * MODULE_NAME_MAX + 16];
+	char			module[MODULE_NAME_MAX], where[16];
+	char			blob[256];
+	cap_manifest_entry_t	want;
+	unsigned int		blen;
+	size_t			n, at = 0;
+	mach_port_t		task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
+	mach_port_t		prev = MACH_PORT_NULL;
+	kern_return_t		kr;
+	int			rc = EXEC_OK, i, slot = -1;
+
+	if (start_ready() != 0)
+		return -1;
+	for (i = 0; i < HAL_MAX_CHORAS && slot < 0; i++)
+		if (choras[i].task == MACH_PORT_NULL)
+			slot = i;
+	if (slot < 0) {
+		printf("hal: all %d choras' slots are taken (#964)\n",
+		       HAL_MAX_CHORAS);
+		return -1;
+	}
+
+	/* The module's name without its .so, which chora puts back. */
+	n = strlen(file);
+	if (n > 3 && strcmp(file + n - 3, ".so") == 0)
+		n -= 3;
+	if (n >= sizeof module)
+		return -1;
+	memcpy(module, file, n);
+	module[n] = '\0';
+	(void)snprintf(where, sizeof where, "%02x:%02x.%x", dev->bus,
+		       dev->slot, dev->func);
+	at = blob_put(argv_blob, at, sizeof argv_blob, "chora");
+	at = blob_put(argv_blob, at, sizeof argv_blob, pool);
+	at = blob_put(argv_blob, at, sizeof argv_blob, module);
+	at = blob_put(argv_blob, at, sizeof argv_blob, where);
+	if (at >= sizeof argv_blob)
+		return -1;
+	argv_blob[at++] = '\0';
+
+	memset(&want, 0, sizeof want);
+	want.type = RESOURCE_PCI_FUNCTION;
+	want.resource_id = (uint64_t)(dev->bus << 8 | dev->slot << 3 |
+				      dev->func);
+	want.ops = CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP | CAP_OP_PCI_IRQ;
+	blen = cap_manifest_build("chora", &want, 1, NULL, 0, blob,
+				  sizeof blob);
+	if (blen == 0) {
+		printf("hal: no manifest for the chora of %s (#964)\n", where);
+		return -1;
+	}
+
+	kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
+	if (kr == KERN_SUCCESS)
+		kr = task_set_bootstrap_port(task, drivers_bootstrap);
+	if (kr == KERN_SUCCESS)
+		kr = exec_load_image(exec_image, task, mach_cap_port,
+				     (pointer_t)chora_image, chora_image_len,
+				     (pointer_t)blob, blen,
+				     (pointer_t)argv_blob,
+				     (mach_msg_type_number_t)at,
+				     (pointer_t)envp_blob, sizeof envp_blob,
+				     &thread, &rc);
+	if (kr != KERN_SUCCESS || rc != EXEC_OK) {
+		printf("hal: the chora of %s was not loaded: 0x%x, exec_server's "
+		       "%d (#964)\n", where, kr, rc);
+		if (task != MACH_PORT_NULL) {
+			(void)task_terminate(task);
+			(void)mach_port_deallocate(mach_task_self(), task);
+		}
+		if (thread != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), thread);
+		return -1;
+	}
+
+	choras[slot].bus = dev->bus;
+	choras[slot].slot = dev->slot;
+	choras[slot].func = dev->func;
+	choras[slot].task = task;
+	kr = mach_port_request_notification(mach_task_self(), task,
+					    MACH_NOTIFY_DEAD_NAME, 0,
+					    hal_service_port,
+					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+	if (kr != KERN_SUCCESS) {
+		printf("hal: the chora of %s, its death not asked (0x%x): "
+		       "ended (#964)\n", where, kr);
+		choras[slot].task = MACH_PORT_NULL;
+		(void)task_terminate(task);
+		(void)mach_port_deallocate(mach_task_self(), task);
+		(void)mach_port_deallocate(mach_task_self(), thread);
+		return -1;
+	}
+	if (prev != MACH_PORT_NULL)
+		(void)mach_port_deallocate(mach_task_self(), prev);
+	kr = thread_resume(thread);
+	(void)mach_port_deallocate(mach_task_self(), thread);
+	if (kr != KERN_SUCCESS) {
+		/* Its death notice gives the slot back. */
+		printf("hal: the chora of %s not resumed (0x%x): ended (#964)\n",
+		       where, kr);
+		(void)task_terminate(task);
+		return -1;
+	}
+	return 0;
+}
+
+int
+hal_chora_dead(mach_port_t name)
+{
+	mach_port_urefs_t	refs = 0;
+	int			i;
+
+	for (i = 0; i < HAL_MAX_CHORAS; i++)
+		if (choras[i].task != MACH_PORT_NULL && choras[i].task == name)
+			break;
+	if (i == HAL_MAX_CHORAS)
+		return 0;
+	printf("hal: the chora of %02x:%02x.%x has ended (#964)\n",
+	       choras[i].bus, choras[i].slot, choras[i].func);
+	/* The right the HAL held, now dead, and the one the notice brought. */
+	if (mach_port_get_refs(mach_task_self(), name,
+			       MACH_PORT_RIGHT_DEAD_NAME, &refs) == KERN_SUCCESS &&
+	    refs > 0)
+		(void)mach_port_mod_refs(mach_task_self(), name,
+					 MACH_PORT_RIGHT_DEAD_NAME,
+					 -(mach_port_delta_t)refs);
+	choras[i].task = MACH_PORT_NULL;
+	return 1;
+}
 
 mach_port_t
 hal_chora_task(unsigned int bus, unsigned int slot, unsigned int func)
@@ -395,7 +607,10 @@ hal_module_report(const struct hal_device_info *dev)
 			       (unsigned)leaves[l].mask);
 			break;
 		}
-		printf("%s: %s/%s declares it\n", at, c.pool, c.module);
+		printf("%s: %s/%s declares it, %s\n", at, c.pool, c.module,
+		       chora_start(dev, c.pool, c.module) == 0 ?
+		       "and its chora is started" :
+		       "and its chora could not be started");
 		break;
 	}
 	case HAL_MODULE_TIE:

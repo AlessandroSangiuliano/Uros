@@ -17,9 +17,10 @@
  */
 
 /*
- * chora_test -- starts chora on the network card twice, as a driver's parent
- * does (#963), and once on QEMU's educational device where the board has one
- * (#977).
+ * chora_test -- the choras the HAL starts in chora.conf (#964), on the network
+ * card and on QEMU's educational device where the board has one (#977), and a
+ * second chora on the card, started here as a driver's parent does (#963),
+ * which the claim of the HAL's must refuse.
  *
  * bootstrap starts it from chora.conf, a list of its own, in a GRUB entry of
  * its own: every other bundle entry reads bootstrap.conf, where
@@ -29,23 +30,22 @@
  * chora holds is what this task may give (#743).
  *
  *   [1] the HAL names the network card;
- *   [2] a chora started on it with exec_load() claims it: the kernel says the
- *       card is claimed within 30 s of the start;
- *   [3] that task carries the card's name, read back with
- *       urmach_task_get_name(): chora_probe@BB:DD.F;
- *   [4] a second chora on the same card ends within 30 s, and the card is
- *       still claimed -- the claim refused it;
+ *   [2] the HAL's chora claims it: the kernel says the card is claimed within
+ *       30 s, and this task never started one;
+ *   [3] the HAL says its driver is the task named after the card, read with
+ *       hal_get_device_driver(): chora_probe@BB:DD.F;
+ *   [4] a second chora on the same card, started here with exec_load(), ends
+ *       within 30 s, and the card is still claimed -- the claim refused it;
  *   [5] the HAL names QEMU's edu device, vendor 1234h and device 11e8h,
  *       which has MSI and no MSI-X table (run-x86_64.sh --edu);
- *   [6] a chora started on it with the module edu_probe claims it within
- *       30 s, and carries its name, edu_probe@BB:DD.F.  That its module took
- *       the interrupt by message is edu_probe's line, the merge test's to
- *       read (#977).
+ *   [6] the HAL's chora claims it within 30 s, and the HAL says its driver is
+ *       edu_probe@BB:DD.F.  That its module took the interrupt by message is
+ *       edu_probe's line, the merge test's to read (#977).
  *
  * chora's own lines -- the claim, the region, the interrupt, the second
  * one's refusal -- and the kernel's line naming both tasks are the merge
- * test's to read.  The first chora is left driving the card: a driver stays,
- * and the run waits for it to say so (run-x86_64.sh).
+ * test's to read.  The HAL's choras drive their devices for as long as they
+ * run: a driver stays, and the run waits for it to say so (run-x86_64.sh).
  */
 
 #include <mach.h>
@@ -134,6 +134,38 @@ list_devices(int arm, vm_offset_t *buf, mach_msg_type_number_t *bytes,
 	}
 	(void)mach_port_deallocate(mach_task_self(), hal);
 	return 1;
+}
+
+/*
+ * The name of the driver the HAL started for `bdf' (#964), waited for until it
+ * reads `want' or 30 s have gone, since a chora names its task as it starts.
+ * Answers what it read last, "" when the HAL named none.
+ */
+static void
+hal_driver(natural_t bdf, const char *want, char *name, size_t size)
+{
+	mach_port_t		hal = MACH_PORT_NULL;
+	mach_msg_type_number_t	cnt;
+	int			i;
+
+	name[0] = '\0';
+	if (netname_look_up(name_server_port, "", (char *)"hal", &hal) !=
+	    KERN_SUCCESS)
+		return;
+	for (i = 0; i < CT_WAIT_STEPS; i++) {
+		memset(name, 0, size);
+		cnt = (mach_msg_type_number_t)size;
+		if (hal_get_device_driver(hal, (unsigned)(bdf >> 8),
+					  (unsigned)((bdf >> 3) & 0x1F),
+					  (unsigned)(bdf & 0x7), name, &cnt) !=
+		    KERN_SUCCESS)
+			cnt = 0;
+		name[cnt < size ? cnt : size - 1] = '\0';
+		if (strcmp(name, want) == 0)
+			break;
+		nap(100);
+	}
+	(void)mach_port_deallocate(mach_task_self(), hal);
 }
 
 /* [1]: the HAL's first device of the network class. */
@@ -308,11 +340,9 @@ run_the_arms(void)
 	mach_port_t	host = MACH_PORT_NULL, root_wired = MACH_PORT_NULL;
 	mach_port_t	root_paged = MACH_PORT_NULL, security = MACH_PORT_NULL;
 	mach_port_t	exec_port = MACH_PORT_NULL;
-	mach_port_t	first = MACH_PORT_NULL, second = MACH_PORT_NULL;
-	mach_port_t	third = MACH_PORT_NULL;
+	mach_port_t	second = MACH_PORT_NULL;
 	natural_t	bdf = 0, edu = 0;
 	char		name[URMACH_TASK_NAME_MAX], want[URMACH_TASK_NAME_MAX];
-	mach_msg_type_number_t cnt;
 	kern_return_t	kr;
 	int		i, rc = 0;
 
@@ -325,32 +355,10 @@ run_the_arms(void)
 	if (!find_the_card(&bdf))
 		return;
 
-	for (i = 0; i < CT_WAIT_STEPS; i++) {
-		if (netname_look_up(name_server_port, "", (char *)"exec_server",
-				    &exec_port) == KERN_SUCCESS)
-			break;
-		nap(100);
-	}
-	if (!MACH_PORT_VALID(exec_port)) {
-		not_asked(2, "exec_server's name did not come in 30 s");
-		return;
-	}
-	for (i = 0; i < CT_WAIT_STEPS && !root_is_served(); i++)
-		nap(100);
-	if (!root_is_served()) {
-		not_asked(2, "no \"/\" in 30 s, and chora is a program on it");
-		return;
-	}
-
 	/* [2] */
-	kr = start_chora(exec_port, bdf, "net", "chora_probe", &first, &rc);
-	if (kr != KERN_SUCCESS) {
-		verdict(2, 0, "/chora did not start: kr 0x%x, result %d", kr, rc);
-		return;
-	}
 	for (i = 0; i < CT_WAIT_STEPS && !claimed(bdf); i++)
 		nap(100);
-	verdict(2, claimed(bdf), "a chora started on the card, and %s",
+	verdict(2, claimed(bdf), "the HAL's chora on the card, and %s",
 		claimed(bdf) ? "the kernel says the card is claimed" :
 		"30 s on the kernel says nobody claims it");
 
@@ -358,15 +366,27 @@ run_the_arms(void)
 	(void)snprintf(want, sizeof want, "chora_probe@%02x:%02x.%x",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
-	memset(name, 0, sizeof name);
-	cnt = sizeof name;
-	kr = urmach_task_get_name(first, name, &cnt);
-	name[sizeof name - 1] = '\0';
-	verdict(3, kr == KERN_SUCCESS && strcmp(name, want) == 0,
-		"that task's name reads \"%s\" (kr 0x%x), and the card's is "
-		"\"%s\"", name, kr, want);
+	hal_driver(bdf, want, name, sizeof name);
+	verdict(3, strcmp(name, want) == 0, "the HAL says the card's driver is "
+		"\"%s\", and the card's name is \"%s\"", name, want);
 
-	/* [4] */
+	/* [4]: a chora this task starts, from the root disk */
+	for (i = 0; i < CT_WAIT_STEPS; i++) {
+		if (netname_look_up(name_server_port, "", (char *)"exec_server",
+				    &exec_port) == KERN_SUCCESS)
+			break;
+		nap(100);
+	}
+	if (!MACH_PORT_VALID(exec_port)) {
+		not_asked(4, "exec_server's name did not come in 30 s");
+		return;
+	}
+	for (i = 0; i < CT_WAIT_STEPS && !root_is_served(); i++)
+		nap(100);
+	if (!root_is_served()) {
+		not_asked(4, "no \"/\" in 30 s, and chora is a program on it");
+		return;
+	}
 	kr = start_chora(exec_port, bdf, "net", "chora_probe", &second, &rc);
 	if (kr != KERN_SUCCESS) {
 		verdict(4, 0, "a second /chora did not start: kr 0x%x, result %d",
@@ -381,29 +401,20 @@ run_the_arms(void)
 		"claimed by nobody");
 	(void)mach_port_deallocate(mach_task_self(), second);
 
-	/* [5], and [6], left driving the device as the first chora is (#977) */
+	/* [5], and [6] */
 	if (!find_the_edu(&edu))
 		return;
-	kr = start_chora(exec_port, edu, "misc", "edu_probe", &third, &rc);
-	if (kr != KERN_SUCCESS) {
-		verdict(6, 0, "/chora did not start on the edu device: kr 0x%x, "
-			"result %d", kr, rc);
-		return;
-	}
 	for (i = 0; i < CT_WAIT_STEPS && !claimed(edu); i++)
 		nap(100);
 	(void)snprintf(want, sizeof want, "edu_probe@%02x:%02x.%x",
 		       (unsigned)(edu >> 8), (unsigned)((edu >> 3) & 0x1F),
 		       (unsigned)(edu & 0x7));
-	memset(name, 0, sizeof name);
-	cnt = sizeof name;
-	kr = urmach_task_get_name(third, name, &cnt);
-	name[sizeof name - 1] = '\0';
-	verdict(6, claimed(edu) && kr == KERN_SUCCESS && strcmp(name, want) == 0,
-		"a chora started on the edu device, %s, and that task's name "
-		"reads \"%s\" (kr 0x%x), and the device's is \"%s\"",
-		claimed(edu) ? "which the kernel says is claimed" :
-		"which 30 s on nobody claims", name, kr, want);
+	hal_driver(edu, want, name, sizeof name);
+	verdict(6, claimed(edu) && strcmp(name, want) == 0, "the HAL's chora on "
+		"the edu device, %s, and the HAL says its driver is \"%s\", and "
+		"the device's name is \"%s\"", claimed(edu) ?
+		"which the kernel says is claimed" :
+		"which 30 s on nobody claims", name, want);
 }
 
 int

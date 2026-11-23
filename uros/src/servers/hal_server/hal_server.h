@@ -321,6 +321,12 @@ void hal_module_report(const struct hal_device_info *dev);
  */
 int  hal_modules_leave(const char *arg);
 
+/*
+ * A death notice for `name': 1 when it was a chora's, its slot given back and
+ * said; 0 when it is no chora's, for the drivers' subscriptions to look at.
+ */
+int  hal_chora_dead(mach_port_t name);
+
 /* The task of the chora the HAL started for a device, or MACH_PORT_NULL. */
 mach_port_t hal_chora_task(unsigned int bus, unsigned int slot,
 			   unsigned int func);

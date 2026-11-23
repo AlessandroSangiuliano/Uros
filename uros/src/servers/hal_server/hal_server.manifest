@@ -25,3 +25,10 @@ name hal_server
 # reading back what sticks (#427), so the scanner writes configuration space
 # as well as reading it -- twelve reads and six writes in pci_scan.c.
 required 5 any 0x7
+
+# RESOURCE_PCI_FUNCTION (12), ANY function, DMA|MMIO|IRQ (0x7), to hand on
+# (#964): the HAL starts a chora for each device a module declares, and writes
+# into the chora's manifest, at run time, the one function's address (#982).
+# exec_server cuts that manifest to this line.  `any' because no manifest
+# names an address.
+delegatable 12 any 0x7

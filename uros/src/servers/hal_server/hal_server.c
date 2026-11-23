@@ -284,7 +284,9 @@ hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	else if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
 		const mach_dead_name_notification_t *n =
 			(const mach_dead_name_notification_t *)in;
-		hal_driver_reg_handle_dead_name(n->not_port);
+		/* #964: a chora's, or a subscribed driver's. */
+		if (!hal_chora_dead(n->not_port))
+			hal_driver_reg_handle_dead_name(n->not_port);
 		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
 		((mig_reply_error_t *)out)->Head.msgh_size =
 			sizeof(mig_reply_error_t);
