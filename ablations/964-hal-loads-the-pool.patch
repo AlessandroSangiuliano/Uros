@@ -6,18 +6,18 @@ Expect: chora_absent: WRONG -- loaded, and no chora is ever told to load it
 Note: the declarations are still read, and every decision is the same: what this one asks is only whether a module is loaded.
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
-index e7327b5a..8ac85dc2 100644
+index 0591fa7e..c5599609 100644
 --- a/uros/src/servers/hal_server/hal_modules.c
 +++ b/uros/src/servers/hal_server/hal_modules.c
-@@ -43,6 +43,7 @@
- #include "hal_server.h"
+@@ -61,6 +61,7 @@
  #include "chora_drives.h"
+ #include "chora_given.h"		/* the module a chora is given */
  #include "libelf.h"
 +#include "modload.h"
+ #include "exec_types.h"			/* EXEC_OK */
+ #include "exec.h"			/* exec_load_image */
  
- /*
-  * The pool of a class, by its base class: what the build installs into
-@@ -210,6 +211,12 @@ pool_read(const char *name)
+@@ -638,6 +639,12 @@ pool_read(const char *name)
  		return p;
  	}
  	p->listed = 1;

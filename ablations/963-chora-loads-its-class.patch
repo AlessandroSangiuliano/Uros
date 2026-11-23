@@ -1,18 +1,19 @@
 Kind: ablation
 Issue: #963
-Takes out: the fetch of the one module a chora is named: it fetches and loads its whole class, as a class server does, and picks the named module out of it.  It drives the card as before, and holds chora_absent's code beside chora_probe's, which says WRONG as it is loaded.
+Takes out: the one module a chora loads, the one it was given: it fetches and loads its whole class from bootstrap, as a class server does, and picks the named module out of it.  It holds chora_absent's code, whose DT_INIT says so; and since chora_probe is on the disk and in no pool of the bundle (#964), the card's chora finds no module of its name among those it loaded, and ends.
 Run: --iommu intel --entry 68 600 -smp 4
 Expect: chora_absent: WRONG -- loaded, and no chora is ever told to load it
 
 diff --git a/uros/src/servers/chora/chora.c b/uros/src/servers/chora/chora.c
-index c3f028dd..e70cef62 100644
+index 84201e47..6eff3afc 100644
 --- a/uros/src/servers/chora/chora.c
 +++ b/uros/src/servers/chora/chora.c
-@@ -107,7 +107,15 @@ main(int argc, char **argv)
+@@ -188,8 +188,15 @@ main(int argc, char **argv)
+ 	if (driver_open(&the_device, argv[2], bdf) != 0)
  		return 1;
- 	}
  	modload_init(the_device.name);
--	ops = modload_load_named(argv[1], file, CHORA_MODULE_SUFFIX);
+-	ops = modload_load_given(argv[1], file, data, size,
+-				 CHORA_MODULE_SUFFIX);
 +	{	/* 963-chora-loads-its-class: the whole class, and the named one picked out */
 +		void	*all[8];
 +		int	k, got = modload_load_class(argv[1], CHORA_MODULE_SUFFIX, all, 8);
@@ -23,5 +24,5 @@ index c3f028dd..e70cef62 100644
 +				ops = all[k];
 +	}
  	if (ops == NULL) {
- 		driver_log(&the_device, "modules/%s/%s did not load", argv[1],
- 			   file);
+ 		driver_log(&the_device, "%s/%s, the module it was given, did not "
+ 			   "load", argv[1], file);
