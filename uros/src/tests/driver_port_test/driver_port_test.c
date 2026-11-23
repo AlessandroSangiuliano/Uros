@@ -39,11 +39,26 @@
  * What is refused on one port and answered on the other is the port, not the
  * routine.  [6] is not set beside the master port: there the line would be
  * taken, and kept by this task.
+ *
+ * And bootstrap's half, as the HAL will ask it:
+ *
+ *   [8] bootstrap loads this program, with the argument "child", into a task
+ *       this one made: a driver, as a chora the HAL makes will be.
+ *
+ * The child says, under "driver_port_test: child:", what it was given:
+ *
+ *   [1] a port in bootstrap_ports()'s device slot, and no host port;
+ *   [2] not the master port: device_open() refuses it;
+ *   [3] the driver's port: device_dma_faults() refuses on it a device the
+ *       child does not hold, where any other port is no port of the device
+ *       master's at all;
+ *   [4] no power to load a driver itself: bootstrap refuses it.
  */
 
 #include <mach.h>
 #include <mach/mach_traps.h>
-#include <mach/bootstrap.h>		/* bootstrap_ports */
+#include <mach/module_pool.h>		/* before <mach/bootstrap.h> */
+#include <mach/bootstrap.h>		/* bootstrap_ports, bootstrap_load_program */
 #include <stdio.h>
 #include <string.h>
 #include <device/device.h>		/* device_open, device_close */
@@ -52,11 +67,12 @@
 #include "hal.h"			/* hal_list_devices */
 #include "device_master.h"		/* device_driver_port, and the rest */
 
-#define ARMS		7
+#define ARMS		8
 #define LEGACY_LINES	16		/* IRQ_FORWARD_LINES */
 
 static int		passed, asked;
 static security_token_t	no_token;
+static const char	*who = "driver_port_test";
 
 static void
 said(int arm, int ok, const char *what)
@@ -64,14 +80,13 @@ said(int arm, int ok, const char *what)
 	asked++;
 	if (ok)
 		passed++;
-	printf("driver_port_test: [%d] %s%s\n", arm, what,
-	       ok ? "" : " -- WRONG");
+	printf("%s: [%d] %s%s\n", who, arm, what, ok ? "" : " -- WRONG");
 }
 
 static void
 not_asked(int arm, const char *why)
 {
-	printf("driver_port_test: [%d] NOT ASKED: %s\n", arm, why);
+	printf("%s: [%d] NOT ASKED: %s\n", who, arm, why);
 }
 
 /*
@@ -111,6 +126,73 @@ free_line(void)
 	return -1;
 }
 
+/*
+ * The child: loaded by bootstrap into a task its parent made, as a driver is,
+ * and asking what it was given.
+ */
+static int
+child(void)
+{
+	mach_port_t		hostp = MACH_PORT_NULL, devp = MACH_PORT_NULL;
+	mach_port_t		wired = MACH_PORT_NULL, paged = MACH_PORT_NULL;
+	mach_port_t		security = MACH_PORT_NULL, dev = MACH_PORT_NULL;
+	mach_port_t		t = MACH_PORT_NULL;
+	natural_t		confined, count, lost, undrained;
+	vm_address_t		address;
+	module_name_t		prog;
+	bootstrap_argv_t	args;
+	kern_return_t		kr;
+	char			line[160];
+
+	who = "driver_port_test: child";
+	printf("%s: started\n", who);
+
+	/* [1] */
+	kr = bootstrap_ports(bootstrap_port, &hostp, &devp, &wired, &paged,
+			     &security);
+	snprintf(line, sizeof line, "bootstrap_ports(): 0x%x, %s in the "
+		 "device slot, %s in the host slot", kr,
+		 MACH_PORT_VALID(devp) ? "a port" : "none",
+		 MACH_PORT_VALID(hostp) ? "a port" : "none");
+	said(1, kr == KERN_SUCCESS && MACH_PORT_VALID(devp) &&
+	     !MACH_PORT_VALID(hostp), line);
+
+	/* [2] */
+	kr = device_open(devp, MACH_PORT_NULL, D_READ | D_WRITE, no_token,
+			 (char *)"console", &dev);
+	if (kr == KERN_SUCCESS) {
+		(void)device_close(dev);
+		(void)mach_port_deallocate(mach_task_self(), dev);
+	}
+	snprintf(line, sizeof line, "device_open(\"console\") on it: %s, "
+		 "0x%x", kr == KERN_SUCCESS ? "opened" : "refused", kr);
+	said(2, MACH_PORT_VALID(devp) && kr != KERN_SUCCESS, line);
+
+	/* [3] */
+	kr = device_dma_faults(devp, 0, &confined, &count, &address, &lost,
+			       &undrained);
+	snprintf(line, sizeof line, "device_dma_faults(00:00.0), no device of "
+		 "its own, on it: 0x%x", kr);
+	said(3, kr == KERN_NO_ACCESS, line);
+
+	/* [4] */
+	strcpy(prog, "driver_port_test");
+	strcpy(args, "child");
+	kr = task_create(mach_task_self(), NULL, 0, FALSE, &t);
+	if (kr == KERN_SUCCESS) {
+		kr = bootstrap_load_program(bootstrap_port, t, prog, args);
+		(void)task_terminate(t);
+		(void)mach_port_deallocate(mach_task_self(), t);
+	}
+	snprintf(line, sizeof line, "bootstrap_load_program() asked by a "
+		 "driver: %s, 0x%x", kr == KERN_SUCCESS ? "loaded" : "refused",
+		 kr);
+	said(4, kr == KERN_NO_ACCESS, line);
+
+	printf("%s: %d of %d arms passed\n", who, passed, asked);
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -126,8 +208,8 @@ main(int argc, char **argv)
 	char		line[160];
 	int		irq;
 
-	(void)argc;
-	(void)argv;
+	if (argc > 1 && strcmp(argv[1], "child") == 0)
+		return child();
 	printf("driver_port_test: started\n");
 
 	if (bootstrap_ports(bootstrap_port, &hostp, &master, &wired, &paged,
@@ -239,6 +321,28 @@ main(int argc, char **argv)
 		 "device of this task's, on the driver's port: %s, 0x%x",
 		 kr == KERN_SUCCESS ? "answered" : "refused", kr);
 	said(7, kr != KERN_SUCCESS, line);
+
+	/* [8] */
+	{
+		mach_port_t		t = MACH_PORT_NULL;
+		module_name_t		prog;
+		bootstrap_argv_t	args;
+
+		strcpy(prog, "driver_port_test");
+		strcpy(args, "child");
+		kr = task_create(mach_task_self(), NULL, 0, FALSE, &t);
+		if (kr == KERN_SUCCESS)
+			kr = bootstrap_load_program(bootstrap_port, t, prog,
+						    args);
+		snprintf(line, sizeof line, "bootstrap loaded this program, "
+			 "\"child\", into a task of this one's, as a driver: "
+			 "0x%x", kr);
+		said(8, kr == KERN_SUCCESS, line);
+		if (kr != KERN_SUCCESS && t != MACH_PORT_NULL)
+			(void)task_terminate(t);
+		if (t != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), t);
+	}
 
 	printf("driver_port_test: %d of %d arms passed\n", passed, asked);
 	return 0;

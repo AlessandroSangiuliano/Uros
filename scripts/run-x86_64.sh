@@ -675,7 +675,9 @@ must_report 'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* ar
 	'It asks the HAL for two edu devices, claims one, derives a child it never starts and asks its port, and nothing in it waits but for the HAL'"'"'s name, so silence is a stop inside the HAL, cap_server or the kernel'"'"'s claim (#982).  Without two edu devices it says NOT ASKED and counts 0 of 0.'
 
 must_report 'driver_port_test: started' 'driver_port_test: [0-9]* of [0-9]* arms passed' \
-	'It asks the kernel for the driver'"'"'s port and asks seven routines on it, each answered at once, and waits for nothing but the HAL'"'"'s name, for its device list, so silence is a stop inside the kernel'"'"'s device master or the HAL (#964).'
+	'It asks the kernel for the driver'"'"'s port and asks seven routines on it, each answered at once, then has bootstrap load it into a task of its own, and waits for nothing but the HAL'"'"'s name, for its device list, so silence is a stop inside the kernel'"'"'s device master, the HAL or bootstrap (#964).'
+must_report 'driver_port_test: child: started' 'driver_port_test: child: [0-9]* of [0-9]* arms passed' \
+	'The child bootstrap loaded as a driver asks what it was given, each question answered at once, so silence is a stop inside bootstrap'"'"'s answers or the kernel'"'"'s device master (#964).'
 
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
@@ -1782,6 +1784,7 @@ expected_reports() {
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
 		'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
 		'driver_port_test: started' 'driver_port_test: [0-9]* of [0-9]* arms passed' \
+		'driver_port_test: child: started' 'driver_port_test: child: [0-9]* of [0-9]* arms passed' \
 		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
 		'musl_test: started'    'musl_test: [0-9]* of [0-9]* arms passed' \
