@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: device_open()'s refusal of the driver's port: on it the kernel's devices open, the boot disk among them, as on the master port.  driver_port_test's [3] opens the console on it.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: \[3\] device_open\("console"\) on the driver's port: opened, 0x0; on the master port: 0x0 -- WRONG
+
+diff --git a/uros/src/mach_kernel/device/ds_routines.c b/uros/src/mach_kernel/device/ds_routines.c
+index 2c310276..95e0b741 100644
+--- a/uros/src/mach_kernel/device/ds_routines.c
++++ b/uros/src/mach_kernel/device/ds_routines.c
+@@ -317,7 +317,8 @@ ds_device_open(
+ 	/*
+ 	 * Open must be called on the master device port.
+ 	 */
+-	if (open_port != master_device_port) {
++	if (open_port != master_device_port &&
++	    ip_kotype(open_port) != IKOT_DRIVER_DEVICE) {
+ 	    return (D_INVALID_OPERATION);
+ 	}
+ 

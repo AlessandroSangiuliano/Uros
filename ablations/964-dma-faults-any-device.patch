@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: the driver's port's bound on device_dma_faults(): on it, as on the master port, any device's faults are answered.  driver_port_test's [5] asks for those of 00:00.0, which it does not hold, and is answered.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: \[5\] device_dma_faults\(00:00\.0\), no device of this task's, on the driver's port: answered, 0x0; on the master port: 0x0 -- WRONG
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index ba590518..b4f084c3 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -4053,7 +4053,7 @@ ds_master_device_dma_faults(
+ 		return kr;
+ 
+ 	/* #964: on the driver's port, the faults of the caller's own device. */
+-	if (port_is_driver(master_port) && check_claim(bdf) != KERN_SUCCESS)
++	if (0 && port_is_driver(master_port) && check_claim(bdf) != KERN_SUCCESS)
+ 		return KERN_NO_ACCESS;
+ 	/*
+ 	 * #599: a bdf that is not a device is refused.  It was answered

@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: the driver's port's bound on device_intr_register(): on it, as on the master port, a line no claimed device raises is taken, and a driver could take the keyboard's line before its server.  driver_port_test's [6] asks for a line no device the HAL lists raises, and gets it.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: \[6\] device_intr_register\([0-9]+\), a line no device raises, on the driver's port: taken, 0x0 -- WRONG
+Note: the test gives the line back, on the master port, when it was taken.
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index ba590518..0698aa49 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -1355,7 +1355,7 @@ ds_master_device_intr_register(
+ 	 * device's line and no other, and would otherwise take the keyboard's
+ 	 * before its server did.
+ 	 */
+-	if (bdf == DEVICE_DMA_NO_BDF && port_is_driver(master_port)) {
++	if (0 && bdf == DEVICE_DMA_NO_BDF && port_is_driver(master_port)) {
+ 		printf("device_intr_register: irq %u is raised by no device "
+ 		       "task 0x%lx holds, and it asked on a driver's port "
+ 		       "(#964)\n", irq, (unsigned long)me);
