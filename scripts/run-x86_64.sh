@@ -658,6 +658,9 @@ must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
 
+must_report 'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
+	'It asks the HAL for two edu devices, claims one, derives a child it never starts and asks its port, and nothing in it waits but for the HAL'"'"'s name, so silence is a stop inside the HAL, cap_server or the kernel'"'"'s claim (#982).  Without two edu devices it says NOT ASKED and counts 0 of 0.'
+
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
 
@@ -1038,6 +1041,12 @@ while :; do
 		# no register that says its mask, so edu_probe's EDU_DMA_REACH
 		# is this line's word.
 		EDU_ARGS="-device edu,dma_mask=0xffffffffffffffff"
+		shift ;;
+	--edu2)
+		# #982: two of them, the same class twice, for
+		# pci_function_test: a capability for one function claims
+		# that one and is refused the other.  Each as --edu makes it.
+		EDU_ARGS="-device edu,dma_mask=0xffffffffffffffff -device edu,dma_mask=0xffffffffffffffff"
 		shift ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
@@ -1731,6 +1740,7 @@ expected_reports() {
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
+		'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
 		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
 		'musl_test: started'    'musl_test: [0-9]* of [0-9]* arms passed' \

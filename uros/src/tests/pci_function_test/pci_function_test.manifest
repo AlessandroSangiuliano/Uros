@@ -1,0 +1,10 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# pci_function_test (#982): a capability for any one PCI function, as the HAL
+# will hold it, and the right to hand one on, written with `any': the address
+# is the test's to name at run time, never this file's.  RESOURCE_PCI_FUNCTION
+# is 12; the operations are DMA, MMIO and IRQ, 0x7.
+name pci_function_test
+required 12 any 0x7
+delegatable 12 any 0x7

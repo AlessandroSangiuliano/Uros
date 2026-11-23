@@ -90,6 +90,16 @@ typedef enum {
      */
     RESOURCE_REVOKE_NOTICES = 11,
 
+    /*
+     * One PCI function (#982): the id is its bus address, bus<<8 | slot<<3 |
+     * func, as the device master's routines take it, and the operations are
+     * RESOURCE_PCI_DEVICE's.  No manifest names an address -- see below why a
+     * policy file cannot -- so a manifest writes this type with `any' only, in
+     * the line of a task that starts drivers, and the address is written by
+     * that task, at run time, into the manifest of the driver it starts.
+     */
+    RESOURCE_PCI_FUNCTION  = 12,
+
     RESOURCE_TYPE_MAX
 } cap_resource_type_t;
 
@@ -120,6 +130,14 @@ typedef enum {
  * because it does not know what is plugged in.  The other half is the device
  * master's claim -- a device has one driver, first come -- and neither alone
  * is a policy.
+ *
+ * 🔑 #982: and the instance is named at run time, by whoever knows what is
+ * plugged in and starts the driver -- the HAL.  It derives, for the driver it
+ * starts, a RESOURCE_PCI_FUNCTION capability for that one device, out of its
+ * own `delegatable' line for the type, written with `any'.  So a manifest still
+ * names kinds and never an instance, and a driver started that way can claim
+ * its own device and no other, where a class capability lets it claim any
+ * unclaimed device of the class.  The operations below are that type's too.
  *
  * The class is the upper 24 bits of the PCI class-code register: base class,
  * sub-class and programming interface, as configuration space reports them.

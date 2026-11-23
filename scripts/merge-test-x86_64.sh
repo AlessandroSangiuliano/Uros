@@ -126,6 +126,12 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             a second slot for its one message, and found it disabled once
 #             given back -- what "harness" would pass a kernel that never ran
 #             the test, since no WRONG says so (#977)
+#   pcifn     the harness's verdict, with two of QEMU's edu devices (--edu2):
+#             pci_function_test's seven arms passed, and the kernel's two
+#             refusals that make its claims -- the second edu refused to a
+#             capability for the first's function, and the bus refused to a
+#             capability for one function, which the HAL's own claim on the bus
+#             would hide from the test (#982)
 #   stop13    the name server stops at service_checkin, which grub.cfg says is
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in.  Since #744 it checks in on its
@@ -210,6 +216,7 @@ ENTRIES="
 14 char @char
 14 ush @ush
 14 msiplain --edu
+14 pcifn --edu2
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
@@ -681,6 +688,12 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		grep -aq 'plain MSI: edu was asked to raise .* a device wrote the message the kernel put in its capability, and it arrived as an interrupt' "$f" &&
 		grep -aq 'plain MSI: asked again, the same function was refused a second slot' "$f" &&
 		grep -aq 'plain MSI: given back, its control word reads .* disabled, so the device can no longer send it' "$f" ;;
+	# #982: a capability for one function claims it and no other, and never
+	# the bus -- the test's count, and the two refusals said by the kernel.
+	pcifn) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aq 'pci_function_test: 7 of 7 arms passed' "$f" &&
+		grep -aq 'REFUSED to task .* its capability does not cover this function with any device operation' "$f" &&
+		grep -aq 'device: the bus REFUSED to task .* a capability for one function claims no bus' "$f" ;;
 	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
 	# while interrupts are remapped takes its pin instead, for the reason
 	# it gives: QEMU's tables name no HPET, and its message could not go

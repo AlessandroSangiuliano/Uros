@@ -376,3 +376,58 @@ cap_derive_child(mach_port_t parent_cap_port,
     (void)mach_port_deallocate(mach_task_self(), id);
     return kr;
 }
+
+/* #982: the layout is mkmanifest's (mkmanifest.c, the blob it writes), offset
+ * by offset, so that cap_server reads one built here as it reads a file's. */
+unsigned int
+cap_manifest_build(const char *name,
+                   const cap_manifest_entry_t *required,
+                   unsigned int n_required,
+                   const cap_manifest_entry_t *delegatable,
+                   unsigned int n_delegatable,
+                   void *buf, unsigned int size)
+{
+    cap_manifest_header_t h;
+    unsigned int name_len, req_bytes, del_bytes, off, total;
+    uint8_t *p = (uint8_t *)buf;
+
+    if (name == NULL || buf == NULL ||
+        n_required > CAP_MANIFEST_MAX_ENTRIES ||
+        n_delegatable > CAP_MANIFEST_MAX_ENTRIES ||
+        (n_required > 0 && required == NULL) ||
+        (n_delegatable > 0 && delegatable == NULL))
+        return 0;
+    name_len = (unsigned int)strlen(name) + 1u;
+    if (name_len > CAP_MANIFEST_MAX_NAME)
+        return 0;
+    req_bytes = n_required * (unsigned int)sizeof(cap_manifest_entry_t);
+    del_bytes = n_delegatable * (unsigned int)sizeof(cap_manifest_entry_t);
+
+    memset(&h, 0, sizeof h);
+    h.magic = CAP_MANIFEST_MAGIC;
+    h.version = (uint16_t)CAP_MANIFEST_VERSION;
+    h.header_size = (uint16_t)sizeof h;
+    off = (unsigned int)sizeof h;
+    h.required_offset = off;
+    h.required_count = n_required;
+    off += req_bytes;
+    h.delegatable_offset = off;
+    h.delegatable_count = n_delegatable;
+    off += del_bytes;
+    h.name_offset = off;
+    h.name_length = name_len;
+    off += name_len;
+    total = (off + 3u) & ~3u;
+    if (total > size || total > CAP_MANIFEST_MAX_BYTES)
+        return 0;
+    h.total_size = total;
+
+    memset(p, 0, total);
+    memcpy(p, &h, sizeof h);
+    if (req_bytes)
+        memcpy(p + h.required_offset, required, req_bytes);
+    if (del_bytes)
+        memcpy(p + h.delegatable_offset, delegatable, del_bytes);
+    memcpy(p + h.name_offset, name, name_len);
+    return total;
+}

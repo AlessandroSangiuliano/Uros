@@ -584,6 +584,12 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/notify_forge_test)
 endif()
 
+# A capability for one PCI function claims it and no other of its class, and
+# is derived for a child with the address its parent names (#982).
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/pci_function_test)
+endif()
+
 # A right a server kept must survive the server's next message (#583): the
 # loop in libmach every server runs, asked directly.  Also built in the i386
 # half below -- the loop is the same code on both.
