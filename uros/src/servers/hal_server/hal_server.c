@@ -265,9 +265,37 @@ dump_registry(void)
  * MIG demux
  * ================================================================ */
 
+/* #964: the port the name server tells when "/" is mounted, while watched. */
+static mach_port_t	disk_watch = MACH_PORT_NULL;
+
 static boolean_t
 hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	/*
+	 * #964: "/" is mounted.  The HAL alone holds this port and gave the name
+	 * server the one send-once right to it, so what arrives on it is the
+	 * name server's, and comes once: the watch ends with it.  The message
+	 * brings a right to the mount's port, which the HAL does not keep.
+	 */
+	if (MACH_PORT_VALID(disk_watch) && in->msgh_local_port == disk_watch) {
+		if (in->msgh_id == NETNAME_NOTIFY_MOUNT_MSID)
+			hal_modules_disk_served();
+		else
+			printf("hal: a message with id %d on the watch of "
+			       "\"/\", which is no mount's notification "
+			       "(#964)\n", (int)in->msgh_id);
+		mach_msg_destroy(in);
+		(void)mach_port_move_member(mach_task_self(), disk_watch,
+					    MACH_PORT_NULL);
+		(void)mach_port_mod_refs(mach_task_self(), disk_watch,
+					 MACH_PORT_RIGHT_RECEIVE, -1);
+		disk_watch = MACH_PORT_NULL;
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	/*
 	 * #981: a dead-name notification is the kernel's, sent through the
 	 * send-once right hal_register_driver() made for it.  This port is the
@@ -432,10 +460,41 @@ main(int argc, char **argv)
 	hal_run_discovery();
 	dump_registry();
 
-	printf("hal: init complete, entering message loop\n");
+	/*
+	 * #964: the devices that wait for the disk's pools are decided when "/"
+	 * is served, which the name server says on a port of the HAL's own,
+	 * received beside the service port in one set.
+	 */
+	{
+		mach_port_t	set = MACH_PORT_NULL, served = hal_service_port;
 
-	mach_msg_server(hal_demux, 8192, hal_service_port,
-			MACH_MSG_OPTION_NONE);
+		disk_watch = hal_modules_disk_watch();
+		if (MACH_PORT_VALID(disk_watch)) {
+			kr = mach_port_allocate(mach_task_self(),
+						MACH_PORT_RIGHT_PORT_SET, &set);
+			if (kr == KERN_SUCCESS)
+				kr = mach_port_move_member(mach_task_self(),
+							   hal_service_port, set);
+			if (kr == KERN_SUCCESS)
+				kr = mach_port_move_member(mach_task_self(),
+							   disk_watch, set);
+			if (kr == KERN_SUCCESS)
+				served = set;
+			else {
+				/* The service port is received alone again. */
+				(void)mach_port_move_member(mach_task_self(),
+							    hal_service_port,
+							    MACH_PORT_NULL);
+				printf("hal: no port set for the watch of "
+				       "\"/\" (0x%x): the disk's pools are not "
+				       "read (#964)\n", kr);
+			}
+		}
+
+		printf("hal: init complete, entering message loop\n");
+
+		mach_msg_server(hal_demux, 8192, served, MACH_MSG_OPTION_NONE);
+	}
 
 	printf("hal: mach_msg_server exited unexpectedly\n");
 	return 1;

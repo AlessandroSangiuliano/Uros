@@ -303,17 +303,36 @@ enum hal_module_verdict {
 
 struct hal_module_choice {
 	int		verdict;	/* enum hal_module_verdict */
+	int		disk;		/* from the disk's pool, not the bundle's */
 	const char	*pool;
 	const char	*module;	/* ONE, TIE */
 	const char	*rival;		/* TIE */
 };
 
-/* The choice for one device, and its verdict.  The names live as long as the HAL. */
+/*
+ * The choice for one device from the bundle's pool of its class, or from the
+ * disk's when `disk' (#964), and its verdict.  The names live as long as the
+ * HAL.
+ */
 int  hal_module_for(const struct hal_device_info *dev,
-		    struct hal_module_choice *c);
+		    struct hal_module_choice *c, int disk);
 
-/* The choice, said on one line: the HAL says what it decided for each device. */
+/*
+ * The choice, said on one line: the HAL says what it decided for each device.
+ * A device no module of the bundle declares, and whose class is not left to
+ * others, waits for the disk's pools (#964).
+ */
 void hal_module_report(const struct hal_device_info *dev);
+
+/*
+ * #964: the port the name server tells when "/" is mounted, asked for when
+ * some device waits for the disk's pools; MACH_PORT_NULL otherwise.  Its one
+ * message makes the HAL call hal_modules_disk_served().
+ */
+mach_port_t hal_modules_disk_watch(void);
+
+/* #964: "/" is served: the waiting devices are decided from the disk's pools. */
+void hal_modules_disk_served(void);
 
 /*
  * "--leave CODE": a class the HAL's line leaves to others (hal_modules.c).

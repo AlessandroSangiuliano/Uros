@@ -236,6 +236,8 @@ target_include_directories(hal_server PRIVATE ${HAL_INCLUDE_DIRS}
 # libdl links it too, for its own reading, and that is libdl's business.
 target_link_libraries(hal_server PRIVATE
   -Wl,--start-group
+  libvfs		# #964: the disk's pools, and the FLIPC it reads by
+  libflipc2
   libelf
   libmodload
   libdl

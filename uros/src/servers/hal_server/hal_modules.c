@@ -32,6 +32,17 @@
  *
  * A pool is read once, the first time a device of its class needs it, and
  * what each module declares is kept; the module's file is not.
+ *
+ * ── The disk's pools (#964) ──
+ *
+ * The modules a boot needs travel in the bundle; the others are on the disk,
+ * in HAL_DISK_POOLS<pool>/, which the HAL reads through libvfs once "/" is
+ * served -- a machine may want two hundred drivers, and the bundle need not
+ * carry them.  A device no module of the bundle declares waits for the disk,
+ * unless its class is left to others; the HAL asks the name server to tell it
+ * when "/" is mounted, on a port of its own, and decides then.  A chora is
+ * given its module's bytes wherever they came from (chora_given.h), so no
+ * driver reads the disk.
  */
 
 #include <mach.h>
@@ -41,6 +52,8 @@
 #include <string.h>
 
 #include <servers/netname_wait.h>
+#include <servers/netname.h>		/* netname_notify_mount() */
+#include <libvfs.h>			/* the disk's pools */
 #include <libcap.h>			/* cap_manifest_build, mach_cap_port */
 #include <mach/cap_types.h>		/* RESOURCE_PCI_FUNCTION, CAP_OP_PCI_* */
 
@@ -66,7 +79,9 @@ static const struct {
 };
 #define POOL_OF_THE_REST	"misc"
 
-#define HAL_MAX_POOLS		4	/* the four names above */
+#define HAL_MAX_POOLS		8	/* the four names above, bundle and disk */
+#define HAL_DISK_POOLS		"/mach_servers/modules/"
+#define HAL_MAX_WAITING		16	/* devices waiting for the disk's pools */
 #define HAL_POOL_MODULES	16
 #define DRIVES_SAID		8	/* lines of a declaration said */
 #define CONSOLE_LINE_MAX	255	/* and the newline: 256, kept whole */
@@ -79,7 +94,8 @@ struct pool_module {
 
 struct pool {
 	char			name[MODULE_NAME_MAX];
-	int			listed;		/* bootstrap listed it */
+	int			disk;		/* the disk's, not the bundle's */
+	int			listed;		/* bootstrap, or the disk, listed it */
 	int			n;
 	struct pool_module	mods[HAL_POOL_MODULES];
 };
@@ -163,19 +179,29 @@ blob_put(char *blob, size_t at, size_t cap, const char *s)
 	return at + len;
 }
 
+static int disk_file(const char *path, vm_offset_t *data,
+		     mach_msg_type_number_t *len);
+
 /*
  * The module `file' of the pool `pool', as bytes, for a chora (#964): from
- * bootstrap, which serves the bundle's pools.  0, or -1 said.
+ * bootstrap, which serves the bundle's pools, or from the disk's.  0, or -1
+ * said.
  */
 static int
-module_fetch(const char *pool, const char *file, vm_offset_t *data,
+module_fetch(const char *pool, const char *file, int disk, vm_offset_t *data,
 	     mach_msg_type_number_t *len)
 {
 	module_name_t	class_buf, name_buf;
+	char		path[VFS_PATH_MAX];
 	kern_return_t	kr;
 
 	*data = 0;
 	*len = 0;
+	if (disk) {
+		(void)snprintf(path, sizeof path, "%s%s/%s", HAL_DISK_POOLS, pool,
+			       file);
+		return disk_file(path, data, len);
+	}
 	if (strlen(pool) >= sizeof class_buf || strlen(file) >= sizeof name_buf)
 		return -1;
 	strcpy(class_buf, pool);
@@ -250,7 +276,7 @@ module_give(mach_port_t task, vm_offset_t data, mach_msg_type_number_t len,
  */
 static int
 chora_start(const struct hal_device_info *dev, const char *pool,
-	    const char *file)
+	    const char *file, int disk)
 {
 	static const char	envp_blob[] = "";
 	char			argv_blob[3 * MODULE_NAME_MAX + 32];
@@ -301,11 +327,12 @@ chora_start(const struct hal_device_info *dev, const char *pool,
 	}
 
 	/* The module the chora will be given, and what it declares, again. */
-	if (module_fetch(pool, file, &mod, &mod_len) != 0)
+	if (module_fetch(pool, file, disk, &mod, &mod_len) != 0)
 		return -1;
 	if (module_score((const void *)mod, mod_len, dev) <= 0) {
-		printf("hal: %s/%s, as bootstrap gives it now, does not declare "
-		       "%s: no chora is started (#964)\n", pool, file, where);
+		printf("hal: %s/%s, as %s gives it now, does not declare %s: no "
+		       "chora is started (#964)\n", pool, file,
+		       disk ? "the disk" : "bootstrap", where);
 		(void)vm_deallocate(mach_task_self(), mod, mod_len);
 		return -1;
 	}
@@ -494,10 +521,12 @@ pool_of_class(uint32_t class_rev)
 /*
  * What one module declares, read from its file: m->lines lines, or 0 when it
  * declares nothing -- no section, or one the HAL refuses, which it says.
+ * `on' follows the module's name where the HAL names it: " on the disk" for
+ * the disk's (#964), "" for the bundle's.
  */
 static void
-module_read(struct pool_module *m, const char *pool, const void *data,
-	    size_t size)
+module_read(struct pool_module *m, const char *pool, const char *on,
+	    const void *data, size_t size)
 {
 	elf_image_t			img;
 	elf_shdr_view_t			sh;
@@ -508,8 +537,8 @@ module_read(struct pool_module *m, const char *pool, const void *data,
 	memset(&img, 0, sizeof img);
 	rc = elf_open(data, size, &img);
 	if (rc != ELF_OK) {
-		printf("hal: %s/%s is no ELF the HAL reads (%d): it declares "
-		       "nothing\n", pool, m->name, rc);
+		printf("hal: %s/%s%s is no ELF the HAL reads (%d): it declares "
+		       "nothing\n", pool, m->name, on, rc);
 		return;
 	}
 	rc = elf_shdr_find(&img, CHORA_DRIVES_SECTION, &sh);
@@ -518,20 +547,20 @@ module_read(struct pool_module *m, const char *pool, const void *data,
 		return;			/* no declaration: not an error */
 	}
 	if (sh.data == NULL) {
-		printf("hal: %s/%s: its %s lies outside its file: it declares "
-		       "nothing\n", pool, m->name, CHORA_DRIVES_SECTION);
+		printf("hal: %s/%s%s: its %s lies outside its file: it declares "
+		       "nothing\n", pool, m->name, on, CHORA_DRIVES_SECTION);
 		elf_close(&img);
 		return;
 	}
 	n = chora_drives_check(sh.data, (size_t)sh.size, &f);
 	if (n < 0) {
 		if (f.line < 0)
-			printf("hal: %s/%s: its %s has %s: it declares "
-			       "nothing\n", pool, m->name,
+			printf("hal: %s/%s%s: its %s has %s: it declares "
+			       "nothing\n", pool, m->name, on,
 			       CHORA_DRIVES_SECTION, f.what);
 		else
-			printf("hal: %s/%s: line %d of its %s is %s: it "
-			       "declares nothing\n", pool, m->name, f.line,
+			printf("hal: %s/%s%s: line %d of its %s is %s: it "
+			       "declares nothing\n", pool, m->name, on, f.line,
 			       CHORA_DRIVES_SECTION, f.what);
 		elf_close(&img);
 		return;
@@ -550,8 +579,8 @@ module_read(struct pool_module *m, const char *pool, const void *data,
 		char	line[CONSOLE_LINE_MAX];
 		int	at;
 
-		at = snprintf(line, sizeof line, "hal: %s/%s drives", pool,
-			      m->name);
+		at = snprintf(line, sizeof line, "hal: %s/%s%s drives", pool,
+			      m->name, on);
 		for (i = 0; i < n && i < DRIVES_SAID &&
 			    at >= 0 && at < (int)sizeof line; i++) {
 			const struct chora_drives *d = &m->drives[i];
@@ -590,7 +619,7 @@ pool_read(const char *name)
 	int			i;
 
 	for (i = 0; i < n_pools; i++)
-		if (strcmp(pools[i].name, name) == 0)
+		if (!pools[i].disk && strcmp(pools[i].name, name) == 0)
 			return &pools[i];
 	if (n_pools >= HAL_MAX_POOLS || strlen(name) >= sizeof class_buf) {
 		printf("hal: no room to read the pool %s\n", name);
@@ -640,7 +669,7 @@ pool_read(const char *name)
 			continue;
 		}
 		strcpy(p->mods[p->n].name, q);
-		module_read(&p->mods[p->n], name, (const void *)data,
+		module_read(&p->mods[p->n], name, "", (const void *)data,
 			    data_count);
 		p->n++;
 		(void)vm_deallocate(mach_task_self(), data, data_count);
@@ -651,9 +680,134 @@ pool_read(const char *name)
 	return p;
 }
 
+/*
+ * #964: a file of the disk, whole, into memory of its own: 0, or -1 said.
+ * A module's size is bounded as a chora's is (chora_given.h).
+ */
+static int
+disk_file(const char *path, vm_offset_t *data, mach_msg_type_number_t *len)
+{
+	vfs_stat_t	st;
+	vfs_fd_t	fd;
+	vm_offset_t	buf = 0;
+	uint64_t	done = 0;
+	ssize_t		r;
+
+	*data = 0;
+	*len = 0;
+	fd = vfs_open(path, VFS_O_RDONLY, 0);
+	if (fd == VFS_FD_INVALID) {
+		printf("hal: %s would not open (#964)\n", path);
+		return -1;
+	}
+	if (vfs_fstat(fd, &st) != 0) {
+		printf("hal: %s: no size (#964)\n", path);
+		(void)vfs_close(fd);
+		return -1;
+	}
+	if (st.st_size == 0 || st.st_size > CHORA_GIVEN_MODULE_MAX ||
+	    vm_allocate(mach_task_self(), &buf, (vm_size_t)st.st_size, TRUE)
+	    != KERN_SUCCESS) {
+		printf("hal: %s: %llu bytes, no module's size (#964)\n", path,
+		       (unsigned long long)st.st_size);
+		(void)vfs_close(fd);
+		return -1;
+	}
+	while (done < st.st_size) {
+		r = vfs_read(fd, (char *)buf + done, (size_t)(st.st_size - done));
+		if (r <= 0)
+			break;
+		done += (uint64_t)r;
+	}
+	(void)vfs_close(fd);
+	if (done != st.st_size) {
+		printf("hal: %s: %llu of its %llu bytes read (#964)\n", path,
+		       (unsigned long long)done, (unsigned long long)st.st_size);
+		(void)vm_deallocate(mach_task_self(), buf, (vm_size_t)st.st_size);
+		return -1;
+	}
+	*data = buf;
+	*len = (mach_msg_type_number_t)done;
+	return 0;
+}
+
+/*
+ * #964: the disk's pool `name', HAL_DISK_POOLS<name>/, read the first time it
+ * is asked for, as the bundle's is: each file of it, a module whose
+ * declaration is read and kept.  A pool the disk does not have is one with
+ * no module, and said.  NULL when there is no room for it, said.
+ */
+static struct pool *
+pool_read_disk(const char *name)
+{
+	static vfs_dirent_t	ents[16];
+	struct pool		*p;
+	char			dir[VFS_PATH_MAX], path[VFS_PATH_MAX];
+	uint64_t		cookie = 0;
+	vfs_fd_t		fd;
+	int			i, n;
+
+	for (i = 0; i < n_pools; i++)
+		if (pools[i].disk && strcmp(pools[i].name, name) == 0)
+			return &pools[i];
+	if (n_pools >= HAL_MAX_POOLS || strlen(name) >= sizeof pools[0].name) {
+		printf("hal: no room to read the disk's pool %s\n", name);
+		return NULL;
+	}
+	p = &pools[n_pools++];
+	memset(p, 0, sizeof *p);
+	strcpy(p->name, name);
+	p->disk = 1;
+	p->listed = 1;
+
+	(void)snprintf(dir, sizeof dir, "%s%s", HAL_DISK_POOLS, name);
+	fd = vfs_open(dir, VFS_O_RDONLY, 0);
+	if (fd == VFS_FD_INVALID) {
+		printf("hal: the disk has no pool %s, at %s (#964)\n", name, dir);
+		return p;
+	}
+	do {
+		n = vfs_readdir(fd, ents, sizeof ents / sizeof ents[0], &cookie);
+		for (i = 0; i < n; i++) {
+			vm_offset_t		data = 0;
+			mach_msg_type_number_t	len = 0;
+
+			if (ents[i].d_type != VFS_FT_REG)
+				continue;	/* "." and ".." among them */
+			if (strlen(ents[i].d_name) >= sizeof p->mods[0].name) {
+				printf("hal: %s/%s, on the disk: a name longer "
+				       "than a module's\n", name, ents[i].d_name);
+				continue;
+			}
+			if (p->n >= HAL_POOL_MODULES) {
+				printf("hal: the disk's pool %s has more than %d "
+				       "modules: %s and those after it are not "
+				       "read\n", name, HAL_POOL_MODULES,
+				       ents[i].d_name);
+				cookie = 0;
+				break;
+			}
+			(void)snprintf(path, sizeof path, "%s/%s", dir,
+				       ents[i].d_name);
+			if (disk_file(path, &data, &len) != 0)
+				continue;
+			strcpy(p->mods[p->n].name, ents[i].d_name);
+			module_read(&p->mods[p->n], name, " on the disk",
+				    (const void *)data, len);
+			p->n++;
+			(void)vm_deallocate(mach_task_self(), data, len);
+		}
+	} while (n > 0 && cookie != 0);
+	if (n < 0)
+		printf("hal: the disk's pool %s could not be listed (#964)\n",
+		       name);
+	(void)vfs_close(fd);
+	return p;
+}
+
 int
 hal_module_for(const struct hal_device_info *dev,
-	       struct hal_module_choice *c)
+	       struct hal_module_choice *c, int disk)
 {
 	struct pool	*p;
 	int		score[HAL_POOL_MODULES];
@@ -661,7 +815,8 @@ hal_module_for(const struct hal_device_info *dev,
 
 	memset(c, 0, sizeof *c);
 	c->pool = pool_of_class(dev->class_rev);
-	p = pool_read(c->pool);
+	c->disk = disk;
+	p = disk ? pool_read_disk(c->pool) : pool_read(c->pool);
 	if (p == NULL || !p->listed) {
 		c->verdict = HAL_MODULE_UNREAD;
 		return c->verdict;
@@ -687,20 +842,34 @@ hal_module_for(const struct hal_device_info *dev,
 	return c->verdict;
 }
 
+/* "hal: BB:DD.F VVVV:DDDD class CCCCCC", how each of the HAL's lines on a device starts. */
+static void
+device_at(const struct hal_device_info *dev, char *at, size_t size)
+{
+	(void)snprintf(at, size, "hal: %02x:%02x.%x %04x:%04x class %06x",
+		       dev->bus, dev->slot, dev->func,
+		       dev->vendor_device & 0xffffu, dev->vendor_device >> 16,
+		       dev->class_rev >> 8);
+}
+
+/*
+ * #964: the devices no module of the bundle declares, whose class is not left
+ * to others: the disk's pools are read for them once "/" is served.
+ */
+static struct hal_device_info	waiting[HAL_MAX_WAITING];
+static int			n_waiting;
+
 void
 hal_module_report(const struct hal_device_info *dev)
 {
 	struct hal_module_choice	c;
 	char				at[48];
+	int				l;
 
-	(void)snprintf(at, sizeof at, "hal: %02x:%02x.%x %04x:%04x class %06x",
-		       dev->bus, dev->slot, dev->func,
-		       dev->vendor_device & 0xffffu, dev->vendor_device >> 16,
-		       dev->class_rev >> 8);
-	switch (hal_module_for(dev, &c)) {
-	case HAL_MODULE_ONE: {
-		int	l = left_by(dev->class_rev);
-
+	device_at(dev, at, sizeof at);
+	l = left_by(dev->class_rev);
+	switch (hal_module_for(dev, &c, 0)) {
+	case HAL_MODULE_ONE:
 		if (l >= 0) {
 			printf("%s: %s/%s declares it, and the HAL's line leaves "
 			       "class %06x/%06x to others\n", at, c.pool,
@@ -709,21 +878,109 @@ hal_module_report(const struct hal_device_info *dev)
 			break;
 		}
 		printf("%s: %s/%s declares it, %s\n", at, c.pool, c.module,
-		       chora_start(dev, c.pool, c.module) == 0 ?
+		       chora_start(dev, c.pool, c.module, 0) == 0 ?
 		       "and its chora is started" :
 		       "and its chora could not be started");
 		break;
-	}
 	case HAL_MODULE_TIE:
 		printf("%s: %s/%s and %s/%s declare it alike, and the HAL "
 		       "chooses neither\n", at, c.pool, c.module, c.pool,
 		       c.rival);
 		break;
 	case HAL_MODULE_NONE:
-		printf("%s: no module of %s declares it\n", at, c.pool);
+		if (l >= 0)
+			printf("%s: no module of the bundle's %s declares it, and "
+			       "the HAL's line leaves class %06x/%06x to "
+			       "others\n", at, c.pool, (unsigned)leaves[l].code,
+			       (unsigned)leaves[l].mask);
+		else if (n_waiting < HAL_MAX_WAITING) {
+			waiting[n_waiting++] = *dev;
+			printf("%s: no module of the bundle's %s declares it; the "
+			       "disk's are read once \"/\" is served\n", at,
+			       c.pool);
+		} else
+			printf("%s: no module of the bundle's %s declares it, and "
+			       "%d devices wait for the disk already\n", at,
+			       c.pool, HAL_MAX_WAITING);
 		break;
 	default:
 		printf("%s: its pool, %s, could not be read\n", at, c.pool);
 		break;
 	}
+}
+
+/*
+ * #964: a port the name server tells, once, when "/" is mounted -- at once if
+ * it is -- or MACH_PORT_NULL when no device waits for the disk, or the name
+ * server would not watch, said.  The HAL alone holds it, and the name server
+ * the one send-once right to it: a message on it is the name server's.
+ */
+mach_port_t
+hal_modules_disk_watch(void)
+{
+	mach_port_t	watch = MACH_PORT_NULL;
+	kern_return_t	kr;
+
+	if (n_waiting == 0)
+		return MACH_PORT_NULL;
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&watch);
+	if (kr == KERN_SUCCESS)
+		kr = netname_notify_mount(name_server_port, "/", watch);
+	if (kr != KERN_SUCCESS) {
+		printf("hal: \"/\" could not be watched (0x%x): %d device(s) "
+		       "wait for the disk's pools for good (#964)\n", kr,
+		       n_waiting);
+		if (watch != MACH_PORT_NULL)
+			(void)mach_port_mod_refs(mach_task_self(), watch,
+						 MACH_PORT_RIGHT_RECEIVE, -1);
+		return MACH_PORT_NULL;
+	}
+	printf("hal: %d device(s) wait for the disk's pools, read once \"/\" "
+	       "is served (#964)\n", n_waiting);
+	return watch;
+}
+
+/*
+ * #964: "/" is served: each device that waited is decided from the disk's
+ * pools, and started as one from the bundle's would be, with the bytes read
+ * from the disk.
+ */
+void
+hal_modules_disk_served(void)
+{
+	struct hal_module_choice	c;
+	char				at[48];
+	int				i;
+
+	printf("hal: \"/\" is served: the disk's pools are read for %d "
+	       "device(s) (#964)\n", n_waiting);
+	for (i = 0; i < n_waiting; i++) {
+		const struct hal_device_info *dev = &waiting[i];
+
+		device_at(dev, at, sizeof at);
+		switch (hal_module_for(dev, &c, 1)) {
+		case HAL_MODULE_ONE:
+			printf("%s: %s/%s, on the disk, declares it, %s\n", at,
+			       c.pool, c.module,
+			       chora_start(dev, c.pool, c.module, 1) == 0 ?
+			       "and its chora is started" :
+			       "and its chora could not be started");
+			break;
+		case HAL_MODULE_TIE:
+			printf("%s: %s/%s and %s/%s, on the disk, declare it "
+			       "alike, and the HAL chooses neither\n", at,
+			       c.pool, c.module, c.pool, c.rival);
+			break;
+		case HAL_MODULE_NONE:
+			printf("%s: no module of %s, in the bundle or on the "
+			       "disk, declares it\n", at, c.pool);
+			break;
+		default:
+			printf("%s: its pool on the disk, %s, could not be "
+			       "read\n", at, c.pool);
+			break;
+		}
+	}
+	n_waiting = 0;
 }
