@@ -43,12 +43,4 @@
  */
 typedef char module_name_t[MODULE_NAME_MAX];
 
-/*
- * #964: bootstrap_load_program()'s arguments, `type bootstrap_argv_t =
- * c_string[*:256]' in bootstrap.defs, visible before <mach/bootstrap.h> as
- * module_name_t is.
- */
-#define BOOTSTRAP_ARGV_MAX	256
-typedef char bootstrap_argv_t[BOOTSTRAP_ARGV_MAX];
-
 #endif /* _MACH_MODULE_POOL_H_ */
