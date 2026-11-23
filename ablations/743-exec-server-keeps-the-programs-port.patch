@@ -5,12 +5,12 @@ Run: --entry 14 600 -smp 4
 Expect: cap_test: \[42\] WRONG — the slots were [0-9]+ before the exec and [0-9]+ after both ports were given back and 200 wait\(s\) of 10 ms
 
 diff --git a/uros/src/servers/exec_server/exec_load.c b/uros/src/servers/exec_server/exec_load.c
-index aee95556..3a699788 100644
+index e6f56de3..121da86f 100644
 --- a/uros/src/servers/exec_server/exec_load.c
 +++ b/uros/src/servers/exec_server/exec_load.c
-@@ -461,11 +461,6 @@ derive_cap_port(mach_port_t new_task, const elf_image_t *img,
-            path ? path : "(?)", (unsigned)cap_port, blen,
-            (blob == &default_manifest_blob) ? ", default" : "");
+@@ -725,11 +725,6 @@ derive_cap_port(mach_port_t new_task, const elf_image_t *img,
+            (blob == &default_manifest_blob) ? ", default" :
+            (blob == manifest) ? ", its caller's" : "");
  
 -    /*
 -     * The task holds the port now; this copy would keep it from ever having

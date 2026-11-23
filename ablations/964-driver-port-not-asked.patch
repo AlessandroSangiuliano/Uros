@@ -1,16 +1,17 @@
 Kind: ablation
 Issue: #964
-Takes out: bootstrap's asking the kernel for the driver's port at start: no driver can be loaded, and bootstrap_load_program() says so.  driver_port_test's [8] is refused.
+Takes out: bootstrap's asking the kernel for the driver's port at start: the drivers' bootstrap port answers no device port, and no driver reaches its device.  driver_port_test's child finds its device slot empty.
 Run: --entry 14 600 -smp 4
-Expect: driver_port_test: \[8\] bootstrap loaded this program, "child", into a task of this one's, as a driver: 0x5 -- WRONG
+Expect: driver_port_test: child: \[1\] bootstrap_ports\(\): 0x0, none in the device slot, none in the host slot -- WRONG
+Note: made again over 748feff4, where exec_server loads a driver and bootstrap keeps no state for one.
 
 diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
-index ebaf6411..79f9917c 100644
+index f8a88075..64586c2f 100644
 --- a/uros/src/servers/bootstrap/bootstrap.c
 +++ b/uros/src/servers/bootstrap/bootstrap.c
-@@ -927,8 +927,7 @@ main(int argc, char **argv)
- 	 * it no driver can be loaded, which do_bootstrap_load_program() says
- 	 * when asked; the servers of bootstrap.conf do not need it.
+@@ -924,8 +924,7 @@ main(int argc, char **argv)
+ 	 * the drivers' bootstrap port answers no device port, and no driver
+ 	 * reaches its device; the servers of bootstrap.conf do not need it.
  	 */
 -	kr = device_driver_port(bootstrap_master_device_port,
 -				&bootstrap_driver_device_port);
