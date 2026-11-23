@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #964
+Takes out: the module the HAL gives a chora: the port is made in the chora's task and its name given, and nothing is sent on it.  A chora asks nobody else for a module, so each finds its port empty, says so, and ends without claiming its device; a chora that fetched one by name would drive it anyway, and this arm would pass.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[2\] WRONG -- the HAL.s chora on the card, and 30 s on the kernel says nobody claims it
+Note: each chora's own line is "MODULE@BB:DD.F: no module given on port 0x...: whoever started this gave it none".
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+index 3f7543f7..394bbe86 100644
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -230,7 +230,13 @@ module_give(mach_port_t task, vm_offset_t data, mach_msg_type_number_t len,
+ 	    const char *where)
+ {
+ 	kern_return_t	kr;
+-	mach_port_t	box = chora_give_module(task, data, len, &kr);
++	mach_port_t	box = MACH_PORT_NULL;
++
++	(void)data;
++	(void)len;
++	kr = mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &box);
++	if (kr != KERN_SUCCESS)
++		box = MACH_PORT_NULL;
+ 
+ 	if (box == MACH_PORT_NULL)
+ 		printf("hal: the chora of %s could not be given its module "

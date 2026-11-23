@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: modload_load_given() loading the bytes it is given: it fetches a module of that name from bootstrap instead, as chora did before #964, and the module that runs is whatever the pool holds under the name and not what the HAL checked.  modload_test's [5] gives modload_a/only_a.so's bytes as modload_given/only_a.so, which bootstrap does not have, and gets nothing.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: modload_test: \[5\] modload_load_given\(\) of modload_a/only_a.so.s [0-9]+ bytes, as modload_given/only_a.so, gave nothing, where modload_a/only_a.so a was given -- WRONG
+Note: a chora still drives its device here, its module's name being in the bundle's pool: the same bytes as those given, which is why only a pool bootstrap lacks can tell the two apart.
+
+diff --git a/uros/src/lib/libmodload/modload.c b/uros/src/lib/libmodload/modload.c
+index bc7c2e8d..ead2e46d 100644
+--- a/uros/src/lib/libmodload/modload.c
++++ b/uros/src/lib/libmodload/modload.c
+@@ -409,6 +409,8 @@ modload_load_given(const char *class, const char *name, vm_offset_t data,
+ {
+ 	struct cached_module *cm;
+ 
++	if (data != 0)
++		return modload_load_named(class, name, sym_suffix);
+ 	if (strlen(class) >= MODULE_NAME_MAX || strlen(name) >= MODULE_NAME_MAX) {
+ 		printf("%s: module \"%s/%s\": a name longer than %u "
+ 		       "characters is no pool's\n", log_tag, class, name,
