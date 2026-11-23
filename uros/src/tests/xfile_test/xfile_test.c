@@ -831,6 +831,81 @@ xf_indirect_owner(const char *path, int arm)
 	}
 }
 
+/*
+ * [10] #964: vfs_readdir() of the directory `path' is in.  Read one entry a
+ * call, each call going on from the cookie the last gave, and again as many
+ * as a call brings: the file written is listed both times, as a regular
+ * file, and the two readings count as many entries.  One entry a call is
+ * fewer than the server sends, so it is the reading that leans on the cookie
+ * libvfs hands back.
+ */
+#define XF_LIST_CALLS	4096		/* a bound, for a cookie that never ends */
+
+static int
+xf_list(vfs_fd_t fd, unsigned int max, const char *leaf, int *found)
+{
+	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
+	uint64_t		cookie = 0;
+	int			n, i, total = 0, calls = 0;
+
+	*found = 0;
+	do {
+		n = vfs_readdir(fd, ents, max, &cookie);
+		if (n < 0)
+			return -1;
+		for (i = 0; i < n; i++)
+			if (strcmp(ents[i].d_name, leaf) == 0 &&
+			    ents[i].d_type == VFS_FT_REG)
+				(*found)++;
+		total += n;
+	} while (cookie != 0 && n > 0 && ++calls < XF_LIST_CALLS);
+	return cookie == 0 ? total : -2;
+}
+
+static void
+xf_listing(const char *path, int arm)
+{
+	char		dir[VFS_PATH_MAX];
+	const char	*slash = strrchr(path, '/');
+	vfs_fd_t	fd;
+	size_t		len;
+	int		one, all, found_one = 0, found_all = 0;
+
+	if (slash == NULL || (size_t)(slash - path) + 2 > sizeof dir) {
+		printf("%s: [%d] WRONG — not asked: %s has no directory\n", tag,
+		       arm, path);
+		failed++;
+		return;
+	}
+	len = slash == path ? 1 : (size_t)(slash - path);
+	memcpy(dir, path, len);
+	dir[len] = '\0';
+	if (vfs_open_rc(dir, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS) {
+		printf("%s: [%d] WRONG — not asked: %s would not open\n", tag,
+		       arm, dir);
+		failed++;
+		return;
+	}
+	one = xf_list(fd, 1, slash + 1, &found_one);
+	all = xf_list(fd, VFS_DIRENT_MAX, slash + 1, &found_all);
+	(void)vfs_close(fd);
+	if (one > 0 && one == all && found_one == 1 && found_all == 1) {
+		printf("%s: [%d] %s listed by vfs_readdir(), one entry a call "
+		       "and %d a call: %d entries both times, %s among them, "
+		       "once, a file\n", tag, arm, dir, VFS_DIRENT_MAX, one,
+		       slash + 1);
+		passed++;
+	} else {
+		printf("%s: [%d] WRONG — %s by vfs_readdir(): one entry a call "
+		       "%d entries, %s %d times; %d a call %d entries, %s %d "
+		       "times (-1 an error, -2 a reading that ended with a "
+		       "cookie left)\n",
+		       tag, arm, dir, one, slash + 1, found_one, VFS_DIRENT_MAX,
+		       all, slash + 1, found_all);
+		failed++;
+	}
+}
+
 static void
 xf_write(const char *path)
 {
@@ -898,6 +973,7 @@ xf_write(const char *path)
 	xf_owner_change(path, 7);
 	xf_neighbour_inodes(path, 8);
 	xf_indirect_owner(path, 9);
+	xf_listing(path, 10);
 }
 
 static void
