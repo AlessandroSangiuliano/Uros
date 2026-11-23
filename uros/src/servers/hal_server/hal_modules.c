@@ -46,6 +46,7 @@
 
 #include "hal_server.h"
 #include "chora_drives.h"
+#include "chora_given.h"		/* the module a chora is given */
 #include "libelf.h"
 #include "exec_types.h"			/* EXEC_OK */
 #include "exec.h"			/* exec_load_image */
@@ -163,26 +164,105 @@ blob_put(char *blob, size_t at, size_t cap, const char *s)
 }
 
 /*
+ * The module `file' of the pool `pool', as bytes, for a chora (#964): from
+ * bootstrap, which serves the bundle's pools.  0, or -1 said.
+ */
+static int
+module_fetch(const char *pool, const char *file, vm_offset_t *data,
+	     mach_msg_type_number_t *len)
+{
+	module_name_t	class_buf, name_buf;
+	kern_return_t	kr;
+
+	*data = 0;
+	*len = 0;
+	if (strlen(pool) >= sizeof class_buf || strlen(file) >= sizeof name_buf)
+		return -1;
+	strcpy(class_buf, pool);
+	strcpy(name_buf, file);
+	kr = bootstrap_get_module(bootstrap_port, class_buf, name_buf, data,
+				  len);
+	if (kr != KERN_SUCCESS || *len == 0) {
+		printf("hal: bootstrap would not give %s/%s again (0x%x) "
+		       "(#964)\n", pool, file, kr);
+		if (kr == KERN_SUCCESS && *data != 0)
+			(void)vm_deallocate(mach_task_self(), *data, *len);
+		*data = 0;
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * How well the module in `data' declares `dev', read from those bytes (#964):
+ * what a chora is given is what was checked for its device, and not a file
+ * read once and fetched again.  0 when it does not declare it, or nothing.
+ */
+static int
+module_score(const void *data, size_t size, const struct hal_device_info *dev)
+{
+	elf_image_t			img;
+	elf_shdr_view_t			sh;
+	struct chora_drives_fault	f;
+	struct chora_drives		d[CHORA_DRIVES_MAX];
+	int				n, score = 0;
+
+	memset(&img, 0, sizeof img);
+	if (elf_open(data, size, &img) != ELF_OK)
+		return 0;
+	if (elf_shdr_find(&img, CHORA_DRIVES_SECTION, &sh) == ELF_OK &&
+	    sh.data != NULL &&
+	    (n = chora_drives_check(sh.data, (size_t)sh.size, &f)) > 0) {
+		memcpy(d, sh.data, (size_t)n * sizeof d[0]);
+		score = chora_drives_score(d, n, dev->vendor_device,
+					   dev->class_rev);
+	}
+	elf_close(&img);
+	return score;
+}
+
+/*
+ * Give the chora in `task' its module (chora_given.h): the name of the port it
+ * was sent on, in the chora's task, or MACH_PORT_NULL said.
+ */
+static mach_port_t
+module_give(mach_port_t task, vm_offset_t data, mach_msg_type_number_t len,
+	    const char *where)
+{
+	kern_return_t	kr;
+	mach_port_t	box = chora_give_module(task, data, len, &kr);
+
+	if (box == MACH_PORT_NULL)
+		printf("hal: the chora of %s could not be given its module "
+		       "(0x%x) (#964)\n", where, kr);
+	return box;
+}
+
+/*
  * A chora for `dev', told the module `file' of the pool `pool' (#964): 0 when
  * it is started, -1 said.  The task is made here, given the drivers' bootstrap
  * port -- the driver's port, never the master port -- and loaded by exec_server
  * from chora's image, with a manifest naming this one function, which
- * exec_server cuts to the HAL's `delegatable' line.  It is recorded and its
- * death asked before its thread runs, so that the HAL hears of every end.
+ * exec_server cuts to the HAL's `delegatable' line.  It is given the module's
+ * bytes, read again here and checked again for `dev', on a port of its own
+ * whose name is its fifth argument.  It is recorded and its death asked
+ * before its thread runs, so that the HAL hears of every end.
  */
 static int
 chora_start(const struct hal_device_info *dev, const char *pool,
 	    const char *file)
 {
 	static const char	envp_blob[] = "";
-	char			argv_blob[3 * MODULE_NAME_MAX + 16];
-	char			module[MODULE_NAME_MAX], where[16];
+	char			argv_blob[3 * MODULE_NAME_MAX + 32];
+	char			module[MODULE_NAME_MAX], where[16], boxname[16];
 	char			blob[256];
 	cap_manifest_entry_t	want;
 	unsigned int		blen;
 	size_t			n, at = 0;
 	mach_port_t		task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
-	mach_port_t		prev = MACH_PORT_NULL;
+	mach_port_t		prev = MACH_PORT_NULL, box = MACH_PORT_NULL;
+	vm_offset_t		mod = 0;
+	mach_msg_type_number_t	mod_len = 0;
 	kern_return_t		kr;
 	int			rc = EXEC_OK, i, slot = -1;
 
@@ -207,13 +287,6 @@ chora_start(const struct hal_device_info *dev, const char *pool,
 	module[n] = '\0';
 	(void)snprintf(where, sizeof where, "%02x:%02x.%x", dev->bus,
 		       dev->slot, dev->func);
-	at = blob_put(argv_blob, at, sizeof argv_blob, "chora");
-	at = blob_put(argv_blob, at, sizeof argv_blob, pool);
-	at = blob_put(argv_blob, at, sizeof argv_blob, module);
-	at = blob_put(argv_blob, at, sizeof argv_blob, where);
-	if (at >= sizeof argv_blob)
-		return -1;
-	argv_blob[at++] = '\0';
 
 	memset(&want, 0, sizeof want);
 	want.type = RESOURCE_PCI_FUNCTION;
@@ -227,9 +300,37 @@ chora_start(const struct hal_device_info *dev, const char *pool,
 		return -1;
 	}
 
+	/* The module the chora will be given, and what it declares, again. */
+	if (module_fetch(pool, file, &mod, &mod_len) != 0)
+		return -1;
+	if (module_score((const void *)mod, mod_len, dev) <= 0) {
+		printf("hal: %s/%s, as bootstrap gives it now, does not declare "
+		       "%s: no chora is started (#964)\n", pool, file, where);
+		(void)vm_deallocate(mach_task_self(), mod, mod_len);
+		return -1;
+	}
+
 	kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
 	if (kr == KERN_SUCCESS)
 		kr = task_set_bootstrap_port(task, drivers_bootstrap);
+	if (kr == KERN_SUCCESS) {
+		box = module_give(task, mod, mod_len, where);
+		if (box == MACH_PORT_NULL)
+			kr = KERN_FAILURE;
+	}
+	(void)vm_deallocate(mach_task_self(), mod, mod_len);
+	if (kr == KERN_SUCCESS) {
+		(void)snprintf(boxname, sizeof boxname, "0x%x", (unsigned)box);
+		at = blob_put(argv_blob, at, sizeof argv_blob, "chora");
+		at = blob_put(argv_blob, at, sizeof argv_blob, pool);
+		at = blob_put(argv_blob, at, sizeof argv_blob, module);
+		at = blob_put(argv_blob, at, sizeof argv_blob, where);
+		at = blob_put(argv_blob, at, sizeof argv_blob, boxname);
+		if (at >= sizeof argv_blob)
+			kr = KERN_INVALID_ARGUMENT;
+		else
+			argv_blob[at++] = '\0';
+	}
 	if (kr == KERN_SUCCESS)
 		kr = exec_load_image(exec_image, task, mach_cap_port,
 				     (pointer_t)chora_image, chora_image_len,

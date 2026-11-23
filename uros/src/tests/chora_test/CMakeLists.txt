@@ -58,6 +58,7 @@ target_include_directories(chora_test_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/src/servers/hal_server
   ${CMAKE_SOURCE_DIR}/src/lib/libpci
+  ${CMAKE_SOURCE_DIR}/src/lib/libdriver          # chora_given.h, #964
   ${CMAKE_SOURCE_DIR}/src/servers/exec_server
   ${_CT_OUT}
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach

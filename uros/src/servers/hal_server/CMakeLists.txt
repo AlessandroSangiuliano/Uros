@@ -224,8 +224,9 @@ target_compile_definitions(hal_server PRIVATE
   MACH_IPC_COMPAT=0
 )
 
-# chora_drives.h only, of libdriver's headers (#964): the HAL reads what a
-# module declares and links nothing of libdriver.
+# chora_drives.h and chora_given.h only, of libdriver's headers (#964): the
+# HAL reads what a module declares and gives a chora its module, and links
+# nothing of libdriver.
 target_include_directories(hal_server PRIVATE ${HAL_INCLUDE_DIRS}
   ${CMAKE_SOURCE_DIR}/src/lib/libdriver
   ${CMAKE_SOURCE_DIR}/src/servers/exec_server

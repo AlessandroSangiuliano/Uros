@@ -66,6 +66,7 @@
 #include "hal_server.h"			/* struct hal_device_info */
 #include "hal.h"			/* hal_list_devices() */
 #include "exec.h"			/* exec_load_image() */
+#include "chora_given.h"		/* chora_give_module() */
 #include "exec_types.h"			/* EXEC_OK */
 
 /*
@@ -246,22 +247,23 @@ blob_add(char *blob, size_t at, size_t cap, const char *s)
  * A chora on `bdf' with the module `module' of the class `class', started the
  * way the HAL starts one (#964): a task made here, given the drivers' bootstrap
  * port, and loaded by exec_server from chora's image, which bootstrap gives,
- * with a manifest naming this one function.  So it holds the driver's port and
- * the one capability, as the HAL's does, and passes the checks every driver
- * makes as it starts.  Its first thread is resumed.
+ * with a manifest naming this one function, and given its module's bytes,
+ * from bootstrap, on a port of its own.  So it holds the driver's port and the
+ * one capability, as the HAL's does, and passes the checks every driver makes
+ * as it starts.  Its first thread is resumed.
  */
 static kern_return_t
 start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 	    const char *module, mach_port_t *task_out, int *rc_out)
 {
 	static char		envp_blob[] = "";
-	char			blob[64], where[8], manifest[256];
+	char			blob[80], where[8], manifest[256], boxname[16];
 	size_t			at = 0;
 	mach_port_t		task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
-	mach_port_t		drivers = MACH_PORT_NULL;
-	vm_offset_t		image = 0;
-	mach_msg_type_number_t	image_len = 0;
-	module_name_t		prog;
+	mach_port_t		drivers = MACH_PORT_NULL, box = MACH_PORT_NULL;
+	vm_offset_t		image = 0, mod = 0;
+	mach_msg_type_number_t	image_len = 0, mod_len = 0;
+	module_name_t		prog, class_buf, file_buf;
 	cap_manifest_entry_t	want;
 	unsigned int		mlen;
 	kern_return_t		kr;
@@ -270,13 +272,11 @@ start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 	(void)snprintf(where, sizeof where, "%02x:%02x.%x",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
-	at = blob_add(blob, at, sizeof blob, "chora");
-	at = blob_add(blob, at, sizeof blob, class);
-	at = blob_add(blob, at, sizeof blob, module);
-	at = blob_add(blob, at, sizeof blob, where);
-	if (at >= sizeof blob)
+	if (strlen(class) >= sizeof class_buf ||
+	    (size_t)snprintf(file_buf, sizeof file_buf, "%s.so", module)
+	    >= sizeof file_buf)
 		return KERN_INVALID_ARGUMENT;
-	blob[at++] = '\0';
+	strcpy(class_buf, class);
 	memset(&want, 0, sizeof want);
 	want.type = RESOURCE_PCI_FUNCTION;
 	want.resource_id = bdf;
@@ -292,9 +292,26 @@ start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 		kr = bootstrap_get_program(bootstrap_port, prog, &image,
 					   &image_len);
 	if (kr == KERN_SUCCESS)
+		kr = bootstrap_get_module(bootstrap_port, class_buf, file_buf,
+					  &mod, &mod_len);
+	if (kr == KERN_SUCCESS)
 		kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
 	if (kr == KERN_SUCCESS)
 		kr = task_set_bootstrap_port(task, drivers);
+	if (kr == KERN_SUCCESS)
+		box = chora_give_module(task, mod, mod_len, &kr);
+	if (kr == KERN_SUCCESS) {
+		(void)snprintf(boxname, sizeof boxname, "0x%x", (unsigned)box);
+		at = blob_add(blob, at, sizeof blob, "chora");
+		at = blob_add(blob, at, sizeof blob, class);
+		at = blob_add(blob, at, sizeof blob, module);
+		at = blob_add(blob, at, sizeof blob, where);
+		at = blob_add(blob, at, sizeof blob, boxname);
+		if (at >= sizeof blob)
+			kr = KERN_INVALID_ARGUMENT;
+		else
+			blob[at++] = '\0';
+	}
 	if (kr == KERN_SUCCESS)
 		kr = exec_load_image(image_port, task, mach_cap_port,
 				     (pointer_t)image, image_len,
@@ -309,6 +326,8 @@ start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 		(void)mach_port_deallocate(mach_task_self(), thread);
 	if (image != 0)
 		(void)vm_deallocate(mach_task_self(), image, image_len);
+	if (mod != 0)
+		(void)vm_deallocate(mach_task_self(), mod, mod_len);
 	if (MACH_PORT_VALID(drivers))
 		(void)mach_port_deallocate(mach_task_self(), drivers);
 	if (kr != KERN_SUCCESS || rc != EXEC_OK) {
