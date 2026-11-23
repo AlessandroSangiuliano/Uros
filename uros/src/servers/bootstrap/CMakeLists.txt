@@ -856,14 +856,15 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
-            # #963: the test that starts chora, chora's test module in the
-            # pool of its class, and a module of that class no chora is told
-            # to load, which a chora that loaded its class would load too.
+            # #963: the test of the HAL's choras, and a module of the network
+            # class no chora is told to load, which a chora that loaded its
+            # class would load too.  chora_probe, the card's module, is on the
+            # disk and in no pool here (make-disk-x86_64.sh, #964): a card's
+            # chora shows a module the HAL read from the disk.
             chora_test:${_SBIN}/chora_test
             # #964: and chora itself, whose image the HAL hands exec_server:
             # a driver starts before any disk is served.
             chora:${_SBIN}/chora
-            modules/net/chora_probe.so:${_MOD}/net/chora_probe.so
             modules/net/chora_absent.so:${_MOD}/net/chora_absent.so
             # #973: libmodload's test, and its two pools, each with a
             # twin.so and a module of its own.
@@ -901,8 +902,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             driver_port_test_bin
             ${_IPC_BENCH_DEP}
             ${_CONF}
-            # #963: chora is on the disk, which make-disk-x86_64.sh refuses
-            # without it, and run-x86_64.sh builds the bundle, not ALL.
+            # #964: chora_probe is on the disk, which make-disk-x86_64.sh
+            # refuses without it, and run-x86_64.sh builds the bundle, not ALL.
             ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
             chora_probe_module chora_absent_module chora_bin
             modload_test_bin modload_test_twin_a modload_test_twin_b

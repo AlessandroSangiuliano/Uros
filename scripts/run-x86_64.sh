@@ -651,7 +651,7 @@ must_report 'modload_test: started' 'modload_test: [0-9]* of [0-9]* arms passed'
 # #977: and edu_probe's chora, on QEMU's educational device, in a pair of its
 # own: the pair above is met by the network card's chora alone, and the boot
 # ends on chora_test's count, which may come before edu_probe's last line.
-must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
+must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|.* did not load\)' \
 	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and three for each half of its DMA round trip, and says so either way (#977, #978).' \
 	edu_probe
 
@@ -660,17 +660,23 @@ must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_
 # line must end in: the network card's chora_probe, which declares QEMU's two
 # cards by vendor and device, and edu's edu_probe, on a board with --edu.  A
 # HAL that decided otherwise writes the device's line all the same, with
-# another ending, and the pair says which.
-must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: net/chora_probe\.so declares it' \
-	'The HAL named the network card and did not say that chora_probe drives it, which declares the card by its vendor and device: its line says what it decided instead (#964).' \
+# another ending, and the pair says which.  chora_probe is on the disk and in
+# no pool of the bundle: at its scan the HAL finds none for the card, and
+# leaves it to others or waits for "/"; once "/" is served it reads the disk's
+# pools for the devices that waited, which the second pair asks for the card.
+must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: no module of the bundle.s net declares it' \
+	'The HAL named the network card and did not say that no module of the bundle declares it, chora_probe being on the disk alone: its line says what it decided instead (#964).' \
 	'the HAL on the network card'
+must_report 'hal: "/" is served: the disk.s pools are read' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: \(net/chora_probe\.so, on the disk, declares it\|no module of the bundle.s net declares it, and the HAL.s line leaves class 020000\)' \
+	'The HAL read the disk.s pools and did not say that chora_probe, on the disk, declares the card, nor had it left the card to others: its line says what it decided instead (#964).' \
+	'the HAL on the card, from the disk'
 must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class [0-9a-f]*: misc/edu_probe\.so declares it' \
 	'The HAL named the edu device and did not say that edu_probe drives it, which declares edu by its vendor and device: its line says what it decided instead (#964).' \
 	'the HAL on edu'
 # And where the HAL's line leaves the network class to others, the card is left:
 # irq_claim_test drives it there, and a chora the HAL started would fight it for
 # the claim.  The pair's first line is the HAL's own, said only in those lists.
-must_report 'hal: class 0x020000 left to others by its line' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: net/chora_probe\.so declares it, and the HAL.s line leaves class 020000' \
+must_report 'hal: class 0x020000 left to others by its line' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: no module of the bundle.s net declares it, and the HAL.s line leaves class 020000' \
 	'The HAL was told to leave the network class to others and did not say the card was left: its line says what it decided instead (#964).' \
 	'the HAL leaving the card'
 

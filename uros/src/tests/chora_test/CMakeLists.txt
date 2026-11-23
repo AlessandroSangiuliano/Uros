@@ -74,6 +74,8 @@ target_include_directories(chora_test_bin PRIVATE
 
 target_link_libraries(chora_test_bin PRIVATE
   -Wl,--start-group
+  libvfs		# #964: the card's module, read from the disk
+  libflipc2
   libpthreads
   libmach
   libcap

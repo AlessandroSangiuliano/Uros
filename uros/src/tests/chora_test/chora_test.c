@@ -30,17 +30,25 @@
  * chora holds is what this task may give (#743).
  *
  *   [1] the HAL names the network card;
- *   [2] the HAL's chora claims it: the kernel says the card is claimed within
- *       30 s, and this task never started one;
+ *   [2] the HAL's chora claims it: once "/" is served -- the card's module is
+ *       on the disk (#964) -- the kernel says the card is claimed within 30 s,
+ *       and this task never started one;
  *   [3] the HAL says its driver is the task named after the card, read with
  *       hal_get_device_driver(): chora_probe@BB:DD.F;
- *   [4] a second chora on the same card, started here with exec_load(), ends
- *       within 30 s, and the card is still claimed -- the claim refused it;
+ *   [4] a second chora on the same card, started here the HAL's way, with the
+ *       card's module read from the disk, ends within 30 s, and the card is
+ *       still claimed -- the claim refused it;
+ *   [7] the card's module is on the disk alone: bootstrap gives no
+ *       net/chora_probe.so, the disk holds it, and [3]'s driver drives the
+ *       card -- a module the HAL read from the disk (#964);
  *   [5] the HAL names QEMU's edu device, vendor 1234h and device 11e8h,
  *       which has MSI and no MSI-X table (run-x86_64.sh --edu);
  *   [6] the HAL's chora claims it within 30 s, and the HAL says its driver is
  *       edu_probe@BB:DD.F.  That its module took the interrupt by message is
- *       edu_probe's line, the merge test's to read (#977).
+ *       edu_probe's line, the merge test's to read (#977);
+ *   [8] edu's module is in the bundle alone: bootstrap gives
+ *       misc/edu_probe.so, the disk holds none, and [6]'s driver drives edu --
+ *       a module of the bundle, started at the HAL's scan.
  *
  * chora's own lines -- the claim, the region, the interrupt, the second
  * one's refusal -- and the kernel's line naming both tasks are the merge
@@ -57,6 +65,8 @@
 #include <mach_init.h>			/* name_server_port */
 #include <servers/netname.h>
 #include <servers/netname_defs.h>	/* NETNAME_SUCCESS, netname_name_t */
+#include <libvfs.h>			/* the disk's pools, #964 */
+#include <mach/module_pool.h>		/* module_name_t */
 #include <libcap.h>			/* mach_cap_port */
 #include <stdarg.h>
 #include <stdio.h>
@@ -79,6 +89,8 @@ mach_port_t	master_device;
 #define CT_EDU_ID	0x11E81234u	/* QEMU's edu: device 11e8h, vendor 1234h */
 #define CT_HAL_TRIES	200
 #define CT_WAIT_STEPS	300		/* of 100 ms: 30 s */
+#define CT_ROOT_WAIT_MS	120000		/* "/" has 120 s, as mount_test gives it */
+#define CT_DISK_POOLS	"/mach_servers/modules/"	/* the HAL's, #964 */
 
 static int	arms_run;
 static int	arms_passed;
@@ -247,23 +259,24 @@ blob_add(char *blob, size_t at, size_t cap, const char *s)
  * A chora on `bdf' with the module `module' of the class `class', started the
  * way the HAL starts one (#964): a task made here, given the drivers' bootstrap
  * port, and loaded by exec_server from chora's image, which bootstrap gives,
- * with a manifest naming this one function, and given its module's bytes,
- * from bootstrap, on a port of its own.  So it holds the driver's port and the
- * one capability, as the HAL's does, and passes the checks every driver makes
- * as it starts.  Its first thread is resumed.
+ * with a manifest naming this one function, and given the module's bytes
+ * `mod', `mod_len', on a port of its own.  So it holds the driver's port and
+ * the one capability, as the HAL's does, and passes the checks every driver
+ * makes as it starts.  Its first thread is resumed.
  */
 static kern_return_t
 start_chora(mach_port_t image_port, natural_t bdf, const char *class,
-	    const char *module, mach_port_t *task_out, int *rc_out)
+	    const char *module, vm_offset_t mod, mach_msg_type_number_t mod_len,
+	    mach_port_t *task_out, int *rc_out)
 {
 	static char		envp_blob[] = "";
 	char			blob[80], where[8], manifest[256], boxname[16];
 	size_t			at = 0;
 	mach_port_t		task = MACH_PORT_NULL, thread = MACH_PORT_NULL;
 	mach_port_t		drivers = MACH_PORT_NULL, box = MACH_PORT_NULL;
-	vm_offset_t		image = 0, mod = 0;
-	mach_msg_type_number_t	image_len = 0, mod_len = 0;
-	module_name_t		prog, class_buf, file_buf;
+	vm_offset_t		image = 0;
+	mach_msg_type_number_t	image_len = 0;
+	module_name_t		prog;
 	cap_manifest_entry_t	want;
 	unsigned int		mlen;
 	kern_return_t		kr;
@@ -272,11 +285,6 @@ start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 	(void)snprintf(where, sizeof where, "%02x:%02x.%x",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
-	if (strlen(class) >= sizeof class_buf ||
-	    (size_t)snprintf(file_buf, sizeof file_buf, "%s.so", module)
-	    >= sizeof file_buf)
-		return KERN_INVALID_ARGUMENT;
-	strcpy(class_buf, class);
 	memset(&want, 0, sizeof want);
 	want.type = RESOURCE_PCI_FUNCTION;
 	want.resource_id = bdf;
@@ -291,9 +299,6 @@ start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 	if (kr == KERN_SUCCESS)
 		kr = bootstrap_get_program(bootstrap_port, prog, &image,
 					   &image_len);
-	if (kr == KERN_SUCCESS)
-		kr = bootstrap_get_module(bootstrap_port, class_buf, file_buf,
-					  &mod, &mod_len);
 	if (kr == KERN_SUCCESS)
 		kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
 	if (kr == KERN_SUCCESS)
@@ -326,8 +331,6 @@ start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 		(void)mach_port_deallocate(mach_task_self(), thread);
 	if (image != 0)
 		(void)vm_deallocate(mach_task_self(), image, image_len);
-	if (mod != 0)
-		(void)vm_deallocate(mach_task_self(), mod, mod_len);
 	if (MACH_PORT_VALID(drivers))
 		(void)mach_port_deallocate(mach_task_self(), drivers);
 	if (kr != KERN_SUCCESS || rc != EXEC_OK) {
@@ -339,6 +342,97 @@ start_chora(mach_port_t image_port, natural_t bdf, const char *class,
 	}
 	*task_out = task;
 	return KERN_SUCCESS;
+}
+
+/*
+ * #964: whether "/" is mounted within CT_ROOT_WAIT_MS, on the name server's
+ * word: netname_notify_mount(), and its one message, waited for with a bound.
+ */
+static int
+root_served(void)
+{
+	netname_notify_msg_t	m;
+	mach_port_t		recv = MACH_PORT_NULL;
+	kern_return_t		kr;
+	int			ok = 0;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&recv);
+	if (kr == KERN_SUCCESS)
+		kr = netname_notify_mount(name_server_port, "/", recv);
+	if (kr == KERN_SUCCESS) {
+		memset(&m, 0, sizeof m);
+		kr = mach_msg(&m.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof m, recv, CT_ROOT_WAIT_MS, MACH_PORT_NULL);
+		if (kr == KERN_SUCCESS) {
+			ok = (m.head.msgh_id == NETNAME_NOTIFY_MOUNT_MSID);
+			mach_msg_destroy(&m.head);
+		}
+	}
+	if (MACH_PORT_VALID(recv))
+		(void)mach_port_mod_refs(mach_task_self(), recv,
+					 MACH_PORT_RIGHT_RECEIVE, -1);
+	return ok;
+}
+
+/* #964: a module of the disk's pools, CT_DISK_POOLS<pool>/<file>, whole. */
+static kern_return_t
+disk_module(const char *pool, const char *file, vm_offset_t *data,
+	    mach_msg_type_number_t *len)
+{
+	char		path[VFS_PATH_MAX];
+	vfs_stat_t	st;
+	vfs_fd_t	fd;
+	vm_offset_t	buf = 0;
+	uint64_t	done = 0;
+	ssize_t		r;
+
+	(void)snprintf(path, sizeof path, "%s%s/%s", CT_DISK_POOLS, pool, file);
+	fd = vfs_open(path, VFS_O_RDONLY, 0);
+	if (fd == VFS_FD_INVALID)
+		return KERN_INVALID_NAME;
+	if (vfs_fstat(fd, &st) != 0 || st.st_size == 0 ||
+	    st.st_size > CHORA_GIVEN_MODULE_MAX ||
+	    vm_allocate(mach_task_self(), &buf, (vm_size_t)st.st_size, TRUE)
+	    != KERN_SUCCESS) {
+		(void)vfs_close(fd);
+		return KERN_INVALID_VALUE;
+	}
+	while (done < st.st_size &&
+	       (r = vfs_read(fd, (char *)buf + done,
+			     (size_t)(st.st_size - done))) > 0)
+		done += (uint64_t)r;
+	(void)vfs_close(fd);
+	if (done != st.st_size) {
+		(void)vm_deallocate(mach_task_self(), buf, (vm_size_t)st.st_size);
+		return KERN_FAILURE;
+	}
+	*data = buf;
+	*len = (mach_msg_type_number_t)done;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #964: where a module is: whether bootstrap gives `pool'/`file' from the
+ * bundle, and whether the disk's pools hold it.
+ */
+static void
+module_where(const char *pool, const char *file, int *in_bundle, int *on_disk)
+{
+	module_name_t		c, f;
+	vm_offset_t		data = 0;
+	mach_msg_type_number_t	len = 0;
+	char			path[VFS_PATH_MAX];
+	vfs_stat_t		st;
+
+	strcpy(c, pool);
+	strcpy(f, file);
+	*in_bundle = bootstrap_get_module(bootstrap_port, c, f, &data, &len)
+		     == KERN_SUCCESS;
+	if (*in_bundle && data != 0)
+		(void)vm_deallocate(mach_task_self(), data, len);
+	(void)snprintf(path, sizeof path, "%s%s/%s", CT_DISK_POOLS, pool, file);
+	*on_disk = vfs_stat(path, &st) == 0;
 }
 
 /* Whether somebody holds a claim on `bdf'; this task holds none. */
@@ -372,8 +466,11 @@ run_the_arms(void)
 	mach_port_t	second = MACH_PORT_NULL;
 	natural_t	bdf = 0, edu = 0;
 	char		name[URMACH_TASK_NAME_MAX], want[URMACH_TASK_NAME_MAX];
+	char		card_driver[URMACH_TASK_NAME_MAX];
+	vm_offset_t	mod = 0;
+	mach_msg_type_number_t mod_len = 0;
 	kern_return_t	kr;
-	int		i, rc = 0;
+	int		i, rc = 0, in_bundle, on_disk, card_ok;
 
 	kr = bootstrap_ports(bootstrap_port, &host, &master_device,
 			     &root_wired, &root_paged, &security);
@@ -384,7 +481,13 @@ run_the_arms(void)
 	if (!find_the_card(&bdf))
 		return;
 
-	/* [2] */
+	/* [2]: the card's module is on the disk, read once "/" is served */
+	if (!root_served()) {
+		verdict(2, 0, "no \"/\" in %u s, and the card's module is on "
+			"the disk, which the HAL reads once \"/\" is served",
+			CT_ROOT_WAIT_MS / 1000);
+		return;
+	}
 	for (i = 0; i < CT_WAIT_STEPS && !claimed(bdf); i++)
 		nap(100);
 	verdict(2, claimed(bdf), "the HAL's chora on the card, and %s",
@@ -396,7 +499,9 @@ run_the_arms(void)
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
 	hal_driver(bdf, want, name, sizeof name);
-	verdict(3, strcmp(name, want) == 0, "the HAL says the card's driver is "
+	card_ok = strcmp(name, want) == 0;
+	(void)snprintf(card_driver, sizeof card_driver, "%s", name);
+	verdict(3, card_ok, "the HAL says the card's driver is "
 		"\"%s\", and the card's name is \"%s\"", name, want);
 
 	/* [4]: a chora this task starts, the HAL's way */
@@ -410,7 +515,15 @@ run_the_arms(void)
 		not_asked(4, "exec_server's image port did not come in 30 s");
 		return;
 	}
-	kr = start_chora(exec_port, bdf, "net", "chora_probe", &second, &rc);
+	kr = disk_module("net", "chora_probe.so", &mod, &mod_len);
+	if (kr != KERN_SUCCESS) {
+		verdict(4, 0, "the card's module, %snet/chora_probe.so, could not "
+			"be read from the disk: 0x%x", CT_DISK_POOLS, kr);
+		return;
+	}
+	kr = start_chora(exec_port, bdf, "net", "chora_probe", mod, mod_len,
+			 &second, &rc);
+	(void)vm_deallocate(mach_task_self(), mod, mod_len);
 	if (kr != KERN_SUCCESS) {
 		verdict(4, 0, "a second chora did not start: kr 0x%x, result %d",
 			kr, rc);
@@ -424,7 +537,14 @@ run_the_arms(void)
 		"claimed by nobody");
 	(void)mach_port_deallocate(mach_task_self(), second);
 
-	/* [5], and [6] */
+	/* [7]: the card's module, on the disk alone */
+	module_where("net", "chora_probe.so", &in_bundle, &on_disk);
+	verdict(7, !in_bundle && on_disk && card_ok, "the card's module, "
+		"net/chora_probe.so, %s the bundle and %s the disk, and the "
+		"card's driver is \"%s\"", in_bundle ? "IS in" : "is not in",
+		on_disk ? "on" : "NOT on", card_driver);
+
+	/* [5], [6], and [8] */
 	if (!find_the_edu(&edu))
 		return;
 	for (i = 0; i < CT_WAIT_STEPS && !claimed(edu); i++)
@@ -438,6 +558,13 @@ run_the_arms(void)
 		"the device's name is \"%s\"", claimed(edu) ?
 		"which the kernel says is claimed" :
 		"which 30 s on nobody claims", name, want);
+
+	/* [8]: edu's module, in the bundle alone */
+	module_where("misc", "edu_probe.so", &in_bundle, &on_disk);
+	verdict(8, in_bundle && !on_disk && strcmp(name, want) == 0, "edu's "
+		"module, misc/edu_probe.so, %s the bundle and %s the disk, and "
+		"edu's driver is \"%s\"", in_bundle ? "is in" : "is NOT in",
+		on_disk ? "IS on" : "not on", name);
 }
 
 int
