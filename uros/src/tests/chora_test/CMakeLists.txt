@@ -44,6 +44,12 @@ add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs
                         ${_CT_OUT} CT_EXEC)
 list(APPEND CT_MIG_GENERATED ${CT_EXEC_GENERATED})
 
+# #964: a chora's control port, which [10] asks before and after the kill.
+set(CT_CHORA_GENERATED)
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/chora/chora.defs
+                        ${_CT_OUT} CT_CHORA)
+list(APPEND CT_MIG_GENERATED ${CT_CHORA_GENERATED})
+
 add_executable(chora_test_bin chora_test.c ${CT_MIG_GENERATED})
 
 target_compile_options(chora_test_bin PRIVATE

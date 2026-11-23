@@ -745,12 +745,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # start one on each device, with chora's image from this bundle (#964) --
   # then the disk and the root, and chora_test last, so that its last line
   # ends the run (run-x86_64.sh).  The HAL's line leaves no class to others
-  # here: the card and edu are its choras'.
+  # here: the card and edu are its choras'.  chora_test's line has -H, the
+  # master host port, for its [10] to find the card's chora among the tasks
+  # and kill it, as an administrator would (#964).
   # #973: modload_test before it, waited for (-w): libmodload is how a chora
   # fetches its module, and the test's two pools are in the bundle.
   set(_CHORA_CONF ${CMAKE_CURRENT_BINARY_DIR}/chora.conf)
   file(GENERATE OUTPUT ${_CHORA_CONF}
-       CONTENT "name_server name_server\ncap_server cap_server\nexec_server exec_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\n-w modload_test modload_test\n-D chora_test chora_test\n")
+       CONTENT "name_server name_server\ncap_server cap_server\nexec_server exec_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\n-w modload_test modload_test\n-H -D chora_test chora_test\n")
   set(_CHORA_TEST_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/chora_test.cmf")
   add_custom_command(

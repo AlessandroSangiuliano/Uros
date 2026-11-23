@@ -52,7 +52,12 @@
  *   [9] where the board has QEMU's pci-testdev (run-x86_64.sh --testdev),
  *       crash_probe, which dies at its start every time, is started by the
  *       HAL HAL_CHORA_STARTS_MAX times and then given up: get_driver_state()
- *       says HAL_DRIVER_GAVE_UP within 30 s, with that many starts (#964).
+ *       says HAL_DRIVER_GAVE_UP within 30 s, with that many starts (#964);
+ *  [10] the card's chora, killed by this task -- found by its name among the
+ *       tasks the master host port lists, which this line's -H gives -- is
+ *       started again by the HAL within 30 s, and its consumer's next
+ *       request is served: chora_status() on the control port looked up
+ *       again under the card's name, which the dead chora's answered too.
  *
  * chora's own lines -- the claim, the region, the interrupt, the second
  * one's refusal -- and the kernel's line naming both tasks are the merge
@@ -65,6 +70,7 @@
 #include <mach/mach_interface.h>	/* urmach_task_get_name() */
 #include <mach/task_info.h>
 #include <mach/task_name.h>		/* URMACH_TASK_NAME_MAX */
+#include <mach/mach_host.h>		/* processor_set_*(): [10] */
 #include <mach/thread_switch.h>
 #include <mach_init.h>			/* name_server_port */
 #include <servers/netname.h>
@@ -81,6 +87,7 @@
 #include "hal.h"			/* hal_list_devices() */
 #include "exec.h"			/* exec_load_image() */
 #include "chora_given.h"		/* chora_give_module() */
+#include "chora.h"			/* chora_status(): [10] */
 #include "exec_types.h"			/* EXEC_OK */
 
 /*
@@ -99,6 +106,10 @@ mach_port_t	master_device;
 
 static int	arms_run;
 static int	arms_passed;
+
+/* The card [1] found, for [10]. */
+static natural_t	card_bdf;
+static int		card_found;
 
 static void
 verdict(int arm, int ok, const char *fmt, ...)
@@ -485,6 +496,8 @@ run_the_arms(void)
 	}
 	if (!find_the_card(&bdf))
 		return;
+	card_bdf = bdf;
+	card_found = 1;
 
 	/* [2]: the card's module is on the disk, read once "/" is served */
 	if (!root_served()) {
@@ -624,12 +637,156 @@ the_crash_arm(void)
 		state, HAL_DRIVER_GAVE_UP, starts, HAL_CHORA_STARTS_MAX, kr);
 }
 
+/*
+ * #964 [10]: the task named `name' among those the master host port lists --
+ * this line's -H gives it -- terminated.  0, or why not.
+ */
+static const char *
+kill_by_name(const char *name)
+{
+	mach_port_t		host = MACH_PORT_NULL, dev = MACH_PORT_NULL;
+	mach_port_t		wired = MACH_PORT_NULL, paged = MACH_PORT_NULL;
+	mach_port_t		sec = MACH_PORT_NULL, pset_name = MACH_PORT_NULL;
+	mach_port_t		pset = MACH_PORT_NULL, me = mach_task_self();
+	task_port_array_t	tasks = 0;
+	mach_msg_type_number_t	ntasks = 0, i;
+	const char		*why = "no task of that name";
+	kern_return_t		kr;
+
+	kr = bootstrap_ports(bootstrap_port, &host, &dev, &wired, &paged, &sec);
+	if (kr == KERN_SUCCESS)
+		kr = processor_set_default(host, &pset_name);
+	if (kr == KERN_SUCCESS &&
+	    host_processor_set_priv(host, pset_name, &pset) != KERN_SUCCESS)
+		return "not asked: the host port this line has is not the master "
+		       "host port (no -H)";
+	if (kr == KERN_SUCCESS)
+		kr = processor_set_tasks(pset, &tasks, &ntasks);
+	if (kr != KERN_SUCCESS)
+		return "not asked: the tasks could not be listed";
+	for (i = 0; i < ntasks; i++) {
+		char			got[URMACH_TASK_NAME_MAX];
+		mach_msg_type_number_t	cnt = sizeof got;
+
+		memset(got, 0, sizeof got);
+		if (why != NULL && tasks[i] != me &&
+		    urmach_task_get_name(tasks[i], got, &cnt) == KERN_SUCCESS &&
+		    strcmp(got, name) == 0) {
+			why = task_terminate(tasks[i]) == KERN_SUCCESS ? NULL
+			      : "task_terminate() refused";
+		}
+		(void)mach_port_deallocate(me, tasks[i]);
+	}
+	if (tasks != 0)
+		(void)vm_deallocate(me, (vm_address_t)tasks,
+				    ntasks * sizeof(*tasks));
+	if (MACH_PORT_VALID(pset))
+		(void)mach_port_deallocate(me, pset);
+	if (MACH_PORT_VALID(pset_name))
+		(void)mach_port_deallocate(me, pset_name);
+	return why;
+}
+
+/* #964 [10]: chora_status() on the port checked in as `name', or why not. */
+static kern_return_t
+ask_chora(const char *name, mach_port_t *port, char *module, size_t size,
+	  unsigned int *bdf)
+{
+	mach_msg_type_number_t	cnt = (mach_msg_type_number_t)size;
+	kern_return_t		kr;
+
+	*port = MACH_PORT_NULL;
+	kr = netname_look_up(name_server_port, "", (char *)name, port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	memset(module, 0, size);
+	return chora_status(*port, module, &cnt, bdf);
+}
+
+static void
+the_kill_arm(void)
+{
+	char		name[URMACH_TASK_NAME_MAX], module[64];
+	mach_port_t	before = MACH_PORT_NULL, after = MACH_PORT_NULL;
+	mach_port_t	hal = MACH_PORT_NULL;
+	unsigned int	bdf = 0, bus, slot, func;
+	const char	*why;
+	kern_return_t	kr;
+	int		steps, state = -1, starts = -1, served = 0;
+
+	if (!card_found) {
+		not_asked(10, "no network card");
+		return;
+	}
+	bus = (unsigned)(card_bdf >> 8);
+	slot = (unsigned)((card_bdf >> 3) & 0x1F);
+	func = (unsigned)(card_bdf & 0x7);
+	(void)snprintf(name, sizeof name, "chora_probe@%02x:%02x.%x", bus, slot,
+		       func);
+
+	/* The consumer's request, to the chora as it runs. */
+	kr = ask_chora(name, &before, module, sizeof module, &bdf);
+	if (kr != KERN_SUCCESS || strcmp(module, "chora_probe") != 0 ||
+	    bdf != card_bdf) {
+		verdict(10, 0, "the card's chora, asked on the control port "
+			"checked in as \"%s\" before the kill: 0x%x, module "
+			"\"%s\", device 0x%x", name, kr, module, bdf);
+		return;
+	}
+
+	why = kill_by_name(name);
+	if (why != NULL) {
+		if (strncmp(why, "not asked", 9) == 0)
+			not_asked(10, why);
+		else
+			verdict(10, 0, "the card's chora \"%s\" not killed: %s",
+				name, why);
+		return;
+	}
+
+	/* The HAL starts it again; the consumer asks again, by the name. */
+	if (netname_look_up(name_server_port, "", (char *)"hal", &hal)
+	    != KERN_SUCCESS) {
+		verdict(10, 0, "the HAL's name is gone");
+		return;
+	}
+	for (steps = 0; steps < CT_WAIT_STEPS && !served; steps++) {
+		(void)hal_get_driver_state(hal, bus, slot, func, &state,
+					   &starts);
+		if (state == HAL_DRIVER_RUNNING && starts >= 2) {
+			kr = ask_chora(name, &after, module, sizeof module,
+				       &bdf);
+			served = kr == KERN_SUCCESS && after != before &&
+				 strcmp(module, "chora_probe") == 0 &&
+				 bdf == card_bdf;
+			if (!served && MACH_PORT_VALID(after))
+				(void)mach_port_deallocate(mach_task_self(),
+							   after);
+		}
+		if (!served)
+			nap(100);
+	}
+	(void)mach_port_deallocate(mach_task_self(), hal);
+	verdict(10, served && claimed(card_bdf), "the card's chora killed by "
+		"this task: the HAL says state %d (running is %d) after %d "
+		"start(s); asked again under \"%s\", %s, module \"%s\", device "
+		"0x%x; the card %s", state, HAL_DRIVER_RUNNING, starts, name,
+		served ? "a new port answered" : "no answer from a new port",
+		module, bdf, claimed(card_bdf) ? "claimed again" :
+		"claimed by nobody");
+	if (MACH_PORT_VALID(before))
+		(void)mach_port_deallocate(mach_task_self(), before);
+	if (served)
+		(void)mach_port_deallocate(mach_task_self(), after);
+}
+
 int
 main(void)
 {
 	printf("chora_test: started\n");
 	run_the_arms();
 	the_crash_arm();
+	the_kill_arm();
 	printf("chora_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
 }
