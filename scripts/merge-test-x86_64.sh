@@ -300,10 +300,10 @@ ENTRIES="
 65 harness - 1
 67 wakee
 67 wakee - 1
-68 chora --iommu_intel_--edu
-68 chora --iommu_intel_--edu 1
-70 chora --edu_--iommu_intel
-70 chora --edu_--iommu_amd
+68 chora --iommu_intel_--edu_--testdev
+68 chora --iommu_intel_--edu_--testdev 1
+70 chora --edu_--iommu_intel_--testdev
+70 chora --edu_--iommu_amd_--testdev
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -878,6 +878,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# #978: after a DMA round trip through it, at an address of the kind
 	# the boot's translation says; #417: and again within the 28 bits its
 	# reach is then declared as, and a buffer within 20 refused (chora_dma).
+	# #964: and --testdev, QEMU's pci-testdev, whose module crash_probe dies
+	# at its start every time: chora_test's [9] counts the HAL's starts of
+	# it up to its limit, and is in chora_test's count.
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&

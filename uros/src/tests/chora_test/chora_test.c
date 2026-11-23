@@ -48,7 +48,11 @@
  *       edu_probe's line, the merge test's to read (#977);
  *   [8] edu's module is in the bundle alone: bootstrap gives
  *       misc/edu_probe.so, the disk holds none, and [6]'s driver drives edu --
- *       a module of the bundle, started at the HAL's scan.
+ *       a module of the bundle, started at the HAL's scan;
+ *   [9] where the board has QEMU's pci-testdev (run-x86_64.sh --testdev),
+ *       crash_probe, which dies at its start every time, is started by the
+ *       HAL HAL_CHORA_STARTS_MAX times and then given up: get_driver_state()
+ *       says HAL_DRIVER_GAVE_UP within 30 s, with that many starts (#964).
  *
  * chora's own lines -- the claim, the region, the interrupt, the second
  * one's refusal -- and the kernel's line naming both tasks are the merge
@@ -87,6 +91,7 @@ mach_port_t	master_device;
 
 #define CT_NET_CLASS	0x020000u
 #define CT_EDU_ID	0x11E81234u	/* QEMU's edu: device 11e8h, vendor 1234h */
+#define CT_TESTDEV_ID	0x00051B36u	/* QEMU's pci-testdev: 0005h, 1b36h */
 #define CT_HAL_TRIES	200
 #define CT_WAIT_STEPS	300		/* of 100 ms: 30 s */
 #define CT_ROOT_WAIT_MS	120000		/* "/" has 120 s, as mount_test gives it */
@@ -567,11 +572,64 @@ run_the_arms(void)
 		on_disk ? "IS on" : "not on", name);
 }
 
+/*
+ * [9] (#964): crash_probe on the pci-testdev, started by the HAL again after
+ * each death, at most HAL_CHORA_STARTS_MAX times, then given up.  The delays
+ * add up to well under 30 s: 100, 200, 400 and 800 ms.
+ */
+static void
+the_crash_arm(void)
+{
+	vm_offset_t		buf = 0;
+	mach_msg_type_number_t	bytes = 0;
+	const struct hal_device_info *devs;
+	mach_port_t		hal = MACH_PORT_NULL;
+	unsigned int		n = 0, i, bus = 0, slot = 0, func = 0;
+	int			found = 0, state = -1, starts = -1, steps;
+	kern_return_t		kr = KERN_FAILURE;
+
+	if (!list_devices(9, &buf, &bytes, &n))
+		return;
+	devs = (const struct hal_device_info *)buf;
+	for (i = 0; i < n && !found; i++)
+		if (devs[i].vendor_device == CT_TESTDEV_ID) {
+			bus = devs[i].bus;
+			slot = devs[i].slot;
+			func = devs[i].func;
+			found = 1;
+		}
+	if (bytes != 0)
+		(void)vm_deallocate(mach_task_self(), buf, bytes);
+	if (!found) {
+		not_asked(9, "no pci-testdev on this board (run-x86_64.sh "
+			  "--testdev)");
+		return;
+	}
+	if (netname_look_up(name_server_port, "", (char *)"hal", &hal)
+	    != KERN_SUCCESS) {
+		verdict(9, 0, "the HAL's name is gone");
+		return;
+	}
+	for (steps = 0; steps < CT_WAIT_STEPS; steps++) {
+		kr = hal_get_driver_state(hal, bus, slot, func, &state, &starts);
+		if (kr != KERN_SUCCESS || state == HAL_DRIVER_GAVE_UP)
+			break;
+		nap(100);
+	}
+	(void)mach_port_deallocate(mach_task_self(), hal);
+	verdict(9, kr == KERN_SUCCESS && state == HAL_DRIVER_GAVE_UP &&
+		starts == HAL_CHORA_STARTS_MAX, "crash_probe on the pci-testdev "
+		"at %02x:%02x.%x: the HAL says state %d (given up is %d) after "
+		"%d start(s), where the limit is %d (0x%x)", bus, slot, func,
+		state, HAL_DRIVER_GAVE_UP, starts, HAL_CHORA_STARTS_MAX, kr);
+}
+
 int
 main(void)
 {
 	printf("chora_test: started\n");
 	run_the_arms();
+	the_crash_arm();
 	printf("chora_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
 }
