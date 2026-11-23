@@ -73,6 +73,16 @@
  * execve held on a file does not hold the next; with one thread, the second
  * waited until the first was let go.  Let go, the first comes back as a name
  * the liar does not have.
+ *
+ * ── Waiting for a mount (#964) ──
+ *
+ * [33] is netname_notify_mount(): a watcher of "/" is told at once, with "/"'s
+ * port; a watcher of /mount_test, which is not mounted then, is told nothing
+ * until the arm checks the mount in, and then the mount's port.  The name
+ * server sends each before it answers, so the arm receives without waiting,
+ * and a notification that came later is a WRONG and not a boot that never
+ * ends.  netname_wait_mount() of "/" last, once "/" has been told at once.
+ * The HAL waits for "/" so, whose disk holds the modules the bundle does not.
  */
 
 #include <mach.h>
@@ -89,6 +99,7 @@
 
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
+#include <servers/netname_wait.h>	/* netname_wait_mount(): [33] */
 
 #include <libcap.h>
 #include <libvfs.h>
@@ -103,7 +114,7 @@
 #include "mount_test.h"
 
 #define	MT_PREFIX	"/mount_test"
-#define	MT_ARMS		32
+#define	MT_ARMS		33
 #define	MT_WAIT_STEPS	1200		/* x 100 ms: "/" has 120 s to appear */
 
 /* #574: what `mount_test die' checks in and dies with, and the word it waits
@@ -1000,6 +1011,137 @@ mt_pool_arm(mach_port_t mine, mach_port_t sig, char *tok_blob,
 		(void)mach_port_deallocate(mach_task_self(), exec_port);
 }
 
+/*
+ * One notification of a mount, if one is waiting on `recv' now: the name
+ * server sends it before it answers the request that caused it -- the
+ * watcher's for a prefix that is mounted, the check-in's for one that was not
+ * -- so a receive that does not wait is enough, and a notification that came
+ * later would be a defect.  Whether it carried `want', and the receive's answer.
+ */
+static kern_return_t
+mt_mount_told(mach_port_t recv, mach_port_t want, int *told)
+{
+	netname_notify_msg_t	m;
+	kern_return_t		kr;
+
+	*told = 0;
+	memset(&m, 0, sizeof m);
+	kr = mach_msg(&m.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof m,
+		      recv, 0, MACH_PORT_NULL);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	*told = (m.head.msgh_id == NETNAME_NOTIFY_MOUNT_MSID &&
+		 (m.head.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 &&
+		 m.body.msgh_descriptor_count == 1 &&
+		 m.service.type == MACH_MSG_PORT_DESCRIPTOR &&
+		 m.service.name == want);
+	mach_msg_destroy(&m.head);
+	return kr;
+}
+
+/* A watcher of `prefix' on a receive right of its own, or MACH_PORT_NULL. */
+static mach_port_t
+mt_watch_mount(const char *prefix, kern_return_t *kr)
+{
+	mach_port_t recv = MACH_PORT_NULL;
+
+	*kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				 &recv);
+	if (*kr != KERN_SUCCESS)
+		return MACH_PORT_NULL;
+	*kr = netname_notify_mount(name_server_port, (char *)prefix, recv);
+	if (*kr != KERN_SUCCESS) {
+		(void)mach_port_mod_refs(mach_task_self(), recv,
+					 MACH_PORT_RIGHT_RECEIVE, -1);
+		return MACH_PORT_NULL;
+	}
+	return recv;
+}
+
+static void
+mt_unwatch(mach_port_t recv)
+{
+	if (MACH_PORT_VALID(recv))
+		(void)mach_port_mod_refs(mach_task_self(), recv,
+					 MACH_PORT_RIGHT_RECEIVE, -1);
+}
+
+/*
+ * [33] netname_notify_mount() (#964).  A watcher of "/", which is mounted, is
+ * told at once; a watcher of MT_PREFIX, which is not, is told nothing until
+ * the arm checks the mount in, and then the mount's port.  Last,
+ * netname_wait_mount() of "/", asked only once "/" has been told at once, so
+ * that it cannot wait for good.
+ */
+static void
+mt_notify_arm(mach_port_t mine, mach_port_t sig, char *tok_blob,
+	      mach_msg_type_number_t tok_len, int have_tok, mach_port_t root,
+	      int have_root)
+{
+	mach_port_t	got = MACH_PORT_NULL, recv;
+	kern_return_t	kr, root_kr, early = KERN_FAILURE, late = KERN_FAILURE;
+	kern_return_t	wait_kr = KERN_FAILURE;
+	int		root_told = 0, early_told = 0, told = 0, waited = 0;
+	int		mounted = 0;
+
+	if (!have_root || !have_tok) {
+		printf("mount_test: [33] WRONG — not asked: %s\n", !have_root
+		       ? "no \"/\"" : "no capability for " MT_PREFIX);
+		mt_result(0);
+		return;
+	}
+
+	/* "/" is mounted: told at once. */
+	recv = mt_watch_mount("/", &kr);
+	root_kr = MACH_PORT_VALID(recv) ? mt_mount_told(recv, root, &root_told)
+					: kr;
+	mt_unwatch(recv);
+
+	/* MT_PREFIX is not: told nothing, until the check-in. */
+	recv = mt_watch_mount(MT_PREFIX, &kr);
+	if (MACH_PORT_VALID(recv)) {
+		early = mt_mount_told(recv, mine, &early_told);
+		mounted = (netname_check_in_mount(name_server_port, MT_PREFIX,
+						  sig, mine, tok_blob, tok_len)
+			   == NETNAME_SUCCESS);
+		if (mounted) {
+			late = mt_mount_told(recv, mine, &told);
+			(void)netname_check_out_mount(name_server_port,
+						      MT_PREFIX, sig);
+		}
+		mt_unwatch(recv);
+	} else
+		early = kr;
+
+	/* libnetname's wait, where it is known not to wait. */
+	if (root_told) {
+		wait_kr = netname_wait_mount(name_server_port, "/", &got);
+		waited = (wait_kr == KERN_SUCCESS && got == root);
+		if (MACH_PORT_VALID(got))
+			(void)mach_port_deallocate(mach_task_self(), got);
+	}
+
+	if (root_told && early == MACH_RCV_TIMED_OUT && told && waited) {
+		printf("mount_test: [33] a watcher of \"/\" told at once, with "
+		       "\"/\"'s port, and netname_wait_mount() too; one of "
+		       MT_PREFIX " told nothing before the mount, and its port "
+		       "at the check-in\n");
+		mt_result(1);
+	} else {
+		printf("mount_test: [33] WRONG — a watcher of \"/\": 0x%x, %s; "
+		       "one of " MT_PREFIX ": before the mount 0x%x%s (nothing "
+		       "is 0x%x), %s, at the check-in 0x%x, %s; "
+		       "netname_wait_mount(\"/\"): %s\n", root_kr,
+		       root_told ? "its port" : "not told its port", early,
+		       early_told ? ", its port" : "", MACH_RCV_TIMED_OUT,
+		       mounted ? "mounted" : "NOT mounted again", late,
+		       told ? "its port" : "not told its port",
+		       !root_told ? "not asked" : waited ? "its port"
+		       : "not its port");
+		mt_result(0);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1683,6 +1825,8 @@ main(int argc, char **argv)
 	mt_rights_arms(mine, root, have_root, eps_why);	/* [27] to [31], #911 */
 	mt_pool_arm(mine, sig, tok_blob, (mach_msg_type_number_t)sizeof tok,
 		    have_tok, have_root);			/* [32], #964 */
+	mt_notify_arm(mine, sig, tok_blob, (mach_msg_type_number_t)sizeof tok,
+		      have_tok, root, have_root);		/* [33], #964 */
 
 	if (have_root)
 		(void)mach_port_deallocate(mach_task_self(), root);
