@@ -340,7 +340,7 @@ mach_trap_t	mach_trap_table[] = {
 	 */
 	MACH_TRAP(urmach_cap_verify, 7),
 	MACH_TRAP(not_implemented, 0),		/* 38: was urmach_cap_use, #747 */
-	MACH_TRAP(urmach_cap_revoke, 2),	/* 39 */
+	MACH_TRAP(urmach_cap_revoke, 1),	/* 39: the token (#974) */
 
 	MACH_TRAP(urmach_cap_register, 1),	/* 40 */
 	MACH_TRAP(kern_invalid, 0),		/* 41 rsvd for init_process */
@@ -362,7 +362,7 @@ mach_trap_t	mach_trap_table[] = {
 #else
 	MACH_TRAP(not_implemented, 0),		/* 46 */
 #endif
-	MACH_TRAP(not_implemented, 0),		/* 47 */
+	MACH_TRAP(urmach_cap_census, 2),	/* 47 (#974) */
 	MACH_TRAP(not_implemented, 0),		/* 48 */
 	MACH_TRAP(not_implemented, 0),		/* 49 */
 

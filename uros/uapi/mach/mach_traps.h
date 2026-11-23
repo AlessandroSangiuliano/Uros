@@ -187,9 +187,16 @@ boolean_t	swtch_pri(int);
 kern_return_t	urmach_cap_verify(const struct uros_cap *, uint64_t, uint32_t,
 				  uint32_t, uint64_t);
 kern_return_t	urmach_cap_register(const struct uros_cap *);
-kern_return_t	urmach_cap_revoke(uint64_t);
+/*
+ * #974: the token revoked, cap_server's own copy, and not its id: the kernel
+ * reads the deadline it may forget the revocation after from the bytes the MAC
+ * covers, and not from cap_server's word.
+ */
+kern_return_t	urmach_cap_revoke(const struct uros_cap *);
 /* #537: the revocation epoch, in the return word (trap 45) */
 kern_return_t	urmach_cap_epoch(void);
+/* #974: the revocations the kernel holds, and the dated among them (trap 47) */
+kern_return_t	urmach_cap_census(natural_t *, natural_t *);
 
 /*
  * Does `task' own the DMA region named by `region_id'? (#432)

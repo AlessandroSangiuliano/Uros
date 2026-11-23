@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #974
+Takes out: the mending of the parent's own link -- a forgotten tree that is its parent's first child is left in the parent's list, which then names an id the table no longer holds, and a cascade from the parent ends there; cap_test's [57] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[57\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 478f6cd6..2e546c26 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -880,8 +880,6 @@ cap_forget_tree(struct cap_entry *root)
+     parent = root->token.parent_cap_id != 0
+            ? cap_table_find_by_id(root->token.parent_cap_id) : NULL;
+     if (parent != NULL && parent->token.first_child_cap_id == id) {
+-        parent->token.first_child_cap_id = root->token.next_sibling_cap_id;
+-        cap_sign(&parent->token);
+     } else if (parent != NULL) {
+         for (e = cap_table_find_by_id(parent->token.first_child_cap_id);
+              e != NULL && e->token.next_sibling_cap_id != id;

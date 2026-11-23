@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #974
+Takes out: the kernel's forgetting -- every revocation is given an entry kept for good, as before #974, so the revocations a deadline makes grow the kernel's table; cap_test's [55] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[55\] WRONG
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index 5253c50c..e0113b72 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -981,8 +981,8 @@ cap_revoke_token(const struct uros_cap *t)
+      * is asked, so its id is given no entry.  The deadline's own revocation,
+      * which cap_server's sweep makes after it, is always such a one.
+      */
+-    if (!have_now || t->expires == 0 || now < t->expires) {
+-        e = cap_state_get_or_create(cap_id, have_now ? t->expires : 0);
++    {
++        e = cap_state_get_or_create(cap_id, 0);
+         if (e == NULL) {
+             simple_unlock(&cap_lock);
+             cap_state_free(gone);

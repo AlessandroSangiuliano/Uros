@@ -803,7 +803,12 @@ cap_revoke_tree(struct cap_entry *root, int *count)
          * verifying the token.  The rest of the tree is still revoked, and
          * the request is answered with the first refusal.
          */
-        kr = urmach_cap_revoke(id);
+        /*
+         * #974: the token, this server's own copy, signed as revoked just
+         * above: the kernel checks its MAC and reads from it the deadline it
+         * may forget the revocation after.
+         */
+        kr = urmach_cap_revoke(&e->token);
         if (kr != KERN_SUCCESS) {
             printf("cap: the kernel refused the revocation of cap %llu "
                    "(kr=%d) -- the trap still verifies it (#745)\n",
@@ -837,6 +842,74 @@ cap_revoke_tell(struct cap_entry *root, int count)
              e = cap_subtree_next(root->token.cap_id, e, 1))
             fanout_revoke_notify(e->token.cap_id);
     }
+}
+
+/*
+ * #974: forget a revoked tree -- `root' and everything under it, all of it
+ * revoked -- once its notices are sent.  An entry was kept for as long as this
+ * server ran, one for every capability it ever issued; and since #747 a
+ * deadline revokes every capability asked for with a lifetime, so a task that
+ * asked for short-lived ones steadily grew this table without bound.
+ *
+ * 🔑 Forgetting one changes no answer.  cap_verify() answers REVOKED for an id
+ * it no longer finds, and the kernel's check keeps the revocation for as long
+ * as the token's deadline does not refuse it there first (kern/cap.c).  A
+ * derivation from it finds no parent and is refused as revoked, as it was; a
+ * revocation of it is answered REVOKED (cap_revoke()).
+ *
+ * ⚠️ BUT ITS PARENT MAY LIVE, AND THE PARENT'S LIST OF CHILDREN RUNS THROUGH
+ * IT.  The tree is left-child right-sibling with its links in the tokens, and
+ * cap_subtree_next() ends a walk at an id it cannot find: a forgotten child
+ * left in the list would cut every later cascade from the parent short at
+ * itself, and the siblings after it would keep their authority after a
+ * revocation that said it succeeded -- #745's defect by another road.  So the
+ * link that points at it, the parent's first child or the previous sibling's
+ * next one, is pointed past it, and that token signed again, as a derivation
+ * signs the parent it links a child under.
+ *
+ * The tree goes from the bottom: down from `root' by first children to a leaf,
+ * which leaves the list of the node above it from the front.  Each step starts
+ * at the root again, at most CAP_MAX_DEPTH links down, and needs no stack.
+ */
+static void
+cap_forget_tree(struct cap_entry *root)
+{
+    uint64_t          id = root->token.cap_id;
+    struct cap_entry *parent, *e, *c, *above;
+
+    parent = root->token.parent_cap_id != 0
+           ? cap_table_find_by_id(root->token.parent_cap_id) : NULL;
+    if (parent != NULL && parent->token.first_child_cap_id == id) {
+        parent->token.first_child_cap_id = root->token.next_sibling_cap_id;
+        cap_sign(&parent->token);
+    } else if (parent != NULL) {
+        for (e = cap_table_find_by_id(parent->token.first_child_cap_id);
+             e != NULL && e->token.next_sibling_cap_id != id;
+             e = cap_table_find_by_id(e->token.next_sibling_cap_id))
+            ;
+        if (e != NULL) {
+            e->token.next_sibling_cap_id = root->token.next_sibling_cap_id;
+            cap_sign(&e->token);
+        }
+    }
+
+    for (;;) {
+        above = NULL;
+        e = root;
+        while (e->token.first_child_cap_id != 0 &&
+               (c = cap_table_find_by_id(e->token.first_child_cap_id)) != NULL) {
+            above = e;
+            e = c;
+        }
+        if (above == NULL)
+            break;
+        /* `above' is forgotten too, so its token is not signed again. */
+        above->token.first_child_cap_id = e->token.next_sibling_cap_id;
+        cap_table_remove(e);
+        free(e);
+    }
+    cap_table_remove(root);
+    free(root);
 }
 
 /*
@@ -960,12 +1033,23 @@ cap_expiry_waiter(void *arg)
  * tree, and the waiter is given the earliest deadline left.  A tree's
  * deadlines are never past its root's, so its capabilities have all come to
  * theirs too.
+ *
+ * #974: and then forgotten, as cap_revoke() forgets what it revokes -- but
+ * not during the walk, which goes from each entry to the next: forgetting a
+ * tree frees entries the walk has yet to reach, the one it would go to next
+ * among them.  So the walk keeps the id of every revoked entry it meets, and
+ * those are forgotten after it, each found again by its id: one that went with
+ * a tree forgotten before it is not found.  An entry revoked earlier and left
+ * in the table is met and forgotten too.  Should there be no memory to keep
+ * the ids in, the ones kept are forgotten, and the rest wait, revoked, for a
+ * later sweep to meet them.
  */
 static void
 cap_expiry_sweep(void)
 {
     struct cap_entry *e;
-    uint64_t          now, next = 0;
+    uint64_t          now, next = 0, *gone = NULL, *more;
+    size_t            ngone = 0, room = 0, i;
     int               n;
 
     if (!cap_now_ns(&now)) {
@@ -975,22 +1059,37 @@ cap_expiry_sweep(void)
         return;
     }
     for (e = cap_table_next(NULL); e != NULL; e = cap_table_next(e)) {
-        if (e->token.revoked || e->token.expires == 0)
-            continue;
-        if (e->token.expires > now) {
+        if (!e->token.revoked && e->token.expires != 0 &&
+            e->token.expires > now) {
             if (next == 0 || e->token.expires < next)
                 next = e->token.expires;
             continue;
         }
-        /* A refusal by the kernel is said by cap_revoke_tree(). */
-        (void)cap_revoke_tree(e, &n);
-        printf("cap: cap %llu reached its deadline %llu ms ago and was "
-               "revoked, %d cap(s) with its tree (#747)\n",
-               (unsigned long long)e->token.cap_id,
-               (unsigned long long)((now - e->token.expires) / 1000000ULL),
-               n);
-        cap_revoke_tell(e, n);
+        if (!e->token.revoked && e->token.expires != 0) {
+            /* A refusal by the kernel is said by cap_revoke_tree(). */
+            (void)cap_revoke_tree(e, &n);
+            printf("cap: cap %llu reached its deadline %llu ms ago and was "
+                   "revoked, %d cap(s) with its tree (#747)\n",
+                   (unsigned long long)e->token.cap_id,
+                   (unsigned long long)((now - e->token.expires) / 1000000ULL),
+                   n);
+            cap_revoke_tell(e, n);
+        }
+        if (!e->token.revoked)
+            continue;
+        if (ngone == room) {
+            more = realloc(gone, (room == 0 ? 64 : 2 * room) * sizeof(*gone));
+            if (more == NULL)
+                continue;
+            gone = more;
+            room = room == 0 ? 64 : 2 * room;
+        }
+        gone[ngone++] = e->token.cap_id;
     }
+    for (i = 0; i < ngone; i++)
+        if ((e = cap_table_find_by_id(gone[i])) != NULL)
+            cap_forget_tree(e);
+    free(gone);
     pthread_mutex_lock(&cap_expiry_lock);
     cap_expiry_due = next;
     pthread_mutex_unlock(&cap_expiry_lock);
@@ -1003,7 +1102,15 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
     (void)server;
 
     struct cap_entry *root = cap_table_find_by_id(cap_id);
-    if (!root) return CAP_ERR_INVALID_TOKEN;
+    /*
+     * #974: an id this server issued and no longer holds was revoked, and
+     * forgotten with its tree (cap_forget_tree()).  It is said so to whoever
+     * asks: that a capability has ended tells nobody what it was for.  An id
+     * never issued is no token at all.
+     */
+    if (!root)
+        return cap_table_issued(cap_id) ? CAP_ERR_REVOKED
+                                        : CAP_ERR_INVALID_TOKEN;
 
     /*
      * #599: the revocation needed no authority at all, so any task could
@@ -1023,6 +1130,7 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
            revoked, (unsigned long long)cap_id);
     cap_revoke_tell(root, revoked);
+    cap_forget_tree(root);		/* #974 */
     return refused;
 }
 
@@ -1430,8 +1538,29 @@ cap_verify(mach_port_t             server,
     /* Also consult the live table: a token may have been revoked
      * after issuance but the in-flight copy can still carry revoked=0. */
     struct cap_entry *live = cap_table_find_by_id(token.cap_id);
-    if (live && live->token.revoked) return CAP_ERR_REVOKED;
+    /*
+     * 🔴 #974: AND AN ID THE TABLE NO LONGER HOLDS WAS REVOKED.  This answered
+     * such a token as good, which was right only while nothing ever left the
+     * table.  A token whose MAC verifies was signed with this server's key,
+     * made anew each time it starts, so this server issued it; and an entry
+     * leaves the table only once it is revoked (cap_forget_tree()).
+     */
+    if (live == NULL || live->token.revoked) return CAP_ERR_REVOKED;
 
+    return KERN_SUCCESS;
+}
+
+/*
+ * cap_census (#974).  The table's own count, and how many ids it has handed
+ * out, on any port as cap_slots answers: a count says nothing about any one
+ * capability.  It is how a test sees a revoked capability leave the table.
+ */
+kern_return_t
+cap_census(mach_port_t server, natural_t *entries, natural_t *issued)
+{
+    (void)server;
+    *entries = (natural_t)cap_table_count();
+    *issued  = (natural_t)cap_table_issued_count();
     return KERN_SUCCESS;
 }
 

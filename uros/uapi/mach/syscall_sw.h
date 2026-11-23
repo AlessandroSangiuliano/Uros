@@ -135,7 +135,7 @@ kernel_trap(evc_wait,-17,1)
  *	urmach_cap_use, which counted uses nothing asked for (#747).
  */
 kernel_trap(urmach_cap_verify,-37,7)
-kernel_trap(urmach_cap_revoke,-39,2)
+kernel_trap(urmach_cap_revoke,-39,1)
 kernel_trap(urmach_cap_register,-40,1)
 
 /*
@@ -145,6 +145,12 @@ kernel_trap(urmach_cap_register,-40,1)
  *	stubs share is a call that lands in the wrong one.
  */
 kernel_trap(urmach_cap_epoch,-45,0)
+
+/*
+ *	#974: how many revocations the kernel holds, and how many of them it
+ *	will forget when their deadlines come.  47, which no stub has used.
+ */
+kernel_trap(urmach_cap_census,-47,2)
 
 /*
  *	urmach_thread_set_fs_base (#414) — this thread's FS base on x86-64,

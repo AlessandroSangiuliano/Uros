@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #974
+Takes out: the pruning of the dated revocations -- a revocation made before its deadline keeps its entry after the deadline has come, and no later revocation frees it; cap_test's [56] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[56\] WRONG
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index 5253c50c..65fbd356 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -975,7 +975,7 @@ cap_revoke_token(const struct uros_cap *t)
+         return CAP_ERR_UNAUTHORIZED;
+     }
+ 
+-    gone = have_now ? cap_dated_prune_locked(now) : NULL;	/* #974 */
++    gone = NULL;
+     /*
+      * #974: a token whose deadline has come is refused by it before this table
+      * is asked, so its id is given no entry.  The deadline's own revocation,

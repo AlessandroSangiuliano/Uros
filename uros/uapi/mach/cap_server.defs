@@ -258,3 +258,18 @@ routine cap_derive_for(
 	in	lifetime_ms	: cap_u32_t;
 	in	delegate	: mach_port_t;
 	out	child		: cap_token_t);
+
+/*
+ *	cap_census (#974) — how many capabilities cap_server's table holds
+ *	now, and how many ids it has handed out since it started.  Answered
+ *	on any port, as cap_slots is: a count says nothing about any one
+ *	capability.
+ *
+ *	It is how a test sees a revoked capability leave the table, by its
+ *	holder's revocation or by its deadline: an entry kept is one more than
+ *	the table should hold.  Appended: MIG numbers routines by position.
+ */
+routine cap_census(
+		cap_server	: mach_port_t;
+	out	entries		: natural_t;
+	out	issued		: natural_t);

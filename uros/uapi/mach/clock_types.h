@@ -49,15 +49,25 @@
 
 /*
  * #747: the clock a capability's deadline is written on, and read against --
- * time since boot, never set and never going back.  That is the clock above on
- * x86-64, and REALTIME_CLOCK on i386, where it is already time since boot.
- * cap_server reads this id to write a deadline and the kernel to check one, so
- * the two agree on what a deadline means.
+ * time since boot.  That is the clock above on x86-64, and REALTIME_CLOCK on
+ * i386, where it is already time since boot.  cap_server reads this id to
+ * write a deadline and the kernel to check one, so the two agree on what a
+ * deadline means.
+ *
+ * #974: and whether it can be set, URMACH_CAP_CLOCK_NEVER_SET.  This said
+ * "never set and never going back" of both, which is true of x86-64's alone:
+ * it has no c_settime (x86_64/time/clock_dev.c).  i386's REALTIME_CLOCK has
+ * one, rtc_settime(), for whoever holds the clock's control port.  On a clock
+ * that is never set a deadline once passed stays passed, and the kernel may
+ * forget a revocation when its deadline comes; on i386 a clock set back would
+ * bring the deadline back, and every revocation is kept (kern/cap.c).
  */
 #if defined(__x86_64__)
-#define	URMACH_CAP_CLOCK	URMACH_MONOTONIC_CLOCK
+#define	URMACH_CAP_CLOCK		URMACH_MONOTONIC_CLOCK
+#define	URMACH_CAP_CLOCK_NEVER_SET	1
 #else
-#define	URMACH_CAP_CLOCK	REALTIME_CLOCK
+#define	URMACH_CAP_CLOCK		REALTIME_CLOCK
+#define	URMACH_CAP_CLOCK_NEVER_SET	0
 #endif
 
 /* Any number of distributed clocks may be defined. */

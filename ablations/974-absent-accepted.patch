@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #974
+Takes out: cap_verify's answer for an id the table no longer holds -- it is answered good again, as before #974, so a capability revoked and forgotten verifies at cap_server; cap_test's [56] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[56\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 478f6cd6..448b710e 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1545,7 +1545,7 @@ cap_verify(mach_port_t             server,
+      * made anew each time it starts, so this server issued it; and an entry
+      * leaves the table only once it is revoked (cap_forget_tree()).
+      */
+-    if (live == NULL || live->token.revoked) return CAP_ERR_REVOKED;
++    if (live && live->token.revoked) return CAP_ERR_REVOKED;
+ 
+     return KERN_SUCCESS;
+ }
