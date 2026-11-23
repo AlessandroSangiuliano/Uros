@@ -80,6 +80,67 @@ struct pool {
 static struct pool	pools[HAL_MAX_POOLS];
 static int		n_pools;
 
+/*
+ * The classes the HAL's line leaves to others, "--leave CODE" (#964): a
+ * device of one is said and not started, while another server drives that
+ * class -- irq_claim_test the network card, block_device_server the disks,
+ * pci_function_test edu -- until their drivers are the HAL's (#966, #968).
+ * The digits say how much of the class code is compared: two the base class,
+ * four the subclass too, six the interface too.
+ */
+#define HAL_MAX_LEAVES		8
+
+static struct {
+	uint32_t	code;
+	uint32_t	mask;
+} leaves[HAL_MAX_LEAVES];
+static int		n_leaves;
+
+int
+hal_modules_leave(const char *arg)
+{
+	const char	*p;
+	uint32_t	v = 0;
+	int		digits = 0;
+
+	if (arg == NULL || arg[0] != '0' || (arg[1] != 'x' && arg[1] != 'X'))
+		return -1;
+	for (p = arg + 2; *p != '\0'; p++) {
+		int d;
+
+		if (*p >= '0' && *p <= '9')
+			d = *p - '0';
+		else if (*p >= 'a' && *p <= 'f')
+			d = *p - 'a' + 10;
+		else if (*p >= 'A' && *p <= 'F')
+			d = *p - 'A' + 10;
+		else
+			return -1;
+		v = v << 4 | (uint32_t)d;
+		digits++;
+	}
+	if ((digits != 2 && digits != 4 && digits != 6) ||
+	    n_leaves >= HAL_MAX_LEAVES)
+		return -1;
+	leaves[n_leaves].code = v << (24 - 4 * digits);
+	leaves[n_leaves].mask = 0xffffffu & ~((1u << (24 - 4 * digits)) - 1u);
+	n_leaves++;
+	return 0;
+}
+
+/* The --leave a device's class falls under, or -1. */
+static int
+left_by(uint32_t class_rev)
+{
+	uint32_t	code = class_rev >> 8;
+	int		i;
+
+	for (i = 0; i < n_leaves; i++)
+		if ((code & leaves[i].mask) == leaves[i].code)
+			return i;
+	return -1;
+}
+
 static const char *
 pool_of_class(uint32_t class_rev)
 {
@@ -299,9 +360,19 @@ hal_module_report(const struct hal_device_info *dev)
 		       dev->vendor_device & 0xffffu, dev->vendor_device >> 16,
 		       dev->class_rev >> 8);
 	switch (hal_module_for(dev, &c)) {
-	case HAL_MODULE_ONE:
+	case HAL_MODULE_ONE: {
+		int	l = left_by(dev->class_rev);
+
+		if (l >= 0) {
+			printf("%s: %s/%s declares it, and the HAL's line leaves "
+			       "class %06x/%06x to others\n", at, c.pool,
+			       c.module, (unsigned)leaves[l].code,
+			       (unsigned)leaves[l].mask);
+			break;
+		}
 		printf("%s: %s/%s declares it\n", at, c.pool, c.module);
 		break;
+	}
 	case HAL_MODULE_TIE:
 		printf("%s: %s/%s and %s/%s declare it alike, and the HAL "
 		       "chooses neither\n", at, c.pool, c.module, c.pool,

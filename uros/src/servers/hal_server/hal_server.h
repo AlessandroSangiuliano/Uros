@@ -315,6 +315,12 @@ int  hal_module_for(const struct hal_device_info *dev,
 /* The choice, said on one line: the HAL says what it decided for each device. */
 void hal_module_report(const struct hal_device_info *dev);
 
+/*
+ * "--leave CODE": a class the HAL's line leaves to others (hal_modules.c).
+ * 0, or -1 when CODE is no class: 0x and two, four or six hex digits.
+ */
+int  hal_modules_leave(const char *arg);
+
 /* ================================================================
  * Global state (defined in hal_server.c)
  * ================================================================ */

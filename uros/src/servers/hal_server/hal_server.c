@@ -320,6 +320,27 @@ main(int argc, char **argv)
 
 	printf("\n=== HAL server ===\n");
 
+	/* #964: the classes its line leaves to others, "--leave CODE". */
+	{
+		int	i;
+
+		for (i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--leave") != 0 || i + 1 >= argc) {
+				printf("hal: '%s' is no option of the HAL's "
+				       "(#964)\n", argv[i]);
+				continue;
+			}
+			i++;
+			if (hal_modules_leave(argv[i]) != 0)
+				printf("hal: --leave '%s' is no class: 0x and "
+				       "two, four or six hex digits (#964)\n",
+				       argv[i]);
+			else
+				printf("hal: class %s left to others by its "
+				       "line (#964)\n", argv[i]);
+		}
+	}
+
 	/*
 	 * ── The bus is claimed before anything is scanned (#511) ──────────
 	 *
