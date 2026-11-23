@@ -28,8 +28,10 @@
  * chora takes the module it was given, first: a chora given none claims
  * nothing.  Then it opens the device through libdriver, which names the task
  * MODULE@BB:DD.F and claims the device; loads the module as CLASS/MODULE.so,
- * asking nobody else for one; and hands it the device.  Then it stays, for as
- * long as the module drives it.
+ * asking nobody else for one; and hands it the device.  Then it checks a
+ * control port in under its name, MODULE@BB:DD.F, and serves it (chora.defs)
+ * for as long as the module drives the device, which happens on the module's
+ * own threads.
  *
  * Whatever refuses, chora says which step and ends: a chora that drives no
  * device has no reason to be.
@@ -38,6 +40,9 @@
 #include <mach.h>
 #include <mach/thread_switch.h>
 #include <mach/module_pool.h>		/* MODULE_NAME_MAX */
+#include <mach_init.h>			/* name_server_port, the signature */
+#include <servers/netname.h>
+#include <servers/netname_defs.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -45,9 +50,73 @@
 #include "chora_module.h"
 #include "chora_given.h"
 #include "modload.h"
+#include "chora_server.h"		/* chora.defs's server half, #964 */
 
 /* The interrupt thread keeps a pointer to it for the task's whole life. */
 static struct driver	the_device;
+
+/* The module that drives it, once it does: chora_status() says its name. */
+static const struct chora_module_ops	*the_module;
+
+#define CHORA_NAME_TRIES	50	/* of 100 ms: the name a dead one left */
+
+
+/* #964: chora_status(), what this chora drives (chora.defs). */
+kern_return_t
+chora_S_status(mach_port_t port, module_name_t module,
+	       mach_msg_type_number_t *moduleCnt, unsigned int *bdf)
+{
+	size_t	n = strlen(the_module->name);
+
+	(void)port;
+	if (*moduleCnt == 0)
+		return KERN_INVALID_ARGUMENT;
+	if (n >= *moduleCnt)
+		n = *moduleCnt - 1;
+	memcpy(module, the_module->name, n);
+	module[n] = '\0';
+	*moduleCnt = (mach_msg_type_number_t)(n + 1);
+	*bdf = (unsigned int)the_device.bdf;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #964: a control port checked in under the task's name, MODULE@BB:DD.F, or
+ * MACH_PORT_NULL said.  The name may still be the chora's that drove this
+ * device before and died, until the name server has taken it out with its
+ * port: that refusal is waited out, a little.
+ */
+static mach_port_t
+control_port(void)
+{
+	mach_port_t	port = MACH_PORT_NULL, sig = MACH_PORT_NULL;
+	kern_return_t	kr;
+	int		tries;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr == KERN_SUCCESS)
+		kr = mach_port_insert_right(mach_task_self(), port, port,
+					    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr == KERN_SUCCESS)
+		kr = urmach_netname_signature(&sig);
+	for (tries = 0; kr == KERN_SUCCESS && tries < CHORA_NAME_TRIES;
+	     tries++) {
+		kr = netname_check_in(name_server_port, the_device.name, sig,
+				      port);
+		if (kr != NETNAME_NOT_YOURS)
+			break;
+		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	}
+	if (kr != KERN_SUCCESS) {
+		driver_log(&the_device, "no control port checked in (0x%x): no "
+			   "consumer finds it by its name", kr);
+		return MACH_PORT_NULL;
+	}
+	driver_log(&the_device, "its control port is checked in as \"%s\" "
+		   "(#964)", the_device.name);
+	return port;
+}
 
 /* Two hex digits, a colon, two, a dot, one: "00:03.0". */
 static int
@@ -200,8 +269,23 @@ main(int argc, char **argv)
 		return 1;
 	}
 	driver_log(&the_device, "%s drives the device", ops->name);
+	the_module = ops;
 
-	/* What happens from here happens on the module's interrupt thread. */
-	for (;;)
-		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 60000);
+	/*
+	 * The device is driven on the module's threads; this one serves the
+	 * control port, for as long as the task lives -- or, without one,
+	 * only stays.
+	 */
+	{
+		mach_port_t	port = control_port();
+
+		for (;;) {
+			if (MACH_PORT_VALID(port))
+				(void)mach_msg_server(chora_server, 512, port,
+						      MACH_MSG_OPTION_NONE);
+			else
+				(void)thread_switch(MACH_PORT_NULL,
+						    SWITCH_OPTION_WAIT, 60000);
+		}
+	}
 }

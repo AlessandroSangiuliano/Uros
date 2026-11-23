@@ -45,7 +45,16 @@ set(CHORA_INCLUDE_DIRS
 # goes in whole -- a call a module makes and chora does not is still there to
 # be found -- and the program is exec'd, so exec_server relocates it (#963).
 
-add_executable(chora_bin chora.c)
+# #964: the server half of chora.defs, the control port each chora serves.
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel)
+set(_CHORA_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
+set(CHORA_MIG_GENERATED)
+add_mig_userland_server(${CMAKE_CURRENT_SOURCE_DIR}/chora.defs ${_CHORA_OUT}
+                        CHORA_MIG)
+
+add_executable(chora_bin chora.c ${CHORA_MIG_GENERATED})
 
 target_compile_options(chora_bin PRIVATE
   -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC
@@ -53,7 +62,7 @@ target_compile_options(chora_bin PRIVATE
 
 target_compile_definitions(chora_bin PRIVATE MACH_IPC_COMPAT=0)
 
-target_include_directories(chora_bin PRIVATE ${CHORA_INCLUDE_DIRS})
+target_include_directories(chora_bin PRIVATE ${CHORA_INCLUDE_DIRS} ${_CHORA_OUT})
 
 target_link_libraries(chora_bin PRIVATE
   -Wl,--start-group
