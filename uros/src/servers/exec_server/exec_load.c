@@ -577,10 +577,9 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
  * this server does not end a task it was only lent.
  */
 static int
-fail_after_task(elf_image_t *img, void *file_buf, int rc)
+fail_after_task(elf_image_t *img, int rc)
 {
     elf_close(img);
-    free(file_buf);
     return rc;
 }
 
@@ -662,14 +661,32 @@ extract_manifest(const elf_image_t *img,
  */
 static int
 derive_cap_port(mach_port_t new_task, const elf_image_t *img,
-                const char *path, mach_port_t parent_caps)
+                const char *path, mach_port_t parent_caps,
+                const void *manifest, uint32_t manifest_len)
 {
     const void   *blob;
     uint32_t      blen;
     mach_port_t   cap_port = MACH_PORT_NULL;
     kern_return_t kr;
 
-    extract_manifest(img, &blob, &blen);
+    /*
+     * #964: a manifest the caller wrote, in place of the program's own --
+     * the HAL's, which names the one function a driver is started for.  It
+     * is cut to the caller's `delegatable' lines as the program's would be,
+     * by cap_derive_child(): it asks, and grants nothing by itself.
+     */
+    if (manifest != NULL) {
+        if (manifest_len < sizeof(cap_manifest_header_t) ||
+            manifest_len > CAP_MANIFEST_MAX_BYTES) {
+            printf("exec: %s -> no TASK_CAP_PORT: the manifest its caller "
+                   "wrote is %u bytes, no manifest's size (#964)\n",
+                   path ? path : "(?)", manifest_len);
+            return 0;
+        }
+        blob = manifest;
+        blen = manifest_len;
+    } else
+        extract_manifest(img, &blob, &blen);
 
     if (!MACH_PORT_VALID(parent_caps)) {
         printf("exec: %s -> no TASK_CAP_PORT: its caller has none to derive "
@@ -705,7 +722,8 @@ derive_cap_port(mach_port_t new_task, const elf_image_t *img,
     printf("exec: %s -> TASK_CAP_PORT=0x%x, derived from its caller's "
            "(manifest %u bytes%s) (#743)\n",
            path ? path : "(?)", (unsigned)cap_port, blen,
-           (blob == &default_manifest_blob) ? ", default" : "");
+           (blob == &default_manifest_blob) ? ", default" :
+           (blob == manifest) ? ", its caller's" : "");
 
     /*
      * The task holds the port now; this copy would keep it from ever having
@@ -715,15 +733,23 @@ derive_cap_port(mach_port_t new_task, const elf_image_t *img,
     return 1;
 }
 
-int
-exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
-             const char *path,
-             const void *argv_blob, mach_msg_type_number_t argv_len,
-             const void *envp_blob, mach_msg_type_number_t envp_len,
-             mach_port_t *out_thread)
+/*
+ * #964: an image in `file_buf', loaded into `new_task' -- everything a load
+ * does once the bytes are here, for exec_do_load(), which read them from a
+ * file, and exec_do_load_image(), which was handed them.  The buffer is the
+ * caller's, written in place by a PIE's relocation and freed by the caller.
+ * `manifest', when not NULL, stands for the program's own (derive_cap_port()).
+ * `reads_no_file' refuses an image that names a dynamic linker, which would be
+ * read from a file: an image load must never wait for a filesystem.
+ */
+static int
+load_image(mach_port_t new_task, mach_port_t parent_caps,
+           void *file_buf, vm_size_t file_sz, const char *path,
+           const void *manifest, uint32_t manifest_len, int reads_no_file,
+           const void *argv_blob, mach_msg_type_number_t argv_len,
+           const void *envp_blob, mach_msg_type_number_t envp_len,
+           mach_port_t *out_thread)
 {
-    void *file_buf = NULL;
-    vm_size_t file_sz = 0;
     elf_image_t img;
     mach_port_t new_thread = MACH_PORT_NULL;
     vm_address_t stack_top;
@@ -736,16 +762,9 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
 
     *out_thread = MACH_PORT_NULL;
 
-    /* 1. Read the binary. */
-    rc = slurp_binary(path, &file_buf, &file_sz);
-    if (rc != EXEC_OK)
-        return rc;
-
     /* 2. Parse with libelf. */
-    if (elf_open(file_buf, (size_t)file_sz, &img) != ELF_OK) {
-        free(file_buf);
+    if (elf_open(file_buf, (size_t)file_sz, &img) != ELF_OK)
         return EXEC_ERR_PARSE;
-    }
     /* v0.2.0 (#234): accept ET_EXEC (bias 0) and ET_DYN/PIE (loaded at
      * EXEC_DYN_BASE).  A PT_INTERP, if present, names a dynamic linker
      * we load below and hand control to instead of the app entry. */
@@ -753,9 +772,15 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
         uint32_t et = elf_type(&img);
         if (et != ET_EXEC && et != ET_DYN) {
             elf_close(&img);
-            free(file_buf);
             return EXEC_ERR_NOT_STATIC;
         }
+    }
+    if (reads_no_file && elf_interp(&img) != NULL) {
+        printf("exec: %s names a dynamic linker, %s, which would be read "
+               "from a file: an image load reads none (#964)\n", path,
+               elf_interp(&img));
+        elf_close(&img);
+        return EXEC_ERR_NOT_STATIC;
     }
     if (!image_is_this_machine(&img)) {
         printf("exec: %s is an image of another machine (machine %u, "
@@ -763,7 +788,6 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
                (unsigned)elf_machine(&img), elf_is_64bit(&img) ? 64 : 32,
                ELF_TARGET_NAME);
         elf_close(&img);
-        free(file_buf);
         return EXEC_ERR_PARSE;
     }
 
@@ -789,7 +813,7 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
                     VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_COPY);
         if (kr != KERN_SUCCESS) {
             printf("exec: reserving page zero kr=%d\n", kr);
-            return fail_after_task(&img, file_buf, EXEC_ERR_VM_SETUP);
+            return fail_after_task(&img, EXEC_ERR_VM_SETUP);
         }
     }
 
@@ -804,13 +828,13 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
     if (elf_type(&img) == ET_DYN && elf_interp(&img) == NULL) {
         rc = relocate_pie(file_buf, &img, main_bias, path);
         if (rc != EXEC_OK)
-            return fail_after_task(&img, file_buf, rc);
+            return fail_after_task(&img, rc);
     }
 
     /* 4. Map every PT_LOAD into the child. */
     rc = install_segments(new_task, &img, main_bias);
     if (rc != EXEC_OK)
-        return fail_after_task(&img, file_buf, rc);
+        return fail_after_task(&img, rc);
 
     /* 4.1. If the image names a dynamic linker (PT_INTERP), load it and
      *      hand control to its entry instead of the app's e_entry; the
@@ -819,7 +843,7 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
     if (interp != NULL) {
         rc = load_interp(new_task, interp, &interp_base, &start_entry);
         if (rc != EXEC_OK)
-            return fail_after_task(&img, file_buf, rc);
+            return fail_after_task(&img, rc);
     } else {
         start_entry = (uintptr_t)(elf_entry(&img) + main_bias);
     }
@@ -829,7 +853,8 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
      *       #743).  Done before vDSO + stack so libmach init reads
      *       TASK_CAP_PORT on the very first instruction.  Best-effort
      *       — see derive_cap_port. */
-    (void)derive_cap_port(new_task, &img, path, parent_caps);
+    (void)derive_cap_port(new_task, &img, path, parent_caps, manifest,
+                          manifest_len);
 
     /* 4.5. Install the vDSO placeholder (v0.4.0 / #236).  Failure
      *      here is non-fatal — the binary can still run, libposix
@@ -885,17 +910,69 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
                               envp_blob, envp_len, &hints, &stack_top);
     }
     if (rc != EXEC_OK)
-        return fail_after_task(&img, file_buf, rc);
+        return fail_after_task(&img, rc);
 
     /* 6. Bring up the entry thread — at the interpreter's entry when a
      *    PT_INTERP was present, otherwise at the app's (biased) entry. */
     rc = start_thread(new_task, start_entry, stack_top, &new_thread);
     if (rc != EXEC_OK)
-        return fail_after_task(&img, file_buf, rc);
+        return fail_after_task(&img, rc);
 
     elf_close(&img);
-    free(file_buf);
 
     *out_thread = new_thread;
     return EXEC_OK;
+}
+
+int
+exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
+             const char *path,
+             const void *argv_blob, mach_msg_type_number_t argv_len,
+             const void *envp_blob, mach_msg_type_number_t envp_len,
+             mach_port_t *out_thread)
+{
+    void *file_buf = NULL;
+    vm_size_t file_sz = 0;
+    int rc;
+
+    *out_thread = MACH_PORT_NULL;
+
+    /* 1. Read the binary. */
+    rc = slurp_binary(path, &file_buf, &file_sz);
+    if (rc != EXEC_OK)
+        return rc;
+    rc = load_image(new_task, parent_caps, file_buf, file_sz, path, NULL, 0,
+                    0, argv_blob, argv_len, envp_blob, envp_len, out_thread);
+    free(file_buf);
+    return rc;
+}
+
+/*
+ * #964: an image the caller hands, loaded into a task the caller made -- a
+ * driver, for the HAL, whose program comes from the boot bundle before any
+ * disk is served.  The name in this server's lines is the image's argv[0].
+ */
+int
+exec_do_load_image(mach_port_t new_task, mach_port_t parent_caps,
+                   void *image, vm_size_t image_len,
+                   const void *manifest, uint32_t manifest_len,
+                   const void *argv_blob, mach_msg_type_number_t argv_len,
+                   const void *envp_blob, mach_msg_type_number_t envp_len,
+                   mach_port_t *out_thread)
+{
+    char name[64];
+    size_t i;
+
+    *out_thread = MACH_PORT_NULL;
+    for (i = 0; i + 1 < sizeof name && i < argv_len &&
+                ((const char *)argv_blob)[i] != '\0'; i++)
+        name[i] = ((const char *)argv_blob)[i];
+    name[i] = '\0';
+    if (i == 0)
+        strcpy(name, "(an image)");
+    if (image == NULL || image_len == 0)
+        return EXEC_ERR_PARSE;
+    return load_image(new_task, parent_caps, image, image_len, name,
+                      manifest, manifest_len, 1, argv_blob, argv_len,
+                      envp_blob, envp_len, out_thread);
 }

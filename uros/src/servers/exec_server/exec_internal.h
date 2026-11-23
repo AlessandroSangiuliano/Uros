@@ -28,6 +28,19 @@ int exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
                  mach_port_t *out_thread);
 
 /*
+ * #964: the same, for an image the caller hands instead of a file, with a
+ * manifest the caller wrote in place of the program's own when `manifest' is
+ * not NULL.  It reads no file: an image that names a dynamic linker is
+ * refused.
+ */
+int exec_do_load_image(mach_port_t new_task, mach_port_t parent_caps,
+                       void *image, vm_size_t image_len,
+                       const void *manifest, uint32_t manifest_len,
+                       const void *argv_blob, mach_msg_type_number_t argv_len,
+                       const void *envp_blob, mach_msg_type_number_t envp_len,
+                       mach_port_t *out_thread);
+
+/*
  * Build the System V ABI initial stack in `new_task` (allocates
  * EXEC_STACK_VA..EXEC_STACK_TOP, vm_writes the prepared layout).
  * On success *out_top holds the runtime ESP value.
