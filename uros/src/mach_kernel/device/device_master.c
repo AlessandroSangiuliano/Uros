@@ -319,10 +319,35 @@ irq_forward_thread_start(void)
 	(void)kernel_thread(kernel_task, irq_forward_thread, NULL);
 }
 
+/*
+ * ── The driver's port (#964) ─────────────────────────────────────────
+ *
+ * 🔴 THE MASTER PORT OPENS MORE THAN A DEVICE.  device_open() on it opens the
+ * kernel's own devices, the boot disk among them; and of the routines below,
+ * it takes the debugger, the I/O ports and DMA for another task.  A driver
+ * needs none of that: what it does to its device, it does through its claim.
+ *
+ * 🔑 So a driver is given this port instead.  Bootstrap asks for it on the
+ * master port, ds_master_device_driver_port(), and puts it in the device slot
+ * of a driver's bootstrap_ports().  The routines a driver calls take it,
+ * through check_driver_port(); every other routine takes the master port
+ * alone, and so does device.defs whole -- ds_device_open() compares its port
+ * with the master's.
+ *
+ * ⚠️ A kobject type of its own: ds_master_notify() asserts that a port of the
+ * master's type is the master (#442).
+ */
+static ipc_port_t	driver_device_port = IP_NULL;
+
 void
 device_master_init(void)
 {
 	int i;
+
+	driver_device_port = ipc_port_alloc_kernel();
+	if (driver_device_port == IP_NULL)
+		panic("can't allocate the driver's device port");
+	ipc_kobject_set(driver_device_port, 1, IKOT_DRIVER_DEVICE);
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
 	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
@@ -5636,4 +5661,23 @@ urmach_dma_region_owner(
 
 	task_deallocate(t);
 	return kr;
+}
+
+/*
+ * #964: the driver's port, for bootstrap to give a driver in place of the
+ * master port -- asked for on the master port alone, since it is the master
+ * port's holder that decides who drives.  The same port every time.
+ */
+kern_return_t
+ds_master_device_driver_port(
+	ipc_port_t		master_port,
+	ipc_port_t		*driver_port)
+{
+	kern_return_t	kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	*driver_port = ipc_port_make_send(driver_device_port);
+	return KERN_SUCCESS;
 }
