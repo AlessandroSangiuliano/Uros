@@ -356,11 +356,15 @@ mach_port_t hal_chora_task(unsigned int bus, unsigned int slot,
  * that dies is started again after a delay, HAL_CHORA_BACKOFF_MS doubled with
  * each death that comes within HAL_CHORA_STEADY_S of its start; after
  * HAL_CHORA_STARTS_MAX such starts in a row the HAL gives up, and says so.
+ * A death the HAL asked for is no crash: a stopped driver stays ended, and an
+ * updated one is started at its end with its new module, once.
  */
 #define HAL_DRIVER_NONE		0	/* the HAL started no driver for it */
 #define HAL_DRIVER_RUNNING	1	/* its chora runs */
 #define HAL_DRIVER_RESTARTING	2	/* it died, and is started again soon */
 #define HAL_DRIVER_GAVE_UP	3	/* it died soon after each of its last starts */
+#define HAL_DRIVER_STOPPED	4	/* stopped on request, started only on request */
+#define HAL_DRIVER_UPDATING	5	/* ended on request, started again at its end */
 
 #define HAL_CHORA_STARTS_MAX	5
 #define HAL_CHORA_STEADY_S	10
@@ -369,6 +373,21 @@ mach_port_t hal_chora_task(unsigned int bus, unsigned int slot,
 /* HAL_DRIVER_* for a device, with its starts in *starts. */
 int  hal_chora_state(unsigned int bus, unsigned int slot, unsigned int func,
 		     int *starts);
+
+/*
+ * #964: the driver of a device, stopped, started again, or given a new module,
+ * on request -- stop_driver(), start_driver() and update_driver() in hal.defs,
+ * once hal_mig.c has checked the capability.  KERN_INVALID_ARGUMENT for a
+ * device the HAL started no driver for.  hal_driver_update() keeps `data' when
+ * it answers KERN_SUCCESS, and leaves it to the caller otherwise.
+ */
+kern_return_t hal_driver_stop(unsigned int bus, unsigned int slot,
+			      unsigned int func);
+kern_return_t hal_driver_start(unsigned int bus, unsigned int slot,
+			       unsigned int func);
+kern_return_t hal_driver_update(unsigned int bus, unsigned int slot,
+				unsigned int func, const char *name,
+				vm_offset_t data, mach_msg_type_number_t len);
 
 /*
  * #964: the HAL's own port for its restarts: a timer's message on it says a

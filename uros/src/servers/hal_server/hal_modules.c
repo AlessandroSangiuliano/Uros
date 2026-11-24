@@ -559,12 +559,39 @@ record_where(const struct chora_record *r, char *where, size_t size)
 		       r->dev.func);
 }
 
+static void chora_died(struct chora_record *r);
+
 /*
- * #964: the chora of `r' has died, or a start of it failed.  One that lived
- * HAL_CHORA_STEADY_S had run: its next start begins a new row.  After
- * HAL_CHORA_STARTS_MAX starts in a row that each died soon, the HAL gives up
- * and says so; otherwise it starts it again after HAL_CHORA_BACKOFF_MS,
- * doubled with each start of the row.
+ * #964: a start the HAL was asked for -- by start_driver() or update_driver(),
+ * or at the end of a chora ended to be started again.  Now, with no delay, and
+ * a new row: the deaths before it were another module's, or an
+ * administrator's to forgive.  A failure is a crash's, with the delays and the
+ * limit.
+ */
+static void
+chora_start_asked(struct chora_record *r)
+{
+	char	where[16];
+
+	record_where(r, where, sizeof where);
+	r->quick = 0;
+	r->ticket++;			/* a delay still to come no longer counts */
+	r->state = HAL_DRIVER_RESTARTING;
+	if (chora_launch(r) == 0)
+		printf("hal: the chora of %s is started on request, with %s/%s: "
+		       "start %d (#964)\n", where, r->pool, r->file, r->starts);
+	else
+		chora_died(r);
+}
+
+/*
+ * #964: the chora of `r' has died, or a start of it failed.  A death the HAL
+ * asked for is no crash: a stopped driver stays ended, and one ended to be
+ * started again -- updated, or started while it was still ending -- is started
+ * now.  Otherwise one that lived HAL_CHORA_STEADY_S had run: its next start
+ * begins a new row.  After HAL_CHORA_STARTS_MAX starts in a row that each died
+ * soon, the HAL gives up and says so; otherwise it starts it again after
+ * HAL_CHORA_BACKOFF_MS, doubled with each start of the row.
  */
 static void
 chora_died(struct chora_record *r)
@@ -576,6 +603,15 @@ chora_died(struct chora_record *r)
 	unsigned int		ms;
 
 	record_where(r, where, sizeof where);
+	if (r->state == HAL_DRIVER_STOPPED) {
+		printf("hal: the chora of %s was stopped on request: it is not "
+		       "started again (#964)\n", where);
+		return;
+	}
+	if (r->state == HAL_DRIVER_UPDATING) {
+		chora_start_asked(r);
+		return;
+	}
 	if (hal_now(&now) == 0 && r->started.tv_sec != 0 &&
 	    now.tv_sec - r->started.tv_sec >= HAL_CHORA_STEADY_S)
 		r->quick = 0;
@@ -689,6 +725,132 @@ hal_chora_state(unsigned int bus, unsigned int slot, unsigned int func,
 
 	*starts = r != NULL ? r->starts : 0;
 	return r != NULL ? r->state : HAL_DRIVER_NONE;
+}
+
+/*
+ * #964: stop_driver().  The device's driver ends and stays ended.  It is
+ * marked before its task is ended, so that its death is not taken for a
+ * crash, and a delay still to come no longer counts.
+ */
+kern_return_t
+hal_driver_stop(unsigned int bus, unsigned int slot, unsigned int func)
+{
+	struct chora_record	*r = record_of(bus, slot, func);
+	char			where[16];
+
+	if (r == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (r->state == HAL_DRIVER_STOPPED)
+		return KERN_SUCCESS;
+	record_where(r, where, sizeof where);
+	r->state = HAL_DRIVER_STOPPED;
+	r->ticket++;
+	if (r->task == MACH_PORT_NULL) {
+		printf("hal: the driver of %s, which does not run, is stopped on "
+		       "request (#964)\n", where);
+		return KERN_SUCCESS;
+	}
+	printf("hal: the chora of %s is stopped on request, after %d start(s) "
+	       "(#964)\n", where, r->starts);
+	/* Its death notice comes, and finds it stopped. */
+	(void)task_terminate(r->task);
+	return KERN_SUCCESS;
+}
+
+/*
+ * #964: start_driver().  A driver stopped, or given up after its starts, is
+ * started again with the module it has; one stopped whose chora has not yet
+ * ended is started at its end.  KERN_FAILURE for one that runs, or is to be
+ * started.
+ */
+kern_return_t
+hal_driver_start(unsigned int bus, unsigned int slot, unsigned int func)
+{
+	struct chora_record	*r = record_of(bus, slot, func);
+	char			where[16];
+
+	if (r == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (r->state != HAL_DRIVER_STOPPED && r->state != HAL_DRIVER_GAVE_UP)
+		return KERN_FAILURE;
+	if (r->task != MACH_PORT_NULL) {
+		record_where(r, where, sizeof where);
+		r->state = HAL_DRIVER_UPDATING;
+		printf("hal: the chora of %s, still ending, is started again at "
+		       "its end, on request (#964)\n", where);
+		return KERN_SUCCESS;
+	}
+	chora_start_asked(r);
+	return KERN_SUCCESS;
+}
+
+/* A module's name: letters, digits and _, with room for ".so" after it. */
+static int
+module_name_ok(const char *name, size_t room)
+{
+	size_t	i, n = strlen(name);
+
+	if (n == 0 || n + sizeof ".so" > room)
+		return 0;
+	for (i = 0; i < n; i++)
+		if (!((name[i] >= 'a' && name[i] <= 'z') ||
+		      (name[i] >= 'A' && name[i] <= 'Z') ||
+		      (name[i] >= '0' && name[i] <= '9') || name[i] == '_'))
+			return 0;
+	return 1;
+}
+
+/*
+ * #964: update_driver().  The device's module becomes the `len' bytes at
+ * `data', named `name', once they are read to declare the device; the record
+ * keeps them for every start after, the restarts after a crash among them.  A
+ * chora that runs is ended and started with them at its end; a driver that
+ * does not run is started with them now.  `data' is the record's when the
+ * answer is KERN_SUCCESS, and the caller's otherwise.
+ */
+kern_return_t
+hal_driver_update(unsigned int bus, unsigned int slot, unsigned int func,
+		  const char *name, vm_offset_t data,
+		  mach_msg_type_number_t len)
+{
+	struct chora_record	*r = record_of(bus, slot, func);
+	char			where[16];
+
+	if (r == NULL || !module_name_ok(name, sizeof r->file))
+		return KERN_INVALID_ARGUMENT;
+	record_where(r, where, sizeof where);
+	if (data == 0 || len == 0 || len > CHORA_GIVEN_MODULE_MAX ||
+	    module_score((const void *)data, len, &r->dev) <= 0) {
+		printf("hal: %s.so, given to update the driver of %s, does not "
+		       "declare it: refused (#964)\n", name, where);
+		return KERN_INVALID_VALUE;
+	}
+	if (r->given != 0)
+		(void)vm_deallocate(mach_task_self(), r->given, r->given_len);
+	r->given = data;
+	r->given_len = len;
+	(void)snprintf(r->file, sizeof r->file, "%s.so", name);
+	r->disk = 0;
+	printf("hal: the driver of %s is updated on request: %s/%s, %u bytes "
+	       "given (#964)\n", where, r->pool, r->file, (unsigned)len);
+
+	if (r->state == HAL_DRIVER_UPDATING)
+		return KERN_SUCCESS;	/* started with it at its end */
+	if (r->task != MACH_PORT_NULL) {
+		/*
+		 * Running, or stopped and still ending: started at its end.
+		 * Marked first, as a stop is.
+		 */
+		int	runs = r->state == HAL_DRIVER_RUNNING;
+
+		r->state = HAL_DRIVER_UPDATING;
+		r->ticket++;
+		if (runs)
+			(void)task_terminate(r->task);
+		return KERN_SUCCESS;
+	}
+	chora_start_asked(r);
+	return KERN_SUCCESS;
 }
 
 /*
