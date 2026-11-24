@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #996
+Takes out: a reply's buffer as long as its entries: it is made for a whole batch of VFS_DIRENT_MAX again, and the kernel takes out of ext_server only the pages the reply names.  xfile_test [11] reads the pages past the entries kept, a listing of /mnt/disk2 after another.
+Run: --entry 14 600 -smp 4
+Expect: xfile_write: \[11\] WRONG . ext_server kept 16384 bytes a listing of
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -1385,7 +1385,7 @@
+ 		return KERN_SUCCESS;
+ 	}
+ 	kr = vm_allocate(mach_task_self(), &buf,
+-			 emit * sizeof(vfs_dirent_t), TRUE);
++			 VFS_DIRENT_MAX * sizeof(vfs_dirent_t), TRUE);
+ 	if (kr != KERN_SUCCESS) {
+ 		free(tmp);
+ 		return kr;
