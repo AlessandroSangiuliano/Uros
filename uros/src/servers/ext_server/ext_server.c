@@ -166,7 +166,7 @@ struct mount_context {
 	mach_port_t	port;			/* receive port for this mount */
 	char		driver_name[64];	/* block driver name */
 	char		service_name[64];	/* netname registration */
-	char		flipc_ep[80];		/* FLIPC v2 endpoint name (#232) */
+	flipc2_endpoint_t flipc_ep;		/* FLIPC v2 endpoint, NULL: none (#232, #715) */
 };
 
 static struct mount_context	mounts[MAX_MOUNTS];
@@ -2353,24 +2353,28 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
  * ================================================================ */
 
 /*
- * Control RPC (vfs.defs): hand libvfs the name of the FLIPC endpoint
- * that serves this mount.  Empty name + non-zero result means no
- * fast-path (libvfs stays on the Mach data path).
+ * Control RPC (vfs.defs): hand libvfs the FLIPC endpoint that serves this
+ * mount.  A null port + non-zero result means no fast-path (libvfs stays on
+ * the Mach data path).
+ *
+ * #715: the endpoint's port, made a send right by the reply, and only to a
+ * task that sent this on the mount's port.  The endpoint has no name
+ * (flipc_start_mount()), so this is the one way to it: FLIPC is open to whom
+ * the mount is, as the Mach path is, and to no one else.
  */
 kern_return_t
-vfs_flipc_endpoint(mach_port_t fs_port, vfs_path_t endpoint, int *result)
+vfs_flipc_endpoint(mach_port_t fs_port, mach_port_t *endpoint, int *result)
 {
 	struct mount_context *mnt = mnt_from_payload(fs_port);
 
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	if (mnt && mnt->flipc_ep[0]) {
-		strncpy(endpoint, mnt->flipc_ep, VFS_PATH_MAX - 1);
-		endpoint[VFS_PATH_MAX - 1] = '\0';
+	if (mnt->flipc_ep != NULL) {
+		*endpoint = flipc2_endpoint_port(mnt->flipc_ep);
 		*result = 0;
 	} else {
-		endpoint[0] = '\0';
+		*endpoint = MACH_PORT_NULL;
 		*result = -1;
 	}
 	return KERN_SUCCESS;
@@ -2580,7 +2584,11 @@ flipc_reactor(void *arg)
 
 /*
  * Create the FLIPC endpoint for one mount and start its reactor thread.
- * On any failure the mount simply has no fast-path (flipc_ep stays "").
+ * On any failure the mount simply has no fast-path (flipc_ep stays NULL).
+ *
+ * #715: created without a name.  It was checked in as "flipc.<service>",
+ * and any task could look it up and connect, without the mount's port; now
+ * a client reaches it only through vfs_flipc_endpoint(), on that port.
  */
 static void
 flipc_start_mount(struct mount_context *mnt)
@@ -2589,21 +2597,15 @@ flipc_start_mount(struct mount_context *mnt)
 	flipc2_return_t ret;
 	static int slot;
 
-	(void)snprintf(mnt->flipc_ep, sizeof(mnt->flipc_ep),
-		       "%s%s", VFS_FLIPC_ENDPOINT_PREFIX, mnt->service_name);
-
-	ret = flipc2_endpoint_create(mnt->flipc_ep, 4,
+	mnt->flipc_ep = NULL;
+	if (slot >= MAX_MOUNTS)
+		return;
+	ret = flipc2_endpoint_create(NULL, 4,
 				     VFS_FLIPC_CHANNEL_SIZE,
 				     VFS_FLIPC_RING_ENTRIES, 0, &ep);
 	if (ret != FLIPC2_SUCCESS) {
-		printf("ext2: FLIPC endpoint_create(%s) failed %d\n",
-		       mnt->flipc_ep, ret);
-		mnt->flipc_ep[0] = '\0';
-		return;
-	}
-
-	if (slot >= MAX_MOUNTS) {
-		mnt->flipc_ep[0] = '\0';
+		printf("ext2: FLIPC endpoint_create for %s failed %d\n",
+		       mnt->service_name, ret);
 		return;
 	}
 	flipc_reactor_args[slot].ep  = ep;
@@ -2613,13 +2615,15 @@ flipc_start_mount(struct mount_context *mnt)
 	if (pthread_create(&t, NULL, flipc_reactor,
 			   &flipc_reactor_args[slot]) != 0) {
 		printf("ext2: FLIPC reactor thread failed for %s\n",
-		       mnt->flipc_ep);
-		mnt->flipc_ep[0] = '\0';
+		       mnt->service_name);
+		(void)flipc2_endpoint_destroy(ep);
 		return;
 	}
 	slot++;
 	pthread_detach(t);
-	printf("ext2: FLIPC fast-path endpoint \"%s\" ready\n", mnt->flipc_ep);
+	mnt->flipc_ep = ep;
+	printf("ext2: FLIPC fast-path endpoint for %s ready, reached through "
+	       "its mount's port (#715)\n", mnt->service_name);
 }
 
 /* ================================================================

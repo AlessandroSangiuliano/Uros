@@ -45,7 +45,7 @@ mt_is_task(mach_port_t name)
 
 static mach_port_t		liar_port;
 static flipc2_endpoint_t	liar_ep;
-static char			liar_ep_name[64];
+static int			liar_ep_up;	/* its reader thread runs */
 
 static const struct {
 	const char	*name;
@@ -157,16 +157,16 @@ liar_write(mach_port_t fs_port, vfs_u64_t handle, vfs_u64_t offset,
 }
 
 kern_return_t
-liar_flipc_endpoint(mach_port_t fs_port, vfs_path_t endpoint, int *result)
+liar_flipc_endpoint(mach_port_t fs_port, mach_port_t *endpoint, int *result)
 {
 	(void)fs_port;
-	if (liar_ep_name[0] == '\0') {
-		endpoint[0] = '\0';
+	/* #715: the endpoint's port, as ext_server's, the endpoint unnamed. */
+	if (!liar_ep_up) {
+		*endpoint = MACH_PORT_NULL;
 		*result = -1;
 		return KERN_SUCCESS;
 	}
-	(void)strncpy(endpoint, liar_ep_name, VFS_PATH_MAX - 1);
-	endpoint[VFS_PATH_MAX - 1] = '\0';
+	*endpoint = flipc2_endpoint_port(liar_ep);
 	*result = 0;
 	return KERN_SUCCESS;
 }
@@ -372,18 +372,14 @@ liar_flipc_start(void)
 {
 	pthread_t t;
 
-	(void)snprintf(liar_ep_name, sizeof liar_ep_name, "%s%s",
-		       VFS_FLIPC_ENDPOINT_PREFIX, "mount_test");
-	if (flipc2_endpoint_create(liar_ep_name, 1, VFS_FLIPC_CHANNEL_SIZE,
+	/* #715: no name -- libvfs is handed the port by liar_flipc_endpoint(). */
+	if (flipc2_endpoint_create(NULL, 1, VFS_FLIPC_CHANNEL_SIZE,
 				   VFS_FLIPC_RING_ENTRIES, 0, &liar_ep)
-	    != FLIPC2_SUCCESS) {
-		liar_ep_name[0] = '\0';
+	    != FLIPC2_SUCCESS)
 		return "flipc2_endpoint_create failed";
-	}
-	if (pthread_create(&t, NULL, liar_flipc, NULL) != 0) {
-		liar_ep_name[0] = '\0';
+	if (pthread_create(&t, NULL, liar_flipc, NULL) != 0)
 		return "pthread_create failed";
-	}
+	liar_ep_up = 1;
 	(void)pthread_detach(t);
 	return NULL;
 }

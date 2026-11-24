@@ -232,16 +232,22 @@ routine fs_sync(
 /* ------------------------------------------------------------------ */
 
 /*
- * Ask the server for the name of the FLIPC v2 endpoint that serves the
- * mount behind fs_port.  libvfs connects to it (flipc2_endpoint_connect)
- * and routes bulk read/write data through the shared-memory channel
- * instead of fs_read/fs_write Mach RPCs.  result == 0 and a non-empty
- * name mean the fast-path is available; result != 0 means the server has
- * no fast-path and the caller must stay on the Mach data path.
+ * Ask the server for the FLIPC v2 endpoint that serves the mount behind
+ * fs_port.  libvfs connects to it and routes bulk read/write data through
+ * the shared-memory channel instead of fs_read/fs_write Mach RPCs.
+ * result == 0 and a valid port mean the fast-path is available; result != 0
+ * means the server has no fast-path and the caller must stay on the Mach
+ * data path.
+ *
+ * #715: a send right to the endpoint's contact port, not its name.  The
+ * endpoint is checked in nowhere, so the one way to it is this routine, on
+ * the mount's port: FLIPC is open to whom the mount is, and to no one else.
+ * The caller connects with flipc2_endpoint_connect_port() and gives the
+ * right back.
  */
 routine fs_flipc_endpoint(
 		fs_port		: mach_port_t;
-	out	endpoint	: vfs_path_t;
+	out	endpoint	: mach_port_make_send_t;
 	out	result		: int
 	);
 

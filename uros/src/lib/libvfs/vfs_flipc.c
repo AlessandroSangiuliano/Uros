@@ -95,19 +95,21 @@ vfs_flipc_get(mach_port_t fs_port)
     if (c->state == 2)
         return NULL;
 
-    /* Untried: resolve the endpoint name and connect, once. */
+    /* Untried: ask the mount for its endpoint and connect, once.  #715: the
+     * mount answers a send right to the endpoint, which has no name; it is
+     * given back once the connection is made, or is not. */
     pthread_mutex_lock(&c->io_lock);
     if (c->state == 0) {
-        vfs_path_t name;
+        mach_port_t ep = MACH_PORT_NULL;
         int res = -1;
-        kern_return_t kr = fs_flipc_endpoint(fs_port, name, &res);
-        if (kr == KERN_SUCCESS && res == 0 && name[0]) {
+        kern_return_t kr = fs_flipc_endpoint(fs_port, &ep, &res);
+        if (kr == KERN_SUCCESS && res == 0 && MACH_PORT_VALID(ep)) {
             flipc2_channel_t fwd = 0, rev = 0;
-            if (flipc2_endpoint_connect(name, 0, 0, &fwd, &rev)
+            if (flipc2_endpoint_connect_port(ep, 0, 0, &fwd, &rev)
                 == FLIPC2_SUCCESS) {
                 c->fwd = fwd;
                 c->rev = rev;
-                c->fwd_data_size = fwd->hdr->data_size;    /* #716 */
+                c->fwd_data_size = fwd->data_size;    /* #716, #715 */
                 c->state = 1;
             } else {
                 c->state = 2;
@@ -115,6 +117,8 @@ vfs_flipc_get(mach_port_t fs_port)
         } else {
             c->state = 2;
         }
+        if (kr == KERN_SUCCESS && MACH_PORT_VALID(ep))
+            (void)mach_port_deallocate(mach_task_self(), ep);
     }
     pthread_mutex_unlock(&c->io_lock);
     return (c->state == 1) ? c : NULL;

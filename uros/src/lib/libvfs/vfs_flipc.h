@@ -49,7 +49,9 @@
  *     data_length = bytes actually read (0 = EOF)
  */
 
-#define VFS_FLIPC_ENDPOINT_PREFIX  "flipc."   /* + service name */
+/* #715: a mount's endpoint has no name; fs_flipc_endpoint() hands its port to
+ * whom the mount answers, and VFS_FLIPC_ENDPOINT_PREFIX, which named it
+ * "flipc.<service>" for any task to look up, is gone. */
 
 /* Channel sizing for an fs fast-path connection. */
 #define VFS_FLIPC_CHANNEL_SIZE     (256 * 1024)
