@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #996
+Takes out: the reply's cookie counted from the listing's cookie: ext_server hands back the count of the entries the reply carries, which is right only for a reply that began at the directory's start.  xfile_test [12]'s listing on from the first entry gets the 64th again.
+Run: --entry 14 600 -smp 4
+Expect: xfile_write: \[12\] WRONG . /mnt/disk2/many_x86_64 listed: 72 entries in [0-9]+ calls, 70 files once; on from its first entry 73 in
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -1423,7 +1423,7 @@
+ 
+ 	*entries_out       = (pointer_t)buf;
+ 	*entries_count_out = (mach_msg_type_number_t)(emit * sizeof(vfs_dirent_t));
+-	*next_cookie_out   = got > emit ? cookie + emit : 0;
++	*next_cookie_out   = got > emit ? emit : 0;
+ 	return KERN_SUCCESS;
+ }
+ 
