@@ -795,7 +795,8 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 #define	MT715_CHANNEL	4096u		/* FLIPC2_CHANNEL_SIZE_MIN */
 #define	MT715_RING	16u		/* FLIPC2_RING_ENTRIES_MIN: what fits it */
 #define	MT715_READ	8192u		/* more than such a channel's data */
-#define	MT715_FILE	"/boot/grub/grub.cfg"	/* every "/" that booted has it */
+#define	MT715_FILE	"/hello_world"	/* every "/" has it: make-disk-x86_64.sh */
+#define	MT715_DIR	"/mach_servers"	/* and this, as [31] asks */
 #define	MT715_OLD_NAME	"flipc.ext_server"	/* the name the endpoint had */
 #define	MT715_WAIT	500		/* x 10 ms: an answer's time */
 
@@ -902,14 +903,15 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
 				&token);
 	if (kr == KERN_SUCCESS) {
-		kd = fs_open(root, token, "/boot", VFS_O_RDONLY, 0, &dir, &type);
+		kd = fs_open(root, token, MT715_DIR, VFS_O_RDONLY, 0, &dir,
+			     &type);
 		kf = fs_open(root, token, MT715_FILE, VFS_O_RDONLY, 0, &file,
 			     &type);
 	}
 	if (con != FLIPC2_SUCCESS || kd != KERN_SUCCESS || kf != KERN_SUCCESS) {
 		for (i = 33; i <= 35; i++) {
 			printf("mount_test: [%d] WRONG — not asked: the connect "
-			       "%d, the opens of /boot %d and of " MT715_FILE
+			       "%d, the opens of " MT715_DIR " %d and of " MT715_FILE
 			       " %d\n", i, con, kd, kf);
 			mt_result(0);
 		}
@@ -919,8 +921,9 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 		/*
 		 * [33] Two writes whose data lie outside the reverse channel's
 		 * region -- at its end, and one byte longer than it -- its
-		 * header saying the region is as large as can be.  On /boot,
-		 * a directory: no file is written, whatever is answered.
+		 * header saying the region is as large as can be.  On
+		 * MT715_DIR, a directory: no file is written, whatever is
+		 * answered.
 		 */
 		rev->hdr->data_size = 0xFFFFFFFFu;
 		got_a = mt715_ask(fwd, rev, VFS_FLIPC_OP_WRITE, dir, 0,
