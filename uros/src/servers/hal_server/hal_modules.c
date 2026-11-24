@@ -68,6 +68,7 @@
 #include "chora_module.h"		/* CHORA_MODULE_SUFFIX, #964 */
 #include <mach/task_name.h>		/* URMACH_TASK_NAME_MAX, #964 */
 #include "libelf.h"
+#include <mach/elf.h>			/* SHT_DYNSYM, SHN_UNDEF: #964 */
 #include "exec_types.h"			/* EXEC_OK */
 #include "exec.h"			/* exec_load_image */
 
@@ -731,9 +732,10 @@ hal_chora_state(unsigned int bus, unsigned int slot, unsigned int func,
 }
 
 /*
- * #964: the chora of `r' ended on request, its state already written.  An end
- * the kernel refuses is said: the state would say a driver that runs is
- * stopped or being updated.
+ * #964: the chora of `r' ended on request, its state already written.  The
+ * kernel refuses the end of a task that is already ending, or whose port is a
+ * dead name: either way its death notice comes, and finds the state written.
+ * That is said, so that a refused end is not taken for a driver ended.
  */
 static void
 chora_end(struct chora_record *r, const char *where)
@@ -741,8 +743,8 @@ chora_end(struct chora_record *r, const char *where)
 	kern_return_t	kr = task_terminate(r->task);
 
 	if (kr != KERN_SUCCESS)
-		printf("hal: the chora of %s would not end: 0x%x, and the HAL "
-		       "says it is %s (#964)\n", where, kr,
+		printf("hal: the chora of %s was already ending (0x%x): its "
+		       "death notice finds it %s (#964)\n", where, kr,
 		       r->state == HAL_DRIVER_STOPPED ? "stopped" : "updated");
 }
 
@@ -805,18 +807,17 @@ hal_driver_start(unsigned int bus, unsigned int slot, unsigned int func)
 
 /*
  * A module's name: letters, digits and _, with room for ".so" after it, and
- * for the name chora gives its task, MODULE@BB:DD.F, which the kernel keeps to
- * URMACH_TASK_NAME_MAX with its terminator: a longer one could never be a
- * driver's (#964).
+ * for the name chora gives its task after it, which the kernel keeps to
+ * URMACH_TASK_NAME_MAX with its terminator: DRIVER_MODULE_NAME_MAX, from
+ * libdriver.h, where the format is (#964).  A longer one could never be a
+ * driver's.
  */
-#define MODULE_NAME_ROOM	(URMACH_TASK_NAME_MAX - sizeof "@BB:DD.F")
-
 static int
 module_name_ok(const char *name, size_t room)
 {
 	size_t	i, n = strlen(name);
 
-	if (n == 0 || n + sizeof ".so" > room || n > MODULE_NAME_ROOM)
+	if (n == 0 || n + sizeof ".so" > room || n > DRIVER_MODULE_NAME_MAX)
 		return 0;
 	for (i = 0; i < n; i++)
 		if (!((name[i] >= 'a' && name[i] <= 'z') ||
@@ -827,38 +828,77 @@ module_name_ok(const char *name, size_t room)
 }
 
 /*
- * #964: whether the module in `data' has `name' CHORA_MODULE_SUFFIX among the
- * names of its dynamic symbols, which chora's dlsym() finds its operations by:
- * its .dynstr holds the string, whole.  libelf reads the symbol tables of
- * ELF32 alone (#422), and the string table is enough to tell a module that no
- * chora could load by that name.
+ * #964: whether the module in `data' defines `name' CHORA_MODULE_SUFFIX among
+ * its dynamic symbols, which chora's dlsym() finds its operations by: an entry
+ * of an SHT_DYNSYM section whose name, read from the string table its sh_link
+ * names, is that one, whole, and whose section is not SHN_UNDEF.  The string
+ * table alone was not enough (the review of 24/11): GNU ld keeps one string
+ * as the tail of another, so a symbol's name need not be there whole, and an
+ * import's name is there as well as a definition's.  libelf reads the symbol
+ * tables of ELF32 alone (#422), so the entries are read here, of either
+ * class: Elf32_Sym has st_shndx at 14 of 16 bytes, Elf64_Sym at 6 of 24.
  */
 static int
 module_has_ops(const void *data, size_t size, const char *name)
 {
-	elf_image_t	img;
-	elf_shdr_view_t	sh;
-	char		want[MODULE_NAME_MAX + sizeof CHORA_MODULE_SUFFIX];
-	const char	*s;
-	size_t		n, i;
-	int		found = 0;
+	elf_image_t		img;
+	elf_shdr_view_t		sym, str;
+	char			want[MODULE_NAME_MAX + sizeof CHORA_MODULE_SUFFIX];
+	const unsigned char	*e;
+	uint32_t		st_name;
+	uint16_t		st_shndx;
+	size_t			ent, shndx_at, count, k, wl;
+	int			i, n, found = 0;
 
-	n = (size_t)snprintf(want, sizeof want, "%s%s", name,
-			     CHORA_MODULE_SUFFIX);
-	if (n >= sizeof want)
+	if ((size_t)snprintf(want, sizeof want, "%s%s", name,
+			     CHORA_MODULE_SUFFIX) >= sizeof want)
 		return 0;
-	n++;				/* its terminator too */
+	wl = strlen(want);
 	memset(&img, 0, sizeof img);
 	if (elf_open(data, size, &img) != ELF_OK)
 		return 0;
-	if (elf_shdr_find(&img, ".dynstr", &sh) == ELF_OK && sh.data != NULL) {
-		s = (const char *)sh.data;
-		for (i = 0; !found && i + n <= (size_t)sh.size; i++)
-			found = (i == 0 || s[i - 1] == '\0') &&
-				memcmp(s + i, want, n) == 0;
+	ent = elf_is_64bit(&img) ? 24 : 16;
+	shndx_at = elf_is_64bit(&img) ? 6 : 14;
+	n = elf_shdr_count(&img);
+	for (i = 0; i < n && !found; i++) {
+		if (elf_shdr_get(&img, i, &sym) != ELF_OK ||
+		    sym.type != SHT_DYNSYM || sym.data == NULL ||
+		    sym.entsize != ent || sym.link == 0 ||
+		    elf_shdr_get(&img, (int)sym.link, &str) != ELF_OK ||
+		    str.type != SHT_STRTAB || str.data == NULL)
+			continue;
+		count = (size_t)(sym.size / ent);
+		/* Entry 0 is the null symbol. */
+		for (k = 1; k < count && !found; k++) {
+			e = (const unsigned char *)sym.data + k * ent;
+			memcpy(&st_name, e, sizeof st_name);
+			memcpy(&st_shndx, e + shndx_at, sizeof st_shndx);
+			if (st_shndx == SHN_UNDEF || st_name >= str.size ||
+			    str.size - st_name <= wl)
+				continue;
+			found = memcmp((const char *)str.data + st_name, want,
+				       wl + 1) == 0;
+		}
 	}
 	elf_close(&img);
 	return found;
+}
+
+/*
+ * #964: whether a chora could run the module `name' (without ".so") whose
+ * bytes are `data', `size': its name fits a driver's task name, and the bytes
+ * define its operations.  NULL, or why not.  Asked of a pool's module as it
+ * is read, and of an update's.
+ */
+static const char *
+module_unrunnable(const void *data, size_t size, const char *name)
+{
+	if (!module_name_ok(name, MODULE_NAME_MAX))
+		return "its name is not letters, digits and _, or is longer "
+		       "than a driver's task name has room for";
+	if (!module_has_ops(data, size, name))
+		return "it defines no operations under its name";
+	return NULL;
 }
 
 /*
@@ -879,9 +919,15 @@ hal_driver_update(unsigned int bus, unsigned int slot, unsigned int func,
 	struct chora_record	*r = record_of(bus, slot, func);
 	char			where[16];
 
-	if (r == NULL || !module_name_ok(name, sizeof r->file))
+	if (r == NULL)
 		return KERN_INVALID_ARGUMENT;
 	record_where(r, where, sizeof where);
+	if (!module_name_ok(name, sizeof r->file)) {
+		printf("hal: \"%.64s\", given to update the driver of %s, is no "
+		       "name a driver's task has room for: refused (#964)\n",
+		       name, where);
+		return KERN_INVALID_ARGUMENT;
+	}
 	if (data == 0 || len == 0 || len > CHORA_GIVEN_MODULE_MAX) {
 		printf("hal: %s.so, given to update the driver of %s, is %u "
 		       "bytes, where a module is 1 to %u: refused (#964)\n", name,
@@ -894,7 +940,7 @@ hal_driver_update(unsigned int bus, unsigned int slot, unsigned int func,
 		return KERN_INVALID_VALUE;
 	}
 	if (!module_has_ops((const void *)data, len, name)) {
-		printf("hal: %s.so, given to update the driver of %s, has no "
+		printf("hal: %s.so, given to update the driver of %s, defines no "
 		       "%s%s for chora to find: refused (#964)\n", name, where,
 		       name, CHORA_MODULE_SUFFIX);
 		return KERN_INVALID_VALUE;
@@ -1052,6 +1098,31 @@ module_read(struct pool_module *m, const char *pool, const char *on,
 			       CHORA_DRIVES_SECTION, f.what);
 		elf_close(&img);
 		return;
+	}
+	/*
+	 * #964: and a module no chora could run declares nothing, said: one
+	 * started for its device would die at each start until the HAL gave
+	 * up, as an update's would, which update_driver() refuses alike.
+	 */
+	{
+		char		name[MODULE_NAME_MAX];
+		size_t		len = strlen(m->name);
+		const char	*why;
+
+		if (len > 3 && strcmp(m->name + len - 3, ".so") == 0)
+			len -= 3;
+		if (len >= sizeof name)
+			len = sizeof name - 1;
+		memcpy(name, m->name, len);
+		name[len] = '\0';
+		why = module_unrunnable(data, size, name);
+		if (why != NULL) {
+			printf("hal: %s/%s%s: %s, so no chora could run it: it "
+			       "declares nothing (#964)\n", pool, m->name, on,
+			       why);
+			elf_close(&img);
+			return;
+		}
 	}
 	memcpy(m->drives, sh.data, (size_t)n * sizeof m->drives[0]);
 	m->lines = n;
