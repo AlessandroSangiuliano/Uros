@@ -1040,9 +1040,10 @@ xf_size_of(mach_port_t task)
  * go for them can fall in a round too -- a client leaving FLIPC gives back two
  * rings of 256 KiB -- where the least would pick that round and hide a leak.
  * A leak is every listing's, so it is in every round; another client's growth
- * or release falls in one, and the median is a round of neither.  And the bound is half
- * a page a listing, where what stays of a buffer is pages: 4096 bytes at the
- * least, and another client's growth must pass 512 KiB in a round to count.
+ * or release falls in one, and the median is a round of neither.  And the
+ * bound is half a page a listing, where what stays of a buffer is pages, 4096
+ * bytes at the least: another client's growth must pass 512 KiB in three
+ * rounds of the five to be read as a leak.
  */
 #define XF_LISTINGS		256
 #define XF_LISTING_SLACK	2048	/* bytes a listing: half a page */
@@ -1165,7 +1166,7 @@ xf_listing_leak(const char *path, int arm)
 		   mid_end < XF_LISTING_SLACK) {
 		printf("%s: [%d] ext_server's size, as the kernel says it, over %d "
 		       "rounds of %d listings of %s's %d entries and %d at its "
-		       "end: the median round kept %lld and %lld bytes a listing, "
+		       "end: the medians kept %lld and %lld bytes a listing, "
 		       "under %d\n", tag, arm, XF_LEAK_ROUNDS, XF_LISTINGS, dir,
 		       entries, XF_LISTINGS, mid_all, mid_end, XF_LISTING_SLACK);
 		passed++;
@@ -1300,13 +1301,15 @@ xf_many(const char *path, int arm, char *made, size_t size)
  * They are asked of [12]'s directory, of 72 entries.
  *
  *   XF_FAR_COOKIE   past the directory, answered with no entries.
- *   XF_EDGE_COOKIE  2^32 - 65, within the 32 bits ext2fs counts in,
- *                   answered so too.  ext_server read cookie + VFS_DIRENT_MAX
- *                   entries into memory of that many, 2^32 - 1 entries for
- *                   this cookie, which no malloc() gives, and the listing
- *                   failed; and a room for cookie + 65 entries, a reply's and
- *                   the one past it, comes to 0 in 32 bits, which malloc()
- *                   does not give either.
+ *   XF_EDGE_COOKIE  2^32 - 64 and 2^32 - 65, within the 32 bits ext2fs
+ *   XF_EDGE1_COOKIE counts in, answered so too.  Each brings to 0, in 32
+ *                   bits, a count of entries made from the cookie, and
+ *                   malloc(0) gives nothing: 2^32 - 64 the old code's cookie +
+ *                   VFS_DIRENT_MAX, on both targets, and 2^32 - 65 a room for
+ *                   cookie + 65, a reply's and the entry past it.  (At 2^32 -
+ *                   65 the old count is 2^32 - 1 entries: on i386 malloc()'s
+ *                   own rounding overflows, #1001, and on x86-64 a terabyte
+ *                   is given, lazily, and the old code answered the end.)
  *   XF_WIDE_COOKIE  2^32, which no listing hands out, refused.
  *
  * ⚠️ What it does NOT catch is why XF_FAR_COOKIE is this one: on i386, where
@@ -1317,7 +1320,8 @@ xf_many(const char *path, int arm, char *made, size_t size)
  * count away: the room is a reply's whatever the cookie.
  */
 #define XF_FAR_COOKIE	16268752ull	/* 2^32 / 264 bytes, less 64, up */
-#define XF_EDGE_COOKIE	4294967231ull	/* 2^32 - 65 */
+#define XF_EDGE_COOKIE	4294967232ull	/* 2^32 - 64 */
+#define XF_EDGE1_COOKIE	4294967231ull	/* 2^32 - 65 */
 #define XF_WIDE_COOKIE	4294967296ull	/* 2^32 */
 
 static void
@@ -1325,8 +1329,8 @@ xf_far_cookie(const char *dir, int arm)
 {
 	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
 	vfs_fd_t		fd;
-	uint64_t		cookie, far_back, edge_back;
-	int			first, far, edge, wide, again;
+	uint64_t		cookie, far_back, edge_back, edge1_back;
+	int			first, far, edge, edge1, wide, again;
 
 	if (dir[0] == '\0' ||
 	    vfs_open_rc(dir, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS) {
@@ -1339,30 +1343,36 @@ xf_far_cookie(const char *dir, int arm)
 	first = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
 	cookie = XF_FAR_COOKIE;
 	far = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
-	far_back = cookie;
+	far_back = far < 0 ? 0 : cookie;
 	cookie = XF_EDGE_COOKIE;
 	edge = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
-	edge_back = cookie;
+	edge_back = edge < 0 ? 0 : cookie;
+	cookie = XF_EDGE1_COOKIE;
+	edge1 = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	edge1_back = edge1 < 0 ? 0 : cookie;
 	cookie = XF_WIDE_COOKIE;
 	wide = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
 	cookie = 0;
 	again = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
 	(void)vfs_close(fd);
 	if (first > 0 && far == 0 && far_back == 0 && edge == 0 &&
-	    edge_back == 0 && wide < 0 && again == first) {
-		printf("%s: [%d] listings of %s at the cookies %llu and %llu: no "
-		       "entries, and the end; at %llu refused; the listing after "
-		       "them %d entries, as before\n", tag, arm, dir,
-		       XF_FAR_COOKIE, XF_EDGE_COOKIE, XF_WIDE_COOKIE, again);
+	    edge_back == 0 && edge1 == 0 && edge1_back == 0 && wide < 0 &&
+	    again == first) {
+		printf("%s: [%d] listings of %s at the cookies %llu, %llu and "
+		       "%llu: no entries, and the end; at %llu refused; the "
+		       "listing after them %d entries, as before\n", tag, arm,
+		       dir, XF_FAR_COOKIE, XF_EDGE_COOKIE, XF_EDGE1_COOKIE,
+		       XF_WIDE_COOKIE, again);
 		passed++;
 	} else {
-		printf("%s: [%d] WRONG — listings of %s at the cookies %llu, %llu "
-		       "and %llu: %d, %d and %d entries (-1 an error), the cookies "
-		       "%llu and %llu back; before them %d entries, after %d\n",
-		       tag, arm, dir, XF_FAR_COOKIE, XF_EDGE_COOKIE,
-		       XF_WIDE_COOKIE, far, edge, wide,
-		       (unsigned long long)far_back,
-		       (unsigned long long)edge_back, first, again);
+		printf("%s: [%d] WRONG — listings of %s at the cookies %llu, %llu, "
+		       "%llu and %llu: %d, %d, %d and %d entries (-1 an error), "
+		       "cookies back %llu %llu %llu (0 if none); before them %d "
+		       "entries, after %d\n", tag, arm, dir, XF_FAR_COOKIE,
+		       XF_EDGE_COOKIE, XF_EDGE1_COOKIE, XF_WIDE_COOKIE, far,
+		       edge, edge1, wide, (unsigned long long)far_back,
+		       (unsigned long long)edge_back,
+		       (unsigned long long)edge1_back, first, again);
 		failed++;
 	}
 }

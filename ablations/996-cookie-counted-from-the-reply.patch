@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #996
-Takes out: the reply's cookie counted from the listing's cookie: ext_server hands back the count of the entries the reply carries, which is right only for a reply that began at the directory's start.  xfile_test [12]'s listing on from the first entry gets the 64th again.
+Takes out: the reply's cookie counted from the listing's cookie: ext_server hands back the count of the entries the reply carries, which is right only for a reply that began at the directory's start.  xfile_test [12]'s listing on from the first entry gets its 65th entry twice.
 Run: --entry 14 600 -smp 4
 Expect: xfile_write: \[12\] WRONG . /mnt/disk2/many_x86_64 listed: 72 entries in [0-9]+ calls, 70 files once; on from its first entry 73 in
 

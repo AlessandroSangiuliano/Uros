@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #996
-Takes out: a reply's room whatever the cookie: ext_server counts it from the cookie again, cookie + 65 entries in 32 bits, as it counted cookie + 64 before #996.  xfile_test [13]'s listing at 2^32 - 65 finds that count 0, which malloc() does not give, and fails.
+Takes out: a reply's room whatever the cookie: ext_server counts it from the cookie again, cookie + 65 entries in 32 bits, as it counted cookie + 64 before #996.  xfile_test [13]'s listing at 2^32 - 65 finds that count 0, which malloc() does not give, and fails; at 2^32 - 64 it is 1, and answers the end.
 Run: --entry 14 600 -smp 4
-Expect: xfile_write: \[13\] WRONG . listings of .* at the cookies 16268752, 4294967231 and 4294967296: (-1|0), -1 and -1 entries
+Expect: xfile_write: \[13\] WRONG . listings of .* at the cookies 16268752, 4294967232, 4294967231 and 4294967296: (-1|0), 0, -1 and -1 entries
 
 diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
 --- a/uros/src/servers/ext_server/ext_server.c
