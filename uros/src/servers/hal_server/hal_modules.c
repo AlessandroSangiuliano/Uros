@@ -729,6 +729,22 @@ hal_chora_state(unsigned int bus, unsigned int slot, unsigned int func,
 }
 
 /*
+ * #964: the chora of `r' ended on request, its state already written.  An end
+ * the kernel refuses is said: the state would say a driver that runs is
+ * stopped or being updated.
+ */
+static void
+chora_end(struct chora_record *r, const char *where)
+{
+	kern_return_t	kr = task_terminate(r->task);
+
+	if (kr != KERN_SUCCESS)
+		printf("hal: the chora of %s would not end: 0x%x, and the HAL "
+		       "says it is %s (#964)\n", where, kr,
+		       r->state == HAL_DRIVER_STOPPED ? "stopped" : "updated");
+}
+
+/*
  * #964: stop_driver().  The device's driver ends and stays ended.  It is
  * marked before its task is ended, so that its death is not taken for a
  * crash, and a delay still to come no longer counts.
@@ -754,7 +770,7 @@ hal_driver_stop(unsigned int bus, unsigned int slot, unsigned int func)
 	printf("hal: the chora of %s is stopped on request, after %d start(s) "
 	       "(#964)\n", where, r->starts);
 	/* Its death notice comes, and finds it stopped. */
-	(void)task_terminate(r->task);
+	chora_end(r, where);
 	return KERN_SUCCESS;
 }
 
