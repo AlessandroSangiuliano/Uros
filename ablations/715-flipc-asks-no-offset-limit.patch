@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #715
+Takes out: the FLIPC path's asking of fs_offset_ok() -- it passes any offset on again, where the Mach path refuses past 4 GiB; mount_test's [36] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: mount_test: \[36\] WRONG
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -2441,8 +2441,7 @@
+ 	if ((op == VFS_FLIPC_OP_READ || op == VFS_FLIPC_OP_WRITE) &&
+ 	    (handle < 1 || handle > MAX_OPEN_FILES)) {
+ 		rep->status = VFS_FLIPC_ERR_BADHANDLE;
+-	} else if ((op == VFS_FLIPC_OP_READ || op == VFS_FLIPC_OP_WRITE) &&
+-		   !fs_offset_ok(offset)) {
++	} else if (0) {
+ 		rep->status = VFS_FLIPC_ERR_INVAL;
+ 	} else if (op == VFS_FLIPC_OP_READ) {
+ 		int idx = (int)handle - 1;
