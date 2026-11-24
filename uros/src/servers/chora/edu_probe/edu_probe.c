@@ -383,7 +383,22 @@ edu_attach(struct driver *d)
 /* edu, vendor 1234h and device 11e8h, and nothing else (#964). */
 CHORA_DRIVES(CHORA_DRIVES_PCI_ID(0x1234, 0x11e8));
 
-const struct chora_module_ops edu_probe_chora_ops = {
-	.name	= "edu_probe",
+/*
+ * The module's name, and the symbol of its operations after it, which chora
+ * looks up as <name>_chora_ops (#964).  The build compiles this file twice:
+ * as edu_probe, in the bundle's pool misc, and as edu_next, on the disk and in
+ * no pool, which chora_test hands the HAL to update edu's driver with -- a
+ * module of another name, for the same device.
+ */
+#ifndef EDU_MODULE
+#define EDU_MODULE	edu_probe
+#endif
+#define EDU_NAME_(m)	#m
+#define EDU_NAME(m)	EDU_NAME_(m)
+#define EDU_OPS_(m)	m##_chora_ops
+#define EDU_OPS(m)	EDU_OPS_(m)
+
+const struct chora_module_ops EDU_OPS(EDU_MODULE) = {
+	.name	= EDU_NAME(EDU_MODULE),
 	.attach	= edu_attach,
 };

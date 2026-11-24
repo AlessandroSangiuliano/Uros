@@ -207,3 +207,28 @@ set_target_properties(edu_probe_module PROPERTIES
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
+
+# #964: edu_probe again, named edu_next: the module chora_test hands the HAL to
+# update edu's driver with.  It goes to user/updates, which make-disk-x86_64.sh
+# writes to the disk's /mach_servers/updates and which is no pool: in the
+# bundle's misc, or the disk's, it would declare edu alike with edu_probe, a
+# tie the HAL does not break, and edu would get no driver.
+add_library(edu_next_module SHARED edu_probe/edu_probe.c)
+
+add_dependencies(edu_next_module mig_mach_public_headers)
+
+target_compile_options(edu_next_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(edu_next_module PRIVATE MACH_IPC_COMPAT=0
+  EDU_MODULE=edu_next)
+
+target_include_directories(edu_next_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(edu_next_module PROPERTIES
+  OUTPUT_NAME "edu_next"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")
