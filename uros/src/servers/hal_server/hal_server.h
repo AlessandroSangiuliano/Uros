@@ -390,4 +390,7 @@ extern mach_port_t	root_ledger_wired;
 extern mach_port_t	root_ledger_paged;
 extern mach_port_t	hal_service_port;
 
+/* #964: the task that sent the request being served, by its identity (#747). */
+extern uint64_t		hal_request_sender;
+
 #endif /* _HAL_SERVER_H_ */

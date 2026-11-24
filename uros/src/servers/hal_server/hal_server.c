@@ -39,6 +39,7 @@
 #include <mach/message.h>
 #include <mach/mig_errors.h>
 #include <mach/notify.h>
+#include <mach/urmach_identity.h>	/* a request's sender (#964) */
 #include <sa_mach.h>
 #include <servers/netname.h>
 #include <stdio.h>
@@ -271,9 +272,19 @@ static mach_port_t	disk_watch = MACH_PORT_NULL;
 /* #964: the HAL's own port for its restarts' timers. */
 static mach_port_t	restart_port = MACH_PORT_NULL;
 
+/*
+ * #964: the task that sent the request being served, from the message's
+ * trailer, which the HAL's receive asks for (URMACH_RCV_SENDER).  A routine
+ * that takes a capability verifies it as this task's: a token is good only for
+ * the task it was issued to (#747).
+ */
+uint64_t	hal_request_sender;
+
 static boolean_t
 hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	hal_request_sender = urmach_msg_sender(in);
+
 	/*
 	 * #964: a restart's delay is over.  The HAL alone holds a send right to
 	 * this port, for its timers, so what arrives on it is theirs.
@@ -511,7 +522,8 @@ main(int argc, char **argv)
 
 		printf("hal: init complete, entering message loop\n");
 
-		mach_msg_server(hal_demux, 8192, served, MACH_MSG_OPTION_NONE);
+		/* #964: every request with its sender, for the capabilities. */
+		mach_msg_server(hal_demux, 8192, served, URMACH_RCV_SENDER);
 	}
 
 	printf("hal: mach_msg_server exited unexpectedly\n");
