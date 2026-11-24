@@ -730,6 +730,24 @@ must_report "bootstrap: stage-2: waiting for 'disk0a'" "bootstrap: stage-2: 'dis
 	'Bootstrap waited for the boot disk'"'"'s partition and never got it, so none of the programs it loads from the boot disk after stage 2 started, and no pair of theirs ever opened to ask (#778).' \
 	"bootstrap's stage 2"
 
+# #995: bootstrap makes, as it starts, the four notifications it does not ask
+# for, on its servers' notification port, and says each as it takes it.  Each
+# panicked bootstrap, and the system with it, so a pair whose second line never
+# came is a notice bootstrap did not say: one its service thread never took,
+# or one taken another way than the fix's.
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a send-once notification, on its servers. notification port: said, and bootstrap goes on' \
+	'Bootstrap let a send-once right to its notification port go unused and never said the notice it brings (#995).' \
+	'bootstrap and a send-once notice'
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a port-deleted notification for 0x[0-9a-f]*, on its servers. notification port: said, and bootstrap goes on' \
+	'Bootstrap let a right with a dead-name request on it go and never said the port-deleted notice that cancels the request (#995).' \
+	'bootstrap and a port-deleted notice'
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a no-senders notification, make-send count [0-9]*, on its servers. notification port: said, and bootstrap goes on' \
+	'Bootstrap let the one send right of a port with a no-senders request go and never said the notice (#995).' \
+	'bootstrap and a no-senders notice'
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a port-destroyed notification, on its servers. notification port: the receive right 0x[0-9a-f]* it brings is destroyed, and bootstrap goes on' \
+	'Bootstrap destroyed a receive right with a port-destroyed request on it and never said the notice that brings the right back (#995).' \
+	'bootstrap and a port-destroyed notice'
+
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
 # with no flag, with -D and with -H -D.  The start is said through mach_print,
 # which needs no port, so the "none" line whose console never came is a start
