@@ -130,6 +130,8 @@ static struct chora_record {
 	int			quick;		/* starts in a row that died soon */
 	tvalspec_t		started;	/* its last start, by the clock */
 	unsigned int		ticket;		/* the restart it waits for */
+	vm_offset_t		given;		/* its module from an update, */
+	mach_msg_type_number_t	given_len;	/* kept for every start: or 0 */
 } choras[HAL_MAX_CHORAS];
 
 /*
@@ -364,14 +366,22 @@ chora_launch(struct chora_record *r)
 		return -1;
 	}
 
-	/* The module the chora will be given, and what it declares, again. */
-	if (module_fetch(pool, file, disk, &mod, &mod_len) != 0)
+	/*
+	 * The module the chora will be given, and what it declares, again: the
+	 * bytes an update gave, which the record keeps, or the pool's, fetched.
+	 */
+	if (r->given != 0) {
+		mod = r->given;
+		mod_len = r->given_len;
+	} else if (module_fetch(pool, file, disk, &mod, &mod_len) != 0)
 		return -1;
 	if (module_score((const void *)mod, mod_len, dev) <= 0) {
-		printf("hal: %s/%s, as %s gives it now, does not declare %s: no "
-		       "chora is started (#964)\n", pool, file,
-		       disk ? "the disk" : "bootstrap", where);
-		(void)vm_deallocate(mach_task_self(), mod, mod_len);
+		printf("hal: %s/%s, as %s, does not declare %s: no chora is "
+		       "started (#964)\n", pool, file, r->given != 0 ?
+		       "an update gave it" : disk ? "the disk gives it now" :
+		       "bootstrap gives it now", where);
+		if (r->given == 0)
+			(void)vm_deallocate(mach_task_self(), mod, mod_len);
 		return -1;
 	}
 
@@ -383,7 +393,9 @@ chora_launch(struct chora_record *r)
 		if (box == MACH_PORT_NULL)
 			kr = KERN_FAILURE;
 	}
-	(void)vm_deallocate(mach_task_self(), mod, mod_len);
+	/* The message carried a copy: an update's bytes stay the record's. */
+	if (r->given == 0)
+		(void)vm_deallocate(mach_task_self(), mod, mod_len);
 	if (kr == KERN_SUCCESS) {
 		(void)snprintf(boxname, sizeof boxname, "0x%x", (unsigned)box);
 		at = blob_put(argv_blob, at, sizeof argv_blob, "chora");
