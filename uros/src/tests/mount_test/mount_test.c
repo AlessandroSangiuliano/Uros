@@ -924,9 +924,9 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 
 		/*
 		 * [33] Two writes whose data lie outside the reverse channel's
-		 * region -- at its end, and one byte longer than it -- its
-		 * header saying the region is as large as can be.  On
-		 * MT715_DIR, a directory: no file is written, whatever is
+		 * region -- one byte past its end, and one byte longer than
+		 * it -- its header saying the region is as large as can be.
+		 * On MT715_DIR, a directory: no file is written, whatever is
 		 * answered.
 		 */
 		rev->hdr->data_size = 0xFFFFFFFFu;
