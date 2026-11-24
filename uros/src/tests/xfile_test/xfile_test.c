@@ -1028,10 +1028,20 @@ xf_size_of(mach_port_t task)
  * what it needs; what stays must be under XF_LISTING_SLACK bytes a listing,
  * where that buffer left 16 KiB and 20 KiB.  ext_server is found by the name
  * it gives itself.
+ *
+ * 🔑 THE LEAST OF XF_LEAK_ROUNDS ROUNDS, and not one.  ext_server serves other
+ * clients meanwhile, and what it grows by for them can stay: on OMEGA, one
+ * round of a fixed tree read 1064960 bytes, 260 pages, which is no listing's,
+ * where every other round read none.  A leak is every listing's, so it is in
+ * every round; another client's growth falls in one.  And the bound is half
+ * a page a listing, where what stays of a buffer is pages: 4096 bytes at the
+ * least, and another client's growth must pass 512 KiB in a round to count.
  */
 #define XF_LISTINGS		256
-#define XF_LISTING_SLACK	1024	/* bytes a listing: a quarter page */
+#define XF_LISTING_SLACK	2048	/* bytes a listing: half a page */
 #define XF_WARM_LISTINGS	8
+#define XF_LEAK_ROUNDS		3
+_Static_assert(XF_LEAK_ROUNDS == 3, "[11]'s WRONG line names three rounds");
 
 static void
 xf_listing_leak(const char *path, int arm)
@@ -1043,8 +1053,9 @@ xf_listing_leak(const char *path, int arm)
 	vfs_fd_t		fd;
 	uint64_t		cookie, end;
 	vm_size_t		before, mid, after;
-	long long		stay_all, stay_end;
-	int			i, n, entries, wrong = 0;
+	long long		all[XF_LEAK_ROUNDS], at_end[XF_LEAK_ROUNDS];
+	long long		least_all = 0, least_end = 0;
+	int			i, r, n, entries, wrong = 0, unread = 0;
 
 	if (xf_dir_of(path, dir, sizeof dir) != 0) {
 		printf("%s: [%d] WRONG — not asked: %s has no directory\n", tag,
@@ -1086,41 +1097,51 @@ xf_listing_leak(const char *path, int arm)
 		(void)vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
 	}
 
-	before = xf_size_of(task);
-	for (i = 0; i < XF_LISTINGS; i++) {
-		cookie = 0;
-		n = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
-		if (n != entries || cookie != 0)
-			wrong++;
+	for (r = 0; r < XF_LEAK_ROUNDS; r++) {
+		before = xf_size_of(task);
+		for (i = 0; i < XF_LISTINGS; i++) {
+			cookie = 0;
+			n = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+			if (n != entries || cookie != 0)
+				wrong++;
+		}
+		mid = xf_size_of(task);
+		for (i = 0; i < XF_LISTINGS; i++) {
+			cookie = end;
+			n = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+			if (n != 0 || cookie != 0)
+				wrong++;
+		}
+		after = xf_size_of(task);
+		if (before == 0 || mid == 0 || after == 0)
+			unread++;
+		all[r] = ((long long)mid - (long long)before) / XF_LISTINGS;
+		at_end[r] = ((long long)after - (long long)mid) / XF_LISTINGS;
+		if (r == 0 || all[r] < least_all)
+			least_all = all[r];
+		if (r == 0 || at_end[r] < least_end)
+			least_end = at_end[r];
 	}
-	mid = xf_size_of(task);
-	for (i = 0; i < XF_LISTINGS; i++) {
-		cookie = end;
-		n = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
-		if (n != 0 || cookie != 0)
-			wrong++;
-	}
-	after = xf_size_of(task);
 	(void)vfs_close(fd);
 	(void)mach_port_deallocate(mach_task_self(), task);
 
-	stay_all = ((long long)mid - (long long)before) / XF_LISTINGS;
-	stay_end = ((long long)after - (long long)mid) / XF_LISTINGS;
-	if (before != 0 && mid != 0 && after != 0 && wrong == 0 &&
-	    stay_all < XF_LISTING_SLACK && stay_end < XF_LISTING_SLACK) {
-		printf("%s: [%d] ext_server's size, as the kernel says it, over "
-		       "%d listings of %s's %d entries and %d at its end: %lld "
-		       "and %lld bytes stayed a listing, under %d\n", tag, arm,
-		       XF_LISTINGS, dir, entries, XF_LISTINGS, stay_all,
-		       stay_end, XF_LISTING_SLACK);
+	if (unread == 0 && wrong == 0 && least_all < XF_LISTING_SLACK &&
+	    least_end < XF_LISTING_SLACK) {
+		printf("%s: [%d] ext_server's size, as the kernel says it, over %d "
+		       "rounds of %d listings of %s's %d entries and %d at its "
+		       "end: the least a round kept, %lld and %lld bytes a "
+		       "listing, under %d\n", tag, arm, XF_LEAK_ROUNDS,
+		       XF_LISTINGS, dir, entries, XF_LISTINGS, least_all,
+		       least_end, XF_LISTING_SLACK);
 		passed++;
 	} else {
 		printf("%s: [%d] WRONG — ext_server kept %lld bytes a listing of "
-		       "%s's %d entries and %lld a listing at its end, over %d "
-		       "of each (sizes %llu %llu %llu; %d answered wrong)\n",
-		       tag, arm, stay_all, dir, entries, stay_end, XF_LISTINGS,
-		       (unsigned long long)before, (unsigned long long)mid,
-		       (unsigned long long)after, wrong);
+		       "%s's %d entries and %lld a listing at its end, the least "
+		       "of %d rounds of %d (rounds %lld %lld %lld, %lld %lld "
+		       "%lld; %d answered wrong, %d unread)\n", tag, arm,
+		       least_all, dir, entries, least_end, XF_LEAK_ROUNDS,
+		       XF_LISTINGS, all[0], all[1], all[2], at_end[0], at_end[1],
+		       at_end[2], wrong, unread);
 		failed++;
 	}
 }
