@@ -910,19 +910,25 @@ hal_driver_update(unsigned int bus, unsigned int slot, unsigned int func,
 
 	if (r->state == HAL_DRIVER_UPDATING)
 		return KERN_SUCCESS;	/* started with it at its end */
-	if (r->task != MACH_PORT_NULL) {
-		/*
-		 * Running, or stopped and still ending: started at its end.
-		 * Marked first, as a stop is.
-		 */
-		int	runs = r->state == HAL_DRIVER_RUNNING;
-
-		r->state = HAL_DRIVER_UPDATING;
-		r->ticket++;
-		if (runs)
-			(void)task_terminate(r->task);
+	/*
+	 * A stopped driver stays stopped, with the new module, until
+	 * start_driver(): an update is no start, and who may update may not
+	 * thereby start what an administrator stopped (decided with the user,
+	 * 24/11).
+	 */
+	if (r->state == HAL_DRIVER_STOPPED) {
+		printf("hal: the driver of %s stays stopped, with %s/%s, until it "
+		       "is started (#964)\n", where, r->pool, r->file);
 		return KERN_SUCCESS;
 	}
+	if (r->task != MACH_PORT_NULL) {
+		/* Running: started at its end.  Marked first, as a stop is. */
+		r->state = HAL_DRIVER_UPDATING;
+		r->ticket++;
+		chora_end(r, where);
+		return KERN_SUCCESS;
+	}
+	/* Given up after its starts, or waiting for a restart's delay. */
 	chora_start_asked(r);
 	return KERN_SUCCESS;
 }

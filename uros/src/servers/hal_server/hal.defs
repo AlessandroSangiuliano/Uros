@@ -177,10 +177,13 @@ routine get_driver_state(
  *                  again with the module it has.  KERN_FAILURE for one that
  *                  runs or is to be started.
  *   update_driver  its module becomes `module', named `name' without ".so",
- *                  which must declare the device: KERN_INVALID_VALUE
- *                  otherwise.  A chora that runs is ended and started again
- *                  with it, once, at its end (HAL_DRIVER_UPDATING); a driver
- *                  that does not run is started with it now.
+ *                  which must declare the device and have `name'_chora_ops:
+ *                  KERN_INVALID_VALUE otherwise, and KERN_INVALID_ARGUMENT
+ *                  for a name longer than a driver's task name leaves room
+ *                  for.  A chora that runs is ended and started again with
+ *                  it, once, at its end (HAL_DRIVER_UPDATING); a stopped
+ *                  driver stays stopped with it until start_driver(); one
+ *                  given up after its starts is started with it now.
  *
  * Each takes a RESOURCE_DRIVER_ADMIN token for the device's class and the
  * routine's operation, issued to the task that sends the request; for any
