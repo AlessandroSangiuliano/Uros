@@ -75,8 +75,10 @@
  * on a directory so that nothing is written whatever the answer; [34] a read
  * longer than the forward channel's region, its header saying the same, which
  * must answer the region's length and the bytes the Mach path reads; [35] a
- * handle with bit 32 set over this task's own fid, which must be no handle.
- * Each asks after that ext_server still answers.
+ * handle with bit 32 set over this task's own fid, which must be no handle;
+ * [36] a read and a write at offset 2^44, past the 4 GiB the backend takes,
+ * which both paths must refuse.  Each asks after that ext_server still
+ * answers.
  */
 
 #include <mach.h>
@@ -105,7 +107,7 @@
 #include "mount_test.h"
 
 #define	MT_PREFIX	"/mount_test"
-#define	MT_ARMS		35
+#define	MT_ARMS		36
 #define	MT_WAIT_STEPS	1200		/* x 100 ms: "/" has 120 s to appear */
 
 /* #574: what `mount_test die' checks in and dies with, and the word it waits
@@ -799,6 +801,7 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 #define	MT715_DIR	"/mach_servers"	/* and this, as [31] asks */
 #define	MT715_OLD_NAME	"flipc.ext_server"	/* the name the endpoint had */
 #define	MT715_WAIT	500		/* x 10 ms: an answer's time */
+#define	MT715_FAR	(1ULL << 44)	/* block 2^32 of 4 KiB: block 0 as an int */
 
 /*
  * One request on `rev', and its answer from `fwd' into *answer: 1 if it came
@@ -860,13 +863,14 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 	vfs_u32_t		type = 0;
 	kern_return_t		kr = KERN_FAILURE, kd = KERN_FAILURE;
 	kern_return_t		kf = KERN_FAILURE, look = KERN_FAILURE;
+	kern_return_t		far = KERN_FAILURE;
 	pointer_t		mach = 0;
 	mach_msg_type_number_t	machn = 0;
 	uint32_t		region = 0;
 	int			res = -1, ok, got_a, got_b, same = 0, i;
 
 	if (!have_root) {
-		for (i = 32; i <= 35; i++) {
+		for (i = 32; i <= 36; i++) {
 			printf("mount_test: [%d] WRONG — not asked: no \"/\"\n", i);
 			mt_result(0);
 		}
@@ -909,7 +913,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 			     &type);
 	}
 	if (con != FLIPC2_SUCCESS || kd != KERN_SUCCESS || kf != KERN_SUCCESS) {
-		for (i = 33; i <= 35; i++) {
+		for (i = 33; i <= 36; i++) {
 			printf("mount_test: [%d] WRONG — not asked: the connect "
 			       "%d, the opens of " MT715_DIR " %d and of " MT715_FILE
 			       " %d\n", i, con, kd, kf);
@@ -1017,6 +1021,40 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 			       got_b ? "answered" : "no answer", (int)b.status,
 			       (unsigned long long)b.data_length,
 			       mt715_alive(root) ? "answers" : "does not answer");
+
+		/*
+		 * [36] An offset past the 4 GiB the backend takes: a read of
+		 * the file and a write on the directory at 2^44, which
+		 * bext2_lblkno() would make block 0, refused as the Mach path
+		 * refuses a read there -- one limit, fs_offset_ok(), asked of
+		 * both paths.
+		 */
+		got_a = mt715_ask(fwd, rev, VFS_FLIPC_OP_READ, file, MT715_FAR,
+				  0, 64, &a);
+		got_b = mt715_ask(fwd, rev, VFS_FLIPC_OP_WRITE, dir, MT715_FAR,
+				  0, 64, &b);
+		far = fs_read(root, file, MT715_FAR, 64, &mach, &machn);
+		if (far == KERN_SUCCESS)
+			(void)vm_deallocate(mach_task_self(), mach, machn);
+		ok = got_a && a.status == VFS_FLIPC_ERR_INVAL && got_b &&
+		     b.status == VFS_FLIPC_ERR_INVAL &&
+		     far == KERN_INVALID_ARGUMENT && mt715_alive(root);
+		mt_result(ok);
+		if (ok)
+			printf("mount_test: [36] a FLIPC read and write at offset "
+			       "0x%llx, past the 4 GiB the backend takes, were "
+			       "refused VFS_FLIPC_ERR_INVAL, as the Mach path "
+			       "refuses a read there: KERN_INVALID_ARGUMENT "
+			       "(#715)\n", (unsigned long long)MT715_FAR);
+		else
+			printf("mount_test: [36] WRONG — a FLIPC read and write at "
+			       "offset 0x%llx: %s %d and %s %d, where both must be "
+			       "VFS_FLIPC_ERR_INVAL (%d); the Mach path's read %d, "
+			       "where it must be KERN_INVALID_ARGUMENT (%d) "
+			       "(#715)\n", (unsigned long long)MT715_FAR,
+			       got_a ? "answered" : "no answer", (int)a.status,
+			       got_b ? "answered" : "no answer", (int)b.status,
+			       VFS_FLIPC_ERR_INVAL, far, KERN_INVALID_ARGUMENT);
 	}
 	if (kd == KERN_SUCCESS)
 		(void)fs_close(root, dir);
