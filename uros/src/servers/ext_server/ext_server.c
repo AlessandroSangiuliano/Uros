@@ -1324,7 +1324,7 @@ vfs_readdir(
 	fs_private_t priv = vfs_op_begin(mnt, dir_handle);
 	struct fs_dirent *tmp;
 	vfs_dirent_t *outv;
-	unsigned int want, got = 0, emit = 0, i;
+	unsigned int got = 0, emit, i;
 	vm_offset_t buf;
 	kern_return_t kr;
 	int rc;
@@ -1339,32 +1339,60 @@ vfs_readdir(
 	if (!priv)
 		return KERN_INVALID_ARGUMENT;
 
-	/* ext2fs_readdir() always enumerates from the start, so read
-	 * cookie + VFS_DIRENT_MAX entries and slice off the ones already
-	 * delivered.  Adequate for the directory sizes this fs sees. */
-	want = (unsigned int)cookie + VFS_DIRENT_MAX;
-	tmp = (struct fs_dirent *)malloc(want * sizeof(*tmp));
+	/*
+	 * #996: the cookie is the count of entries a listing has had, and no
+	 * listing hands out one past 32 bits, which ext2fs counts in.
+	 */
+	if (cookie != (vfs_u64_t)(unsigned int)cookie) {
+		vfs_op_end(mnt, dir_handle);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * #996: the entries from the cookie on, and one more than a reply
+	 * carries, which says whether the directory goes on.  ext2fs walks
+	 * the ones before the cookie without keeping them, so the room is a
+	 * reply's and not the whole directory's up to there: the count of
+	 * cookie + VFS_DIRENT_MAX entries it was had wrapped past 4 GiB on
+	 * i386, where size_t is 32 bits, and malloc() was asked for what was
+	 * left of it.  And with no entry past the reply's, a listing of a
+	 * directory longer than a reply said the directory ended there.
+	 */
+	tmp = (struct fs_dirent *)malloc((VFS_DIRENT_MAX + 1) * sizeof(*tmp));
 	if (!tmp) {
 		vfs_op_end(mnt, dir_handle);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
-	rc = ext2fs_readdir(priv, tmp, want, &got);
+	rc = ext2fs_readdir_from(priv, (unsigned int)cookie, tmp,
+				 VFS_DIRENT_MAX + 1, &got);
 	vfs_op_end(mnt, dir_handle);
 	if (rc != 0) {
 		free(tmp);
 		return fs_error(rc);			/* #599 */
 	}
 
+	/*
+	 * #996: and a reply's room for the entries it carries.  The kernel
+	 * takes out of this task the pages the reply names (`Dealloc',
+	 * vfs.defs): a buffer made for a whole batch left the rest of it here
+	 * for good, and a reply of no entries all of it.  So the buffer is as
+	 * long as the entries, and a reply of none has none.
+	 */
+	emit = got > VFS_DIRENT_MAX ? VFS_DIRENT_MAX : got;
+	if (emit == 0) {
+		free(tmp);
+		return KERN_SUCCESS;
+	}
 	kr = vm_allocate(mach_task_self(), &buf,
-			 VFS_DIRENT_MAX * sizeof(vfs_dirent_t), TRUE);
+			 emit * sizeof(vfs_dirent_t), TRUE);
 	if (kr != KERN_SUCCESS) {
 		free(tmp);
 		return kr;
 	}
 	outv = (vfs_dirent_t *)buf;
 
-	for (i = (unsigned int)cookie; i < got && emit < VFS_DIRENT_MAX; i++) {
+	for (i = 0; i < emit; i++) {
 		unsigned int nlen = (unsigned int)strlen(tmp[i].name);
 		uint8_t vt;
 		switch (tmp[i].type) {		/* ext2 FT -> VFS_FT */
@@ -1379,19 +1407,18 @@ vfs_readdir(
 		}
 		if (nlen > VFS_NAME_MAX)
 			nlen = VFS_NAME_MAX;
-		outv[emit].d_ino     = (uint64_t)tmp[i].ino;
-		outv[emit].d_cookie  = (uint64_t)(i + 1);
-		outv[emit].d_type    = vt;
-		outv[emit].d_namelen = (uint8_t)nlen;
-		memcpy(outv[emit].d_name, tmp[i].name, nlen);
-		outv[emit].d_name[nlen] = '\0';
-		emit++;
+		outv[i].d_ino     = (uint64_t)tmp[i].ino;
+		outv[i].d_cookie  = cookie + i + 1;
+		outv[i].d_type    = vt;
+		outv[i].d_namelen = (uint8_t)nlen;
+		memcpy(outv[i].d_name, tmp[i].name, nlen);
+		outv[i].d_name[nlen] = '\0';
 	}
 	free(tmp);
 
 	*entries_out       = (pointer_t)buf;
 	*entries_count_out = (mach_msg_type_number_t)(emit * sizeof(vfs_dirent_t));
-	*next_cookie_out   = (i < got) ? (vfs_u64_t)i : 0;
+	*next_cookie_out   = got > emit ? cookie + emit : 0;
 	return KERN_SUCCESS;
 }
 
