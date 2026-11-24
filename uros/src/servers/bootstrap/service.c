@@ -79,6 +79,7 @@
 #include <mach.h>
 #include <mach/message.h>
 #include <mach/notify.h>
+#include <mach_error.h>		/* mach_error_string(): #995 */
 #include "notifyServer.h"	/* this program's own server half (#931) */
 #include <mach/mig_errors.h>
 #include "serviceServer.h"
@@ -360,6 +361,114 @@ service_init(void)
 		    program_name, kr);
 	}
     }
+}
+
+/* #995: one step of notify_selftest() that could not be made, said. */
+static void
+notify_selftest_said(const char *step, kern_return_t kr)
+{
+    BOOTSTRAP_IO_LOCK();
+    printf("%s: the %s notification could not be made: %s (0x%x) (#995)\n",
+	   program_name, step, mach_error_string(kr), kr);
+    BOOTSTRAP_IO_UNLOCK();
+}
+
+/*
+ * #995: bootstrap makes, as it starts, each of the four notifications it does
+ * not ask for, on its servers' notification port, where it asks for their
+ * deaths:
+ *
+ *   send-once       a send-once right to that port, let go unused;
+ *   port-deleted    a dead-name request on a send-once right to a port of its
+ *                   own, and the right let go, which cancels the request;
+ *   no-senders      a no-senders request on a port of its own, and its one
+ *                   send right let go;
+ *   port-destroyed  a port-destroyed request on a receive right of its own,
+ *                   and the right destroyed, which sends it to the request.
+ *
+ * Its server loop takes them as they come, and the harness reads a line for
+ * each, and bootstrap going on after them.  They panicked bootstrap, and with
+ * it the system, for no worse than a right let go.
+ */
+void
+notify_selftest(void)
+{
+    mach_port_t me = mach_task_self();
+    mach_port_t so, port, prev;
+    mach_msg_type_name_t type;
+    kern_return_t kr;
+
+    BOOTSTRAP_IO_LOCK();
+    printf("%s: making the four notifications it does not ask for, on its "
+	   "servers' notification port (#995)\n", program_name);
+    BOOTSTRAP_IO_UNLOCK();
+
+    /* send-once */
+    so = MACH_PORT_NULL;
+    kr = mach_port_extract_right(me, bootstrap_notification_port,
+				 MACH_MSG_TYPE_MAKE_SEND_ONCE, &so, &type);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_deallocate(me, so);
+    if (kr != KERN_SUCCESS)
+	notify_selftest_said("send-once", kr);
+
+    /* port-deleted */
+    port = MACH_PORT_NULL;
+    so = MACH_PORT_NULL;
+    prev = MACH_PORT_NULL;
+    kr = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_extract_right(me, port, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+				     &so, &type);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_request_notification(me, so, MACH_NOTIFY_DEAD_NAME, 0,
+					    bootstrap_notification_port,
+					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_deallocate(me, so);
+    if (kr != KERN_SUCCESS)
+	notify_selftest_said("port-deleted", kr);
+    if (MACH_PORT_VALID(prev))
+	(void)mach_port_deallocate(me, prev);
+    /* And the send-once notice the right's end sent to it, with it. */
+    if (MACH_PORT_VALID(port))
+	(void)mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, -1);
+
+    /* no-senders */
+    port = MACH_PORT_NULL;
+    prev = MACH_PORT_NULL;
+    kr = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_insert_right(me, port, port, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_request_notification(me, port, MACH_NOTIFY_NO_SENDERS,
+					    1, bootstrap_notification_port,
+					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_mod_refs(me, port, MACH_PORT_RIGHT_SEND, -1);
+    if (kr != KERN_SUCCESS)
+	notify_selftest_said("no-senders", kr);
+    if (MACH_PORT_VALID(prev))
+	(void)mach_port_deallocate(me, prev);
+    if (MACH_PORT_VALID(port))
+	(void)mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, -1);
+
+    /* port-destroyed: the right goes to the request, not away. */
+    port = MACH_PORT_NULL;
+    prev = MACH_PORT_NULL;
+    kr = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr == KERN_SUCCESS) {
+	kr = mach_port_request_notification(me, port,
+					    MACH_NOTIFY_PORT_DESTROYED, 0,
+					    bootstrap_notification_port,
+					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+	/* With the request the right goes to it; without, it goes. */
+	(void)mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, -1);
+    }
+    if (kr != KERN_SUCCESS)
+	notify_selftest_said("port-destroyed", kr);
+    if (MACH_PORT_VALID(prev))
+	(void)mach_port_deallocate(me, prev);
 }
 
 boolean_t

@@ -1027,6 +1027,13 @@ main(int argc, char **argv)
 	service_init();
 
 	/*
+	 * #995: and the notifications it does not ask for, on the port it asks
+	 * for its servers' deaths on, made here, where the port is in the set
+	 * the service thread receives from.
+	 */
+	notify_selftest();
+
+	/*
 	 * #744: libcap asks the cap_server bootstrap starts, not a name.  Every
 	 * child finds the port in its registered ports, and bootstrap, whose own
 	 * were read before it made them, is told here.

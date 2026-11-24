@@ -208,6 +208,8 @@ extern int ex_get_header(struct file *, objfmt_t);
 extern boolean_t is_kernel_loadable(struct server *, struct objfmt *);
 
 void service_init(void);
+/* #995: the four notifications bootstrap does not ask for, made as it starts. */
+void notify_selftest(void);
 extern boolean_t service_demux(mach_msg_header_t *, mach_msg_header_t *);
 /* #744: the service.defs demux, which bootstrap_demux() asks too */
 extern boolean_t service_server(mach_msg_header_t *, mach_msg_header_t *);
