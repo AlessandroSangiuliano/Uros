@@ -632,8 +632,9 @@ chora_died(struct chora_record *r)
 		t->ms = ms;
 		if (pthread_create(&th, NULL, restart_timer, t) == 0) {
 			(void)pthread_detach(th);
-			printf("hal: the chora of %s is started again in %u ms, "
-			       "after %d start(s) (#964)\n", where, ms, r->starts);
+			printf("hal: the chora of %s, %s/%s, is started again in "
+			       "%u ms, after %d start(s) (#964)\n", where, r->pool,
+			       r->file, ms, r->starts);
 			return;
 		}
 	}
