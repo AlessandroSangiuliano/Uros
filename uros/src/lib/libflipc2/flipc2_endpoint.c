@@ -462,7 +462,7 @@ flipc2_endpoint_create(
     uint32_t            i;
     unsigned            ep_slot;
 
-    if (!name || !ep_out)
+    if (!ep_out)
         return FLIPC2_ERR_INVALID_ARGUMENT;
     if (max_clients == 0 || max_clients > FLIPC2_EP_MAX_CLIENTS_MAX)
         return FLIPC2_ERR_INVALID_ARGUMENT;
@@ -483,8 +483,11 @@ flipc2_endpoint_create(
     ep = (struct flipc2_endpoint *)addr;
     memset(ep, 0, sizeof(struct flipc2_endpoint));
 
-    strncpy(ep->name, name, FLIPC2_EP_NAME_MAX - 1);
-    ep->name[FLIPC2_EP_NAME_MAX - 1] = '\0';
+    /* #715: no name, no check-in -- see flipc2.h.  ep->name stays "". */
+    if (name != NULL) {
+        strncpy(ep->name, name, FLIPC2_EP_NAME_MAX - 1);
+        ep->name[FLIPC2_EP_NAME_MAX - 1] = '\0';
+    }
     ep->max_clients   = max_clients;
     ep->channel_size  = channel_size;
     ep->ring_entries  = ring_entries;
@@ -569,10 +572,13 @@ flipc2_endpoint_create(
      * holds (#744): mach_task_self() gave the name server a send right to this
      * task's port.  Without a signature the name was never asked for, so that
      * failure is the kernel's and not a name already taken. */
-    kr = urmach_netname_signature(&sig);
-    if (kr == KERN_SUCCESS)
-        kr = netname_check_in(name_server_port, (char *)name,
-                              sig, ep->recv_port);
+    kr = KERN_SUCCESS;
+    if (name != NULL) {
+        kr = urmach_netname_signature(&sig);
+        if (kr == KERN_SUCCESS)
+            kr = netname_check_in(name_server_port, (char *)name,
+                                  sig, ep->recv_port);
+    }
     if (kr != KERN_SUCCESS) {
         flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->port_set,
@@ -713,8 +719,8 @@ flipc2_endpoint_destroy(
     }
 
     /* Unregister from name server, under the signature the name was checked
-     * in with (#744). */
-    if (urmach_netname_signature(&sig) == KERN_SUCCESS)
+     * in with (#744) -- an endpoint made without a name has none (#715). */
+    if (ep->name[0] != '\0' && urmach_netname_signature(&sig) == KERN_SUCCESS)
         netname_check_out(name_server_port, ep->name, sig);
 
     /* Destroy ports */

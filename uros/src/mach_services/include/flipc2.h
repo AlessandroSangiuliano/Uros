@@ -1427,7 +1427,13 @@ typedef struct flipc2_endpoint *flipc2_endpoint_t;
  * Registers a contact port with the Mach name server under the
  * given name.  Clients connect via flipc2_endpoint_connect().
  *
- * name:           endpoint name (up to 128 chars)
+ * #715: with a NULL name the endpoint is checked in nowhere, and a client
+ * reaches it only through a send right to its contact port, which the server
+ * hands to whom it chooses (flipc2_endpoint_port()); the client connects with
+ * flipc2_endpoint_connect_port().  A named endpoint lets any task that can
+ * reach the name server connect.
+ *
+ * name:           endpoint name (up to 128 chars), or NULL for none
  * max_clients:    maximum simultaneous connections (1..64)
  * channel_size:   default channel size for new connections
  * ring_entries:   default ring entries for new connections
@@ -1508,7 +1514,10 @@ flipc2_endpoint_destroy(
 /*
  * Server-side: get the endpoint's receive port.
  *
- * Useful for adding to a custom port set for multiplexed receive.
+ * Useful for adding to a custom port set for multiplexed receive.  And the
+ * contact port of an endpoint created without a name (#715): a server hands
+ * a client a send right made from it -- in a MIG reply, as
+ * MACH_MSG_TYPE_MAKE_SEND -- and only a task holding one can connect.
  */
 mach_port_t
 flipc2_endpoint_port(
