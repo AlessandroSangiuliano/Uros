@@ -103,27 +103,61 @@ mach_port_t	master_device;
 #define CT_WAIT_STEPS	300		/* of 100 ms: 30 s */
 #define CT_ROOT_WAIT_MS	120000		/* "/" has 120 s, as mount_test gives it */
 #define CT_DISK_POOLS	"/mach_servers/modules/"	/* the HAL's, #964 */
+#define CT_UPDATES	"/mach_servers/updates/"	/* in no pool, #964 */
+#define CT_LINE_MAX	255		/* the console's whole line, #964 */
+#define CT_SETTLE_MS	3000		/* past 100+200+400+800 ms of delays */
+#define CT_EDU_CLASS	0x00ff00u	/* edu's class, as its manifest line */
+#define CT_SATA_CLASS	0x010601u	/* a class the manifest does not name */
+#define CT_ADMIN_ALL	(CAP_OP_DRIVER_STOP | CAP_OP_DRIVER_START | \
+			 CAP_OP_DRIVER_UPDATE)
+
+#define CT_BUS(b)	((unsigned)((b) >> 8))
+#define CT_SLOT(b)	((unsigned)(((b) >> 3) & 0x1F))
+#define CT_FUNC(b)	((unsigned)((b) & 0x7))
 
 static int	arms_run;
 static int	arms_passed;
 
-/* The card [1] found, for [10]. */
+/* The card [1] found, for [10] to [12]. */
 static natural_t	card_bdf;
 static int		card_found;
 
+/* The edu device [5] found, and its class, for [13]. */
+static natural_t	edu_bdf;
+static uint32_t		edu_class;
+static int		edu_found;
+
+/*
+ * An arm's line, said.  #964: the console keeps a line whole up to
+ * CT_LINE_MAX bytes and its newline, and the harness reads lines, so a longer
+ * one, which would come out in two, fails its arm in a line of its own, and
+ * follows it for the reader.  The buffer is twice that, so a line too long is
+ * measured and not cut.
+ */
 static void
 verdict(int arm, int ok, const char *fmt, ...)
 {
-	char	text[300];
+	char	text[2 * CT_LINE_MAX + 2], head[32];
 	va_list	ap;
+	size_t	len;
 
 	va_start(ap, fmt);
 	(void)vsnprintf(text, sizeof text, fmt, ap);
 	va_end(ap);
 	arms_run++;
+	(void)snprintf(head, sizeof head, "chora_test: [%d] %s", arm,
+		       ok ? "" : "WRONG -- ");
+	len = strlen(head) + strlen(text);
+	if (len > CT_LINE_MAX) {
+		printf("chora_test: [%d] WRONG -- its line is %u bytes, more than "
+		       "the %u the console keeps whole; it follows\n", arm,
+		       (unsigned)len, (unsigned)CT_LINE_MAX);
+		printf("%s%s\n", head, text);
+		return;
+	}
 	if (ok)
 		arms_passed++;
-	printf("chora_test: [%d] %s%s\n", arm, ok ? "" : "WRONG -- ", text);
+	printf("%s%s\n", head, text);
 }
 
 static void
@@ -391,19 +425,16 @@ root_served(void)
 	return ok;
 }
 
-/* #964: a module of the disk's pools, CT_DISK_POOLS<pool>/<file>, whole. */
+/* #964: a file of the disk, whole, in memory of its own. */
 static kern_return_t
-disk_module(const char *pool, const char *file, vm_offset_t *data,
-	    mach_msg_type_number_t *len)
+disk_file(const char *path, vm_offset_t *data, mach_msg_type_number_t *len)
 {
-	char		path[VFS_PATH_MAX];
 	vfs_stat_t	st;
 	vfs_fd_t	fd;
 	vm_offset_t	buf = 0;
 	uint64_t	done = 0;
 	ssize_t		r;
 
-	(void)snprintf(path, sizeof path, "%s%s/%s", CT_DISK_POOLS, pool, file);
 	fd = vfs_open(path, VFS_O_RDONLY, 0);
 	if (fd == VFS_FD_INVALID)
 		return KERN_INVALID_NAME;
@@ -426,6 +457,17 @@ disk_module(const char *pool, const char *file, vm_offset_t *data,
 	*data = buf;
 	*len = (mach_msg_type_number_t)done;
 	return KERN_SUCCESS;
+}
+
+/* #964: a module of the disk's pools, CT_DISK_POOLS<pool>/<file>, whole. */
+static kern_return_t
+disk_module(const char *pool, const char *file, vm_offset_t *data,
+	    mach_msg_type_number_t *len)
+{
+	char	path[VFS_PATH_MAX];
+
+	(void)snprintf(path, sizeof path, "%s%s/%s", CT_DISK_POOLS, pool, file);
+	return disk_file(path, data, len);
 }
 
 /*
