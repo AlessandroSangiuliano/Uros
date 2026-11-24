@@ -86,12 +86,12 @@ name_the_task(struct driver *d, const char *module)
 	int		n;
 	kern_return_t	kr;
 
-	n = snprintf(d->name, sizeof d->name, "%s@%02x:%02x.%x", module,
+	n = snprintf(d->name, sizeof d->name, DRIVER_TASK_NAME_FMT, module,
 		     d->bus, d->slot, d->func);
 	if (n < 0 || (size_t)n >= sizeof d->name) {
 		d->name[0] = '\0';
-		printf("chora: %s@%02x:%02x.%x is longer than a task's name, "
-		       "%u characters\n", module, d->bus, d->slot, d->func,
+		printf("chora: " DRIVER_TASK_NAME_FMT " is longer than a task's "
+		       "name, %u characters\n", module, d->bus, d->slot, d->func,
 		       (unsigned)(URMACH_TASK_NAME_MAX - 1));
 		return -1;
 	}
