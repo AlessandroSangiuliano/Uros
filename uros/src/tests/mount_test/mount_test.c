@@ -791,7 +791,7 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 }
 
 /*
- * [32] to [35] (#715): what ext_server's FLIPC endpoint takes from a client,
+ * [32] to [36] (#715): what ext_server's FLIPC endpoint takes from a client,
  * asked of "/"'s on a channel of 4 KiB.  See the top of this file.
  */
 #define	MT715_CHANNEL	4096u		/* FLIPC2_CHANNEL_SIZE_MIN */
@@ -1748,7 +1748,7 @@ main(int argc, char **argv)
 	}
 
 	mt_rights_arms(mine, root, have_root, eps_why);	/* [27] to [31], #911 */
-	mt_flipc_bounds_arms(root, have_root);		/* [32] to [35], #715 */
+	mt_flipc_bounds_arms(root, have_root);		/* [32] to [36], #715 */
 
 	if (have_root)
 		(void)mach_port_deallocate(mach_task_self(), root);
