@@ -44,6 +44,7 @@
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <mach/cap_types.h>
+#include <mach/mach_interface.h>	/* urmach_task_set_name() (#996) */
 #include <sa_mach.h>
 #include <device/device.h>
 #include <stdio.h>
@@ -2690,6 +2691,21 @@ main(int argc, char **argv)
 	(void)gpu_console_init("ext");
 
 	printf("\n=== ext2 filesystem server " EXT2_SERVER_VERSION_STRING " ===\n");
+
+	/*
+	 * #996: the task names itself, as a driver does, so that a test holding
+	 * the master host port finds it among the tasks and asks the kernel its
+	 * size (xfile_test [11]), and the debugger's listing says which it is.
+	 */
+	{
+		char	me[] = "ext_server";
+
+		kr = urmach_task_set_name(mach_task_self(), me,
+					  (mach_msg_type_number_t)(sizeof me - 1));
+		if (kr != KERN_SUCCESS)
+			printf("ext2: the kernel would not name this task: 0x%x "
+			       "(#996)\n", kr);
+	}
 
 	/*
 	 * #599: the check every directory walk makes, asked before any disk is
