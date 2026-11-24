@@ -679,6 +679,19 @@ must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class ' 'ha
 must_report 'hal: class 0x020000 left to others by its line' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: no module of the bundle.s net declares it, and the HAL.s line leaves class 020000' \
 	'The HAL was told to leave the network class to others and did not say the card was left: its line says what it decided instead (#964).' \
 	'the HAL leaving the card'
+# #964: a driver stopped or updated through the HAL, as chora_test [12] and
+# [13] ask, ends by the HAL's own hand, and its death is no crash: the HAL says
+# so at the death.  A death taken for a crash says instead that the chora is
+# started again after a delay -- which for an update starts the new module all
+# the same, one start, so that chora_test's count cannot tell it: these lines
+# can.  The update's pair names edu_next, since [12]'s start of the card writes
+# a line of the same shape.
+must_report 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is stopped on request' 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] was stopped on request: it is not started again' \
+	'The HAL ended a chora it was asked to stop and did not say, at its death, that it is not started again: it took the death for a crash, or never heard of it (#964).' \
+	'the HAL stopping a driver'
+must_report 'hal: the driver of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is updated on request: misc/edu_next\.so' 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is started on request, with misc/edu_next\.so: start' \
+	'The HAL took edu_next to update a driver with and never said it started the driver with it on request: it took the old chora'"'"'s death for a crash, which waits and counts in the row, or never heard of it (#964).' \
+	'the HAL updating a driver'
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
