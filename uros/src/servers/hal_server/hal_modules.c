@@ -65,6 +65,8 @@
 #include "hal_server.h"
 #include "chora_drives.h"
 #include "chora_given.h"		/* the module a chora is given */
+#include "chora_module.h"		/* CHORA_MODULE_SUFFIX, #964 */
+#include <mach/task_name.h>		/* URMACH_TASK_NAME_MAX, #964 */
 #include "libelf.h"
 #include "exec_types.h"			/* EXEC_OK */
 #include "exec.h"			/* exec_load_image */
@@ -801,13 +803,20 @@ hal_driver_start(unsigned int bus, unsigned int slot, unsigned int func)
 	return KERN_SUCCESS;
 }
 
-/* A module's name: letters, digits and _, with room for ".so" after it. */
+/*
+ * A module's name: letters, digits and _, with room for ".so" after it, and
+ * for the name chora gives its task, MODULE@BB:DD.F, which the kernel keeps to
+ * URMACH_TASK_NAME_MAX with its terminator: a longer one could never be a
+ * driver's (#964).
+ */
+#define MODULE_NAME_ROOM	(URMACH_TASK_NAME_MAX - sizeof "@BB:DD.F")
+
 static int
 module_name_ok(const char *name, size_t room)
 {
 	size_t	i, n = strlen(name);
 
-	if (n == 0 || n + sizeof ".so" > room)
+	if (n == 0 || n + sizeof ".so" > room || n > MODULE_NAME_ROOM)
 		return 0;
 	for (i = 0; i < n; i++)
 		if (!((name[i] >= 'a' && name[i] <= 'z') ||
@@ -818,12 +827,49 @@ module_name_ok(const char *name, size_t room)
 }
 
 /*
+ * #964: whether the module in `data' has `name' CHORA_MODULE_SUFFIX among the
+ * names of its dynamic symbols, which chora's dlsym() finds its operations by:
+ * its .dynstr holds the string, whole.  libelf reads the symbol tables of
+ * ELF32 alone (#422), and the string table is enough to tell a module that no
+ * chora could load by that name.
+ */
+static int
+module_has_ops(const void *data, size_t size, const char *name)
+{
+	elf_image_t	img;
+	elf_shdr_view_t	sh;
+	char		want[MODULE_NAME_MAX + sizeof CHORA_MODULE_SUFFIX];
+	const char	*s;
+	size_t		n, i;
+	int		found = 0;
+
+	n = (size_t)snprintf(want, sizeof want, "%s%s", name,
+			     CHORA_MODULE_SUFFIX);
+	if (n >= sizeof want)
+		return 0;
+	n++;				/* its terminator too */
+	memset(&img, 0, sizeof img);
+	if (elf_open(data, size, &img) != ELF_OK)
+		return 0;
+	if (elf_shdr_find(&img, ".dynstr", &sh) == ELF_OK && sh.data != NULL) {
+		s = (const char *)sh.data;
+		for (i = 0; !found && i + n <= (size_t)sh.size; i++)
+			found = (i == 0 || s[i - 1] == '\0') &&
+				memcmp(s + i, want, n) == 0;
+	}
+	elf_close(&img);
+	return found;
+}
+
+/*
  * #964: update_driver().  The device's module becomes the `len' bytes at
  * `data', named `name', once they are read to declare the device; the record
  * keeps them for every start after, the restarts after a crash among them.  A
- * chora that runs is ended and started with them at its end; a driver that
- * does not run is started with them now.  `data' is the record's when the
- * answer is KERN_SUCCESS, and the caller's otherwise.
+ * chora that runs is ended and started with them at its end; a stopped driver
+ * stays stopped with them; one given up, or waiting for a restart, is started
+ * with them now.  A name no chora could run, or bytes with no operations by
+ * that name, are refused.  `data' is the record's when the answer is
+ * KERN_SUCCESS, and the caller's otherwise.
  */
 kern_return_t
 hal_driver_update(unsigned int bus, unsigned int slot, unsigned int func,
@@ -836,10 +882,21 @@ hal_driver_update(unsigned int bus, unsigned int slot, unsigned int func,
 	if (r == NULL || !module_name_ok(name, sizeof r->file))
 		return KERN_INVALID_ARGUMENT;
 	record_where(r, where, sizeof where);
-	if (data == 0 || len == 0 || len > CHORA_GIVEN_MODULE_MAX ||
-	    module_score((const void *)data, len, &r->dev) <= 0) {
+	if (data == 0 || len == 0 || len > CHORA_GIVEN_MODULE_MAX) {
+		printf("hal: %s.so, given to update the driver of %s, is %u "
+		       "bytes, where a module is 1 to %u: refused (#964)\n", name,
+		       where, (unsigned)len, (unsigned)CHORA_GIVEN_MODULE_MAX);
+		return KERN_INVALID_VALUE;
+	}
+	if (module_score((const void *)data, len, &r->dev) <= 0) {
 		printf("hal: %s.so, given to update the driver of %s, does not "
 		       "declare it: refused (#964)\n", name, where);
+		return KERN_INVALID_VALUE;
+	}
+	if (!module_has_ops((const void *)data, len, name)) {
+		printf("hal: %s.so, given to update the driver of %s, has no "
+		       "%s%s for chora to find: refused (#964)\n", name, where,
+		       name, CHORA_MODULE_SUFFIX);
 		return KERN_INVALID_VALUE;
 	}
 	if (r->given != 0)
