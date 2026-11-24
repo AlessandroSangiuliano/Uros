@@ -63,6 +63,20 @@
  * real ext_server keeping a client's right through a failed open: it let the
  * right go and so did the request's destruction, and the second release came
  * out of the reference an open file was counting on.
+ *
+ * ── What ext_server's FLIPC endpoint takes from a client (#715) ──
+ *
+ * Any task could look the endpoint up by name and connect, and the server
+ * took the write's source and the read's cap from memory the client writes:
+ * a write's data offset and length, and the forward channel's header.  [32]
+ * asks that the name is gone and that "/"'s port hands the endpoint's out.
+ * The rest connect on a channel of 4 KiB, the smallest: [33] writes whose
+ * data lie past the reverse channel's region, its header saying 0xFFFFFFFF,
+ * on a directory so that nothing is written whatever the answer; [34] a read
+ * longer than the forward channel's region, its header saying the same, which
+ * must answer the region's length and the bytes the Mach path reads; [35] a
+ * handle with bit 32 set over this task's own fid, which must be no handle.
+ * Each asks after that ext_server still answers.
  */
 
 #include <mach.h>
@@ -91,7 +105,7 @@
 #include "mount_test.h"
 
 #define	MT_PREFIX	"/mount_test"
-#define	MT_ARMS		31
+#define	MT_ARMS		35
 #define	MT_WAIT_STEPS	1200		/* x 100 ms: "/" has 120 s to appear */
 
 /* #574: what `mount_test die' checks in and dies with, and the word it waits
@@ -772,6 +786,244 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 			       closed, late ? "and then none"
 			       : "and still some -- the control failed");
 	}
+}
+
+/*
+ * [32] to [35] (#715): what ext_server's FLIPC endpoint takes from a client,
+ * asked of "/"'s on a channel of 4 KiB.  See the top of this file.
+ */
+#define	MT715_CHANNEL	4096u		/* FLIPC2_CHANNEL_SIZE_MIN */
+#define	MT715_RING	16u		/* FLIPC2_RING_ENTRIES_MIN: what fits it */
+#define	MT715_READ	8192u		/* more than such a channel's data */
+#define	MT715_FILE	"/boot/grub/grub.cfg"	/* every "/" that booted has it */
+#define	MT715_OLD_NAME	"flipc.ext_server"	/* the name the endpoint had */
+#define	MT715_WAIT	500		/* x 10 ms: an answer's time */
+
+/*
+ * One request on `rev', and its answer from `fwd' into *answer: 1 if it came
+ * within MT715_WAIT steps.  Peeked at, not waited on: a server that died
+ * would leave a wait for good, and these arms are to say WRONG of it.
+ */
+static int
+mt715_ask(flipc2_channel_t fwd, flipc2_channel_t rev, uint32_t op,
+	  uint64_t handle, uint64_t offset, uint64_t data_off,
+	  uint64_t data_len, struct flipc2_desc *answer)
+{
+	static uint64_t		seq;
+	struct flipc2_desc	*req, *rep = NULL;
+	unsigned int		step;
+
+	memset(answer, 0, sizeof *answer);
+	req = flipc2_produce_wait(rev, FLIPC2_SPIN_DEFAULT);
+	if (req == NULL)
+		return 0;
+	req->opcode      = op;
+	req->flags       = 0;
+	req->cookie      = ++seq;
+	req->data_offset = data_off;
+	req->data_length = data_len;
+	req->param[0]    = 0;
+	req->param[1]    = handle;
+	req->param[2]    = offset;
+	flipc2_produce_commit(rev);
+	for (step = 0; step < MT715_WAIT && rep == NULL; step++) {
+		rep = flipc2_consume_peek(fwd);
+		if (rep == NULL)
+			thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+	}
+	if (rep == NULL)
+		return 0;
+	*answer = *rep;
+	flipc2_consume_release(fwd);
+	return answer->cookie == seq;
+}
+
+/* Whether ext_server still answers on the Mach path: a stat of MT715_FILE. */
+static int
+mt715_alive(mach_port_t root)
+{
+	vfs_stat_t st;
+
+	return fs_stat(root, MT715_FILE, &st) == KERN_SUCCESS;
+}
+
+static void
+mt_flipc_bounds_arms(mach_port_t root, int have_root)
+{
+	mach_port_t		ep = MACH_PORT_NULL, named = MACH_PORT_NULL;
+	mach_port_t		token = MACH_PORT_NULL;
+	flipc2_channel_t	fwd = 0, rev = 0;
+	flipc2_return_t		con = FLIPC2_ERR_KERNEL;
+	struct flipc2_desc	a, b;
+	vfs_u64_t		dir = 0, file = 0;
+	vfs_u32_t		type = 0;
+	kern_return_t		kr = KERN_FAILURE, kd = KERN_FAILURE;
+	kern_return_t		kf = KERN_FAILURE, look = KERN_FAILURE;
+	pointer_t		mach = 0;
+	mach_msg_type_number_t	machn = 0;
+	uint32_t		region = 0;
+	int			res = -1, ok, got_a, got_b, same = 0, i;
+
+	if (!have_root) {
+		for (i = 32; i <= 35; i++) {
+			printf("mount_test: [%d] WRONG — not asked: no \"/\"\n", i);
+			mt_result(0);
+		}
+		return;
+	}
+
+	/*
+	 * [32] Who may connect: a task that holds the mount's port.  The name
+	 * the endpoint had is not in the name server, and the mount's port
+	 * hands out the endpoint's.
+	 */
+	look = netname_look_up(name_server_port, "", MT715_OLD_NAME, &named);
+	if (look == NETNAME_SUCCESS && MACH_PORT_VALID(named))
+		(void)mach_port_deallocate(mach_task_self(), named);
+	kr = fs_flipc_endpoint(root, &ep, &res);
+	ok = look != NETNAME_SUCCESS && kr == KERN_SUCCESS && res == 0 &&
+	     MACH_PORT_VALID(ep);
+	mt_result(ok);
+	if (ok)
+		printf("mount_test: [32] \"/\"'s FLIPC endpoint has no name -- \""
+		       MT715_OLD_NAME "\" answered %d -- and the mount's port "
+		       "hands its port out (#715)\n", look);
+	else
+		printf("mount_test: [32] WRONG — \"" MT715_OLD_NAME "\" in the "
+		       "name server: %d, where it must be none; the mount's port "
+		       "handed out %s (%d, result %d) (#715)\n", look,
+		       MACH_PORT_VALID(ep) ? "a port" : "none", kr, res);
+
+	if (kr == KERN_SUCCESS && MACH_PORT_VALID(ep)) {
+		con = flipc2_endpoint_connect_port(ep, MT715_CHANNEL,
+						   MT715_RING, &fwd, &rev);
+		(void)mach_port_deallocate(mach_task_self(), ep);
+	}
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&token);
+	if (kr == KERN_SUCCESS) {
+		kd = fs_open(root, token, "/boot", VFS_O_RDONLY, 0, &dir, &type);
+		kf = fs_open(root, token, MT715_FILE, VFS_O_RDONLY, 0, &file,
+			     &type);
+	}
+	if (con != FLIPC2_SUCCESS || kd != KERN_SUCCESS || kf != KERN_SUCCESS) {
+		for (i = 33; i <= 35; i++) {
+			printf("mount_test: [%d] WRONG — not asked: the connect "
+			       "%d, the opens of /boot %d and of " MT715_FILE
+			       " %d\n", i, con, kd, kf);
+			mt_result(0);
+		}
+	} else {
+		region = rev->data_size;
+
+		/*
+		 * [33] Two writes whose data lie outside the reverse channel's
+		 * region -- at its end, and one byte longer than it -- its
+		 * header saying the region is as large as can be.  On /boot,
+		 * a directory: no file is written, whatever is answered.
+		 */
+		rev->hdr->data_size = 0xFFFFFFFFu;
+		got_a = mt715_ask(fwd, rev, VFS_FLIPC_OP_WRITE, dir, 0,
+				  (uint64_t)region + 1, 0, &a);
+		got_b = mt715_ask(fwd, rev, VFS_FLIPC_OP_WRITE, dir, 0, 0,
+				  (uint64_t)region + 1, &b);
+		ok = got_a && got_b && a.status == VFS_FLIPC_ERR_INVAL &&
+		     b.status == VFS_FLIPC_ERR_INVAL && mt715_alive(root);
+		mt_result(ok);
+		if (ok)
+			printf("mount_test: [33] two FLIPC writes whose data lie "
+			       "outside a 4 KiB channel's region of %u bytes, its "
+			       "header saying 0xFFFFFFFF, were refused "
+			       "VFS_FLIPC_ERR_INVAL, and ext_server answers after "
+			       "them (#715)\n", (unsigned)region);
+		else
+			printf("mount_test: [33] WRONG — two FLIPC writes outside a "
+			       "4 KiB channel's region of %u bytes: %s %d and %s "
+			       "%d, where both must be VFS_FLIPC_ERR_INVAL (%d); "
+			       "ext_server %s (#715)\n", (unsigned)region,
+			       got_a ? "answered" : "no answer", (int)a.status,
+			       got_b ? "answered" : "no answer", (int)b.status,
+			       VFS_FLIPC_ERR_INVAL,
+			       mt715_alive(root) ? "answers" : "does not answer");
+
+		/*
+		 * [34] A read longer than the forward channel's region, its
+		 * header saying the region is as large as can be: the answer
+		 * must fit the region, and be what the Mach path reads.
+		 */
+		region = fwd->data_size;
+		fwd->hdr->data_size = 0xFFFFFFFFu;
+		got_a = mt715_ask(fwd, rev, VFS_FLIPC_OP_READ, file, 0, 0,
+				  MT715_READ, &a);
+		ok = got_a && a.status == VFS_FLIPC_OK && a.data_offset == 0 &&
+		     a.data_length == region;
+		if (ok && fs_read(root, file, 0, region, &mach, &machn) ==
+		    KERN_SUCCESS) {
+			same = machn == region &&
+			       memcmp(flipc2_data_ptr(fwd, 0), (void *)mach,
+				      region) == 0;
+			(void)vm_deallocate(mach_task_self(), mach, machn);
+		}
+		ok = ok && same && mt715_alive(root);
+		mt_result(ok);
+		if (ok)
+			printf("mount_test: [34] a FLIPC read of %u bytes on a 4 "
+			       "KiB channel, its header saying 0xFFFFFFFF, was "
+			       "answered %u, the region's, the same bytes the Mach "
+			       "path reads, and ext_server answers after it "
+			       "(#715)\n", MT715_READ, (unsigned)region);
+		else
+			printf("mount_test: [34] WRONG — a FLIPC read of %u bytes on "
+			       "a 4 KiB channel, its header saying 0xFFFFFFFF: %s, "
+			       "status %d, %llu bytes at %llu, where it must be the "
+			       "region's %u at 0%s; ext_server %s (#715)\n",
+			       MT715_READ, got_a ? "answered" : "no answer",
+			       (int)a.status, (unsigned long long)a.data_length,
+			       (unsigned long long)a.data_offset, (unsigned)region,
+			       got_a && !same ? ", and the bytes the Mach path "
+			       "reads" : "",
+			       mt715_alive(root) ? "answers" : "does not answer");
+
+		/*
+		 * [35] A handle at its full width: this task's fid with bit 32
+		 * set is no handle, where the fid itself reads.
+		 */
+		got_a = mt715_ask(fwd, rev, VFS_FLIPC_OP_READ,
+				  (1ULL << 32) + file, 0, 0, 64, &a);
+		got_b = mt715_ask(fwd, rev, VFS_FLIPC_OP_READ, file, 0, 0, 64,
+				  &b);
+		ok = got_a && a.status == VFS_FLIPC_ERR_BADHANDLE && got_b &&
+		     b.status == VFS_FLIPC_OK && b.data_length == 64 &&
+		     mt715_alive(root);
+		mt_result(ok);
+		if (ok)
+			printf("mount_test: [35] a FLIPC read naming handle 0x%llx, "
+			       "fid %llu with bit 32 set, was refused "
+			       "VFS_FLIPC_ERR_BADHANDLE, where fid %llu read 64 "
+			       "bytes (#715)\n",
+			       (unsigned long long)((1ULL << 32) + file),
+			       (unsigned long long)file, (unsigned long long)file);
+		else
+			printf("mount_test: [35] WRONG — a FLIPC read naming handle "
+			       "0x%llx: %s %d, where it must be "
+			       "VFS_FLIPC_ERR_BADHANDLE (%d); fid %llu itself: %s "
+			       "%d, %llu bytes; ext_server %s (#715)\n",
+			       (unsigned long long)((1ULL << 32) + file),
+			       got_a ? "answered" : "no answer", (int)a.status,
+			       VFS_FLIPC_ERR_BADHANDLE, (unsigned long long)file,
+			       got_b ? "answered" : "no answer", (int)b.status,
+			       (unsigned long long)b.data_length,
+			       mt715_alive(root) ? "answers" : "does not answer");
+	}
+	if (kd == KERN_SUCCESS)
+		(void)fs_close(root, dir);
+	if (kf == KERN_SUCCESS)
+		(void)fs_close(root, file);
+	if (con == FLIPC2_SUCCESS)
+		(void)flipc2_endpoint_disconnect(fwd, rev);
+	if (MACH_PORT_VALID(token))
+		(void)mach_port_mod_refs(mach_task_self(), token,
+					 MACH_PORT_RIGHT_RECEIVE, -1);
 }
 
 int
@@ -1455,6 +1707,7 @@ main(int argc, char **argv)
 	}
 
 	mt_rights_arms(mine, root, have_root, eps_why);	/* [27] to [31], #911 */
+	mt_flipc_bounds_arms(root, have_root);		/* [32] to [35], #715 */
 
 	if (have_root)
 		(void)mach_port_deallocate(mach_task_self(), root);
