@@ -1208,6 +1208,19 @@ vfs_close(mach_port_t fs_port, vfs_u64_t handle)
 	return ds_ext2_close(fs_port, (natural_t)handle);
 }
 
+/*
+ * Whether a file offset is one the backend can take, on either data path
+ * (#715): ds_ext2_read and ds_ext2_write take a 32-bit offset, and
+ * bext2_lblkno() answers the file's block as an int, so with 4 KiB blocks
+ * offset 2^44 + X is X's block.  The Mach path refused past 4 GiB; FLIPC
+ * passed any offset on.  Both ask this.
+ */
+static int
+fs_offset_ok(uint64_t offset)
+{
+	return offset <= 0xFFFFFFFFu;
+}
+
 kern_return_t
 vfs_read(
 	mach_port_t		fs_port,
@@ -1220,7 +1233,7 @@ vfs_read(
 	/* Existing ds_ext2_read takes natural_t offset (32-bit).  Until
 	 * the backend grows 64-bit offsets, refuse calls past 4 GiB and
 	 * truncate large reads to 32-bit count. */
-	if (offset > 0xFFFFFFFFu)
+	if (!fs_offset_ok(offset))
 		return KERN_INVALID_ARGUMENT;
 	return ds_ext2_read(fs_port, (natural_t)handle,
 			    (natural_t)offset, (natural_t)count,
@@ -1238,7 +1251,7 @@ vfs_write(
 {
 	kern_return_t kr;
 
-	if (offset > 0xFFFFFFFFu)
+	if (!fs_offset_ok(offset))
 		return KERN_INVALID_ARGUMENT;
 	kr = ds_ext2_write(fs_port, (natural_t)handle,
 			   (natural_t)offset, data, data_count);
@@ -2400,8 +2413,19 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 	uint64_t offset   = req->param[2];
 	uint64_t count    = req->data_length;
 	uint64_t data_off = req->data_offset;
+	/*
+	 * #715: all of it is the client's to write, so each is held to what
+	 * this server keeps.  The write's data must lie in the reverse
+	 * channel's region, as the handle's own copy of its size says
+	 * (flipc2_data_ptr_safe()): it took any offset and length there as its
+	 * source, and copied this server's memory into a file.  The read's cap
+	 * is the forward channel's region by the same copy, where it was the
+	 * header's data_size, which the client writes.  The handle is asked at
+	 * its full width before it becomes an index, and the offset by the
+	 * limit the Mach path keeps (fs_offset_ok()).
+	 */
 	void *wsrc = (op == VFS_FLIPC_OP_WRITE)
-		     ? flipc2_data_ptr(rev, data_off) : (void *)0;
+		     ? flipc2_data_ptr_safe(rev, data_off, count) : (void *)0;
 	flipc2_consume_release(rev);
 
 	struct flipc2_desc *rep = flipc2_produce_wait(fwd, FLIPC2_SPIN_DEFAULT);
@@ -2414,20 +2438,26 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 	rep->data_length = 0;
 	rep->status      = VFS_FLIPC_ERR_INVAL;
 
-	if (op == VFS_FLIPC_OP_READ) {
+	if ((op == VFS_FLIPC_OP_READ || op == VFS_FLIPC_OP_WRITE) &&
+	    (handle < 1 || handle > MAX_OPEN_FILES)) {
+		rep->status = VFS_FLIPC_ERR_BADHANDLE;
+	} else if ((op == VFS_FLIPC_OP_READ || op == VFS_FLIPC_OP_WRITE) &&
+		   !fs_offset_ok(offset)) {
+		rep->status = VFS_FLIPC_ERR_INVAL;
+	} else if (op == VFS_FLIPC_OP_READ) {
 		int idx = (int)handle - 1;
 		fs_private_t priv = of_op_begin(mnt, idx);	/* #388 pin */
 		if (priv == (fs_private_t)0) {
 			rep->status = VFS_FLIPC_ERR_BADHANDLE;
 		} else {
 			size_t fsize = ext2fs_file_size(priv);
-			uint64_t cap = fwd->hdr->data_size;
+			uint64_t cap = fwd->data_size;		/* #715: ours */
 			if (cap > VFS_FLIPC_MAX_READ)
 				cap = VFS_FLIPC_MAX_READ;
 			if (offset >= fsize || count == 0) {
 				rep->status = VFS_FLIPC_OK;
 			} else {
-				if (offset + count > fsize)
+				if (count > fsize - offset)	/* no sum to wrap */
 					count = fsize - offset;
 				if (count > cap)
 					count = cap;
@@ -2450,7 +2480,9 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 		fs_private_t priv = wsrc ? of_op_begin(mnt, idx)	/* #388 pin */
 					 : (fs_private_t)0;
 		if (priv == (fs_private_t)0) {
-			rep->status = VFS_FLIPC_ERR_BADHANDLE;
+			/* #715: no source in the channel is no handle's fault */
+			rep->status = wsrc ? VFS_FLIPC_ERR_BADHANDLE
+					   : VFS_FLIPC_ERR_INVAL;
 		} else {
 			if (count == 0) {
 				rep->status = VFS_FLIPC_OK;
