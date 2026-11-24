@@ -164,6 +164,13 @@ ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test 
 MODULES="$BUILD/export/uros/x86_64/user/modules"
 DISK_MODULES="net/chora_probe.so"
 
+# And modules in no pool, in /mach_servers/updates on the same disk (#964):
+# edu_next, edu_probe under another name, which chora_test hands the HAL to
+# update edu's driver with.  In a pool it would declare edu alike with
+# edu_probe, a tie the HAL does not break.
+UPDATES="$BUILD/export/uros/x86_64/user/updates"
+DISK_UPDATES="edu_next.so"
+
 # The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
 # libc.so under the name musl gives it for this target.
 MUSL_LDSO="$BUILD/src/contrib/musl-install/lib/libc.so"
@@ -198,6 +205,13 @@ done
 for m in $DISK_MODULES; do
 	[ -f "$MODULES/$m" ] || {
 		echo "make-disk-x86_64: $MODULES/$m is missing — build first" >&2
+		exit 1
+	}
+done
+
+for m in $DISK_UPDATES; do
+	[ -f "$UPDATES/$m" ] || {
+		echo "make-disk-x86_64: $UPDATES/$m is missing — build first" >&2
 		exit 1
 	}
 done
@@ -425,6 +439,12 @@ for AHCI_DISK in $AHCI_DISKS; do
 				echo "mkdir /mach_servers/modules/$pool"
 				echo "cd /mach_servers/modules/$pool"
 				echo "write $MODULES/$m ${m##*/}"
+			done
+			# And the modules in no pool (#964).
+			echo "mkdir /mach_servers/updates"
+			echo "cd /mach_servers/updates"
+			for m in $DISK_UPDATES; do
+				echo "write $UPDATES/$m $m"
 			done
 			echo "cd /"
 		fi
