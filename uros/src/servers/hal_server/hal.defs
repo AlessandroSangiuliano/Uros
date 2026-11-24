@@ -164,3 +164,57 @@ routine get_driver_state(
 	in	func		: unsigned;
 	out	state		: int;
 	out	starts		: int);
+
+/*
+ * #964 — stop, start and update the driver the HAL started for a device.
+ *
+ * Only the HAL holds a chora's task, so a driver is ended on purpose through
+ * these and no other way.  The HAL marks the device before it ends the task,
+ * so that a death it asked for is not taken for a crash and started again.
+ *
+ *   stop_driver    the driver ends, and stays ended: HAL_DRIVER_STOPPED.
+ *   start_driver   a driver stopped, or given up after its starts, is started
+ *                  again with the module it has.  KERN_FAILURE for one that
+ *                  runs or is to be started.
+ *   update_driver  its module becomes `module', named `name' without ".so",
+ *                  which must declare the device: KERN_INVALID_VALUE
+ *                  otherwise.  A chora that runs is ended and started again
+ *                  with it, once, at its end (HAL_DRIVER_UPDATING); a driver
+ *                  that does not run is started with it now.
+ *
+ * Each takes a RESOURCE_DRIVER_ADMIN token for the device's class and the
+ * routine's operation, issued to the task that sends the request; for any
+ * other token the kernel's refusal comes back.  KERN_INVALID_ARGUMENT for a
+ * device the HAL does not know, or started no driver for.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+type cap_token_t = array[*:256] of char;
+import <mach/cap_types.h>;
+import <mach/module_pool.h>;
+
+type hal_module_name_t = array[*:64] of char	/* MODULE_NAME_MAX */
+	ctype: module_name_t;
+
+routine stop_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	token		: cap_token_t);
+
+routine start_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	token		: cap_token_t);
+
+routine update_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	token		: cap_token_t;
+	in	name		: hal_module_name_t;
+	in	module		: pointer_t);

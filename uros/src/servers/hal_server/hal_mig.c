@@ -33,8 +33,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "hal_server.h"
+#include "hal_server_mig.h"	/* #964: each routine checked against MIG's */
 #include "device_master.h"	/* #513: ask the kernel who holds it */
 #include <mach/mach_interface.h>	/* urmach_task_get_name() (#964) */
+#include <mach/mach_traps.h>		/* urmach_cap_verify() (#964) */
+#include <mach/cap_types.h>		/* RESOURCE_DRIVER_ADMIN (#964) */
+#include <mach/module_pool.h>		/* module_name_t (#964) */
 
 kern_return_t
 hal_list_devices(mach_port_t hal_port,
@@ -355,4 +359,97 @@ hal_get_driver_state(mach_port_t hal_port,
 		return KERN_INVALID_ARGUMENT;
 	*state = hal_chora_state(bus, slot, func, starts);
 	return KERN_SUCCESS;
+}
+
+/*
+ * ── Stopping, starting and updating a driver (#964) ──────────────────
+ *
+ * Whether the request's sender may ask `what' of the driver of the device at
+ * bus/slot/func: KERN_SUCCESS, or the refusal, said.  The kernel verifies the
+ * token -- its MAC, its type, the device's class as its id, the operation, and
+ * that it was issued to the sender and not revoked -- as the name server
+ * verifies a mount's.  The copy is because the token arrives as bytes inside
+ * the message, which promise none of the alignment a struct uros_cap wants.
+ */
+static kern_return_t
+driver_admin(const char *what, const char *token,
+	     mach_msg_type_number_t count, unsigned int bus, unsigned int slot,
+	     unsigned int func, uint64_t op)
+{
+	const struct hal_device_info	*dev = hal_registry_get(bus, slot, func);
+	struct uros_cap			t;
+	kern_return_t			kr;
+
+	if (dev == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (count != sizeof t)
+		kr = CAP_ERR_INVALID_TOKEN;
+	else {
+		memcpy(&t, token, sizeof t);
+		kr = urmach_cap_verify(&t, hal_request_sender,
+				       RESOURCE_DRIVER_ADMIN, (uint32_t)op,
+				       (uint64_t)(dev->class_rev >> 8));
+	}
+	if (kr != KERN_SUCCESS)
+		printf("hal: %s for %02x:%02x.%x refused: no capability to "
+		       "administer the drivers of class %06x (%d) (#964)\n",
+		       what, bus, slot, func, (unsigned)(dev->class_rev >> 8),
+		       (int)kr);
+	return kr;
+}
+
+kern_return_t
+hal_stop_driver(mach_port_t hal_port,
+		unsigned int bus, unsigned int slot, unsigned int func,
+		cap_token_t token, mach_msg_type_number_t tokenCnt)
+{
+	kern_return_t	kr;
+
+	(void)hal_port;
+
+	kr = driver_admin("stop_driver", token, tokenCnt, bus, slot, func,
+			  CAP_OP_DRIVER_STOP);
+	return kr != KERN_SUCCESS ? kr : hal_driver_stop(bus, slot, func);
+}
+
+kern_return_t
+hal_start_driver(mach_port_t hal_port,
+		 unsigned int bus, unsigned int slot, unsigned int func,
+		 cap_token_t token, mach_msg_type_number_t tokenCnt)
+{
+	kern_return_t	kr;
+
+	(void)hal_port;
+
+	kr = driver_admin("start_driver", token, tokenCnt, bus, slot, func,
+			  CAP_OP_DRIVER_START);
+	return kr != KERN_SUCCESS ? kr : hal_driver_start(bus, slot, func);
+}
+
+/*
+ * The module comes out of line: the HAL keeps it when the update is taken,
+ * and mach_msg_server() destroys the request, the module with it, when the
+ * answer is an error.
+ */
+kern_return_t
+hal_update_driver(mach_port_t hal_port,
+		  unsigned int bus, unsigned int slot, unsigned int func,
+		  cap_token_t token, mach_msg_type_number_t tokenCnt,
+		  module_name_t name, mach_msg_type_number_t nameCnt,
+		  vm_offset_t module, mach_msg_type_number_t moduleCnt)
+{
+	module_name_t	n;
+	kern_return_t	kr;
+
+	(void)hal_port;
+
+	kr = driver_admin("update_driver", token, tokenCnt, bus, slot, func,
+			  CAP_OP_DRIVER_UPDATE);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (nameCnt >= sizeof n)
+		return KERN_INVALID_ARGUMENT;
+	memcpy(n, name, nameCnt);
+	n[nameCnt] = '\0';
+	return hal_driver_update(bus, slot, func, n, module, moduleCnt);
 }
