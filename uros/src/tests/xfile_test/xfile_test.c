@@ -1187,22 +1187,62 @@ xf_listing_leak(const char *path, int arm)
  * . and .., are XF_MANY + 2 entries, more than VFS_DIRENT_MAX: each file must
  * be listed once.  ext_server read cookie + VFS_DIRENT_MAX entries and,
  * finding as many as it read, answered that the directory ended there: a
- * listing stopped at its 64th entry.  The directory and its files may be
- * there already, from a boot before on the same disk.  Its path goes to
- * `made', for [13]; "" when it would not open.
+ * listing stopped at its 64th entry.  It is listed twice: from its start, and
+ * on from its first entry, one call taking one entry, so that a reply that
+ * begins past the start must hand back a cookie counted from its own -- one
+ * counted from the reply's first entry would list an entry twice.  The
+ * directory and its files may be there already, from a boot before on the
+ * same disk.  Its path goes to `made', for [13]; "" when it would not open.
  */
 #define XF_MANY		70
+
+/*
+ * #996 [12]: the directory open at `fd' listed from its start, its first call
+ * asking `first' entries and the rest VFS_DIRENT_MAX: the files fNN counted in
+ * `seen', the entries in *total, the calls in *calls, the cookie at the end in
+ * *end.  The last call's answer, -1 for an error.
+ */
+static int
+xf_list_files(vfs_fd_t fd, unsigned int first, unsigned char *seen,
+	      int *total, int *calls, uint64_t *end)
+{
+	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
+	uint64_t		cookie = 0;
+	unsigned int		max = first;
+	int			i, k, n;
+
+	memset(seen, 0, XF_MANY);
+	*total = 0;
+	*calls = 0;
+	do {
+		n = vfs_readdir(fd, ents, max, &cookie);
+		(*calls)++;
+		max = VFS_DIRENT_MAX;
+		for (i = 0; i < n; i++) {
+			k = (ents[i].d_name[0] == 'f' &&
+			     ents[i].d_name[1] >= '0' && ents[i].d_name[1] <= '9' &&
+			     ents[i].d_name[2] >= '0' && ents[i].d_name[2] <= '9' &&
+			     ents[i].d_name[3] == '\0') ?
+			    (ents[i].d_name[1] - '0') * 10 +
+			    (ents[i].d_name[2] - '0') : -1;
+			if (k >= 0 && k < XF_MANY && seen[k] < 255)
+				seen[k]++;
+		}
+		*total += n > 0 ? n : 0;
+	} while (n > 0 && cookie != 0 && *calls < XF_LIST_CALLS);
+	*end = cookie;
+	return n;
+}
 
 static void
 xf_many(const char *path, int arm, char *made, size_t size)
 {
-	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
 	char			dir[VFS_PATH_MAX], name[VFS_PATH_MAX];
-	unsigned char		seen[XF_MANY];
+	unsigned char		seen[XF_MANY], seen1[XF_MANY];
 	vfs_fd_t		fd;
-	uint64_t		cookie = 0;
-	int			i, n, k, total = 0, calls = 0, unmade = 0;
-	int			once = 0;
+	uint64_t		end, end1;
+	int			i, n, n1, total, total1, calls, calls1;
+	int			unmade = 0, once = 0, once1 = 0;
 
 	made[0] = '\0';
 	if (xf_dir_of(path, name, sizeof name) != 0) {
@@ -1228,62 +1268,62 @@ xf_many(const char *path, int arm, char *made, size_t size)
 		return;
 	}
 	(void)snprintf(made, size, "%s", dir);
-	memset(seen, 0, sizeof seen);
-	do {
-		n = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
-		for (i = 0; i < n; i++) {
-			k = (ents[i].d_name[0] == 'f' &&
-			     ents[i].d_name[1] >= '0' && ents[i].d_name[1] <= '9' &&
-			     ents[i].d_name[2] >= '0' && ents[i].d_name[2] <= '9' &&
-			     ents[i].d_name[3] == '\0') ?
-			    (ents[i].d_name[1] - '0') * 10 +
-			    (ents[i].d_name[2] - '0') : -1;
-			if (k >= 0 && k < XF_MANY && seen[k] < 255)
-				seen[k]++;
-		}
-		total += n > 0 ? n : 0;
-	} while (n > 0 && cookie != 0 && ++calls < XF_LIST_CALLS);
+	n = xf_list_files(fd, VFS_DIRENT_MAX, seen, &total, &calls, &end);
+	n1 = xf_list_files(fd, 1, seen1, &total1, &calls1, &end1);
 	(void)vfs_close(fd);
-	for (i = 0; i < XF_MANY; i++)
+	for (i = 0; i < XF_MANY; i++) {
 		once += seen[i] == 1;
-	if (unmade == 0 && n >= 0 && cookie == 0 && total == XF_MANY + 2 &&
-	    once == XF_MANY) {
-		printf("%s: [%d] %s listed whole: %d entries, %d files made here "
-		       "and . and .., in %d call(s), each file once\n", tag, arm,
-		       dir, total, XF_MANY, calls + 1);
+		once1 += seen1[i] == 1;
+	}
+	if (unmade == 0 && n >= 0 && n1 >= 0 && end == 0 && end1 == 0 &&
+	    total == XF_MANY + 2 && total1 == XF_MANY + 2 &&
+	    once == XF_MANY && once1 == XF_MANY) {
+		printf("%s: [%d] %s listed whole from its start and on from its "
+		       "first entry: %d and %d entries, in %d and %d calls, each "
+		       "of its %d files once each time\n", tag, arm, dir, total,
+		       total1, calls, calls1, XF_MANY);
 		passed++;
 	} else {
-		printf("%s: [%d] WRONG — %s listed: %d entries in %d call(s), %d "
-		       "of its %d files once, %d not made, the cookie %llu at "
-		       "the end (-1 an error: %d)\n", tag, arm, dir, total,
-		       calls + 1, once, XF_MANY, unmade,
-		       (unsigned long long)cookie, n);
+		printf("%s: [%d] WRONG — %s listed: %d entries in %d calls, %d "
+		       "files once; on from its first entry %d in %d, %d once; "
+		       "%d not made; cookies %llu %llu at the end (-1 an error: "
+		       "%d %d)\n", tag, arm, dir, total, calls, once, total1,
+		       calls1, once1, unmade, (unsigned long long)end,
+		       (unsigned long long)end1, n, n1);
 		failed++;
 	}
 }
 
 /*
- * [13] #996: a listing asked at a cookie no directory reaches, XF_FAR_COOKIE,
- * is answered with no entries, and ext_server lists the directory after it as
- * before it.  It is asked of [12]'s directory, of 72 entries.
+ * [13] #996: listings asked at cookies no directory reaches are answered with
+ * no entries, and ext_server lists the directory after them as before them.
+ * They are asked of [12]'s directory, of 72 entries.
  *
- * ⚠️ What it does NOT catch is why the cookie is this one.  ext_server read
- * cookie + VFS_DIRENT_MAX entries into memory of that many: on i386, where
- * size_t is 32 bits, this cookie made that size wrap past 4 GiB.  Measured
+ *   XF_FAR_COOKIE   past the directory, answered with no entries.
+ *   XF_EDGE_COOKIE  2^32 - 64, the last ext2fs counts in, answered so too.
+ *                   ext_server read cookie + VFS_DIRENT_MAX entries into
+ *                   memory of that many, a count of 32 bits that this cookie
+ *                   made 0: malloc(0) gave nothing, and the listing failed.
+ *   XF_WIDE_COOKIE  2^32, which no listing hands out, refused.
+ *
+ * ⚠️ What it does NOT catch is why XF_FAR_COOKIE is this one: on i386, where
+ * size_t is 32 bits, it made the old count's bytes wrap past 4 GiB.  Measured
  * with a print that was never committed, the old code asked malloc() for 128
  * bytes and ext2fs wrote this directory's 19008 into them -- and ext_server
  * went on answering, this arm passing, in three boots.  The fix takes the
  * count away: the room is a reply's whatever the cookie.
  */
 #define XF_FAR_COOKIE	16268752ull	/* 2^32 / 264 bytes, less 64, up */
+#define XF_EDGE_COOKIE	4294967232ull	/* 2^32 - 64 */
+#define XF_WIDE_COOKIE	4294967296ull	/* 2^32 */
 
 static void
 xf_far_cookie(const char *dir, int arm)
 {
 	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
 	vfs_fd_t		fd;
-	uint64_t		cookie, far_back;
-	int			first, far, again;
+	uint64_t		cookie, far_back, edge_back;
+	int			first, far, edge, wide, again;
 
 	if (dir[0] == '\0' ||
 	    vfs_open_rc(dir, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS) {
@@ -1297,20 +1337,29 @@ xf_far_cookie(const char *dir, int arm)
 	cookie = XF_FAR_COOKIE;
 	far = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
 	far_back = cookie;
+	cookie = XF_EDGE_COOKIE;
+	edge = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	edge_back = cookie;
+	cookie = XF_WIDE_COOKIE;
+	wide = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
 	cookie = 0;
 	again = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
 	(void)vfs_close(fd);
-	if (first > 0 && far == 0 && far_back == 0 && again == first) {
-		printf("%s: [%d] a listing of %s at the cookie %llu: no entries, "
-		       "and the end; the listing after it %d entries, as before "
-		       "it\n", tag, arm, dir, XF_FAR_COOKIE, again);
+	if (first > 0 && far == 0 && far_back == 0 && edge == 0 &&
+	    edge_back == 0 && wide < 0 && again == first) {
+		printf("%s: [%d] listings of %s at the cookies %llu and %llu: no "
+		       "entries, and the end; at %llu refused; the listing after "
+		       "them %d entries, as before\n", tag, arm, dir,
+		       XF_FAR_COOKIE, XF_EDGE_COOKIE, XF_WIDE_COOKIE, again);
 		passed++;
 	} else {
-		printf("%s: [%d] WRONG — a listing of %s at the cookie %llu: %d "
-		       "entries, the cookie %llu back; before it %d entries, "
-		       "after it %d (-1 an error)\n", tag, arm, dir,
-		       XF_FAR_COOKIE, far, (unsigned long long)far_back, first,
-		       again);
+		printf("%s: [%d] WRONG — listings of %s at the cookies %llu, %llu "
+		       "and %llu: %d, %d and %d entries (-1 an error), the cookies "
+		       "%llu and %llu back; before them %d entries, after %d\n",
+		       tag, arm, dir, XF_FAR_COOKIE, XF_EDGE_COOKIE,
+		       XF_WIDE_COOKIE, far, edge, wide,
+		       (unsigned long long)far_back,
+		       (unsigned long long)edge_back, first, again);
 		failed++;
 	}
 }
