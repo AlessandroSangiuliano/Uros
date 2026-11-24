@@ -927,11 +927,12 @@ xf_dir_of(const char *path, char *dir, size_t size)
 
 /*
  * [11] #996: the task named `name' among those the master host port lists --
- * the line's -H gives it -- or MACH_PORT_NULL, and why in *why.  The other
- * rights asked for on the way are given back.
+ * the line's -H gives it -- or MACH_PORT_NULL, and why in *why; *listed is
+ * whether the tasks could be listed at all.  The other rights asked for on the
+ * way are given back.
  */
 static mach_port_t
-xf_task_named(const char *name, const char **why)
+xf_task_named(const char *name, const char **why, int *listed)
 {
 	mach_port_t		host = MACH_PORT_NULL, dev = MACH_PORT_NULL;
 	mach_port_t		wired = MACH_PORT_NULL, paged = MACH_PORT_NULL;
@@ -943,6 +944,7 @@ xf_task_named(const char *name, const char **why)
 	kern_return_t		kr;
 
 	*why = "no task has that name";
+	*listed = 0;
 	kr = bootstrap_ports(bootstrap_port, &host, &dev, &wired, &paged, &sec);
 	if (kr == KERN_SUCCESS)
 		kr = processor_set_default(host, &pset_name);
@@ -957,6 +959,8 @@ xf_task_named(const char *name, const char **why)
 		kr = KERN_FAILURE;
 	} else if (kr != KERN_SUCCESS)
 		*why = "no host port to list the tasks with";
+	else
+		*listed = 1;
 	for (i = 0; kr == KERN_SUCCESS && i < ntasks; i++) {
 		char			got[URMACH_TASK_NAME_MAX];
 		mach_msg_type_number_t	cnt = sizeof got;
@@ -1029,19 +1033,38 @@ xf_size_of(mach_port_t task)
  * where that buffer left 16 KiB and 20 KiB.  ext_server is found by the name
  * it gives itself.
  *
- * 🔑 THE LEAST OF XF_LEAK_ROUNDS ROUNDS, and not one.  ext_server serves other
- * clients meanwhile, and what it grows by for them can stay: on OMEGA, one
- * round of a fixed tree read 1064960 bytes, 260 pages, which is no listing's,
- * where every other round read none.  A leak is every listing's, so it is in
- * every round; another client's growth falls in one.  And the bound is half
+ * 🔑 THE MEDIAN OF XF_LEAK_ROUNDS ROUNDS, and not one round, nor the least.
+ * ext_server serves other clients meanwhile, and what it grows by for them can
+ * stay: on OMEGA, one round of a fixed tree read 1064960 bytes, 260 pages,
+ * which is no listing's, where every other round read none.  And what it lets
+ * go for them can fall in a round too -- a client leaving FLIPC gives back two
+ * rings of 256 KiB -- where the least would pick that round and hide a leak.
+ * A leak is every listing's, so it is in every round; another client's growth
+ * or release falls in one, and the median is a round of neither.  And the bound is half
  * a page a listing, where what stays of a buffer is pages: 4096 bytes at the
  * least, and another client's growth must pass 512 KiB in a round to count.
  */
 #define XF_LISTINGS		256
 #define XF_LISTING_SLACK	2048	/* bytes a listing: half a page */
 #define XF_WARM_LISTINGS	8
-#define XF_LEAK_ROUNDS		3
-_Static_assert(XF_LEAK_ROUNDS == 3, "[11]'s WRONG line names three rounds");
+#define XF_LEAK_ROUNDS		5
+_Static_assert(XF_LEAK_ROUNDS == 5, "[11]'s WRONG line names five rounds");
+
+/* #996 [11]: the median of the XF_LEAK_ROUNDS counts in `v', which it sorts. */
+static long long
+xf_median(long long *v)
+{
+	long long	t;
+	int		i, j;
+
+	for (i = 1; i < XF_LEAK_ROUNDS; i++)
+		for (j = i; j > 0 && v[j - 1] > v[j]; j--) {
+			t = v[j];
+			v[j] = v[j - 1];
+			v[j - 1] = t;
+		}
+	return v[XF_LEAK_ROUNDS / 2];
+}
 
 static void
 xf_listing_leak(const char *path, int arm)
@@ -1054,8 +1077,8 @@ xf_listing_leak(const char *path, int arm)
 	uint64_t		cookie, end;
 	vm_size_t		before, mid, after;
 	long long		all[XF_LEAK_ROUNDS], at_end[XF_LEAK_ROUNDS];
-	long long		least_all = 0, least_end = 0;
-	int			i, r, n, entries, wrong = 0, unread = 0;
+	long long		sorted[XF_LEAK_ROUNDS], mid_all, mid_end;
+	int			i, r, n, entries, wrong = 0, unread = 0, listed;
 
 	if (xf_dir_of(path, dir, sizeof dir) != 0) {
 		printf("%s: [%d] WRONG — not asked: %s has no directory\n", tag,
@@ -1063,7 +1086,15 @@ xf_listing_leak(const char *path, int arm)
 		failed++;
 		return;
 	}
-	task = xf_task_named("ext_server", &why);
+	task = xf_task_named("ext_server", &why, &listed);
+	if (!MACH_PORT_VALID(task) && listed) {
+		/* ext_server names itself: one that did not is ours to fix. */
+		printf("%s: [%d] WRONG — no task is named ext_server among those "
+		       "the master host port lists, and ext_server names itself "
+		       "(#996)\n", tag, arm);
+		failed++;
+		return;
+	}
 	if (!MACH_PORT_VALID(task)) {
 		printf("%s: [%d] NOT ASKED — ext_server's size: %s\n", tag, arm,
 		       why);
@@ -1117,31 +1148,35 @@ xf_listing_leak(const char *path, int arm)
 			unread++;
 		all[r] = ((long long)mid - (long long)before) / XF_LISTINGS;
 		at_end[r] = ((long long)after - (long long)mid) / XF_LISTINGS;
-		if (r == 0 || all[r] < least_all)
-			least_all = all[r];
-		if (r == 0 || at_end[r] < least_end)
-			least_end = at_end[r];
 	}
 	(void)vfs_close(fd);
 	(void)mach_port_deallocate(mach_task_self(), task);
 
-	if (unread == 0 && wrong == 0 && least_all < XF_LISTING_SLACK &&
-	    least_end < XF_LISTING_SLACK) {
+	memcpy(sorted, all, sizeof sorted);
+	mid_all = xf_median(sorted);
+	memcpy(sorted, at_end, sizeof sorted);
+	mid_end = xf_median(sorted);
+	if (unread != 0) {
+		printf("%s: [%d] WRONG — the kernel would not say ext_server's "
+		       "size in %d of %d rounds (%d answered wrong)\n", tag, arm,
+		       unread, XF_LEAK_ROUNDS, wrong);
+		failed++;
+	} else if (wrong == 0 && mid_all < XF_LISTING_SLACK &&
+		   mid_end < XF_LISTING_SLACK) {
 		printf("%s: [%d] ext_server's size, as the kernel says it, over %d "
 		       "rounds of %d listings of %s's %d entries and %d at its "
-		       "end: the least a round kept, %lld and %lld bytes a "
-		       "listing, under %d\n", tag, arm, XF_LEAK_ROUNDS,
-		       XF_LISTINGS, dir, entries, XF_LISTINGS, least_all,
-		       least_end, XF_LISTING_SLACK);
+		       "end: the median round kept %lld and %lld bytes a listing, "
+		       "under %d\n", tag, arm, XF_LEAK_ROUNDS, XF_LISTINGS, dir,
+		       entries, XF_LISTINGS, mid_all, mid_end, XF_LISTING_SLACK);
 		passed++;
 	} else {
 		printf("%s: [%d] WRONG — ext_server kept %lld bytes a listing of "
-		       "%s's %d entries and %lld a listing at its end, the least "
-		       "of %d rounds of %d (rounds %lld %lld %lld, %lld %lld "
-		       "%lld; %d answered wrong, %d unread)\n", tag, arm,
-		       least_all, dir, entries, least_end, XF_LEAK_ROUNDS,
-		       XF_LISTINGS, all[0], all[1], all[2], at_end[0], at_end[1],
-		       at_end[2], wrong, unread);
+		       "%s's %d entries and %lld one at its end, the median of %d "
+		       "rounds of %d (%lld %lld %lld %lld %lld, %lld %lld %lld "
+		       "%lld %lld; %d answered wrong)\n", tag, arm, mid_all, dir,
+		       entries, mid_end, XF_LEAK_ROUNDS, XF_LISTINGS, all[0],
+		       all[1], all[2], all[3], all[4], at_end[0], at_end[1],
+		       at_end[2], at_end[3], at_end[4], wrong);
 		failed++;
 	}
 }
