@@ -503,14 +503,37 @@ service_demux(mach_msg_header_t *request, mach_msg_header_t *reply)
     }
 }
 
+/*
+ * #995: a notification bootstrap did not ask for, on one of its own
+ * notification ports, is said -- its kind, what it carries and the port --
+ * and bootstrap goes on.  Each one panicked bootstrap, and the system with
+ * it, where a port-deleted notice comes for no worse than a right let go
+ * that had a dead-name request on it: a server's task port deallocated, or
+ * a request answered with an error, whose rights the server loop destroys.
+ * untrusted_notify_port's are what they were.
+ */
+static const char *
+notify_port_said(mach_port_t notify)
+{
+    if (notify == bootstrap_notification_port)
+	return "its servers' notification port";
+    if (notify == trusted_notify_port)
+	return "its trusted notification port";
+    return "a port that is no notification port of its";
+}
+
 kern_return_t
 do_mach_notify_port_deleted(mach_port_t notify, mach_port_t name)
 {
-    if (notify != untrusted_notify_port) {
-	panic("%s: do_mach_notify_port_deleted\n", program_name);
-    }
+    if (notify == untrusted_notify_port)
+	return KERN_FAILURE;
 
-    return KERN_FAILURE;
+    BOOTSTRAP_IO_LOCK();
+    printf("%s: a port-deleted notification for 0x%x, on %s: said, and "
+	   "bootstrap goes on (#995)\n", program_name, (unsigned)name,
+	   notify_port_said(notify));
+    BOOTSTRAP_IO_UNLOCK();
+    return KERN_SUCCESS;
 }
 
 kern_return_t
@@ -522,7 +545,19 @@ do_mach_notify_port_destroyed(mach_port_t notify,
     kern_return_t kr;
 
     if (notify != untrusted_notify_port) {
-	panic("%s: do_mach_notify_port_destroyed\n", program_name);
+	/*
+	 * #995: the receive right it brings is no service port's -- those
+	 * come to untrusted_notify_port -- so it is destroyed here.
+	 */
+	BOOTSTRAP_IO_LOCK();
+	printf("%s: a port-destroyed notification, on %s: the receive right "
+	       "0x%x it brings is destroyed, and bootstrap goes on (#995)\n",
+	       program_name, notify_port_said(notify), (unsigned)port);
+	BOOTSTRAP_IO_UNLOCK();
+	if (MACH_PORT_VALID(port))
+	    (void)mach_port_mod_refs(mach_task_self(), port,
+				     MACH_PORT_RIGHT_RECEIVE, -1);
+	return KERN_SUCCESS;
     }
 
     /*
@@ -590,20 +625,27 @@ do_mach_notify_port_destroyed(mach_port_t notify,
 kern_return_t
 do_mach_notify_no_senders(mach_port_t notify, mach_port_mscount_t mscount)
 {
-    if (notify != untrusted_notify_port) {
-	panic("%s: do_mach_notify_no_senders\n", program_name);
-    }
+    if (notify == untrusted_notify_port)
+	return KERN_FAILURE;
 
-    return KERN_FAILURE;
+    BOOTSTRAP_IO_LOCK();
+    printf("%s: a no-senders notification, make-send count %u, on %s: "
+	   "said, and bootstrap goes on (#995)\n", program_name,
+	   (unsigned)mscount, notify_port_said(notify));
+    BOOTSTRAP_IO_UNLOCK();
+    return KERN_SUCCESS;
 }
 
 kern_return_t
 do_mach_notify_send_once(mach_port_t notify)
 {
-    if (notify != untrusted_notify_port) {
-	panic("%s: do_mach_notify_send_once\n", program_name);
-    }
+    if (notify == untrusted_notify_port)
+	return KERN_SUCCESS;
 
+    BOOTSTRAP_IO_LOCK();
+    printf("%s: a send-once notification, on %s: said, and bootstrap goes "
+	   "on (#995)\n", program_name, notify_port_said(notify));
+    BOOTSTRAP_IO_UNLOCK();
     return KERN_SUCCESS;
 }
 
