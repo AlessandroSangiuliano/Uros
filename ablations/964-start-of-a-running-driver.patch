@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: start_driver()'s refusal of a driver that runs: the start is taken, and the chora, still running, is marked to be started again at an end that never comes.  chora_test [12]'s second start, while the card's driver runs, is answered as taken.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[12\] WRONG -- the card.s driver stopped through the HAL: .*a second start 0 \(5 is refused\)
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -772,8 +772,6 @@
+ 
+ 	if (r == NULL)
+ 		return KERN_INVALID_ARGUMENT;
+-	if (r->state != HAL_DRIVER_STOPPED && r->state != HAL_DRIVER_GAVE_UP)
+-		return KERN_FAILURE;
+ 	if (r->task != MACH_PORT_NULL) {
+ 		record_where(r, where, sizeof where);
+ 		r->state = HAL_DRIVER_UPDATING;

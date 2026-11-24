@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: update_driver()'s reading of the module it is given: bytes that do not declare the device are taken.  chora_test [13] gives edu's driver the card's module, which the HAL takes; chora_launch() reads the declaration again and starts nothing, so edu's driver dies at each start until the HAL gives up.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[13\] WRONG -- edu.s driver updated through the HAL: the card.s module refused 0 \(18\)
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -821,7 +821,7 @@
+ 		return KERN_INVALID_ARGUMENT;
+ 	record_where(r, where, sizeof where);
+ 	if (data == 0 || len == 0 || len > CHORA_GIVEN_MODULE_MAX ||
+-	    module_score((const void *)data, len, &r->dev) <= 0) {
++	    0) {
+ 		printf("hal: %s.so, given to update the driver of %s, does not "
+ 		       "declare it: refused (#964)\n", name, where);
+ 		return KERN_INVALID_VALUE;
