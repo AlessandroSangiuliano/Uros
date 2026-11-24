@@ -124,6 +124,7 @@ targets; the two static assertions in `cap_types.h` name the versions.
 | `RESOURCE_PCI_DEVICE` (5) | **the device CLASS**, not the bus address | the device master |
 | `RESOURCE_DMA_BUFFER` (10) | the kernel's region id | the device master |
 | `RESOURCE_REVOKE_NOTICES` (11) | — a permission, not a capability: no token is issued | cap_server, at `cap_subscribe_revoke` |
+| `RESOURCE_PCI_FUNCTION` (12) | one function's bus address, `bus<<8 \| slot<<3 \| func`; a manifest writes only `any`, and the task that starts a driver writes the address into the driver's manifest at run time (#982) | the device master, at `device_claim` |
 | `RESOURCE_BUDGET` (9) | reserved | — |
 
 🔑 **A mount is put on a capability and taken out on a signature (#716).** The
@@ -898,8 +899,9 @@ Stated so nobody reads this document as a description of a finished system.
   for a forking task that needs one: today no task that forks delegates
   anything, so the derivation would be refused for every child.
 - **Most resource types have no server checking them.** Only
-  `RESOURCE_BLK_DEVICE`, `RESOURCE_PCI_DEVICE`, `RESOURCE_DMA_BUFFER` and
-  `RESOURCE_MOUNT_POINT` are verified anywhere today, and
+  `RESOURCE_BLK_DEVICE`, `RESOURCE_PCI_DEVICE`, `RESOURCE_PCI_FUNCTION`,
+  `RESOURCE_DMA_BUFFER` and `RESOURCE_MOUNT_POINT` are verified anywhere
+  today, and
   `RESOURCE_REVOKE_NOTICES` is a permission cap_server asks for. `FILE`,
   `DIRECTORY`, `PRINTER`, `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values
   with no enforcement behind them — the browser example above is therefore
