@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #964
 Takes out: the device's class in the HAL's check: the token is verified against the id it carries, so a token for any class administers every device.  chora_test [11]'s stop with a token for edu's class stops the card's driver.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[11\] WRONG -- refused without the capability: SATA.s class 2413 by cap_server; by the HAL no token 2403, edu.s class 0
+Expect: chora_test: \[11\] WRONG -- refused without the capability: cap_server SATA 2413; HAL no token 2403, edu.s 0
 
 diff --git a/uros/src/servers/hal_server/hal_mig.c b/uros/src/servers/hal_server/hal_mig.c
 --- a/uros/src/servers/hal_server/hal_mig.c

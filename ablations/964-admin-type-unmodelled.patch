@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #964
 Takes out: RESOURCE_DRIVER_ADMIN's place below RESOURCE_TYPE_MAX: the type becomes 14, past it, where cap_server asks no manifest and issues a token to anyone.  chora_test [11] is given a token for SATA's class, which its manifest does not name.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[11\] WRONG -- refused without the capability: SATA.s class 0 by cap_server
+Expect: chora_test: \[11\] WRONG -- refused without the capability: cap_server SATA 0;
 Note: chora_test's manifest still names type 13, which is RESOURCE_TYPE_MAX here and no type anything asks for.
 
 diff --git a/uros/uapi/mach/cap_types.h b/uros/uapi/mach/cap_types.h
