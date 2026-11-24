@@ -211,10 +211,12 @@ DMA_RECLAIM_CONF_LINES=""
 # #498: the MIRROR of the x86-64 bundle's two lines -- this target reads the
 # file x86-64 wrote on /mnt/disk2 and leaves its own for x86-64 to read.  Both
 # say NOT ASKED on a boot without a second AHCI disk; run-qemu.sh
-# --ahci2-image attaches the one an x86-64 boot left behind.
+# --ahci2-image attaches the one an x86-64 boot left behind.  The writer's line
+# has -H, as x86-64's: its [11] finds ext_server among the tasks the master
+# host port lists, and asks the kernel its size (#996).
 XFILE_CONF_LINES=""
 [ -f "$XFILE_TEST" ] && XFILE_CONF_LINES="xfile_test xfile_test read /mnt/disk2/from_x86_64.dat
-xfile_test xfile_test write /mnt/disk2/from_i386.dat"
+-H xfile_test xfile_test write /mnt/disk2/from_i386.dat"
 # #583: libmach's mach_msg_server asked directly -- a right the server kept
 # must survive its next message.  Needs nothing but libmach and a thread.
 MSG_SERVER_TEST_CONF_LINE=""
