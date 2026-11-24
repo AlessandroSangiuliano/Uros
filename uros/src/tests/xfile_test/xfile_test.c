@@ -1300,10 +1300,13 @@ xf_many(const char *path, int arm, char *made, size_t size)
  * They are asked of [12]'s directory, of 72 entries.
  *
  *   XF_FAR_COOKIE   past the directory, answered with no entries.
- *   XF_EDGE_COOKIE  2^32 - 64, the last ext2fs counts in, answered so too.
- *                   ext_server read cookie + VFS_DIRENT_MAX entries into
- *                   memory of that many, a count of 32 bits that this cookie
- *                   made 0: malloc(0) gave nothing, and the listing failed.
+ *   XF_EDGE_COOKIE  2^32 - 65, within the 32 bits ext2fs counts in,
+ *                   answered so too.  ext_server read cookie + VFS_DIRENT_MAX
+ *                   entries into memory of that many, 2^32 - 1 entries for
+ *                   this cookie, which no malloc() gives, and the listing
+ *                   failed; and a room for cookie + 65 entries, a reply's and
+ *                   the one past it, comes to 0 in 32 bits, which malloc()
+ *                   does not give either.
  *   XF_WIDE_COOKIE  2^32, which no listing hands out, refused.
  *
  * ⚠️ What it does NOT catch is why XF_FAR_COOKIE is this one: on i386, where
@@ -1314,7 +1317,7 @@ xf_many(const char *path, int arm, char *made, size_t size)
  * count away: the room is a reply's whatever the cookie.
  */
 #define XF_FAR_COOKIE	16268752ull	/* 2^32 / 264 bytes, less 64, up */
-#define XF_EDGE_COOKIE	4294967232ull	/* 2^32 - 64 */
+#define XF_EDGE_COOKIE	4294967231ull	/* 2^32 - 65 */
 #define XF_WIDE_COOKIE	4294967296ull	/* 2^32 */
 
 static void
