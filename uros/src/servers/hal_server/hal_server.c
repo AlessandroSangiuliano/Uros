@@ -275,12 +275,6 @@ static boolean_t
 hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
 	/*
-	 * #964: "/" is mounted.  The HAL alone holds this port and gave the name
-	 * server the one send-once right to it, so what arrives on it is the
-	 * name server's, and comes once: the watch ends with it.  The message
-	 * brings a right to the mount's port, which the HAL does not keep.
-	 */
-	/*
 	 * #964: a restart's delay is over.  The HAL alone holds a send right to
 	 * this port, for its timers, so what arrives on it is theirs.
 	 */
@@ -293,6 +287,12 @@ hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 		return TRUE;
 	}
 
+	/*
+	 * #964: "/" is mounted.  The HAL alone holds this port and gave the name
+	 * server the one send-once right to it, so what arrives on it is the
+	 * name server's, and comes once: the watch ends with it.  The message
+	 * brings a right to the mount's port, which the HAL does not keep.
+	 */
 	if (MACH_PORT_VALID(disk_watch) && in->msgh_local_port == disk_watch) {
 		if (in->msgh_id == NETNAME_NOTIFY_MOUNT_MSID)
 			hal_modules_disk_served();
