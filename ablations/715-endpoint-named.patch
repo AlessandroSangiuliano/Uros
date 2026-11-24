@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #715
+Takes out: the endpoint's namelessness -- each mount's endpoint is checked in as "flipc.<service>" again, so any task that can reach the name server connects without the mount's port; mount_test's [32] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: mount_test: \[32\] WRONG
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -2632,7 +2632,9 @@
+ 	mnt->flipc_ep = NULL;
+ 	if (slot >= MAX_MOUNTS)
+ 		return;
+-	ret = flipc2_endpoint_create(NULL, 4,
++	char named[96];
++	(void)snprintf(named, sizeof named, "flipc.%s", mnt->service_name);
++	ret = flipc2_endpoint_create(named, 4,
+ 				     VFS_FLIPC_CHANNEL_SIZE,
+ 				     VFS_FLIPC_RING_ENTRIES, 0, &ep);
+ 	if (ret != FLIPC2_SUCCESS) {
