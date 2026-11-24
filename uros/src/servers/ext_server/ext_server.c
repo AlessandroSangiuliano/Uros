@@ -1321,7 +1321,7 @@ vfs_readdir(
 	vfs_u64_t		*next_cookie_out)
 {
 	struct mount_context *mnt = mnt_from_payload(fs_port);
-	fs_private_t priv = vfs_op_begin(mnt, dir_handle);
+	fs_private_t priv;
 	struct fs_dirent *tmp;
 	vfs_dirent_t *outv;
 	unsigned int got = 0, emit, i;
@@ -1329,13 +1329,18 @@ vfs_readdir(
 	kern_return_t kr;
 	int rc;
 
-	if (mnt == NULL)
-		return KERN_INVALID_ARGUMENT;
-
 	*entries_out       = (pointer_t)0;
 	*entries_count_out = 0;
 	*next_cookie_out   = 0;
 
+	/*
+	 * #996, #714: the mount before its slot.  vfs_op_begin() locks the
+	 * mount's table, and a request on a port that is no mount's -- a
+	 * pager's, in this task's one port set -- has no mount.
+	 */
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
+	priv = vfs_op_begin(mnt, dir_handle);
 	if (!priv)
 		return KERN_INVALID_ARGUMENT;
 
