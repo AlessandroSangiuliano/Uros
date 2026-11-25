@@ -1592,7 +1592,8 @@ the_crash_restart_arm(void)
 		"up after %d start(s), started through the HAL (%d): %s state "
 		"%d, after %d; %s (%d): state %d after %d (given up is %d, %d "
 		"starts a row)", starts0, k_start, k_start != KERN_SUCCESS ?
-		"the start refused, now" : state1 == HAL_DRIVER_GAVE_UP ?
+		"the start refused, now" : starts1 <= starts0 ?
+		"not started again:" : state1 == HAL_DRIVER_GAVE_UP ?
 		"given up again," : "not given up in 30 s:", state1, starts1,
 		state1 != HAL_DRIVER_GAVE_UP ? "not updated, not given up" :
 		k_upd == KERN_SUCCESS ? "updated with a new build of it" :
