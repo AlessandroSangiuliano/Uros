@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: stop_driver()'s own operation: the HAL asks the token for the update instead, so a token that may start and update, and not stop, stops.  chora_test [11]'s stop with such a token stops the card's driver.  Before the review of 24/11, [11] asked the stop with a token for the start alone, and [12] with one for all three, and this passed both.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[11\] WRONG -- refused without the capability: .*no stop 0,
+
+diff --git a/uros/src/servers/hal_server/hal_mig.c b/uros/src/servers/hal_server/hal_mig.c
+--- a/uros/src/servers/hal_server/hal_mig.c
++++ b/uros/src/servers/hal_server/hal_mig.c
+@@ -408,7 +408,7 @@
+ 	(void)hal_port;
+ 
+ 	kr = driver_admin("stop_driver", token, tokenCnt, bus, slot, func,
+-			  CAP_OP_DRIVER_STOP);
++			  CAP_OP_DRIVER_UPDATE);
+ 	return kr != KERN_SUCCESS ? kr : hal_driver_stop(bus, slot, func);
+ }
+ 

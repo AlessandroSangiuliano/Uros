@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #964
-Takes out: an update's mark at the chora's death: the HAL takes the death of the chora it ended to update for a crash, and starts edu_next after the crash's delay instead of at once.  It is one start all the same, so chora_test [13] passes: the HAL's restart line names edu_next, which a fixed tree never restarts after a crash.
+Takes out: an update's mark at the chora's death: the HAL takes the death of the chora it ended to update for a crash, and starts edu_next after the crash's delay instead of at once.  It is one start all the same, so chora_test [15] passes: the HAL's restart line names edu_next, which a fixed tree never restarts after a crash.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
 Expect: hal: the chora of [0-9a-f]{2}:[0-9a-f]{2}\.[0-7], misc/edu_next\.so, is started again in [0-9]+ ms
 Note: the harness's pair "the HAL updating a driver" fails too: no start on request with misc/edu_next.so.

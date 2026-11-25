@@ -1,17 +1,18 @@
 Kind: ablation
 Issue: #964
-Takes out: the room a driver's task name leaves for a module's name: update_driver() takes a name of up to 60 characters, which no chora could name its task with.  chora_test [15]'s name too long reaches the check of the bytes, which have no operations by it: refused, but not for the name.
+Takes out: the room a driver's task name leaves for a module's name: module_name_ok() takes a name of up to 60 characters, which no chora could name its task with.  chora_test [14]'s name of 24 characters reaches the check of the bytes, which have no operations by it: refused, but not for the name.  The disk's host_bridge_one_too_long passes as the HAL reads the pool, and its chora on the host bridge dies at each start until the HAL gives up.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[15\] WRONG -- edu.s driver refused updates no chora could run: .*a name too long 18,
+Expect: chora_test: \[14\] WRONG -- edu.s driver refused updates no chora could run: .*a name of 24 characters 18,
+Note: the harness's pair "the HAL refusing a module of a pool" fails too.
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
 --- a/uros/src/servers/hal_server/hal_modules.c
 +++ b/uros/src/servers/hal_server/hal_modules.c
-@@ -816,7 +816,7 @@
+@@ -817,7 +817,7 @@
  {
  	size_t	i, n = strlen(name);
  
--	if (n == 0 || n + sizeof ".so" > room || n > MODULE_NAME_ROOM)
+-	if (n == 0 || n + sizeof ".so" > room || n > DRIVER_MODULE_NAME_MAX)
 +	if (n == 0 || n + sizeof ".so" > room)
  		return 0;
  	for (i = 0; i < n; i++)

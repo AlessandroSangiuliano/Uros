@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #964
-Takes out: a stopped driver staying stopped through an update: update_driver() starts it with the new module, as it did before the user's decision of 24/11, so that who may update starts what an administrator stopped.  chora_test [13] finds the stopped card running a second after its update.
+Takes out: a stopped driver staying stopped through an update: update_driver() starts it with the new module, as it did before the user's decision of 24/11, so that who may update starts what an administrator stopped.  chora_test [16] finds edu's stopped driver running a second after its update.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[13\] WRONG -- the card.s driver updated while stopped \(0\): 1 s on state 1
+Expect: chora_test: \[16\] WRONG -- edu.s driver stopped \(state 4\) and given edu_probe from the bundle \(0\): 1 s on state 1
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
 --- a/uros/src/servers/hal_server/hal_modules.c

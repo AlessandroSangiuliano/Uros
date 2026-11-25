@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #964
-Takes out: update_driver()'s own operation: the HAL asks the token for the start instead, so a token that may only start updates.  chora_test [11]'s update with a start-only token is taken, and the card's driver is ended and started with the module it was given.
+Takes out: update_driver()'s own operation: the HAL asks the token for the start instead, so a token that may stop and start, and not update, updates.  chora_test [11]'s update with such a token is taken, and the card's driver is ended and started with the module it was given.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
 Expect: chora_test: \[11\] WRONG -- refused without the capability: .*no update 0,
 
@@ -15,4 +15,4 @@ diff --git a/uros/src/servers/hal_server/hal_mig.c b/uros/src/servers/hal_server
 +			  CAP_OP_DRIVER_START);
  	if (kr != KERN_SUCCESS)
  		return kr;
- 	if (nameCnt >= sizeof n)
+ 	if (nameCnt >= sizeof n) {

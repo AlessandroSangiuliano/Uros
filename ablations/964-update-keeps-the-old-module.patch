@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #964
-Takes out: the module an update gives: update_driver() reads it, lets it go and ends the chora, which the HAL starts again with the module it had.  chora_test [16] finds edu_probe driving edu again and no edu_next answering.
+Takes out: the module an update gives: update_driver() reads it, lets it go and ends the chora, which the HAL starts again with the module it had.  chora_test [15] finds edu_probe driving edu again and no edu_next answering, and [16], whose update must replace edu_next, is not asked.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[16\] WRONG -- edu.s driver updated through the HAL to edu_next \(0\): NO ANSWER
+Expect: chora_test: \[15\] WRONG -- edu.s driver updated through the HAL to edu_next \(0\): NO ANSWER
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
 --- a/uros/src/servers/hal_server/hal_modules.c

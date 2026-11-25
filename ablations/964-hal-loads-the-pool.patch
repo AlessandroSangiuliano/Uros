@@ -13,10 +13,10 @@ diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_se
  #include <mach/task_name.h>		/* URMACH_TASK_NAME_MAX, #964 */
  #include "libelf.h"
 +#include "modload.h"
+ #include <mach/elf.h>			/* SHT_DYNSYM, SHN_UNDEF: #964 */
  #include "exec_types.h"			/* EXEC_OK */
  #include "exec.h"			/* exec_load_image */
- 
-@@ -1126,6 +1127,12 @@
+@@ -1197,6 +1198,12 @@
  		return p;
  	}
  	p->listed = 1;
