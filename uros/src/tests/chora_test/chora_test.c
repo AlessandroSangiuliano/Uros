@@ -62,9 +62,9 @@
  *       (RESOURCE_DRIVER_ADMIN for its class), the HAL's stop_driver(),
  *       start_driver() and update_driver() are refused, and the card's
  *       driver goes on as it was: no token, one for edu's class, one for the
- *       card's without each routine's operation, one issued to another task
- *       -- and cap_server will not issue one for a class this manifest does
- *       not name;
+ *       card's with the other two routines' operations and not the
+ *       routine's own, one issued to another task -- and cap_server will not
+ *       issue one for a class this manifest does not name;
  *  [12] the card's driver stopped through the HAL stays stopped: 3 s on, past
  *       every delay the HAL waits before a restart, it has the starts it had,
  *       the card is claimed by nobody and its control port is gone;
@@ -910,13 +910,14 @@ the_hal(void)
  * for the card, each with the kernel's answer, and the card's driver goes on
  * as it was -- the same state, the same starts, the same port.  update_driver()
  * is given the card's own module, so that only the capability can refuse it.
- * Each routine is refused a token for the card's class without its own
- * operation: the operation is what tells the three apart.
+ * Each routine is refused a token for the card's class with the other two
+ * routines' operations and not its own: one that asked another's operation
+ * than its own would take it (the review of 24/11).
  */
 static void
 the_refusal_arm(void)
 {
-	struct uros_cap		all, start_only, no_start, edu_tok, foreign;
+	struct uros_cap		no_stop, no_start, no_update, edu_tok, foreign;
 	struct uros_cap		sata;
 	mach_port_t		hal, before = MACH_PORT_NULL, after = MACH_PORT_NULL;
 	char			name[URMACH_TASK_NAME_MAX], module[64];
@@ -942,20 +943,23 @@ the_refusal_arm(void)
 		       CT_SLOT(b), CT_FUNC(b));
 
 	/*
-	 * This task's tokens: the card's class, all three operations, the start
-	 * alone, and all but the start; edu's class; and a child of the first
-	 * issued to the HAL.
+	 * This task's tokens: the card's class, each without one of the three
+	 * operations; edu's class, with all three; and a child of one, issued
+	 * to the HAL.
 	 */
-	kr = admin_token(CT_NET_CLASS, CT_ADMIN_ALL, &all);
-	if (kr == KERN_SUCCESS)
-		kr = admin_token(CT_NET_CLASS, CAP_OP_DRIVER_START, &start_only);
+	kr = admin_token(CT_NET_CLASS, CAP_OP_DRIVER_START |
+			 CAP_OP_DRIVER_UPDATE, &no_stop);
 	if (kr == KERN_SUCCESS)
 		kr = admin_token(CT_NET_CLASS, CAP_OP_DRIVER_STOP |
 				 CAP_OP_DRIVER_UPDATE, &no_start);
 	if (kr == KERN_SUCCESS)
+		kr = admin_token(CT_NET_CLASS, CAP_OP_DRIVER_STOP |
+				 CAP_OP_DRIVER_START, &no_update);
+	if (kr == KERN_SUCCESS)
 		kr = admin_token(CT_EDU_CLASS, CT_ADMIN_ALL, &edu_tok);
 	if (kr == KERN_SUCCESS)
-		kr = cap_derive_for(&all, CAP_OP_DRIVER_STOP, 0, hal, &foreign);
+		kr = cap_derive_for(&no_start, CAP_OP_DRIVER_STOP, 0, hal,
+				    &foreign);
 	if (kr == KERN_SUCCESS)
 		kr = disk_module("net", "chora_probe.so", &mod, &mod_len);
 	if (kr != KERN_SUCCESS) {
@@ -970,7 +974,7 @@ the_refusal_arm(void)
 	k_before = ask_chora(name, &before, module, sizeof module, &bdf);
 
 	k_none = hal_stop_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				 (char *)&all, 0);
+				 (char *)&no_update, 0);
 	k_stop = hal_stop_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
 				 (char *)&edu_tok, sizeof edu_tok);
 	k_start = hal_start_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
@@ -980,11 +984,11 @@ the_refusal_arm(void)
 				     "chora_probe", sizeof "chora_probe" - 1,
 				     mod, mod_len);
 	k_nostop = hal_stop_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				   (char *)&start_only, sizeof start_only);
+				   (char *)&no_stop, sizeof no_stop);
 	k_nostart = hal_start_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
 				     (char *)&no_start, sizeof no_start);
 	k_noupdate = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				       (char *)&start_only, sizeof start_only,
+				       (char *)&no_update, sizeof no_update,
 				       "chora_probe",
 				       sizeof "chora_probe" - 1, mod, mod_len);
 	k_foreign = hal_stop_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
