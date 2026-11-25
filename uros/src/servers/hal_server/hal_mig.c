@@ -438,8 +438,9 @@ hal_update_driver(mach_port_t hal_port,
 		  module_name_t name, mach_msg_type_number_t nameCnt,
 		  vm_offset_t module, mach_msg_type_number_t moduleCnt)
 {
-	module_name_t	n;
-	kern_return_t	kr;
+	module_name_t		n;
+	mach_msg_type_number_t	i;
+	kern_return_t		kr;
 
 	(void)hal_port;
 
@@ -450,6 +451,19 @@ hal_update_driver(mach_port_t hal_port,
 	if (nameCnt >= sizeof n) {
 		printf("hal: a name of %u bytes, given to update the driver of "
 		       "%02x:%02x.%x, has no room for its terminator: refused "
+		       "(#964)\n", (unsigned)nameCnt, bus, slot, func);
+		return KERN_INVALID_ARGUMENT;
+	}
+	/*
+	 * A NUL among its bytes would cut the name where it stands, and the
+	 * module be taken under the part before it (the third review round of
+	 * 24/11): a name is its bytes, all of them.
+	 */
+	for (i = 0; i < nameCnt && name[i] != '\0'; i++)
+		continue;
+	if (i < nameCnt) {
+		printf("hal: a name with a NUL among its %u bytes, given to update "
+		       "the driver of %02x:%02x.%x, is no module's: refused "
 		       "(#964)\n", (unsigned)nameCnt, bus, slot, func);
 		return KERN_INVALID_ARGUMENT;
 	}

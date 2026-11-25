@@ -888,7 +888,8 @@ module_has_ops(const void *data, size_t size, const char *name)
  * #964: whether a chora could run the module `name' (without ".so") whose
  * bytes are `data', `size': its name fits a driver's task name, and the bytes
  * define its operations.  NULL, or why not.  Asked of a pool's module as it
- * is read, and of an update's.
+ * is read; hal_driver_update() asks an update's the same two things apart,
+ * with the declaration between them, to say which refused it.
  */
 static const char *
 module_unrunnable(const void *data, size_t size, const char *name)

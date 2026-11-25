@@ -181,9 +181,10 @@ routine get_driver_state(
  *                  which must declare the device and define `name'_chora_ops
  *                  among its dynamic symbols: KERN_INVALID_VALUE otherwise,
  *                  and for bytes of no module's size.  KERN_INVALID_ARGUMENT
- *                  for a name that is empty, has a character other than a
- *                  letter, a digit or _, or is longer than a driver's task
- *                  name leaves room for (DRIVER_MODULE_NAME_MAX).  A chora
+ *                  for a name that is empty, has a byte other than a letter,
+ *                  a digit or _ -- a NUL among them too -- or is longer than
+ *                  a driver's task name leaves room for
+ *                  (DRIVER_MODULE_NAME_MAX).  A chora
  *                  that runs is ended and started again with it, once, at its
  *                  end (HAL_DRIVER_UPDATING); a stopped driver stays stopped
  *                  with it until start_driver(); one given up after its
