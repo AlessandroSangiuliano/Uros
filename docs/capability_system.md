@@ -945,6 +945,8 @@ this is where to look, and what to break to confirm it still works.
 | FLIPC's connect hands an endpoint no task port | `mount_test [28]` | `ablations/911-connect-hands-the-task` |
 | a connection ends with its token, refused ones keep nothing | `mount_test [29]`, `[30]` | `ablations/911-disconnect-keeps-the-token`, `911-one-token-for-every-connection`, `911-refused-connect-keeps-its-right` |
 | a failed open leaves the client's right alone | `mount_test [31]` | `ablations/911-failed-open-released-twice` |
+| a mount's FLIPC endpoint has no name, and its port is had through the mount's | `mount_test [32]` | `ablations/715-endpoint-named` |
+| a FLIPC request is held to what the server keeps: the write's source and the read's cap to its own copy of each region, the handle at its full width, the offset to the Mach path's limit | `mount_test [33]` to `[36]` | `ablations/715-write-source-unbounded`, `715-safe-ptr-trusts-header`, `715-read-cap-from-header`, `715-handle-cut-to-int`, `715-flipc-asks-no-offset-limit`, `715-offset-limit-taken-out` |
 | an entry's segments hold, and never exceed its maker's mapping | `cow_test [10]`, `[11]` | `ablations/911-segments-not-enforced`, `911-entry-allows-more-than-its-maker` |
 | an entry ends with its last send right, and a fork keeps it shared | `cow_test [12]`, `[14]` | `ablations/911-entry-outlives-its-port`, `911-symmetric-copy-kept` |
 | a task cannot provision itself | `cap_test [38]` | `ablations/743-anyone-provisions` |
