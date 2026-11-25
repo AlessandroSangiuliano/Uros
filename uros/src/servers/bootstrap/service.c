@@ -382,10 +382,11 @@ notify_port_said(mach_port_t notify)
  * until a handler takes them, and a handler that takes one says it came from
  * the self-test: the lines every boot prints are then not the lines an
  * unexpected notification prints, which a reader must not learn to skip
- * (the review of 24/11).  Exchanged, since the service threads take notices
- * side by side; one of each kind is owed at a time, so a notice that came
- * unasked while one was owed is said as the self-test's, and the self-test's
- * as unasked: both are said.
+ * (the review of 24/11).  The service thread starts after the self-test
+ * (bootstrap.c), so each flag is set before any handler reads it; and the
+ * self-test's notices are the first on each port, which delivers its notices
+ * in order, so the notice a flag owes is the one that pays it.  The exchange
+ * pays a flag once, whichever thread reads it.
  */
 enum {
     SELFTEST_SEND_ONCE,
@@ -636,10 +637,13 @@ service_demux(mach_msg_header_t *request, mach_msg_header_t *reply)
  * #995: a notification bootstrap did not ask for, on one of its own
  * notification ports, is said -- its kind, what it carries, the port, and
  * whether its self-test made it -- and bootstrap goes on.  Each one panicked
- * bootstrap, and the system with it, where a port-deleted notice comes for no
- * worse than a right let go that had a dead-name request on it: a server's
- * task port deallocated, or a request answered with an error, whose rights
- * the server loop destroys.  untrusted_notify_port's are what they were.
+ * bootstrap, and the system with it.  None comes today but the self-test's:
+ * a port-deleted notice would come of a right let go that had a dead-name
+ * request on it, a server's task port that bootstrap deallocated, which it
+ * never does.  It is no small thing: bootstrap would no longer hear of that
+ * server's death, and what waits for the death would wait (#513).  So it is
+ * said, where it stopped the system and said nothing of it.
+ * untrusted_notify_port's are what they were.
  */
 kern_return_t
 do_mach_notify_port_deleted(mach_port_t notify, mach_port_t name)

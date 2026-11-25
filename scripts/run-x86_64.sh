@@ -737,9 +737,9 @@ must_report "bootstrap: stage-2: waiting for 'disk0a'" "bootstrap: stage-2: 'dis
 # bootstrap did not say: one its service thread never took, one taken another
 # way than the fix's, or one it took for a notice it did not make.  And the
 # self-test's line itself, once bootstrap loads a server, which it does after
-# it: without it the eight pairs open on nothing, and ask nothing.
+# it: without it the nine pairs open on nothing, and ask nothing.
 must_report 'bootstrap: loading [^0-9]' 'bootstrap: making the four notifications it does not ask for' \
-	'Bootstrap loaded a server and never said it made the four notifications it does not ask for: its self-test did not run, and the eight pairs on its notices asked nothing (#995).' \
+	'Bootstrap loaded a server and never said it made the four notifications it does not ask for: its self-test did not run, and the nine pairs on its notices asked nothing (#995).' \
 	'bootstrap'"'"'s self-test of notifications'
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a send-once notification from its self-test, on its servers. notification port: said, and bootstrap goes on' \
 	'Bootstrap let a send-once right to its notification port go unused and never said the notice it brings as its self-test'"'"'s (#995).' \

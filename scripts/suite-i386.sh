@@ -156,7 +156,7 @@ PAIRS=(
 # What every full boot must have said: the tests that are always in the bundle.
 MUST=(
 	# #995: the self-test of the notifications bootstrap does not ask for,
-	# which opens the eight pairs on its notices.
+	# which opens the nine pairs on its notices.
 	'bootstrap: making the four notifications it does not ask for'
 	# #995: and the name server's, which opens the five pairs on its notices.
 	'name_server: making the four notifications it does not ask for'

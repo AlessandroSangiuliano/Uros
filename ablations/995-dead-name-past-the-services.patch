@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #995
-Takes out: bootstrap's look for a dead name among its service ports before it counts it as one: a dead-name notification on its trusted port for a name no service port has asks two references of a name that has one, and writes the slot past services[].  notify_selftest() makes such a notice as bootstrap starts, and bootstrap panics on the references.
+Takes out: bootstrap's look for a dead name among its service ports before it counts it as one: a dead-name notification on its trusted port for a name no service port has asks two references of a name that has one, and would write the slot past services[] next.  notify_selftest() makes such a notice as bootstrap starts, and bootstrap panics on the references, before the write.
 Run: --entry 14 600 -smp 4
 Expect: bootstrap: mach_port_mod_refs: [0-9]+
 

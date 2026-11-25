@@ -753,8 +753,10 @@ do_netname_list_mounts(mach_port_t server, netname_path_t out_prefixes,
 /*
  * #995: the notifications the name server makes as it starts, owed to its
  * notification port until a handler takes them, as bootstrap's are: a handler
- * that takes one says it came from the self-test.  Exchanged, as bootstrap's,
- * though one thread takes them here.
+ * that takes one says it came from the self-test.  The one server loop runs
+ * after the self-test, which makes the first notices on the port, delivered
+ * in order: the notice a flag owes is the one that pays it.  Exchanged, as
+ * bootstrap's are.
  */
 enum {
     NS_SELFTEST_SEND_ONCE,
