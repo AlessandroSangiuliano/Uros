@@ -309,20 +309,27 @@ fi
 [ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
 # #964: chora_test [18] updates crash_probe's given-up driver with a new
 # build of crash_probe, under its name, whose line at a start says it came
-# from an update's bytes.  The HAL starts it at once, a new row, and again
-# after each death until it gives it up: so many lines as the row has starts,
-# which [18]'s line says.  A HAL that started the driver with the module it
-# had, or let the update go at a death, passes [18]'s count of starts all the
-# same (the fourth and fifth review rounds of 24/11).  Asked when [18] says
-# the update was taken, so that a WRONG of its own is not explained away.
+# from an update's bytes.  The HAL starts it at once, and again after each
+# death until it gives it up: the update's module at every start after the
+# update, which [18]'s line counts, "after N" before it and "after M" at its
+# end.  A HAL that started the driver with the module it had, or let the
+# update go at a death, passes [18]'s count all the same (the fourth and fifth
+# review rounds of 24/11).  The lines are counted against the starts the
+# update had, as [18] read them, and what is said is the two numbers (the
+# sixth round: counted against a whole row, a WRONG of [18]'s own, with fewer
+# starts, had the HAL blamed for a module it never ran).
 UPDATE_RAN=""
 if grep -aq 'chora_test: \[18\] .*updated with a new build of it (0)' "$LOG"; then
-	row=$(grep -a 'chora_test: \[18\] ' "$LOG" | head -n 1 | sed -n 's/.*, \([0-9][0-9]*\) starts a row).*/\1/p')
+	l18=$(grep -a 'chora_test: \[18\] ' "$LOG" | head -n 1)
+	before=$(printf '%s\n' "$l18" | sed -n 's/.*, after \([0-9][0-9]*\); .*/\1/p')
+	after=$(printf '%s\n' "$l18" | sed -n 's/.*updated with a new build of it (0): state -*[0-9]* after \([0-9][0-9]*\) (.*/\1/p')
 	ran=$(grep -ac "crash_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: crash_probe dies at its start, as it is made to, from an update's bytes" "$LOG" || true)
-	if [ -z "$row" ] || [ "${ran:-0}" -lt "$row" ]; then
-		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT RUN (#964): crash_probe's new build ran at ${ran:-0} start(s) of the ${row:-?} its update began: the HAL started the driver with another module, or let the update go at a death" | sed '/^$/d')
+	if [ -z "$before" ] || [ -z "$after" ]; then
+		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT READ (#964): chora_test [18]'s line gives no starts to count the update's runs against: $l18" | sed '/^$/d')
+	elif [ "${ran:-0}" -lt $((after - before)) ]; then
+		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT RUN (#964): crash_probe's new build ran at ${ran:-0} of the $((after - before)) start(s) after its update, $before to $after" | sed '/^$/d')
 	else
-		UPDATE_RAN="crash_probe's update ran at $ran start(s), its row being $row"
+		UPDATE_RAN="crash_probe's update ran at $ran of the $((after - before)) start(s) after it, $before to $after"
 	fi
 fi
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)

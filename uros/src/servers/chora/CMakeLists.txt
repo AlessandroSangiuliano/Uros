@@ -314,8 +314,8 @@ set_target_properties(edu_again_module PROPERTIES
 # crash_probe_update.so in user/updates: the new build of the same module that
 # chora_test [18] gives crash_probe's driver once the HAL has given it up.  In
 # no pool; its line says it came from an update's bytes, which run-x86_64.sh
-# counts at the starts the update begins, where the pool's would be the module
-# the driver had.
+# counts against the starts after the update, as [18] reads them, where the
+# pool's would be the module the driver had.
 add_library(crash_update_module SHARED crash_probe/crash_probe.c)
 
 add_dependencies(crash_update_module mig_mach_public_headers)
