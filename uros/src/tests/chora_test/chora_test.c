@@ -65,21 +65,29 @@
  *       card's with the other two routines' operations and not the
  *       routine's own, one issued to another task -- and cap_server will not
  *       issue one for a class this manifest does not name;
- *  [12] the card's driver stopped through the HAL stays stopped: 3 s on, past
- *       every delay the HAL waits before a restart, it has the starts it had,
- *       the card is claimed by nobody and its control port is gone;
- *  [13] updated while stopped, it stays stopped with the new module;
- *  [14] started through the HAL, it runs again with one start more; a second
- *       start, while it runs, is refused;
- *  [15] edu's driver is refused updates no chora could run -- a module that
- *       does not declare edu, a name too long for a driver's task, a name
- *       the bytes have no operations for -- and goes on as it was;
- *  [16] given edu_next, read from the disk's updates, it comes back with the
+ *  [12] the card's driver stopped through the HAL, with a token that may
+ *       stop and nothing else, stays stopped: 3 s on, past every delay the
+ *       HAL waits before a restart, it has the starts it had, the card is
+ *       claimed by nobody and its control port is gone;
+ *  [13] started through the HAL, with a token that may start and nothing
+ *       else, it runs again with one start more; a second start, while it
+ *       runs, is refused;
+ *  [14] edu's driver is refused updates no chora could run -- a module that
+ *       does not declare edu, a name of 24 characters, one more than a
+ *       driver's task name has room for, and one of 23, which has room and
+ *       no operations in the bytes -- and goes on as it was;
+ *  [15] given edu_next, read from the disk's updates, it comes back with the
  *       new module without a second start: one start more, still one 3 s
- *       on, edu_next answers on its control port, and the HAL names it.
+ *       on, edu_next answers on its control port, and the HAL names it;
+ *  [16] stopped, and given edu_probe back from the bundle, it stays stopped
+ *       with it; started, it runs with one start more, and edu_probe
+ *       answers -- the module an update of a stopped driver gave.
  *
- * Every arm says one line: an arm the arms before it ended before is said
- * NOT ASKED at the end, so that none is gone from the log without a word.
+ * Each of [12] to [16] gives the HAL a token with the routine's operation and
+ * no other, so that a routine that asked for more is refused there, as one
+ * that asked for another's is in [11].  Every arm says one line: an arm the
+ * arms before it ended before is said NOT ASKED at the end, so that none is
+ * gone from the log without a word.
  *
  * chora's own lines -- the claim, the region, the interrupt, the second
  * one's refusal -- and the kernel's line naming both tasks are the merge
@@ -142,11 +150,11 @@ static int		arms_run;
 static int		arms_passed;
 static unsigned char	said[CT_ARMS + 1];	/* the arms that said a line */
 
-/* The card [1] found, for [10] to [12]. */
+/* The card [1] found, for [10] to [13]. */
 static natural_t	card_bdf;
 static int		card_found;
 
-/* The edu device [5] found, and its class, for [15] and [16]. */
+/* The edu device [5] found, and its class, for [14] to [16]. */
 static natural_t	edu_bdf;
 static uint32_t		edu_class;
 static int		edu_found;
@@ -325,7 +333,7 @@ find_the_edu(natural_t *bdf)
 		if (devs[i].vendor_device == CT_EDU_ID) {
 			*bdf = (natural_t)((devs[i].bus << 8)
 					   | (devs[i].slot << 3) | devs[i].func);
-			edu_class = devs[i].class_rev >> 8;	/* [13] */
+			edu_class = devs[i].class_rev >> 8;	/* [14] */
 			found = 1;
 		}
 	if (bytes != 0)
@@ -875,7 +883,7 @@ the_kill_arm(void)
 		(void)mach_port_deallocate(mach_task_self(), after);
 }
 
-/* #964 [11]-[13]: a RESOURCE_DRIVER_ADMIN token of this task's. */
+/* #964 [11] to [16]: a RESOURCE_DRIVER_ADMIN token of this task's. */
 static kern_return_t
 admin_token(uint32_t class, uint64_t ops, struct uros_cap *t)
 {
@@ -883,7 +891,7 @@ admin_token(uint32_t class, uint64_t ops, struct uros_cap *t)
 	return cap_request(RESOURCE_DRIVER_ADMIN, class, ops, 0, t);
 }
 
-/* #964 [11]-[13]: the HAL's state of the driver of `bdf', and its starts. */
+/* #964 [11] to [16]: the HAL's state of the driver of `bdf', and its starts. */
 static void
 driver_state(mach_port_t hal, natural_t bdf, int *state, int *starts)
 {
@@ -893,7 +901,7 @@ driver_state(mach_port_t hal, natural_t bdf, int *state, int *starts)
 				   state, starts);
 }
 
-/* #964 [11]-[13]: the port the name server gives for "hal", or none. */
+/* #964 [11] to [16]: the port the name server gives for "hal", or none. */
 static mach_port_t
 the_hal(void)
 {
@@ -903,6 +911,74 @@ the_hal(void)
 	    KERN_SUCCESS)
 		return MACH_PORT_NULL;
 	return hal;
+}
+
+/*
+ * #964 [12], [16]: the driver of `bdf' stopped, as the HAL says, and its
+ * device claimed by nobody, waited for up to 30 s.  The state read last, and
+ * its starts.
+ */
+static int
+wait_stopped(mach_port_t hal, natural_t bdf, int *starts)
+{
+	int	i, state = -1;
+
+	for (i = 0; i < CT_WAIT_STEPS; i++) {
+		driver_state(hal, bdf, &state, starts);
+		if (state == HAL_DRIVER_STOPPED && !claimed(bdf))
+			break;
+		nap(100);
+	}
+	return state;
+}
+
+/*
+ * #964 [13], [16]: the driver of `bdf' running with `starts' starts, the
+ * control port checked in as `name' answering for `module' on `bdf', and the
+ * device claimed, waited for up to 30 s: 1 when they are, with the state and
+ * the starts read last.
+ */
+static int
+wait_answer(mach_port_t hal, natural_t bdf, const char *name,
+	    const char *module, int starts, int *state, int *starts_now)
+{
+	mach_port_t	port;
+	char		got[64];
+	unsigned int	at = 0;
+	int		i, ok = 0;
+
+	for (i = 0; i < CT_WAIT_STEPS && !ok; i++) {
+		port = MACH_PORT_NULL;
+		driver_state(hal, bdf, state, starts_now);
+		ok = *state == HAL_DRIVER_RUNNING && *starts_now == starts &&
+		     ask_chora(name, &port, got, sizeof got, &at) == KERN_SUCCESS &&
+		     strcmp(got, module) == 0 && at == bdf && claimed(bdf);
+		if (MACH_PORT_VALID(port))
+			(void)mach_port_deallocate(mach_task_self(), port);
+		if (!ok)
+			nap(100);
+	}
+	return ok;
+}
+
+/* #964 [14] to [16]: memory this task was given, given back. */
+static void
+drop(vm_offset_t *data, mach_msg_type_number_t *len)
+{
+	if (*data != 0)
+		(void)vm_deallocate(mach_task_self(), *data, *len);
+	*data = 0;
+	*len = 0;
+}
+
+/* #964: the arms `first' to `last' said NOT ASKED, for `why'. */
+static void
+not_asked_arms(int first, int last, const char *why)
+{
+	int	arm;
+
+	for (arm = first; arm <= last; arm++)
+		not_asked(arm, why);
 }
 
 /*
@@ -1023,30 +1099,28 @@ the_refusal_arm(void)
 }
 
 /*
- * [12], [13], [14] (#964): the card's driver stopped through the HAL stays
- * stopped -- 3 s on, past every delay the HAL waits before a restart, with the
- * starts it had, the card claimed by nobody and its control port gone; updated
- * while stopped, it stays stopped with the new module, which an update does
- * not start (decided with the user, 24/11); started through the HAL, it runs
- * again with one start more, and a second start, while it runs, is refused.
+ * [12], [13] (#964): the card's driver stopped through the HAL stays stopped
+ * -- 3 s on, past every delay the HAL waits before a restart, with the starts
+ * it had, the card claimed by nobody and its control port gone; then started
+ * through the HAL, it runs again with one start more, and a second start,
+ * while it runs, is refused.  Each routine is given a token that may do what
+ * it does and nothing else, so that one that asked for more is refused (the
+ * review of 24/11).
  */
 static void
-the_stop_arm(void)
+the_card_arms(void)
 {
-	struct uros_cap		tok;
-	mach_port_t		hal, port = MACH_PORT_NULL, gone = MACH_PORT_NULL;
-	char			name[URMACH_TASK_NAME_MAX], module[64];
-	vm_offset_t		mod = 0;
-	mach_msg_type_number_t	mod_len = 0;
+	struct uros_cap		stop_tok, start_tok;
+	mach_port_t		hal, gone = MACH_PORT_NULL;
+	char			name[URMACH_TASK_NAME_MAX];
 	natural_t		b = card_bdf;
-	unsigned int		bdf = 0;
-	kern_return_t		kr, k_gone, k_upd, k_again;
-	int			i, state0, starts0, state1, starts1, state2;
-	int			starts2, state3 = -1, starts3 = -1, state4, starts4;
-	int			freed, freed2, claimed3, answered = 0;
+	kern_return_t		kr, k_gone, k_again;
+	int			state0, starts0, state1, starts1, state2 = -1;
+	int			starts2 = -1, state3, starts3, freed, held;
+	int			answered = 0;
 
 	if (!card_found) {
-		not_asked(12, "no network card");
+		not_asked_arms(12, 13, "no network card");
 		return;
 	}
 	hal = the_hal();
@@ -1056,12 +1130,12 @@ the_stop_arm(void)
 	}
 	(void)snprintf(name, sizeof name, "chora_probe@%02x:%02x.%x", CT_BUS(b),
 		       CT_SLOT(b), CT_FUNC(b));
-	kr = admin_token(CT_NET_CLASS, CT_ADMIN_ALL, &tok);
+	kr = admin_token(CT_NET_CLASS, CAP_OP_DRIVER_STOP, &stop_tok);
 	if (kr == KERN_SUCCESS)
-		kr = disk_module("net", "chora_probe.so", &mod, &mod_len);
+		kr = admin_token(CT_NET_CLASS, CAP_OP_DRIVER_START, &start_tok);
 	if (kr != KERN_SUCCESS) {
-		verdict(12, 0, "no token for the card's class, or no card's "
-			"module from the disk: %d", kr);
+		verdict(12, 0, "no stop or start token for the card's class: %d",
+			kr);
 		(void)mach_port_deallocate(mach_task_self(), hal);
 		return;
 	}
@@ -1069,19 +1143,13 @@ the_stop_arm(void)
 	/* [12]: stopped, and still so once every restart's delay has gone by. */
 	driver_state(hal, b, &state0, &starts0);
 	kr = hal_stop_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-			     (char *)&tok, sizeof tok);
+			     (char *)&stop_tok, sizeof stop_tok);
 	if (kr != KERN_SUCCESS) {
 		verdict(12, 0, "stop_driver refused for the card: %d", kr);
-		(void)vm_deallocate(mach_task_self(), mod, mod_len);
 		(void)mach_port_deallocate(mach_task_self(), hal);
 		return;
 	}
-	for (i = 0; i < CT_WAIT_STEPS; i++) {
-		driver_state(hal, b, &state1, &starts1);
-		if (state1 == HAL_DRIVER_STOPPED && !claimed(b))
-			break;
-		nap(100);
-	}
+	(void)wait_stopped(hal, b, &starts1);
 	nap(CT_SETTLE_MS);
 	driver_state(hal, b, &state1, &starts1);
 	freed = !claimed(b);
@@ -1095,113 +1163,118 @@ the_stop_arm(void)
 		"the card %s, its port %s", state0, state1, HAL_DRIVER_STOPPED,
 		starts0, starts1, freed ? "free" : "CLAIMED",
 		k_gone == KERN_SUCCESS ? "STILL THERE" : "gone");
-
-	/* [13]: updated while stopped, it stays stopped. */
-	k_upd = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				  (char *)&tok, sizeof tok, "chora_probe",
-				  sizeof "chora_probe" - 1, mod, mod_len);
-	(void)vm_deallocate(mach_task_self(), mod, mod_len);
-	nap(1000);
-	driver_state(hal, b, &state2, &starts2);
-	freed2 = !claimed(b);
-	verdict(13, k_upd == KERN_SUCCESS && state2 == HAL_DRIVER_STOPPED &&
-		starts2 == starts1 && freed2, "the card's driver updated while "
-		"stopped (%d): 1 s on state %d (stopped is %d), %d start(s) then "
-		"%d, the card %s", k_upd, state2, HAL_DRIVER_STOPPED, starts1,
-		starts2, freed2 ? "free" : "CLAIMED");
-
-	/* [14]: started, one start more, and a new port answers. */
-	kr = hal_start_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-			      (char *)&tok, sizeof tok);
-	for (i = 0; kr == KERN_SUCCESS && i < CT_WAIT_STEPS && !answered; i++) {
-		driver_state(hal, b, &state3, &starts3);
-		if (state3 == HAL_DRIVER_RUNNING && starts3 == starts2 + 1 &&
-		    ask_chora(name, &port, module, sizeof module, &bdf) ==
-		    KERN_SUCCESS && strcmp(module, "chora_probe") == 0 &&
-		    bdf == b && claimed(b))
-			answered = 1;
-		else {
-			if (MACH_PORT_VALID(port))
-				(void)mach_port_deallocate(mach_task_self(),
-							   port);
-			port = MACH_PORT_NULL;
-			nap(100);
-		}
+	if (state1 != HAL_DRIVER_STOPPED) {
+		not_asked(13, "[12] did not leave the card's driver stopped");
+		(void)mach_port_deallocate(mach_task_self(), hal);
+		return;
 	}
+
+	/* [13]: started, one start more, and a new port answers. */
+	kr = hal_start_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+			      (char *)&start_tok, sizeof start_tok);
+	if (kr == KERN_SUCCESS)
+		answered = wait_answer(hal, b, name, "chora_probe", starts1 + 1,
+				       &state2, &starts2);
 	k_again = hal_start_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				   (char *)&tok, sizeof tok);
-	driver_state(hal, b, &state4, &starts4);
-	claimed3 = claimed(b);
-	verdict(14, kr == KERN_SUCCESS && answered && claimed3 &&
-		k_again == KERN_FAILURE && state4 == HAL_DRIVER_RUNNING &&
-		starts4 == starts2 + 1, "the card's driver started through the "
+				   (char *)&start_tok, sizeof start_tok);
+	driver_state(hal, b, &state3, &starts3);
+	held = claimed(b);
+	verdict(13, kr == KERN_SUCCESS && answered && held &&
+		k_again == KERN_FAILURE && state3 == HAL_DRIVER_RUNNING &&
+		starts3 == starts1 + 1, "the card's driver started through the "
 		"HAL (%d): state %d, %d start(s) of %d, %s, the card %s; a second "
-		"start %d (%d is refused): state %d, %d start(s)", kr, state3,
-		starts3, starts2, answered ? "a new port answered" :
-		"NO PORT ANSWERED", claimed3 ? "claimed" : "NOT CLAIMED",
-		k_again, KERN_FAILURE, state4, starts4);
-	if (answered)
-		(void)mach_port_deallocate(mach_task_self(), port);
+		"start %d (%d is refused): state %d, %d start(s)", kr, state2,
+		starts2, starts1, answered ? "a new port answered" :
+		"NO PORT ANSWERED", held ? "claimed" : "NOT CLAIMED",
+		k_again, KERN_FAILURE, state3, starts3);
 	(void)mach_port_deallocate(mach_task_self(), hal);
 }
 
 /*
- * [15], [16] (#964): edu's driver is refused an update no chora could run --
- * the card's module, which does not declare edu; edu_next's bytes under a name
- * longer than a driver's task name has room for; and edu_next's bytes under a
- * name it has no operations for -- and goes on as it was.  Then, given
+ * A driver's task is named "<module>@BB:DD.F", within URMACH_TASK_NAME_MAX
+ * bytes with its terminator: 31 - 8 = 23 characters of a module's name.  [14]
+ * asks a name on either side of that, neither with operations in edu_next's
+ * bytes: the 24 is refused for its name, the 23 for the operations, once its
+ * name has passed (the review of 24/11: with 28, any bound below it passed).
+ */
+#define CT_NAME_AT_ROOM		"edu_next_name_of_23_chr"
+#define CT_NAME_PAST_ROOM	"edu_next_name_of_24_char"
+
+/*
+ * [14], [15], [16] (#964): edu's driver is refused updates no chora could run
+ * -- the card's module, which does not declare edu, and edu_next's bytes under
+ * CT_NAME_PAST_ROOM and under CT_NAME_AT_ROOM -- and goes on as it was.  Given
  * edu_next, it comes back with the new module without a second start: the HAL
  * ends edu_probe and starts edu_next at its end, with one start more; its
  * control port answers, the HAL names it, edu is claimed, and 3 s on there has
- * been no other start.
+ * been no other start.  Then stopped, and given edu_probe back from the
+ * bundle, it stays stopped -- an update is no start (decided with the user,
+ * 24/11) -- and started, it runs edu_probe: the module the update gave, where
+ * the module it had, edu_next, would answer under another name (the review of
+ * 24/11: the card's update gave it the module it had).  Each routine is given
+ * a token with its own operation alone.
  */
-#define CT_LONG_NAME	"edu_next_and_a_name_too_long"	/* past 23 */
-
 static void
-the_update_arm(void)
+the_edu_arms(void)
 {
-	struct uros_cap		tok;
+	struct uros_cap		stop_tok, start_tok, upd_tok;
 	mach_port_t		hal, port = MACH_PORT_NULL;
 	char			old[URMACH_TASK_NAME_MAX], new[URMACH_TASK_NAME_MAX];
 	char			driver[URMACH_TASK_NAME_MAX], module[64];
-	vm_offset_t		bad = 0, next = 0;
-	mach_msg_type_number_t	bad_len = 0, next_len = 0;
+	module_name_t		pool, file;
+	vm_offset_t		bad = 0, next = 0, probe = 0;
+	mach_msg_type_number_t	bad_len = 0, next_len = 0, probe_len = 0;
 	natural_t		b = edu_bdf;
 	unsigned int		bdf = 0;
-	kern_return_t		kr, k_bad, k_long, k_noops, k_good;
+	kern_return_t		kr, k_bad, k_past, k_at, k_good, k_stop, k_upd;
+	kern_return_t		k_start;
 	int			i, state0, starts0, state1, starts1, state3;
-	int			starts3, answered = 0, held;
+	int			starts3, state4, starts4 = -1, state5, starts5;
+	int			state6 = -1, starts6 = -1, answered = 0, held;
+	int			freed, back = 0;
 
 	if (!edu_found) {
-		not_asked(15, edu_looked ? "no edu device on this board "
-			  "(run-x86_64.sh --edu)" : "the arms before [5] ended "
-			  "before it looked for edu");
+		not_asked_arms(14, 16, edu_looked ? "no edu device on this board "
+			       "(run-x86_64.sh --edu)" : "the arms before [5] "
+			       "ended before it looked for edu");
 		return;
 	}
 	if (edu_class != CT_EDU_CLASS) {
-		not_asked(15, "edu's class is not the one this task's manifest "
-			  "names, 00ff00");
+		not_asked_arms(14, 16, "edu's class is not the one this task's "
+			       "manifest names, 00ff00");
 		return;
 	}
 	hal = the_hal();
 	if (!MACH_PORT_VALID(hal)) {
-		verdict(15, 0, "the HAL's name is gone");
+		verdict(14, 0, "the HAL's name is gone");
 		return;
 	}
 	(void)snprintf(old, sizeof old, "edu_probe@%02x:%02x.%x", CT_BUS(b),
 		       CT_SLOT(b), CT_FUNC(b));
 	(void)snprintf(new, sizeof new, "edu_next@%02x:%02x.%x", CT_BUS(b),
 		       CT_SLOT(b), CT_FUNC(b));
-	kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_UPDATE, &tok);
+	kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_UPDATE, &upd_tok);
+	if (kr == KERN_SUCCESS)
+		kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_STOP, &stop_tok);
+	if (kr == KERN_SUCCESS)
+		kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_START, &start_tok);
 	if (kr == KERN_SUCCESS)
 		kr = disk_module("net", "chora_probe.so", &bad, &bad_len);
 	if (kr == KERN_SUCCESS)
 		kr = disk_file(CT_UPDATES "edu_next.so", &next, &next_len);
+	if (kr == KERN_SUCCESS) {
+		strcpy(pool, "misc");
+		strcpy(file, "edu_probe.so");
+		kr = bootstrap_get_module(bootstrap_port, pool, file, &probe,
+					  &probe_len);
+	}
 	if (kr != KERN_SUCCESS) {
-		verdict(15, 0, "no token for edu's class, or no card's module or "
-			"edu_next from the disk: %d", kr);
-		if (bad != 0)
-			(void)vm_deallocate(mach_task_self(), bad, bad_len);
+		verdict(14, 0, "no tokens for edu's class, or no card's module "
+			"or edu_next from the disk, or no edu_probe from the "
+			"bundle: %d", kr);
+		drop(&bad, &bad_len);
+		drop(&next, &next_len);
+		drop(&probe, &probe_len);
 		(void)mach_port_deallocate(mach_task_self(), hal);
 		return;
 	}
@@ -1217,42 +1290,47 @@ the_update_arm(void)
 		nap(100);
 	}
 	if (i == CT_WAIT_STEPS) {
-		verdict(15, 0, "\"%s\" did not answer on its control port in "
+		verdict(14, 0, "\"%s\" did not answer on its control port in "
 			"30 s: %d", old, kr);
-		(void)vm_deallocate(mach_task_self(), bad, bad_len);
-		(void)vm_deallocate(mach_task_self(), next, next_len);
+		drop(&bad, &bad_len);
+		drop(&next, &next_len);
+		drop(&probe, &probe_len);
 		(void)mach_port_deallocate(mach_task_self(), hal);
 		return;
 	}
 	driver_state(hal, b, &state0, &starts0);
 
-	/* [15]: three updates no chora could run, refused. */
+	/* [14]: three updates no chora could run, refused. */
 	k_bad = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				  (char *)&tok, sizeof tok, "chora_probe",
-				  sizeof "chora_probe" - 1, bad, bad_len);
-	k_long = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				   (char *)&tok, sizeof tok, CT_LONG_NAME,
-				   sizeof CT_LONG_NAME - 1, next, next_len);
-	k_noops = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				    (char *)&tok, sizeof tok, "edu_nexx",
-				    sizeof "edu_nexx" - 1, next, next_len);
-	(void)vm_deallocate(mach_task_self(), bad, bad_len);
+				  (char *)&upd_tok, sizeof upd_tok,
+				  "chora_probe", sizeof "chora_probe" - 1, bad,
+				  bad_len);
+	k_past = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+				   (char *)&upd_tok, sizeof upd_tok,
+				   CT_NAME_PAST_ROOM,
+				   sizeof CT_NAME_PAST_ROOM - 1, next, next_len);
+	k_at = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+				 (char *)&upd_tok, sizeof upd_tok,
+				 CT_NAME_AT_ROOM, sizeof CT_NAME_AT_ROOM - 1,
+				 next, next_len);
+	drop(&bad, &bad_len);
 	driver_state(hal, b, &state1, &starts1);
-	verdict(15, k_bad == KERN_INVALID_VALUE &&
-		k_long == KERN_INVALID_ARGUMENT &&
-		k_noops == KERN_INVALID_VALUE && state1 == HAL_DRIVER_RUNNING &&
-		starts1 == starts0, "edu's driver refused updates no chora could "
-		"run: the card's module %d, a name too long %d, a name with no "
-		"operations %d, where %d %d %d refuse; state %d then %d, %d "
-		"start(s) then %d", k_bad, k_long, k_noops, KERN_INVALID_VALUE,
+	verdict(14, k_bad == KERN_INVALID_VALUE &&
+		k_past == KERN_INVALID_ARGUMENT && k_at == KERN_INVALID_VALUE &&
+		state1 == HAL_DRIVER_RUNNING && starts1 == starts0,
+		"edu's driver refused updates no chora could run: the card's "
+		"module %d, a name of %u characters %d, of %u %d, where %d %d %d "
+		"refuse; state %d then %d, %d start(s) then %d", k_bad,
+		(unsigned)strlen(CT_NAME_PAST_ROOM), k_past,
+		(unsigned)strlen(CT_NAME_AT_ROOM), k_at, KERN_INVALID_VALUE,
 		KERN_INVALID_ARGUMENT, KERN_INVALID_VALUE, state0, state1,
 		starts0, starts1);
 
-	/* [16]: edu_next, from the disk's updates. */
+	/* [15]: edu_next, from the disk's updates. */
 	k_good = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
-				   (char *)&tok, sizeof tok, "edu_next",
+				   (char *)&upd_tok, sizeof upd_tok, "edu_next",
 				   sizeof "edu_next" - 1, next, next_len);
-	(void)vm_deallocate(mach_task_self(), next, next_len);
+	drop(&next, &next_len);
 	for (i = 0; k_good == KERN_SUCCESS && i < CT_WAIT_STEPS && !answered;
 	     i++) {
 		int	state2, starts2;
@@ -1272,13 +1350,52 @@ the_update_arm(void)
 	driver_state(hal, b, &state3, &starts3);
 	hal_driver(b, new, driver, sizeof driver);
 	held = claimed(b);
-	verdict(16, k_good == KERN_SUCCESS && answered &&
+	verdict(15, k_good == KERN_SUCCESS && answered &&
 		state3 == HAL_DRIVER_RUNNING && starts3 == starts1 + 1 &&
 		strcmp(driver, new) == 0 && held, "edu's driver updated through "
 		"the HAL to edu_next (%d): %s, 3 s on state %d, %d start(s) of "
 		"%d, the HAL names \"%s\", edu %s", k_good, answered ?
 		"it answers" : "NO ANSWER", state3, starts3, starts1, driver,
 		held ? "claimed" : "NOT CLAIMED");
+	if (!answered) {
+		not_asked(16, "[15] did not leave edu_next driving edu, which "
+			  "[16]'s update must replace");
+		drop(&probe, &probe_len);
+		(void)mach_port_deallocate(mach_task_self(), hal);
+		return;
+	}
+
+	/* [16]: stopped, given edu_probe back, stopped still; then started. */
+	k_stop = hal_stop_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+				 (char *)&stop_tok, sizeof stop_tok);
+	if (k_stop != KERN_SUCCESS) {
+		verdict(16, 0, "stop_driver refused for edu: %d", k_stop);
+		drop(&probe, &probe_len);
+		(void)mach_port_deallocate(mach_task_self(), hal);
+		return;
+	}
+	state4 = wait_stopped(hal, b, &starts4);
+	k_upd = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+				  (char *)&upd_tok, sizeof upd_tok, "edu_probe",
+				  sizeof "edu_probe" - 1, probe, probe_len);
+	drop(&probe, &probe_len);
+	nap(1000);
+	driver_state(hal, b, &state5, &starts5);
+	freed = !claimed(b);
+	k_start = hal_start_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+				   (char *)&start_tok, sizeof start_tok);
+	if (k_start == KERN_SUCCESS)
+		back = wait_answer(hal, b, old, "edu_probe", starts5 + 1,
+				   &state6, &starts6);
+	verdict(16, state4 == HAL_DRIVER_STOPPED && k_upd == KERN_SUCCESS &&
+		state5 == HAL_DRIVER_STOPPED && starts5 == starts4 && freed &&
+		k_start == KERN_SUCCESS && back, "edu's driver stopped (state "
+		"%d) and given edu_probe from the bundle (%d): 1 s on state %d "
+		"(stopped is %d), %d start(s) then %d, edu %s; started (%d): "
+		"state %d, %d start(s), %s", state4, k_upd, state5,
+		HAL_DRIVER_STOPPED, starts4, starts5, freed ? "free" : "CLAIMED",
+		k_start, state6, starts6, back ? "edu_probe answers" :
+		"NO ANSWER from edu_probe");
 	(void)mach_port_deallocate(mach_task_self(), hal);
 }
 
@@ -1290,8 +1407,8 @@ main(void)
 	the_crash_arm();
 	the_kill_arm();
 	the_refusal_arm();
-	the_stop_arm();
-	the_update_arm();
+	the_card_arms();
+	the_edu_arms();
 	the_arms_not_reached();
 	printf("chora_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;

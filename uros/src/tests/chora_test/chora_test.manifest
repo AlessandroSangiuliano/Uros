@@ -14,9 +14,9 @@ name chora_test
 delegatable 12 any 0x7
 
 # RESOURCE_DRIVER_ADMIN (13), stop, start and update (0x7), for the network
-# class and for edu's (#964): [11] to [13] ask the HAL to stop and start the
-# card's driver and to update edu's.  By class and not `any': [11] asks
-# cap_server for a class this file does not name, which must be refused, so
-# the type is shown to be one a manifest decides.
+# class and for edu's (#964): [11] to [16] ask the HAL to stop and start the
+# card's driver, and to update, stop and start edu's.  By class and not
+# `any': [11] asks cap_server for a class this file does not name, which must
+# be refused, so the type is shown to be one a manifest decides.
 required 13 0x020000 0x7
 required 13 0x00ff00 0x7

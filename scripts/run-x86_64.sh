@@ -679,13 +679,13 @@ must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class ' 'ha
 must_report 'hal: class 0x020000 left to others by its line' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: no module of the bundle.s net declares it, and the HAL.s line leaves class 020000' \
 	'The HAL was told to leave the network class to others and did not say the card was left: its line says what it decided instead (#964).' \
 	'the HAL leaving the card'
-# #964: a driver stopped or updated through the HAL, as chora_test [12] and
-# [13] ask, ends by the HAL's own hand, and its death is no crash: the HAL says
-# so at the death.  A death taken for a crash says instead that the chora is
-# started again after a delay -- which for an update starts the new module all
-# the same, one start, so that chora_test's count cannot tell it: these lines
-# can.  The update's pair names edu_next, since [12]'s start of the card writes
-# a line of the same shape.
+# #964: a driver stopped or updated through the HAL, as chora_test [12], [15]
+# and [16] ask, ends by the HAL's own hand, and its death is no crash: the HAL
+# says so at the death.  A death taken for a crash says instead that the chora
+# is started again after a delay -- which for an update starts the new module
+# all the same, one start, so that chora_test's count cannot tell it: these
+# lines can.  The update's pair names edu_next, since [13]'s start of the card
+# and [16]'s of edu write lines of the same shape.
 must_report 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is stopped on request' 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] was stopped on request: it is not started again' \
 	'The HAL ended a chora it was asked to stop and did not say, at its death, that it is not started again: it took the death for a crash, or never heard of it (#964).' \
 	'the HAL stopping a driver'
