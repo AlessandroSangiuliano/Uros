@@ -910,13 +910,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # #964: chora_probe is on the disk, which make-disk-x86_64.sh
             # refuses without it, and run-x86_64.sh builds the bundle, not ALL;
             # and edu_next, the update chora_test gives edu's driver, is too,
-            # and host_bridge_one_too_long, which the HAL must refuse.
+            # and host_bridge_one_too_long and host_bridge_wrong_ops, which the
+            # HAL must refuse.
             ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
             chora_probe_module chora_absent_module chora_bin
             modload_test_bin modload_test_twin_a modload_test_twin_b
             modload_test_only_a modload_test_only_b
             edu_probe_module crash_probe_module edu_next_module
-            host_bridge_one_too_long_module
+            host_bridge_one_too_long_module host_bridge_wrong_ops_module
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 

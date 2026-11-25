@@ -161,10 +161,11 @@ ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test 
 # served (#964): a machine may want two hundred drivers, and the bundle carries
 # the ones a boot needs.  chora_probe, the network card's, is here and in no
 # pool of the bundle, so that a card's chora shows a module read from the disk.
-# And host_bridge_one_too_long, whose name has no room in a driver's task name:
-# the HAL must refuse it as it reads the disk's misc, and say so.
+# And host_bridge_one_too_long, whose name has no room in a driver's task name,
+# and host_bridge_wrong_ops, whose operations are under another name than its
+# own: the HAL must refuse each as it reads the disk's misc, and say so.
 MODULES="$BUILD/export/uros/x86_64/user/modules"
-DISK_MODULES="net/chora_probe.so misc/host_bridge_one_too_long.so"
+DISK_MODULES="net/chora_probe.so misc/host_bridge_one_too_long.so misc/host_bridge_wrong_ops.so"
 
 # And modules in no pool, in /mach_servers/updates on the same disk (#964):
 # edu_next, edu_probe under another name, which chora_test hands the HAL to
@@ -436,9 +437,15 @@ for AHCI_DISK in $AHCI_DISKS; do
 		if [ $ahci_disk_n = 1 ]; then
 			# The disk's pools, which the HAL reads under "/" (#964).
 			echo "mkdir /mach_servers/modules"
+			# Each pool made once: misc holds two modules (#964).
+			made=" "
 			for m in $DISK_MODULES; do
 				pool=${m%%/*}
-				echo "mkdir /mach_servers/modules/$pool"
+				case $made in
+				*" $pool "*) ;;
+				*)	echo "mkdir /mach_servers/modules/$pool"
+					made="$made$pool " ;;
+				esac
 				echo "cd /mach_servers/modules/$pool"
 				echo "write $MODULES/$m ${m##*/}"
 			done

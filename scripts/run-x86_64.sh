@@ -702,6 +702,12 @@ must_report 'hal: the driver of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is upda
 must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_bridge_one_too_long\.so on the disk: its name is not letters, digits and _, or is longer than a driver.s task name has room for, so no chora could run it: it declares nothing' \
 	'The HAL read the disk'"'"'s pools and did not say that host_bridge_one_too_long, whose name has no room in a driver'"'"'s task name, declares nothing: it took a module no chora can run, or never read the disk'"'"'s misc (#964).' \
 	'the HAL refusing a module of a pool'
+# And its other half: host_bridge_wrong_ops, in the same pool, has a name with
+# room and its operations under another name than its own (the third review
+# round of 24/11: no module of a pool was refused for its operations).
+must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_bridge_wrong_ops\.so on the disk: it defines no operations under its name, so no chora could run it: it declares nothing' \
+	'The HAL read the disk'"'"'s pools and did not say that host_bridge_wrong_ops, whose operations are under another name than its own, declares nothing: it took a module no chora can run, or never read the disk'"'"'s misc (#964).' \
+	'the HAL refusing a module of a pool for its operations'
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
