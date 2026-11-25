@@ -768,6 +768,29 @@ must_report 'bootstrap: making the four notifications it does not ask for' 'boot
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: said, and bootstrap goes on' \
 	'Bootstrap destroyed a port of its own, no service port, with a dead-name request on its send right to its trusted notification port, and never said, as its self-test'"'"'s, the notice for the name services[] has no slot for (#995).' \
 	'bootstrap and a dead-name notice no service port'"'"'s'
+# #995: and the name server, which asks for dead names alone, makes the four
+# others on its notification port as it starts, and a dead-name notice for a
+# port it does not watch, and says each as its self-test's: each of the four
+# panicked it, and the fifth read a record that was not there.  Its line is
+# asked once bootstrap loads a server, as bootstrap's is.
+must_report 'bootstrap: loading [^0-9]' 'name_server: making the four notifications it does not ask for' \
+	'Bootstrap loaded a server and the name server never said it made the notifications it does not ask for: its self-test did not run, and the five pairs on its notices asked nothing (#995).' \
+	'the name server'"'"'s self-test of notifications'
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: a send-once notification from its self-test, on its notification port: said, and the name server goes on' \
+	'The name server let a send-once right to its notification port go unused and never said the notice it brings as its self-test'"'"'s (#995).' \
+	'the name server and a send-once notice'
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: a port-deleted notification from its self-test for 0x[0-9a-f]*, on its notification port: said, and the name server goes on' \
+	'The name server let a right with a dead-name request on it go and never said, as its self-test'"'"'s, the port-deleted notice that cancels the request (#995).' \
+	'the name server and a port-deleted notice'
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: a no-senders notification from its self-test, make-send count [0-9]*, on its notification port: said, and the name server goes on' \
+	'The name server let the one send right of a port with a no-senders request go and never said the notice as its self-test'"'"'s (#995).' \
+	'the name server and a no-senders notice'
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: a port-destroyed notification from its self-test: the right 0x[0-9a-f]* it brings, none it asked for, is refused and destroyed with its message; the name server goes on' \
+	'The name server destroyed a receive right with a port-destroyed request on it and never said, as its self-test'"'"'s, the notice that brings the right back (#995).' \
+	'the name server and a port-destroyed notice'
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*, on its notification port, which no port it watches has: said, and the name server goes on' \
+	'The name server destroyed a port it does not watch, with a dead-name request on its send right, and never said, as its self-test'"'"'s, the notice for the name no record has (#995).' \
+	'the name server and a dead-name notice'
 
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
 # with no flag, with -D and with -H -D.  The start is said through mach_print,

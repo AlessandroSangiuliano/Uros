@@ -18,4 +18,7 @@
  */
 extern uint64_t snames_request_sender;
 
+/* #995: the notifications the name server does not ask for, made as it starts. */
+extern void ns_notify_selftest(void);
+
 #endif	/* _SNAMES_H_ */

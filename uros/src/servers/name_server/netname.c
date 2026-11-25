@@ -264,6 +264,13 @@ main(int argc, char **argv)
     }
 
     /*
+     * #995: the notifications it does not ask for, made on its notification
+     * port now that the port is in the set: the service loop below takes
+     * them, before any request.
+     */
+    ns_notify_selftest();
+
+    /*
      * Let the bootstrap know we are finished.
      */
     (void)bootstrap_completed(bootstrap_port, mach_task_self());
