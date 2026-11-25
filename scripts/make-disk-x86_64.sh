@@ -161,8 +161,10 @@ ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test 
 # served (#964): a machine may want two hundred drivers, and the bundle carries
 # the ones a boot needs.  chora_probe, the network card's, is here and in no
 # pool of the bundle, so that a card's chora shows a module read from the disk.
+# And host_bridge_one_too_long, whose name has no room in a driver's task name:
+# the HAL must refuse it as it reads the disk's misc, and say so.
 MODULES="$BUILD/export/uros/x86_64/user/modules"
-DISK_MODULES="net/chora_probe.so"
+DISK_MODULES="net/chora_probe.so misc/host_bridge_one_too_long.so"
 
 # And modules in no pool, in /mach_servers/updates on the same disk (#964):
 # edu_next, edu_probe under another name, which chora_test hands the HAL to

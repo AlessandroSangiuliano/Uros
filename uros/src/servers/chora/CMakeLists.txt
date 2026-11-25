@@ -232,3 +232,30 @@ set_target_properties(edu_next_module PROPERTIES
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")
+
+# #964: a module no chora could run, in the disk's pool misc: its name has 24
+# characters, one past the room a driver's task name leaves a module's, and
+# it declares the host bridge every board has.  The HAL must refuse it as it
+# reads the pool, and say so, which run-x86_64.sh asks.  make-disk-x86_64.sh
+# writes it to /mach_servers/modules/misc; no bundle holds it.
+add_library(host_bridge_one_too_long_module SHARED
+  host_bridge_one_too_long/host_bridge_one_too_long.c)
+
+add_dependencies(host_bridge_one_too_long_module mig_mach_public_headers)
+
+target_compile_options(host_bridge_one_too_long_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(host_bridge_one_too_long_module PRIVATE
+  MACH_IPC_COMPAT=0)
+
+target_include_directories(host_bridge_one_too_long_module PRIVATE
+  ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(host_bridge_one_too_long_module PROPERTIES
+  OUTPUT_NAME "host_bridge_one_too_long"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
