@@ -679,10 +679,11 @@ notify_selftest_dead_name(mach_port_t notify)
  * not ask for, on its servers' notification port, where it asks for their
  * deaths, and on its trusted one, where it asks for its service ports':
  * notify_selftest_on() says how; and on each a dead-name notification for a
- * name none of its own has, notify_selftest_dead_name().  Its server loop
+ * name none of its ports has, notify_selftest_dead_name().  Its server loop
  * takes them as they come, and the harness reads a line for each, from the
- * self-test, and bootstrap going on after them.  They panicked bootstrap, and
- * with it the system, for no worse than a right let go.
+ * self-test -- the control's unmarked -- and bootstrap going on after them.
+ * They panicked bootstrap, and with it the system: none comes today but the
+ * self-test's, and one that came would be said, where it stopped everything.
  */
 void
 notify_selftest(void)
@@ -690,7 +691,8 @@ notify_selftest(void)
     BOOTSTRAP_IO_LOCK();
     printf("%s: making the four notifications it does not ask for, on its "
 	   "servers' notification port and on its trusted one, and on each a "
-	   "dead-name notification for no port of its own (#995)\n",
+	   "dead-name notification for a name none of its ports has "
+	   "(#995)\n",
 	   program_name);
     BOOTSTRAP_IO_UNLOCK();
     notify_selftest_on(bootstrap_notification_port);

@@ -1004,9 +1004,11 @@ ns_notify_selftest(void)
 
 /*
  * #995: a notification the name server did not ask for is said, and the
- * name server goes on: each panicked it, and every look-up with it, for no
- * worse than a right let go.  A port-destroyed notice is refused, and the
- * server loop destroys its message with the right as the message brought it.
+ * name server goes on: each panicked it, and every look-up with it.  None
+ * comes today but the self-test's; a port-deleted one would be a death it no
+ * longer hears of, said where it stopped everything.  A port-destroyed notice
+ * is refused, and the server loop destroys its message with the right as the
+ * message brought it.
  */
 kern_return_t
 do_mach_notify_port_deleted(mach_port_t notify, mach_port_t name)
