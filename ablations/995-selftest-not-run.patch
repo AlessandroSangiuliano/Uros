@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #995
+Takes out: the self-test's call: bootstrap starts and loads its servers without making the notifications it does not ask for, so the eight pairs on its notices open on nothing; the harness must fail the boot on bootstrap's first server, which before the review of 24/11 it did not ask for.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 4
+Expect: FAILED: 'bootstrap: loading \[\^0-9\]' appeared and 'bootstrap: making the four notifications it does not ask for' never did\.
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -1032,7 +1032,7 @@
+ 	 * ports' on, made here, where both are in the set the service thread
+ 	 * receives from.
+ 	 */
+-	notify_selftest();
++	(void)0;
+ 
+ 	/*
+ 	 * #744: libcap asks the cap_server bootstrap starts, not a name.  Every
