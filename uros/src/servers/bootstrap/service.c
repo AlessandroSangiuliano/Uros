@@ -363,22 +363,86 @@ service_init(void)
     }
 }
 
+/*
+ * #995: the port a notification came on, said.  untrusted_notify_port's are
+ * taken as they were, and never said.
+ */
+static const char *
+notify_port_said(mach_port_t notify)
+{
+    if (notify == bootstrap_notification_port)
+	return "its servers' notification port";
+    if (notify == trusted_notify_port)
+	return "its trusted notification port";
+    return "a port that is no notification port of its";
+}
+
+/*
+ * #995: the notifications notify_selftest() makes are owed to their port
+ * until a handler takes them, and a handler that takes one says it came from
+ * the self-test: the lines every boot prints are then not the lines an
+ * unexpected notification prints, which a reader must not learn to skip
+ * (the review of 24/11).  Exchanged, since the service threads take notices
+ * side by side; one of each kind is owed at a time, so a notice that came
+ * unasked while one was owed is said as the self-test's, and the self-test's
+ * as unasked: both are said.
+ */
+enum {
+    SELFTEST_SEND_ONCE,
+    SELFTEST_PORT_DELETED,
+    SELFTEST_NO_SENDERS,
+    SELFTEST_PORT_DESTROYED,
+    SELFTEST_KINDS
+};
+
+static int selftest_owed[2][SELFTEST_KINDS];	/* servers', trusted */
+
+static int *
+selftest_slot(mach_port_t notify, int kind)
+{
+    if (notify == bootstrap_notification_port)
+	return &selftest_owed[0][kind];
+    if (notify == trusted_notify_port)
+	return &selftest_owed[1][kind];
+    return NULL;
+}
+
+static void
+selftest_owe(mach_port_t notify, int kind, int owed)
+{
+    int *slot = selftest_slot(notify, kind);
+
+    if (slot != NULL)
+	__atomic_store_n(slot, owed, __ATOMIC_RELEASE);
+}
+
+/* " from its self-test", for a notice the self-test owed `notify', now paid. */
+static const char *
+selftest_paid(mach_port_t notify, int kind)
+{
+    int *slot = selftest_slot(notify, kind);
+
+    return slot != NULL && __atomic_exchange_n(slot, 0, __ATOMIC_ACQ_REL) ?
+	   " from its self-test" : "";
+}
+
 /* #995: one step of notify_selftest() that could not be made, said. */
 static void
-notify_selftest_said(const char *step, kern_return_t kr)
+notify_selftest_said(mach_port_t notify, int kind, const char *step,
+		     kern_return_t kr)
 {
+    selftest_owe(notify, kind, 0);
     BOOTSTRAP_IO_LOCK();
-    printf("%s: the %s notification could not be made: %s (0x%x) (#995)\n",
-	   program_name, step, mach_error_string(kr), kr);
+    printf("%s: the %s notification could not be made on %s: %s (0x%x) "
+	   "(#995)\n", program_name, step, notify_port_said(notify),
+	   mach_error_string(kr), kr);
     BOOTSTRAP_IO_UNLOCK();
 }
 
 /*
- * #995: bootstrap makes, as it starts, each of the four notifications it does
- * not ask for, on its servers' notification port, where it asks for their
- * deaths:
+ * #995: the four notifications notify_selftest() makes, on `notify':
  *
- *   send-once       a send-once right to that port, let go unused;
+ *   send-once       a send-once right to `notify', let go unused;
  *   port-deleted    a dead-name request on a send-once right to a port of its
  *                   own, and the right let go, which cancels the request;
  *   no-senders      a no-senders request on a port of its own, and its one
@@ -388,33 +452,28 @@ notify_selftest_said(const char *step, kern_return_t kr)
  *
  * A step that fails lets go of every right it made: the send-once right
  * whether or not its request was made, and every right a port's name still
- * has (the review of 24/11).  Its server loop takes them as they come, and
- * the harness reads a line for each, and bootstrap going on after them.  They panicked bootstrap, and with
- * it the system, for no worse than a right let go.
+ * has (the review of 24/11).
  */
-void
-notify_selftest(void)
+static void
+notify_selftest_on(mach_port_t notify)
 {
     mach_port_t me = mach_task_self();
     mach_port_t so, port, prev;
     mach_msg_type_name_t type;
     kern_return_t kr, kd;
 
-    BOOTSTRAP_IO_LOCK();
-    printf("%s: making the four notifications it does not ask for, on its "
-	   "servers' notification port (#995)\n", program_name);
-    BOOTSTRAP_IO_UNLOCK();
-
     /* send-once */
+    selftest_owe(notify, SELFTEST_SEND_ONCE, 1);
     so = MACH_PORT_NULL;
-    kr = mach_port_extract_right(me, bootstrap_notification_port,
-				 MACH_MSG_TYPE_MAKE_SEND_ONCE, &so, &type);
+    kr = mach_port_extract_right(me, notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+				 &so, &type);
     if (kr == KERN_SUCCESS)
 	kr = mach_port_deallocate(me, so);
     if (kr != KERN_SUCCESS)
-	notify_selftest_said("send-once", kr);
+	notify_selftest_said(notify, SELFTEST_SEND_ONCE, "send-once", kr);
 
     /* port-deleted */
+    selftest_owe(notify, SELFTEST_PORT_DELETED, 1);
     port = MACH_PORT_NULL;
     so = MACH_PORT_NULL;
     prev = MACH_PORT_NULL;
@@ -424,16 +483,15 @@ notify_selftest(void)
 				     &so, &type);
     if (kr == KERN_SUCCESS)
 	kr = mach_port_request_notification(me, so, MACH_NOTIFY_DEAD_NAME, 0,
-					    bootstrap_notification_port,
-					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
-    /* The right let go whether or not its request was made. */
+					    notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+					    &prev);
     if (MACH_PORT_VALID(so)) {
 	kd = mach_port_deallocate(me, so);
 	if (kr == KERN_SUCCESS)
 	    kr = kd;
     }
     if (kr != KERN_SUCCESS)
-	notify_selftest_said("port-deleted", kr);
+	notify_selftest_said(notify, SELFTEST_PORT_DELETED, "port-deleted", kr);
     if (MACH_PORT_VALID(prev))
 	(void)mach_port_deallocate(me, prev);
     /* And the port, with the send-once notice the right's end sent to it. */
@@ -441,6 +499,7 @@ notify_selftest(void)
 	(void)mach_port_destroy(me, port);
 
     /* no-senders */
+    selftest_owe(notify, SELFTEST_NO_SENDERS, 1);
     port = MACH_PORT_NULL;
     prev = MACH_PORT_NULL;
     kr = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &port);
@@ -448,12 +507,12 @@ notify_selftest(void)
 	kr = mach_port_insert_right(me, port, port, MACH_MSG_TYPE_MAKE_SEND);
     if (kr == KERN_SUCCESS)
 	kr = mach_port_request_notification(me, port, MACH_NOTIFY_NO_SENDERS,
-					    1, bootstrap_notification_port,
+					    1, notify,
 					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
     if (kr == KERN_SUCCESS)
 	kr = mach_port_mod_refs(me, port, MACH_PORT_RIGHT_SEND, -1);
     if (kr != KERN_SUCCESS)
-	notify_selftest_said("no-senders", kr);
+	notify_selftest_said(notify, SELFTEST_NO_SENDERS, "no-senders", kr);
     if (MACH_PORT_VALID(prev))
 	(void)mach_port_deallocate(me, prev);
     /* The receive right, and the send right where a step after it failed. */
@@ -461,21 +520,44 @@ notify_selftest(void)
 	(void)mach_port_destroy(me, port);
 
     /* port-destroyed: the right goes to the request, not away. */
+    selftest_owe(notify, SELFTEST_PORT_DESTROYED, 1);
     port = MACH_PORT_NULL;
     prev = MACH_PORT_NULL;
     kr = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &port);
     if (kr == KERN_SUCCESS) {
 	kr = mach_port_request_notification(me, port,
 					    MACH_NOTIFY_PORT_DESTROYED, 0,
-					    bootstrap_notification_port,
-					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+					    notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+					    &prev);
 	/* With the request the right goes to it; without, it goes. */
 	(void)mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, -1);
     }
     if (kr != KERN_SUCCESS)
-	notify_selftest_said("port-destroyed", kr);
+	notify_selftest_said(notify, SELFTEST_PORT_DESTROYED, "port-destroyed",
+			     kr);
     if (MACH_PORT_VALID(prev))
 	(void)mach_port_deallocate(me, prev);
+}
+
+/*
+ * #995: bootstrap makes, as it starts, each of the four notifications it does
+ * not ask for, on its servers' notification port, where it asks for their
+ * deaths, and on its trusted one, where it asks for its service ports':
+ * notify_selftest_on() says how.  Its server loop takes them as they come,
+ * and the harness reads a line for each, from the self-test, and bootstrap
+ * going on after them.  They panicked bootstrap, and with it the system, for
+ * no worse than a right let go.
+ */
+void
+notify_selftest(void)
+{
+    BOOTSTRAP_IO_LOCK();
+    printf("%s: making the four notifications it does not ask for, on its "
+	   "servers' notification port and on its trusted one (#995)\n",
+	   program_name);
+    BOOTSTRAP_IO_UNLOCK();
+    notify_selftest_on(bootstrap_notification_port);
+    notify_selftest_on(trusted_notify_port);
 }
 
 boolean_t
@@ -512,23 +594,13 @@ service_demux(mach_msg_header_t *request, mach_msg_header_t *reply)
 
 /*
  * #995: a notification bootstrap did not ask for, on one of its own
- * notification ports, is said -- its kind, what it carries and the port --
- * and bootstrap goes on.  Each one panicked bootstrap, and the system with
- * it, where a port-deleted notice comes for no worse than a right let go
- * that had a dead-name request on it: a server's task port deallocated, or
- * a request answered with an error, whose rights the server loop destroys.
- * untrusted_notify_port's are what they were.
+ * notification ports, is said -- its kind, what it carries, the port, and
+ * whether its self-test made it -- and bootstrap goes on.  Each one panicked
+ * bootstrap, and the system with it, where a port-deleted notice comes for no
+ * worse than a right let go that had a dead-name request on it: a server's
+ * task port deallocated, or a request answered with an error, whose rights
+ * the server loop destroys.  untrusted_notify_port's are what they were.
  */
-static const char *
-notify_port_said(mach_port_t notify)
-{
-    if (notify == bootstrap_notification_port)
-	return "its servers' notification port";
-    if (notify == trusted_notify_port)
-	return "its trusted notification port";
-    return "a port that is no notification port of its";
-}
-
 kern_return_t
 do_mach_notify_port_deleted(mach_port_t notify, mach_port_t name)
 {
@@ -536,8 +608,9 @@ do_mach_notify_port_deleted(mach_port_t notify, mach_port_t name)
 	return KERN_FAILURE;
 
     BOOTSTRAP_IO_LOCK();
-    printf("%s: a port-deleted notification for 0x%x, on %s: said, and "
-	   "bootstrap goes on (#995)\n", program_name, (unsigned)name,
+    printf("%s: a port-deleted notification%s for 0x%x, on %s: said, and "
+	   "bootstrap goes on (#995)\n", program_name,
+	   selftest_paid(notify, SELFTEST_PORT_DELETED), (unsigned)name,
 	   notify_port_said(notify));
     BOOTSTRAP_IO_UNLOCK();
     return KERN_SUCCESS;
@@ -560,11 +633,12 @@ do_mach_notify_port_destroyed(mach_port_t notify,
 	 * whatever came (the review of 24/11).
 	 */
 	BOOTSTRAP_IO_LOCK();
-	printf("%s: a port-destroyed notification, on %s: the right 0x%x it "
+	printf("%s: a port-destroyed notification%s, on %s: the right 0x%x it "
 	       "brings is no service port's, so the notice is refused and its "
 	       "message destroyed with the right, and bootstrap goes on "
-	       "(#995)\n", program_name, notify_port_said(notify),
-	       (unsigned)port);
+	       "(#995)\n", program_name,
+	       selftest_paid(notify, SELFTEST_PORT_DESTROYED),
+	       notify_port_said(notify), (unsigned)port);
 	BOOTSTRAP_IO_UNLOCK();
 	return KERN_FAILURE;
     }
@@ -638,9 +712,10 @@ do_mach_notify_no_senders(mach_port_t notify, mach_port_mscount_t mscount)
 	return KERN_FAILURE;
 
     BOOTSTRAP_IO_LOCK();
-    printf("%s: a no-senders notification, make-send count %u, on %s: "
+    printf("%s: a no-senders notification%s, make-send count %u, on %s: "
 	   "said, and bootstrap goes on (#995)\n", program_name,
-	   (unsigned)mscount, notify_port_said(notify));
+	   selftest_paid(notify, SELFTEST_NO_SENDERS), (unsigned)mscount,
+	   notify_port_said(notify));
     BOOTSTRAP_IO_UNLOCK();
     return KERN_SUCCESS;
 }
@@ -652,8 +727,9 @@ do_mach_notify_send_once(mach_port_t notify)
 	return KERN_SUCCESS;
 
     BOOTSTRAP_IO_LOCK();
-    printf("%s: a send-once notification, on %s: said, and bootstrap goes "
-	   "on (#995)\n", program_name, notify_port_said(notify));
+    printf("%s: a send-once notification%s, on %s: said, and bootstrap goes "
+	   "on (#995)\n", program_name,
+	   selftest_paid(notify, SELFTEST_SEND_ONCE), notify_port_said(notify));
     BOOTSTRAP_IO_UNLOCK();
     return KERN_SUCCESS;
 }

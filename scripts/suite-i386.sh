@@ -117,11 +117,16 @@ PAIRS=(
 	'xfile_read: started'		'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
 	'xfile_write: started'		'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
 	# #995: the four notifications bootstrap does not ask for, made as it
-	# starts, each said as it is taken.
-	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a send-once notification, on its servers. notification port: said, and bootstrap goes on'
-	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-deleted notification for 0x[0-9a-f]*, on its servers. notification port: said, and bootstrap goes on'
-	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a no-senders notification, make-send count [0-9]*, on its servers. notification port: said, and bootstrap goes on'
-	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-destroyed notification, on its servers. notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on'
+	# starts on its servers' notification port and on its trusted one, each
+	# said, as its self-test's, as it is taken.
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a send-once notification from its self-test, on its servers. notification port: said, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-deleted notification from its self-test for 0x[0-9a-f]*, on its servers. notification port: said, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a no-senders notification from its self-test, make-send count [0-9]*, on its servers. notification port: said, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-destroyed notification from its self-test, on its servers. notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a send-once notification from its self-test, on its trusted notification port: said, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-deleted notification from its self-test for 0x[0-9a-f]*, on its trusted notification port: said, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a no-senders notification from its self-test, make-send count [0-9]*, on its trusted notification port: said, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-destroyed notification from its self-test, on its trusted notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on'
 	'=== kernel242_test ('		'=== kernel242_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'=== sig_test ('			'=== sig_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'fperr_test: x87 arm starting'	'fperr_test: x87 arm \(PASS\|SKIPPED\|FAIL\)'
@@ -142,6 +147,9 @@ PAIRS=(
 )
 # What every full boot must have said: the tests that are always in the bundle.
 MUST=(
+	# #995: the self-test of the notifications bootstrap does not ask for,
+	# which opens the eight pairs on its notices.
+	'bootstrap: making the four notifications it does not ask for'
 	'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)'
 	'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)'
 	'(hello_server): exec tests: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'

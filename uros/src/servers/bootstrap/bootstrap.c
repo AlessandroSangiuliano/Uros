@@ -1028,8 +1028,9 @@ main(int argc, char **argv)
 
 	/*
 	 * #995: and the notifications it does not ask for, on the port it asks
-	 * for its servers' deaths on, made here, where the port is in the set
-	 * the service thread receives from.
+	 * for its servers' deaths on and on the one it asks for its service
+	 * ports' on, made here, where both are in the set the service thread
+	 * receives from.
 	 */
 	notify_selftest();
 
