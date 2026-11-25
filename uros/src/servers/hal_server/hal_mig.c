@@ -447,8 +447,12 @@ hal_update_driver(mach_port_t hal_port,
 			  CAP_OP_DRIVER_UPDATE);
 	if (kr != KERN_SUCCESS)
 		return kr;
-	if (nameCnt >= sizeof n)
+	if (nameCnt >= sizeof n) {
+		printf("hal: a name of %u bytes, given to update the driver of "
+		       "%02x:%02x.%x, has no room for its terminator: refused "
+		       "(#964)\n", (unsigned)nameCnt, bus, slot, func);
 		return KERN_INVALID_ARGUMENT;
+	}
 	memcpy(n, name, nameCnt);
 	n[nameCnt] = '\0';
 	return hal_driver_update(bus, slot, func, n, module, moduleCnt);

@@ -175,15 +175,20 @@ routine get_driver_state(
  *   stop_driver    the driver ends, and stays ended: HAL_DRIVER_STOPPED.
  *   start_driver   a driver stopped, or given up after its starts, is started
  *                  again with the module it has.  KERN_FAILURE for one that
- *                  runs or is to be started.
+ *                  runs, or is to be started: after a restart's delay, or at
+ *                  the end of its chora.
  *   update_driver  its module becomes `module', named `name' without ".so",
- *                  which must declare the device and have `name'_chora_ops:
- *                  KERN_INVALID_VALUE otherwise, and KERN_INVALID_ARGUMENT
- *                  for a name longer than a driver's task name leaves room
- *                  for.  A chora that runs is ended and started again with
- *                  it, once, at its end (HAL_DRIVER_UPDATING); a stopped
- *                  driver stays stopped with it until start_driver(); one
- *                  given up after its starts is started with it now.
+ *                  which must declare the device and define `name'_chora_ops
+ *                  among its dynamic symbols: KERN_INVALID_VALUE otherwise,
+ *                  and for bytes of no module's size.  KERN_INVALID_ARGUMENT
+ *                  for a name that is empty, has a character other than a
+ *                  letter, a digit or _, or is longer than a driver's task
+ *                  name leaves room for (DRIVER_MODULE_NAME_MAX).  A chora
+ *                  that runs is ended and started again with it, once, at its
+ *                  end (HAL_DRIVER_UPDATING); a stopped driver stays stopped
+ *                  with it until start_driver(); one given up after its
+ *                  starts, or waiting for a restart's delay, is started with
+ *                  it now.  Each refusal of the module is said by the HAL.
  *
  * Each takes a RESOURCE_DRIVER_ADMIN token for the device's class and the
  * routine's operation, issued to the task that sends the request; for any
