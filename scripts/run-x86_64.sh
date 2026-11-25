@@ -307,6 +307,24 @@ else
 	NOGLYPH=$(printf '%s\n' "$NOGLYPH" | sed '/^$/d; s/^/NO GLYPH (#661): line /')
 fi
 [ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
+# #964: chora_test [18] updates crash_probe's given-up driver with a new
+# build of crash_probe, under its name, whose line at a start says it came
+# from an update's bytes.  The HAL starts it at once, a new row, and again
+# after each death until it gives it up: so many lines as the row has starts,
+# which [18]'s line says.  A HAL that started the driver with the module it
+# had, or let the update go at a death, passes [18]'s count of starts all the
+# same (the fourth and fifth review rounds of 24/11).  Asked when [18] says
+# the update was taken, so that a WRONG of its own is not explained away.
+UPDATE_RAN=""
+if grep -aq 'chora_test: \[18\] .*updated with a new build of it (0)' "$LOG"; then
+	row=$(grep -a 'chora_test: \[18\] ' "$LOG" | head -n 1 | sed -n 's/.*, \([0-9][0-9]*\) starts a row).*/\1/p')
+	ran=$(grep -ac "crash_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: crash_probe dies at its start, as it is made to, from an update's bytes" "$LOG" || true)
+	if [ -z "$row" ] || [ "${ran:-0}" -lt "$row" ]; then
+		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT RUN (#964): crash_probe's new build ran at ${ran:-0} start(s) of the ${row:-?} its update began: the HAL started the driver with another module, or let the update go at a death" | sed '/^$/d')
+	else
+		UPDATE_RAN="crash_probe's update ran at $ran start(s), its row being $row"
+	fi
+fi
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -715,14 +733,9 @@ must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_brid
 must_report 'chora_test: \[17\] .*under names no driver' 'hal: a name of 64 bytes, given to update the driver of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7], has no room for its terminator: refused' \
 	'chora_test gave the HAL a name of 64 bytes, and the HAL never said it refused it for its terminator: it read the name past its room, or refused it another way (#964).' \
 	'the HAL refusing a name of 64 bytes'
-# #964: and chora_test [18]'s update of the given-up crash_probe with
-# crash_again, crash_probe under another name and in no pool: its line at a
-# start, under its own name, is the update's module running, where a HAL
-# that started the driver again with the pool's module passes [18]'s count
-# of starts all the same (the fourth review round of 24/11).
-must_report 'chora_test: \[18\] .*crash_probe, given up after' 'crash_again@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: crash_again dies at its start' \
-	'chora_test gave crash_probe'"'"'s given-up driver crash_again, and crash_again never ran: the HAL started the driver again with another module than the update'"'"'s (#964).' \
-	'the HAL starting a given-up driver with its update'
+# #964: and what chora_test [18]'s update ran, read with the unexplained lines
+# above (UPDATE_RAN), said here on a pass.
+[ -n "$UPDATE_RAN" ] && echo "  $UPDATE_RAN"
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'

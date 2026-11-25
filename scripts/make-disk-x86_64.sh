@@ -169,11 +169,12 @@ DISK_MODULES="net/chora_probe.so misc/host_bridge_one_too_long.so misc/host_brid
 
 # And modules in no pool, in /mach_servers/updates on the same disk (#964):
 # edu_next and edu_again, edu_probe under other names, which chora_test hands
-# the HAL to update edu's driver with, and crash_again, crash_probe under
-# another, for the pci-testdev's.  In a pool each would declare its device
-# alike with the pool's module, a tie the HAL does not break.
+# the HAL to update edu's driver with, and crash_probe_update, a new build of
+# crash_probe under its own name, for the pci-testdev's.  In a pool each would
+# declare its device alike with the pool's module, a tie the HAL does not
+# break.
 UPDATES="$BUILD/export/uros/x86_64/user/updates"
-DISK_UPDATES="edu_next.so edu_again.so crash_again.so"
+DISK_UPDATES="edu_next.so edu_again.so crash_probe_update.so"
 
 # The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
 # libc.so under the name musl gives it for this target.

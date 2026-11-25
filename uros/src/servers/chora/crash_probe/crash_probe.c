@@ -37,14 +37,20 @@
 
 /*
  * The module's name, which its operations go by: chora looks them up as
- * <name>_chora_ops (#964).  The build compiles this file twice: as
- * crash_probe, the pool's, and as crash_again, in the disk's updates and in
- * no pool, which chora_test [18] gives the given-up driver: its line, with
- * that name, shows the update's module run, where the pool's would be the
- * module the driver had.
+ * <name>_chora_ops (#964).  The build compiles this file twice, under that
+ * one name: as the pool's, and with CRASH_UPDATE, into the disk's updates and
+ * no pool, as a new build of the same module would come, which chora_test
+ * [18] gives the given-up driver.  Its line says it came from an update's
+ * bytes, where the pool's would be the module the driver had (the fourth and
+ * fifth review rounds of 24/11).
  */
 #ifndef CRASH_MODULE
 #define CRASH_MODULE	crash_probe
+#endif
+#ifdef CRASH_UPDATE
+#define CRASH_FROM	", from an update's bytes"
+#else
+#define CRASH_FROM	""
 #endif
 #define CRASH_NAME_(m)	#m
 #define CRASH_NAME(m)	CRASH_NAME_(m)
@@ -54,8 +60,8 @@
 static int
 crash_attach(struct driver *d)
 {
-	printf("%s: %s dies at its start, as it is made to (#964)\n",
-	       d->name, CRASH_NAME(CRASH_MODULE));
+	printf("%s: %s dies at its start, as it is made to%s (#964)\n",
+	       d->name, CRASH_NAME(CRASH_MODULE), CRASH_FROM);
 	return -1;
 }
 

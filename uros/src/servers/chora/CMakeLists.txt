@@ -310,25 +310,27 @@ set_target_properties(edu_again_module PROPERTIES
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")
 
-# #964: crash_probe a second time, named crash_again, in user/updates: the
-# module chora_test [18] gives crash_probe's driver once the HAL has given it
-# up.  In no pool, so that its line at each start, under its own name, can
-# only be the update's module running, where crash_probe would be the pool's.
-add_library(crash_again_module SHARED crash_probe/crash_probe.c)
+# #964: crash_probe a second time, under its own name, with CRASH_UPDATE, as
+# crash_probe_update.so in user/updates: the new build of the same module that
+# chora_test [18] gives crash_probe's driver once the HAL has given it up.  In
+# no pool; its line says it came from an update's bytes, which run-x86_64.sh
+# counts at the starts the update begins, where the pool's would be the module
+# the driver had.
+add_library(crash_update_module SHARED crash_probe/crash_probe.c)
 
-add_dependencies(crash_again_module mig_mach_public_headers)
+add_dependencies(crash_update_module mig_mach_public_headers)
 
-target_compile_options(crash_again_module PRIVATE
+target_compile_options(crash_update_module PRIVATE
   -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
   -include stdint.h)
 
-target_compile_definitions(crash_again_module PRIVATE MACH_IPC_COMPAT=0
-  CRASH_MODULE=crash_again)
+target_compile_definitions(crash_update_module PRIVATE MACH_IPC_COMPAT=0
+  CRASH_UPDATE)
 
-target_include_directories(crash_again_module PRIVATE ${CHORA_INCLUDE_DIRS})
+target_include_directories(crash_update_module PRIVATE ${CHORA_INCLUDE_DIRS})
 
-set_target_properties(crash_again_module PROPERTIES
-  OUTPUT_NAME "crash_again"
+set_target_properties(crash_update_module PROPERTIES
+  OUTPUT_NAME "crash_probe_update"
   PREFIX ""
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
