@@ -392,6 +392,7 @@ enum {
     SELFTEST_PORT_DELETED,
     SELFTEST_NO_SENDERS,
     SELFTEST_PORT_DESTROYED,
+    SELFTEST_DEAD_NAME,		/* on the trusted port alone */
     SELFTEST_KINDS
 };
 
@@ -540,24 +541,63 @@ notify_selftest_on(mach_port_t notify)
 }
 
 /*
+ * #995: and on the trusted port, where bootstrap asks for its service ports'
+ * deaths, a dead-name notification for a name no service port has: a
+ * dead-name request on the send right of a port of its own, and its receive
+ * right destroyed.  Its name is then a dead name, with the send right's
+ * reference and the one the notice brings; this lets go of the first, the
+ * handler of the second.  Made before the service thread runs, so the
+ * handler finds the one reference (the review of 24/11: it wrote past
+ * services[] for such a name, and asked for two).
+ */
+static void
+notify_selftest_dead_name(mach_port_t notify)
+{
+    mach_port_t me = mach_task_self();
+    mach_port_t port = MACH_PORT_NULL, prev = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    selftest_owe(notify, SELFTEST_DEAD_NAME, 1);
+    kr = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_insert_right(me, port, port, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_request_notification(me, port, MACH_NOTIFY_DEAD_NAME, 0,
+					    notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+					    &prev);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, -1);
+    if (kr == KERN_SUCCESS)
+	kr = mach_port_mod_refs(me, port, MACH_PORT_RIGHT_DEAD_NAME, -1);
+    else if (MACH_PORT_VALID(port))
+	(void)mach_port_destroy(me, port);
+    if (kr != KERN_SUCCESS)
+	notify_selftest_said(notify, SELFTEST_DEAD_NAME, "dead-name", kr);
+    if (MACH_PORT_VALID(prev))
+	(void)mach_port_deallocate(me, prev);
+}
+
+/*
  * #995: bootstrap makes, as it starts, each of the four notifications it does
  * not ask for, on its servers' notification port, where it asks for their
  * deaths, and on its trusted one, where it asks for its service ports':
- * notify_selftest_on() says how.  Its server loop takes them as they come,
- * and the harness reads a line for each, from the self-test, and bootstrap
- * going on after them.  They panicked bootstrap, and with it the system, for
- * no worse than a right let go.
+ * notify_selftest_on() says how; and on the trusted one a dead-name
+ * notification no service port's, notify_selftest_dead_name().  Its server
+ * loop takes them as they come, and the harness reads a line for each, from
+ * the self-test, and bootstrap going on after them.  They panicked bootstrap,
+ * and with it the system, for no worse than a right let go.
  */
 void
 notify_selftest(void)
 {
     BOOTSTRAP_IO_LOCK();
     printf("%s: making the four notifications it does not ask for, on its "
-	   "servers' notification port and on its trusted one (#995)\n",
-	   program_name);
+	   "servers' notification port and on its trusted one, and there a "
+	   "dead-name notification no service port's (#995)\n", program_name);
     BOOTSTRAP_IO_UNLOCK();
     notify_selftest_on(bootstrap_notification_port);
     notify_selftest_on(trusted_notify_port);
+    notify_selftest_dead_name(trusted_notify_port);
 }
 
 boolean_t
@@ -753,6 +793,24 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
     for (i = 0; i < services_count; i++)
 	if (services[i].service == name)
 	    break;
+
+    /*
+     * #995: a name no service port has is no service's death, and services[]
+     * has no slot for it: the slot past its last was written, and two
+     * references asked of a name whose right was not bootstrap's to count.
+     * The notice's reference is let go, and it is said (the review of 24/11).
+     */
+    if (i == services_count) {
+	BOOTSTRAP_IO_LOCK();
+	printf("%s: a dead-name notification%s for 0x%x, on %s, which no "
+	       "service port has: said, and bootstrap goes on (#995)\n",
+	       program_name, selftest_paid(notify, SELFTEST_DEAD_NAME),
+	       (unsigned)name, notify_port_said(notify));
+	BOOTSTRAP_IO_UNLOCK();
+	(void)mach_port_mod_refs(mach_task_self(), name,
+				 MACH_PORT_RIGHT_DEAD_NAME, -1);
+	return KERN_SUCCESS;
+    }
 
 #ifdef	DEBUG
     if (debug) {

@@ -765,6 +765,9 @@ must_report 'bootstrap: making the four notifications it does not ask for' 'boot
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a port-destroyed notification from its self-test, on its trusted notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on' \
 	'Bootstrap destroyed a receive right with a port-destroyed request to its trusted notification port on it and never said, as its self-test'"'"'s, the notice that brings the right back (#995).' \
 	'bootstrap and a port-destroyed notice, trusted port'
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: said, and bootstrap goes on' \
+	'Bootstrap destroyed a port of its own, no service port, with a dead-name request on its send right to its trusted notification port, and never said, as its self-test'"'"'s, the notice for the name services[] has no slot for (#995).' \
+	'bootstrap and a dead-name notice no service port'"'"'s'
 
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
 # with no flag, with -D and with -H -D.  The start is said through mach_print,
