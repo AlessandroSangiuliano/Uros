@@ -7,12 +7,12 @@ Expect: bootstrap: mach_port_mod_refs: [0-9]+
 diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
 --- a/uros/src/servers/bootstrap/service.c
 +++ b/uros/src/servers/bootstrap/service.c
-@@ -800,7 +800,7 @@
+@@ -825,7 +825,7 @@
       * references asked of a name whose right was not bootstrap's to count.
       * The notice's reference is let go, and it is said (the review of 24/11).
       */
 -    if (i == services_count) {
 +    if (0 && i == services_count) {
- 	BOOTSTRAP_IO_LOCK();
- 	printf("%s: a dead-name notification%s for 0x%x, on %s, which no "
- 	       "service port has: said, and bootstrap goes on (#995)\n",
+ 	char left[48];
+ 
+ 	/* The release, and what it left, read (the review of 24/11). */

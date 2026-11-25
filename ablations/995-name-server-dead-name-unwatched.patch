@@ -7,12 +7,12 @@ Expect: bootstrap: '[^']*name_server' task terminated
 diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
 --- a/uros/src/servers/name_server/nprocs.c
 +++ b/uros/src/servers/name_server/nprocs.c
-@@ -992,7 +992,7 @@
+@@ -994,7 +994,7 @@
       * the record it did not find.  The notice's reference is let go, and it
       * is said.
       */
 -    if (!port_watched(name)) {
 +    if (0 && !port_watched(name)) {
- 	printf("%s: a dead-name notification%s for 0x%x, on its notification "
- 	       "port, which no port it watches has: said, and the name server "
- 	       "goes on (#995)\n", program,
+ 	mach_port_urefs_t refs = 0;
+ 	kern_return_t kr, kg;
+ 	char left[48];
