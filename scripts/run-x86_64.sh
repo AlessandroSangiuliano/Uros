@@ -708,6 +708,13 @@ must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_brid
 must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_bridge_wrong_ops\.so on the disk: it defines no operations under its name, so no chora could run it: it declares nothing' \
 	'The HAL read the disk'"'"'s pools and did not say that host_bridge_wrong_ops, whose operations are under another name than its own, declares nothing: it took a module no chora can run, or never read the disk'"'"'s misc (#964).' \
 	'the HAL refusing a module of a pool for its operations'
+# #964: and chora_test [17]'s name of 64 bytes, MIG's room, refused before it
+# is read, with no room for its terminator: [17] reads the refusal, which a
+# name too long for a driver's task answers alike, and the HAL's line alone
+# says which refused it.
+must_report 'chora_test: \[17\] .*under names no driver' 'hal: a name of 64 bytes, given to update the driver of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7], has no room for its terminator: refused' \
+	'chora_test gave the HAL a name of 64 bytes, and the HAL never said it refused it for its terminator: it read the name past its room, or refused it another way (#964).' \
+	'the HAL refusing a name of 64 bytes'
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
