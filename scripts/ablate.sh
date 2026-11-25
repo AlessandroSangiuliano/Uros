@@ -21,6 +21,16 @@
 # its diff is written over.  Only the patches given are read for Expect: lines:
 # a base that is itself an ablation would otherwise catch the run on its own.
 #
+# A patch may say with `Premise: ERE' what each fixed boot must show for the
+# ablated arm to be asked at all: what a widen holds open, or what the catch
+# stands on, such as a window of time the test must still have.  It is read
+# from every patch of the run, the bases too, and it brings the fixed arm in
+# without --ab.  A fixed boot no line of whose log matches every premise is
+# said to be without its premise and not passed, and an ablated boot beside it
+# that is not caught is said not askable, not uncaught (#1010: 922-wait-whole-
+# arm read NOT CAUGHT for 700 commits after a sleep of 10 ms came to last 20,
+# its window with it, #1009).
+#
 # Usage:
 #   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --check [--base REV] PATCH...
@@ -50,7 +60,8 @@
 # Exit status: 0 every ablated boot was caught and every fixed boot passed ·
 # 1 at least one was not · 2 a patch does not apply, or the command line is
 # wrong · 3 a tree did not build, or the harness could not run a boot -- which
-# says nothing about the test.  Sent SIGTERM, it stops what it is doing, the
+# says nothing about the test · 4 no boot was uncaught or failed, and a fixed
+# boot was without its premise: the ablation could not be asked there.  Sent SIGTERM, it stops what it is doing, the
 # boot it is running or the build, says so -- a stopped boot has a row whose
 # verdict is "stopped" -- prints what the boots it made said, removes its
 # worktrees and ends by the signal (#951).
@@ -167,7 +178,7 @@ with_bases() {
 	# of four boots, each stopped by a signature on such a line.  What nothing
 	# would read is refused, not dropped.
 	stray=$(sed -n -E -e '/^diff --git /q' -e '/^$/d' \
-		-e '/^(Kind|Issue|Takes out|Holds open|Over|Run|Expect|Measure|Accel|Script|Screen|Note|Machine):/d' \
+		-e '/^(Kind|Issue|Takes out|Holds open|Over|Run|Expect|Premise|Measure|Accel|Script|Screen|Note|Machine):/d' \
 		-e p "$p" | head -n 1)
 	[ -z "$stray" ] ||
 		die 2 "$(basename "$p") has a header line with no key, which nothing reads: '$stray' -- one Expect: per line"
@@ -321,6 +332,16 @@ EXPECT=$(for p in "${PATCHES[@]}"; do
 done)
 [ -n "$EXPECT" ] || die 2 "no Expect: line in the ablation patches: nothing would say the test caught it"
 
+# #1010: what each fixed boot must show for the ablated arm to be asked, from
+# every patch of the run, the bases too, each once.  A premise is read off a
+# fixed boot, so it brings the fixed arm in when --ab was not given.
+PREMISE=$(for p in "${EXPANDED[@]}"; do header "$p" Premise; done | awk '!seen[$0]++')
+PREMISE_AB=0
+if [ -n "$PREMISE" ] && [ $AB = 0 ]; then
+	AB=1
+	PREMISE_AB=1
+fi
+
 if [ $AB = 1 ]; then
 	ARMS=(fixed ablated)
 else
@@ -348,6 +369,12 @@ if [ $PLAN = 1 ]; then
 	while IFS= read -r e; do
 		echo "ablate: plan: caught if a line of $read_from matches: $e"
 	done <<< "$EXPECT"
+	if [ -n "$PREMISE" ]; then
+		while IFS= read -r e; do
+			echo "ablate: plan: asked only beside a fixed boot that shows, in $read_from: $e (Premise:)"
+		done <<< "$PREMISE"
+		[ $PREMISE_AB = 0 ] || echo "ablate: plan: the fixed arm is booted for the premise, though --ab was not given"
+	fi
 	if [ $AB = 1 ]; then
 		echo "ablate: plan: the fixed arm is $SHORT with the ${#WIDENS[@]} widen patch(es), the ablated arm with all ${#EXPANDED[@]}"
 	else
@@ -360,6 +387,19 @@ fi
 RUNDIR="$DIR/runs/$(date +%Y%m%d-%H%M%S)-$SHORT"
 mkdir -p "$RUNDIR"
 printf '%s\n' "$EXPECT" > "$RUNDIR/expect"
+if [ -n "$PREMISE" ]; then
+	printf '%s\n' "$PREMISE" > "$RUNDIR/premise"
+	[ $PREMISE_AB = 0 ] || echo "ablate: the fixed arm is booted for the premise, though --ab was not given (#1010)"
+fi
+
+# #1010: the first premise no line of the log matches, or nothing.
+premise_missing() {
+	local pr
+	[ -s "$RUNDIR/premise" ] || return 0
+	while IFS= read -r pr; do
+		LC_ALL=C.UTF-8 grep -Eq -- "$pr" "$1" || { printf '%s\n' "$pr"; return 0; }
+	done < "$RUNDIR/premise"
+}
 
 cleanup() {
 	local arm
@@ -501,6 +541,9 @@ names=$(for p in "${EXPANDED[@]}"; do basename "$p" .patch; done | paste -sd+)
 host=$(uname -n)
 
 caught=0 missed=0 passed=0 failed=0
+# #1010: fixed boots without their premise, and the ablated boots beside them
+# that were not caught: not asked, rather than uncaught.
+unpremised=0 unaskable=0
 # #951: the boots made so far, of all the run plans, for the line a stopped run
 # ends with.
 MADE=0
@@ -508,6 +551,8 @@ TOTAL=$(( BOOTS * ${#ACCELS[@]} * ${#ARMS[@]} ))
 STOPPED_AT=""
 for i in $(seq 1 "$BOOTS"); do
 	for acc in "${ACCELS[@]}"; do
+		# #1010: what the fixed boot of this pair said of the premise.
+		pair_premise=""
 		for arm in "${ARMS[@]}"; do
 			# #951: asked to stop between two boots, it starts no other.
 			if [ -n "$STOP" ]; then
@@ -585,17 +630,29 @@ for i in $(seq 1 "$BOOTS"); do
 				# no LANG at all, and in the C locale the . that a patch
 				# writes for an em dash is one byte of three.
 				LC_ALL=C.UTF-8 grep -Eqf "$RUNDIR/expect" "$log" && hit=1
+				lacks=""
 				if [ "$arm" = ablated ]; then
 					if [ $hit = 1 ]; then
 						verdict=CAUGHT
 						caught=$((caught + 1))
+					elif [ "$pair_premise" = missing ]; then
+						verdict="NOT ASKABLE"
+						unaskable=$((unaskable + 1))
 					else
 						verdict="NOT CAUGHT"
 						missed=$((missed + 1))
 					fi
 				elif [ $rc = 0 ] && [ $hit = 0 ]; then
-					verdict=PASSED
-					passed=$((passed + 1))
+					lacks=$(premise_missing "$log")
+					if [ -n "$lacks" ]; then
+						verdict="NO PREMISE"
+						unpremised=$((unpremised + 1))
+						pair_premise=missing
+					else
+						verdict=PASSED
+						passed=$((passed + 1))
+						pair_premise=shown
+					fi
 				else
 					verdict=FAILED
 					failed=$((failed + 1))
@@ -619,6 +676,7 @@ for i in $(seq 1 "$BOOTS"); do
 				break 3
 			fi
 			echo "ablate: $arm, $acc, boot $i: $verdict (harness status $rc, ${clock:-?} MHz, power ${power:-?})"
+			[ -z "$lacks" ] || echo "ablate:   no line of it matches the premise: $lacks"
 		done
 	done
 done
@@ -627,7 +685,9 @@ done
 # said, as a whole run does.
 [ -z "$STOP" ] || echo "ablate: stopped by SIG$STOP ${STOPPED_AT:-after its last boot, $MADE of $TOTAL}"
 echo "ablate: ablated tree caught $caught of $((caught + missed))"
-[ $AB = 1 ] && echo "ablate: fixed tree passed $passed of $((passed + failed))"
+[ $unaskable = 0 ] || echo "ablate: $unaskable ablated boot(s) not askable, not caught beside a fixed boot without its premise (#1010)"
+[ $AB = 1 ] && echo "ablate: fixed tree passed $passed of $((passed + failed + unpremised))"
+[ $unpremised = 0 ] || echo "ablate: the premise was missing in $unpremised of $((passed + failed + unpremised)) fixed boot(s): the ablation could not be asked there (#1010)"
 # And it ends by the signal, its worktrees removed first, with the signals
 # that could cut the removal short ignored, as stopped_by() does.
 if [ -n "$STOP" ]; then
@@ -637,4 +697,6 @@ if [ -n "$STOP" ]; then
 	trap - INT TERM HUP
 	kill -s "$STOP" "$$"
 fi
-[ $missed = 0 ] && [ $failed = 0 ]
+[ $missed = 0 ] && [ $failed = 0 ] || exit 1
+[ $unpremised = 0 ] || exit 4
+exit 0
