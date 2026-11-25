@@ -311,14 +311,23 @@ fi
 # not make, said without "from its self-test", is unexplained: one nobody
 # expected, which they say where they panicked -- a dead-name request
 # cancelled on a server's task port leaves bootstrap deaf to that death (the
-# third review round of 24/11).  Their self-tests' controls, a notice each
-# does not owe, are said unmarked on purpose, and announced: as many unmarked
-# lines as there are announced controls pass.
+# third review round of 24/11).  Each self-test's control, a port-deleted
+# notice it does not owe, announced by its name, must be said unmarked under
+# that name, and is the one unmarked line explained: the mark said of it would
+# be the mark said of a notice nobody owed, and a swap of the control's mark
+# with the owed notice's, under their names, is read (the fourth round).
 UNMARKED=$(grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' "$LOG" || true)
-CONTROLS=$(grep -ac "the self-test's control:" "$LOG" || true)
-if [ "$(printf '%s' "$UNMARKED" | grep -c . || true)" -gt "${CONTROLS:-0}" ]; then
-	BAD=$(printf '%s\n%s' "$BAD" "$(printf '%s\n' "$UNMARKED" | sed 's/^/UNASKED NOTIFICATION (#995): /')" | sed '/^$/d')
-fi
+for who in bootstrap name_server; do
+	ctl=$(grep -a "$who: the self-test's control: a port-deleted notification for 0x[0-9a-f]*," "$LOG" | head -n 1 | sed -n 's/.* for \(0x[0-9a-f]*\),.*/\1/p')
+	[ -n "$ctl" ] || continue
+	said=$(printf '%s\n' "$UNMARKED" | grep -F "$who: a port-deleted notification for $ctl," | head -n 1)
+	if [ -n "$said" ]; then
+		UNMARKED=$(printf '%s\n' "$UNMARKED" | grep -vxF -- "$said" || true)
+	else
+		BAD=$(printf '%s\n%s' "$BAD" "CONTROL (#995): $who's control, the port-deleted notification for $ctl it does not owe, was not said unmarked under its name" | sed '/^$/d')
+	fi
+done
+[ -n "$UNMARKED" ] && BAD=$(printf '%s\n%s' "$BAD" "$(printf '%s\n' "$UNMARKED" | sed 's/^/UNASKED NOTIFICATION (#995): /')" | sed '/^$/d')
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -749,9 +758,9 @@ must_report "bootstrap: stage-2: waiting for 'disk0a'" "bootstrap: stage-2: 'dis
 # bootstrap did not say: one its service thread never took, one taken another
 # way than the fix's, or one it took for a notice it did not make.  And the
 # self-test's line itself, once bootstrap loads a server, which it does after
-# it: without it the nine pairs open on nothing, and ask nothing.
+# it: without it the pairs on its notices open on nothing, and ask nothing.
 must_report 'bootstrap: loading [^0-9]' 'bootstrap: making the four notifications it does not ask for' \
-	'Bootstrap loaded a server and never said it made the four notifications it does not ask for: its self-test did not run, and the nine pairs on its notices asked nothing (#995).' \
+	'Bootstrap loaded a server and never said it made the four notifications it does not ask for: its self-test did not run, and the pairs on its notices asked nothing (#995).' \
 	'bootstrap'"'"'s self-test of notifications'
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a send-once notification from its self-test, on its servers. notification port: said, and bootstrap goes on' \
 	'Bootstrap let a send-once right to its notification port go unused and never said the notice it brings as its self-test'"'"'s (#995).' \
@@ -797,16 +806,13 @@ must_report 'bootstrap: making the four notifications it does not ask for' 'boot
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: the self-test.s control:' \
 	'Bootstrap'"'"'s self-test never made its control, the notice it does not owe, whose unmarked line shows the mark is not said of every notice (#995).' \
 	'bootstrap'"'"'s control'
-must_report 'bootstrap: the self-test.s control:' 'bootstrap: a port-deleted notification for 0x[0-9a-f]*, on its trusted notification port: said, and bootstrap goes on' \
-	'Bootstrap'"'"'s control, a port-deleted notice its self-test does not owe, was never said unmarked: the mark is said of a notice nobody owed, which would hide an unexpected one (#995).' \
-	'bootstrap'"'"'s control said unmarked'
 # #995: and the name server, which asks for dead names alone, makes the four
 # others on its notification port as it starts, and a dead-name notice for a
 # port it does not watch, and says each as its self-test's: each of the four
 # panicked it, and the fifth read a record that was not there.  Its line is
 # asked once bootstrap loads a server, as bootstrap's is.
 must_report 'bootstrap: loading [^0-9]' 'name_server: making the four notifications it does not ask for' \
-	'Bootstrap loaded a server and the name server never said it made the notifications it does not ask for: its self-test did not run, and the five pairs on its notices asked nothing (#995).' \
+	'Bootstrap loaded a server and the name server never said it made the notifications it does not ask for: its self-test did not run, and the pairs on its notices asked nothing (#995).' \
 	'the name server'"'"'s self-test of notifications'
 must_report 'name_server: making the four notifications it does not ask for' 'name_server: a send-once notification from its self-test, on its notification port: said, and the name server goes on' \
 	'The name server let a send-once right to its notification port go unused and never said the notice it brings as its self-test'"'"'s (#995).' \
@@ -829,9 +835,6 @@ must_report 'name_server: making the four notifications it does not ask for' 'na
 must_report 'name_server: making the four notifications it does not ask for' 'name_server: the self-test.s control:' \
 	'The name server'"'"'s self-test never made its control, the notice it does not owe (#995).' \
 	'the name server'"'"'s control'
-must_report 'name_server: the self-test.s control:' 'name_server: a port-deleted notification for 0x[0-9a-f]*, on its notification port: said, and the name server goes on' \
-	'The name server'"'"'s control, a port-deleted notice its self-test does not owe, was never said unmarked: the mark is said of a notice nobody owed (#995).' \
-	'the name server'"'"'s control said unmarked'
 
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
 # with no flag, with -D and with -H -D.  The start is said through mach_print,
