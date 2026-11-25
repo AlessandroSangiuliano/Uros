@@ -1783,7 +1783,7 @@ parse_config_file(char *conf, size_t size)
 	    /*
 	     * #995: bootstrap_notify_dead_name() compares it for every server,
 	     * started or not, and the self-test's dead-name notice on the
-	     * servers' port meets it before the most of them are: malloc() gave
+	     * servers' port meets it before most of them are: malloc() gave
 	     * garbage (the fourth review round of 24/11).  Null until the task
 	     * is made, so no request naming a task finds a server by it before
 	     * (do_bootstrap_arguments(), do_bootstrap_completed()).
