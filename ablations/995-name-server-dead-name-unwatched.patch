@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #995
+Takes out: the name server's look for a record before it takes a dead name for a watched port's: remove_port() reads the record it did not find, at address 0, for a name it does not watch.  ns_notify_selftest() makes such a notice as the name server starts, and the name server dies of the fault, which bootstrap says.
+Run: --entry 14 600 -smp 4
+Expect: bootstrap: '[^']*name_server' task terminated
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -992,7 +992,7 @@
+      * the record it did not find.  The notice's reference is let go, and it
+      * is said.
+      */
+-    if (!port_watched(name)) {
++    if (0 && !port_watched(name)) {
+ 	printf("%s: a dead-name notification%s for 0x%x, on its notification "
+ 	       "port, which no port it watches has: said, and the name server "
+ 	       "goes on (#995)\n", program,

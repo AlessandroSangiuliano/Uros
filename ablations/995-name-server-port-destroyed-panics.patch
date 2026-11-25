@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #995
+Takes out: the name server going on after a port-destroyed notification on its notification port: it panics again, as before #995, and every look-up with it.  ns_notify_selftest() makes one as the name server starts.
+Run: --entry 14 600 -smp 4
+Expect: name_server: do_mach_notify_port_destroyed
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -942,6 +942,7 @@
+ kern_return_t
+ do_mach_notify_port_destroyed(mach_port_t notify, mach_port_t port)
+ {
++    panic("%s: do_mach_notify_port_destroyed\n", program);
+     printf("%s: a port-destroyed notification%s: the right 0x%x it brings, "
+ 	   "none it asked for, is refused and destroyed with its message; the "
+ 	   "name server goes on (#995)\n", program,
