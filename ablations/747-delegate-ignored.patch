@@ -6,17 +6,16 @@ Run: --entry 14 600 -smp 4
 Expect: cap_test: \[53\] WRONG
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
-index 5e14484a..c1e38330 100644
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -657,8 +657,8 @@ cap_derive_for(mach_port_t             server,
-                "(kr=%d) (#747)\n", (unsigned)delegate, (int)kr);
-         return CAP_ERR_NO_DELEGATE;
-     }
+@@ -733,8 +733,8 @@
+         w = cap_watch_get(delegate, id, 0);
+     if (w == NULL)
+         return CAP_ERR_NO_MEMORY;
 -    kr = cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms, id,
--                       child_buf, child_len);
+-                       w, child_buf, child_len);
 +    kr = cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms,
-+                       g_request_sender, child_buf, child_len);
++                       g_request_sender, w, child_buf, child_len);
      if (kr == KERN_SUCCESS)
          (void)mach_port_deallocate(mach_task_self(), delegate);
-     return kr;
+     else

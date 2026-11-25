@@ -7,10 +7,9 @@ Expect: irq_claim_test: \[21\] WRONG
 Expect: cap_test: \[54\] WRONG
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
-index 258c0388..4208f14d 100644
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -1045,7 +1045,6 @@ cap_expiry_sweep(void)
+@@ -1105,7 +1105,6 @@
      struct cap_entry *e;
      uint64_t          now, next = 0, *gone = NULL, *more;
      size_t            ngone = 0, room = 0, i;
@@ -18,20 +17,20 @@ index 258c0388..4208f14d 100644
  
      if (!cap_now_ns(&now)) {
          printf("cap: the capability clock could not be read, so no deadline "
-@@ -1060,16 +1059,6 @@ cap_expiry_sweep(void)
+@@ -1119,16 +1118,6 @@
+             if (next == 0 || e->token.expires < next)
                  next = e->token.expires;
              continue;
-         }
+-        }
 -        if (!e->token.revoked && e->token.expires != 0) {
 -            /* A refusal by the kernel is said by cap_revoke_tree(). */
--            (void)cap_revoke_tree(e, &n);
+-            (void)cap_revoke_tree(e, 0, &n);
 -            printf("cap: cap %llu reached its deadline %llu ms ago and was "
 -                   "revoked, %d cap(s) with its tree (#747)\n",
 -                   (unsigned long long)e->token.cap_id,
 -                   (unsigned long long)((now - e->token.expires) / 1000000ULL),
 -                   n);
 -            cap_revoke_tell(e, n);
--        }
+         }
          if (!e->token.revoked)
              continue;
-         if (ngone == room) {
