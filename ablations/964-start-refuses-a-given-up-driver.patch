@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #964
 Takes out: start_driver() of a driver the HAL gave up: it starts a stopped driver alone.  chora_test [18]'s start of crash_probe, given up, is refused.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[18\] WRONG -- crash_probe, given up after 5 start\(s\), started through the HAL \(5\)
+Expect: chora_test: \[18\] WRONG -- crash_probe, given up after 5 start\(s\), started through the HAL \(5\): the start refused, now state 3, after 5;
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
 --- a/uros/src/servers/hal_server/hal_modules.c

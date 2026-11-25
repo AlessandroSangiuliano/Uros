@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: the update of a driver the HAL gave up: hal_driver_update() refuses it, KERN_FAILURE, as if a driver could be updated only while it runs, ends or is stopped.  chora_test [18] reads the given-up crash_probe started and given up again, and its update refused (the seventh review round of 24/11: no Expect read that label).
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[18\] WRONG -- crash_probe, given up after 5 start\(s\), started through the HAL \(0\): given up again, state 3, after 10; the update refused \(5\): state 3 after 10
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -923,6 +923,8 @@
+ 	if (r == NULL)
+ 		return KERN_INVALID_ARGUMENT;
+ 	record_where(r, where, sizeof where);
++	if (r->state == HAL_DRIVER_GAVE_UP)
++		return KERN_FAILURE;
+ 	if (!module_name_ok(name, sizeof r->file)) {
+ 		printf("hal: \"%.64s\", given to update the driver of %s: its "
+ 		       "name is empty, or not letters, digits and _, or longer "
