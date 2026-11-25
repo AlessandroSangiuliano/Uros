@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #983
+Takes out: the difference between a port given up and a death -- a slot's no-senders ends what was asked on it while its task lives; cap_test's [59] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[59\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1717,7 +1717,7 @@
+     if (MACH_PORT_VALID(task))
+         (void)mach_port_deallocate(mach_task_self(), task);
+     if (w != NULL)
+-        cap_watch_drop(w->id);			/* #983: the slot's */
++        cap_watch_fire(w);
+     printf("cap: cap_port=0x%x has no senders — its slot and its task's "
+            "port are given back (#743)\n", (unsigned)port);
+ }
