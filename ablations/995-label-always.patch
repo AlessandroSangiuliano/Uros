@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #995
+Takes out: the owing of the self-test's notices: bootstrap's handlers say every notice from the self-test, owed or not, so that an unexpected one would pass for the self-test's.  The control, the notice the self-test does not owe, is said marked, and the harness says so.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 4
+Expect: FAILED: 'bootstrap: the self-test.s control:' appeared and 'bootstrap: a port-deleted notification for 0x\[0-9a-f\]\*, on its trusted notification port: said, and bootstrap goes on' never did\.
+
+diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
+--- a/uros/src/servers/bootstrap/service.c
++++ b/uros/src/servers/bootstrap/service.c
+@@ -433,7 +433,7 @@
+ {
+     int *slot = selftest_slot(notify, kind);
+ 
+-    return slot != NULL && __atomic_exchange_n(slot, 0, __ATOMIC_ACQ_REL) ?
++    return (slot != NULL && __atomic_exchange_n(slot, 0, __ATOMIC_ACQ_REL)) | 1 ?
+ 	   " from its self-test" : "";
+ }
+ 

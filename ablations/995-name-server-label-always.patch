@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #995
+Takes out: the owing of the name server's self-test notices: every notice is said from the self-test, owed or not.  Its control is said marked, and the harness says so.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 4
+Expect: FAILED: 'name_server: the self-test.s control:' appeared and 'name_server: a port-deleted notification for 0x\[0-9a-f\]\*, on its notification port: said, and the name server goes on' never did\.
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -797,8 +797,8 @@
+ static const char *
+ ns_selftest_paid(mach_port_t notify, int kind)
+ {
+-    return notify == notify_port &&
+-	   __atomic_exchange_n(&ns_selftest_owed[kind], 0, __ATOMIC_ACQ_REL) ?
++    return (notify == notify_port &&
++	   __atomic_exchange_n(&ns_selftest_owed[kind], 0, __ATOMIC_ACQ_REL)) | 1 ?
+ 	   " from its self-test" : "";
+ }
+ 

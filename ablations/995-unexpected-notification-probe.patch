@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #995
+Takes out: nothing -- a probe: bootstrap makes, on each of its two ports, one send-once notice its self-test does not owe nor announce, as an unexpected notification would come; its lines are said unmarked, more than the controls, and the harness must fail the boot as unexplained, which before the third review round of 24/11 it did not.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 4
+Expect: UNASKED NOTIFICATION \(#995\): bootstrap: a send-once notification, on its (servers.|trusted) notification port: said
+
+diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
+--- a/uros/src/servers/bootstrap/service.c
++++ b/uros/src/servers/bootstrap/service.c
+@@ -556,6 +556,10 @@
+ 	kr = mach_port_deallocate(me, so);
+     if (kr != KERN_SUCCESS)
+ 	notify_selftest_said(notify, SELFTEST_SEND_ONCE, "send-once", kr);
++    so = MACH_PORT_NULL;
++    if (mach_port_extract_right(me, notify, MACH_MSG_TYPE_MAKE_SEND_ONCE,
++				&so, &type) == KERN_SUCCESS)
++	(void)mach_port_deallocate(me, so);
+ 
+     /* port-deleted, and on the trusted port the control after it */
+     notify_selftest_port_deleted(notify, 1, "port-deleted", NULL);
