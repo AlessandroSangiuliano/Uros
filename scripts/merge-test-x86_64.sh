@@ -636,7 +636,7 @@ chora_dma() {	# entry full-log
 }
 
 judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
-	local e=$1 v=$2 h=$3 f=$4 a=$5 n=${6:-} out dma
+	local e=$1 v=$2 h=$3 f=$4 a=$5 n=${6:-} out dma unasked
 	NOTE=""
 	case $v in
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
@@ -880,7 +880,12 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# reach is then declared as, and a buffer within 20 refused (chora_dma).
 	# #964: and --testdev, QEMU's pci-testdev, whose module crash_probe dies
 	# at its start every time: chora_test's [9] counts the HAL's starts of
-	# it up to its limit, and is in chora_test's count.
+	# it up to its limit, and is in chora_test's count.  And the arms of
+	# chora_test that said NOT ASKED -- every arm says a line, one the arms
+	# before it ended before among them -- are named first in the note, so
+	# that the boot is counted among the not asked: its count of N of M says
+	# only the arms asked, and the harness passes a NOT ASKED (the review of
+	# 24/11, where the update's arms could go and nothing here said so).
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
@@ -893,7 +898,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		dma=$(chora_dma "$e" "$f") &&
 		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		mod=$(grep -aoE 'modload_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
-		[ -n "$out" ] && [ -n "$mod" ] && NOTE="$out; $mod; DMA round trip at device address $dma" ;;
+		[ -n "$out" ] && [ -n "$mod" ] && NOTE="$out; $mod; DMA round trip at device address $dma" &&
+		unasked=$(grep -aoE 'chora_test: \[[0-9]+\] NOT ASKED' "$f" | grep -oE '\[[0-9]+\]' | tr '\n' ' ') &&
+		{ [ -z "$unasked" ] || NOTE="NOT ASKED by chora_test ${unasked% }: $NOTE"; } ;;
 	esac
 }
 

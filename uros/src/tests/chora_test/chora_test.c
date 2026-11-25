@@ -78,6 +78,9 @@
  *       new module without a second start: one start more, still one 3 s
  *       on, edu_next answers on its control port, and the HAL names it.
  *
+ * Every arm says one line: an arm the arms before it ended before is said
+ * NOT ASKED at the end, so that none is gone from the log without a word.
+ *
  * chora's own lines -- the claim, the region, the interrupt, the second
  * one's refusal -- and the kernel's line naming both tasks are the merge
  * test's to read.  The HAL's choras drive their devices for as long as they
@@ -129,13 +132,15 @@ mach_port_t	master_device;
 #define CT_SATA_CLASS	0x010601u	/* a class the manifest does not name */
 #define CT_ADMIN_ALL	(CAP_OP_DRIVER_STOP | CAP_OP_DRIVER_START | \
 			 CAP_OP_DRIVER_UPDATE)
+#define CT_ARMS		16		/* [1] to [16], each saying one line */
 
 #define CT_BUS(b)	((unsigned)((b) >> 8))
 #define CT_SLOT(b)	((unsigned)(((b) >> 3) & 0x1F))
 #define CT_FUNC(b)	((unsigned)((b) & 0x7))
 
-static int	arms_run;
-static int	arms_passed;
+static int		arms_run;
+static int		arms_passed;
+static unsigned char	said[CT_ARMS + 1];	/* the arms that said a line */
 
 /* The card [1] found, for [10] to [12]. */
 static natural_t	card_bdf;
@@ -165,6 +170,8 @@ verdict(int arm, int ok, const char *fmt, ...)
 	(void)vsnprintf(text, sizeof text, fmt, ap);
 	va_end(ap);
 	arms_run++;
+	if (arm >= 1 && arm <= CT_ARMS)
+		said[arm] = 1;
 	(void)snprintf(head, sizeof head, "chora_test: [%d] %s", arm,
 		       ok ? "" : "WRONG -- ");
 	len = strlen(head) + strlen(text);
@@ -183,7 +190,26 @@ verdict(int arm, int ok, const char *fmt, ...)
 static void
 not_asked(int arm, const char *why)
 {
+	if (arm >= 1 && arm <= CT_ARMS)
+		said[arm] = 1;
 	printf("chora_test: [%d] NOT ASKED -- %s\n", arm, why);
+}
+
+/*
+ * #964: every arm says one line.  One the arms before it ended before -- [3]
+ * after a [2] with no "/", [13] after a [12] whose stop was refused -- is said
+ * here, NOT ASKED, so that no arm is gone from the log without a word, and
+ * the merge test, which reads chora_test's NOT ASKED, sees it (the review of
+ * 24/11: the update's arms could go and nothing said so).
+ */
+static void
+the_arms_not_reached(void)
+{
+	int	arm;
+
+	for (arm = 1; arm <= CT_ARMS; arm++)
+		if (!said[arm])
+			not_asked(arm, "not reached: an arm before it ended");
 }
 
 static void
@@ -535,7 +561,10 @@ ended(mach_port_t task)
 	       != KERN_SUCCESS;
 }
 
-/* The four arms, in order; each that cannot go on says so and ends them. */
+/*
+ * [1] to [8], in order; one that cannot go on says so and ends them, and
+ * the_arms_not_reached() says the rest.
+ */
 static void
 run_the_arms(void)
 {
@@ -1259,6 +1288,7 @@ main(void)
 	the_refusal_arm();
 	the_stop_arm();
 	the_update_arm();
+	the_arms_not_reached();
 	printf("chora_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
 }
