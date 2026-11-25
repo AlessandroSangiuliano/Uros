@@ -1,17 +1,17 @@
 Kind: ablation
 Issue: #995
-Takes out: bootstrap going on after a no-senders notification on its own notification ports: it panics again, as before #995, and the system with it.  notify_selftest() makes one as bootstrap starts.
+Takes out: bootstrap going on after a no-senders notification on its own notification ports: it panics again, as before #995, and the system with it.  notify_selftest() makes one on each of them as bootstrap starts.
 Run: --entry 14 600 -smp 4
 Expect: bootstrap: do_mach_notify_no_senders
 
 diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
 --- a/uros/src/servers/bootstrap/service.c
 +++ b/uros/src/servers/bootstrap/service.c
-@@ -628,6 +628,7 @@
+@@ -711,6 +711,7 @@
      if (notify == untrusted_notify_port)
  	return KERN_FAILURE;
  
 +    panic("%s: do_mach_notify_no_senders\n", program_name);
      BOOTSTRAP_IO_LOCK();
-     printf("%s: a no-senders notification, make-send count %u, on %s: "
+     printf("%s: a no-senders notification%s, make-send count %u, on %s: "
  	   "said, and bootstrap goes on (#995)\n", program_name,
