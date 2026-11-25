@@ -1575,16 +1575,21 @@ the_crash_restart_arm(void)
 					       &starts2);
 		else
 			driver_state(hal, b, &state2, &starts2);
-	}
+	} else
+		driver_state(hal, b, &state2, &starts2);
 	drop(&crash, &crash_len);
+	/* What was done is said as done, and what was not as not (#964). */
 	verdict(18, k_start == KERN_SUCCESS && state1 == HAL_DRIVER_GAVE_UP &&
 		starts1 == starts0 + HAL_CHORA_STARTS_MAX &&
 		k_upd == KERN_SUCCESS && state2 == HAL_DRIVER_GAVE_UP &&
 		starts2 == starts1 + HAL_CHORA_STARTS_MAX, "crash_probe, given "
-		"up after %d start(s), started through the HAL (%d): given up "
-		"again, state %d, after %d; updated with its own module (%d): "
-		"state %d after %d (given up is %d, %d starts a row)", starts0,
-		k_start, state1, starts1, k_upd, state2, starts2,
+		"up after %d start(s), started through the HAL (%d): %s state "
+		"%d, after %d; %s (%d): state %d after %d (given up is %d, %d "
+		"starts a row)", starts0, k_start, k_start == KERN_SUCCESS ?
+		"given up again," : "the start refused, now", state1, starts1,
+		state1 != HAL_DRIVER_GAVE_UP ? "not updated, not given up" :
+		k_upd == KERN_SUCCESS ? "updated with its own module" :
+		"the update refused", k_upd, state2, starts2,
 		HAL_DRIVER_GAVE_UP, HAL_CHORA_STARTS_MAX);
 	(void)mach_port_deallocate(mach_task_self(), hal);
 }
