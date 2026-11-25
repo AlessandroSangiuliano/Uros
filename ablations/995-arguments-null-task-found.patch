@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #995
+Takes out: do_bootstrap_arguments()'s refusal of a task port that is not valid, which it did not have before 2946057a: a request naming no task finds the first server not yet made, whose task port is null, and is given its arguments.  bootstrap's own question, before any server is made, reads them given, 0x0, and says WRONG (the sixth review round of 24/11: the guard had no test).
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 4
+Expect: bootstrap: a request naming no task, before any server is made: its arguments 0x0, its completion 0x4, where 0x4 refuses -- WRONG
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -2266,13 +2266,6 @@
+ 	int i;
+ 	struct server *sp;
+ 
+-	/*
+-	 * #995: no task is no server's: a server not yet made has a null task
+-	 * port (parse_config_file()), which a request naming no task would
+-	 * otherwise find (the fifth review round of 24/11).
+-	 */
+-	if (!MACH_PORT_VALID(task_port))
+-	    return KERN_INVALID_ARGUMENT;
+ 	for (i = 0, sp = servers; i < nservers; i++, sp++) {
+ 	    if (task_port == sp->task_port)
+ 		break;
