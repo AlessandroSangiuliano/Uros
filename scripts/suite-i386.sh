@@ -130,7 +130,7 @@ PAIRS=(
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: its reference let go (0x0), the name gone, and bootstrap goes on'
 	# #995: and what the third review round of 24/11 asked: each port-destroyed
 	# refusal's right destroyed, the dead name no server's task has, and the
-	# control said unmarked.
+	# control announced, whose unmarked line judge_bundle asks for by its name.
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port, which no server.s task has: its reference let go (0x0), the name gone, and bootstrap goes on'
@@ -260,7 +260,7 @@ over() {
 }
 
 judge_bundle() {	# judge_bundle LOG CUT -> prints the reasons; status 0 = passed
-	local log=$1 cut=$2 bad=0 m disks unmarked who ctl said
+	local log=$1 cut=$2 bad=0 m disks unmarked who ann ctl said
 	# #591: every disk controller on the board must have attached, as
 	# run-x86_64.sh asks; run-qemu.sh records the board in the conditions.
 	# First, so that a boot cut short for want of a disk names the disk.
@@ -270,14 +270,20 @@ judge_bundle() {	# judge_bundle LOG CUT -> prints the reasons; status 0 = passed
 	clean "$log" | grep -aE "$FAIL_RE" | head -8 | sed 's/^/    unexplained: /' | grep . && bad=1
 	# #995: a notification bootstrap or the name server did not make, said
 	# unmarked, is unexplained, but each self-test's control, said unmarked
-	# under the name it announces, as run-x86_64.sh asks.
+	# once under the name it announces, as run-x86_64.sh asks.
 	unmarked=$(clean "$log" | grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' || true)
 	for who in bootstrap name_server; do
-		ctl=$(clean "$log" | grep -a "$who: the self-test's control: a port-deleted notification for 0x[0-9a-f]*," | head -n 1 | sed -n 's/.* for \(0x[0-9a-f]*\),.*/\1/p')
-		[ -n "$ctl" ] || continue
-		said=$(printf '%s\n' "$unmarked" | grep -F "$who: a port-deleted notification for $ctl," | head -n 1)
+		ann=$(clean "$log" | grep -a "$who: the self-test's control:" | head -n 1)
+		[ -n "$ann" ] || continue
+		ctl=$(printf '%s\n' "$ann" | sed -n 's/.*: the self-test.s control: a port-deleted notification for \(0x[0-9a-f]*\),.*/\1/p')
+		if [ -z "$ctl" ]; then
+			echo "    $who's control was announced, and its name could not be read off its announcement (#995): $ann"
+			bad=1
+			continue
+		fi
+		said=$(printf '%s\n' "$unmarked" | grep -nF "$who: a port-deleted notification for $ctl," | head -n 1 | cut -d: -f1)
 		if [ -n "$said" ]; then
-			unmarked=$(printf '%s\n' "$unmarked" | grep -vxF -- "$said" || true)
+			unmarked=$(printf '%s\n' "$unmarked" | sed "${said}d" | sed '/^$/d')
 		else
 			echo "    $who's control, the port-deleted notification for $ctl it does not owe, was not said unmarked under its name (#995)"
 			bad=1

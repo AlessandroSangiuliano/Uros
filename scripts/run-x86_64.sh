@@ -313,16 +313,26 @@ fi
 # cancelled on a server's task port leaves bootstrap deaf to that death (the
 # third review round of 24/11).  Each self-test's control, a port-deleted
 # notice it does not owe, announced by its name, must be said unmarked under
-# that name, and is the one unmarked line explained: the mark said of it would
+# that name, and that one line, once, is explained: the mark said of it would
 # be the mark said of a notice nobody owed, and a swap of the control's mark
-# with the owed notice's, under their names, is read (the fourth round).
+# with the owed notice's, under their names, is read (the fourth round).  A
+# second line the same as the control's stays, unexplained; an announcement
+# whose name cannot be read is said; and the control read is said on a pass
+# (the fifth round).
+CONTROLS_READ=""
 UNMARKED=$(grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' "$LOG" || true)
 for who in bootstrap name_server; do
-	ctl=$(grep -a "$who: the self-test's control: a port-deleted notification for 0x[0-9a-f]*," "$LOG" | head -n 1 | sed -n 's/.* for \(0x[0-9a-f]*\),.*/\1/p')
-	[ -n "$ctl" ] || continue
-	said=$(printf '%s\n' "$UNMARKED" | grep -F "$who: a port-deleted notification for $ctl," | head -n 1)
+	ann=$(grep -a "$who: the self-test's control:" "$LOG" | head -n 1)
+	[ -n "$ann" ] || continue
+	ctl=$(printf '%s\n' "$ann" | sed -n 's/.*: the self-test.s control: a port-deleted notification for \(0x[0-9a-f]*\),.*/\1/p')
+	if [ -z "$ctl" ]; then
+		BAD=$(printf '%s\n%s' "$BAD" "CONTROL (#995): $who's control was announced, and its name could not be read off its announcement: $ann" | sed '/^$/d')
+		continue
+	fi
+	said=$(printf '%s\n' "$UNMARKED" | grep -nF "$who: a port-deleted notification for $ctl," | head -n 1 | cut -d: -f1)
 	if [ -n "$said" ]; then
-		UNMARKED=$(printf '%s\n' "$UNMARKED" | grep -vxF -- "$said" || true)
+		UNMARKED=$(printf '%s\n' "$UNMARKED" | sed "${said}d" | sed '/^$/d')
+		CONTROLS_READ="$CONTROLS_READ${CONTROLS_READ:+; }$who's control $ctl said unmarked under its name"
 	else
 		BAD=$(printf '%s\n%s' "$BAD" "CONTROL (#995): $who's control, the port-deleted notification for $ctl it does not owe, was not said unmarked under its name" | sed '/^$/d')
 	fi
@@ -793,7 +803,8 @@ must_report 'bootstrap: making the four notifications it does not ask for' 'boot
 # refusal, read: a send-once right to the port its notice brings, kept under
 # a dead-name request, whose notice comes once the server loop has destroyed
 # the right; the dead name no server's task has, on the servers' port; and
-# the self-test's control, a notice it does not owe, said unmarked.
+# the self-test's control, a notice it does not owe, announced: its unmarked
+# line is asked by its name with the unexplained lines, above.
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on' \
 	'Bootstrap refused a port-destroyed notice on its servers'"'"' notification port, and the port it brought never died: the right was kept, not destroyed with the message (#995).' \
 	'bootstrap destroying the right a port-destroyed notice brings, servers'"'"' port'
@@ -835,6 +846,8 @@ must_report 'name_server: making the four notifications it does not ask for' 'na
 must_report 'name_server: making the four notifications it does not ask for' 'name_server: the self-test.s control:' \
 	'The name server'"'"'s self-test never made its control, the notice it does not owe (#995).' \
 	'the name server'"'"'s control'
+# #995: and the controls read, said on a pass, which reads their names (#507).
+[ -n "$CONTROLS_READ" ] && echo "  $CONTROLS_READ"
 
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
 # with no flag, with -D and with -H -D.  The start is said through mach_print,
