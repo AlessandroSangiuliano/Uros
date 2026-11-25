@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #995
+Takes out: one of the two references the name server's port-destroyed watch's death leaves: it keeps the watch's own, a dead name for good, and its line says the name kept.
+Run: --entry 14 600 -smp 4
+Expect: name_server: a dead-name notification from its self-test for 0x[0-9a-f]+: the port its port-destroyed notice brought is destroyed; its references let go \(0x0\), the name kept, 1 reference\(s\) left
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -1078,7 +1078,7 @@
+ 	char left[48];
+ 
+ 	kr = mach_port_mod_refs(mach_task_self(), name,
+-				MACH_PORT_RIGHT_DEAD_NAME, -2);
++				MACH_PORT_RIGHT_DEAD_NAME, -1);
+ 	kg = mach_port_get_refs(mach_task_self(), name,
+ 				MACH_PORT_RIGHT_DEAD_NAME, &refs);
+ 	if (kg == KERN_INVALID_NAME)

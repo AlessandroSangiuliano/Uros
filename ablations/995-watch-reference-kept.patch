@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #995
+Takes out: one of the two references a port-destroyed watch's death leaves: bootstrap lets go of the notice's and keeps the watch's own, a dead name for good.  Its line, which reads the name after the release, says it kept, where the fixed tree's says it gone (the fourth review round of 24/11: no ablation had read this half).
+Run: --entry 14 600 -smp 4
+Expect: bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]+, on its (servers.|trusted) notification port: the port its port-destroyed notice brought is destroyed; its references let go \(0x0\), the name kept, 1 reference\(s\) left
+
+diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
+--- a/uros/src/servers/bootstrap/service.c
++++ b/uros/src/servers/bootstrap/service.c
+@@ -912,7 +912,7 @@
+     kern_return_t kr;
+ 
+     kr = mach_port_mod_refs(mach_task_self(), name, MACH_PORT_RIGHT_DEAD_NAME,
+-			    -2);
++			    -1);
+     dead_name_left(name, left, sizeof left);
+     BOOTSTRAP_IO_LOCK();
+     printf("%s: a dead-name notification from its self-test for 0x%x, on %s: "

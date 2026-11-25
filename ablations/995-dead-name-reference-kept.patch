@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #995
-Takes out: the release of the notice's reference, for a dead name no service port has: bootstrap says the notice and keeps the name.  notify_selftest() makes such a notice as bootstrap starts, and its line reads the name kept, with the reference the notice brought.
+Takes out: the release of the notice's reference, for a dead name no port of bootstrap's has, on either of its ports: bootstrap says the notice and keeps the name.  notify_selftest() makes such a notice as bootstrap starts, and its line reads the name kept, with the reference the notice brought.
 Run: --entry 14 600 -smp 4
 Expect: bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]+, on its trusted notification port, which no service port has: its reference let go \(0x0\), the name kept, 1 reference\(s\) left
 
