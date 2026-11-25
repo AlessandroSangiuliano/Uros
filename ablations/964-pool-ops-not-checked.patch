@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: the look for a pool's module's operations as the HAL reads it: module_unrunnable() asks the name alone.  The disk's host_bridge_wrong_ops, whose operations are under another name than its own, declares the host bridge, and the HAL starts it there: its chora dies at each start until the HAL gives up.  Before the third review round of 24/11 no module of a pool was refused for its operations, and this passed.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: hal: 00:00\.0 8086:(1237|29c0) class 060000: misc/host_bridge_wrong_ops\.so, on the disk, declares it
+Note: the harness's pair "the HAL refusing a module of a pool for its operations" fails too.
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -897,7 +897,7 @@
+ 	if (!module_name_ok(name, MODULE_NAME_MAX))
+ 		return "its name is not letters, digits and _, or is longer "
+ 		       "than a driver's task name has room for";
+-	if (!module_has_ops(data, size, name))
++	if (0 && !module_has_ops(data, size, name))
+ 		return "it defines no operations under its name";
+ 	return NULL;
+ }

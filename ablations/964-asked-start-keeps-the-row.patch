@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #964
+Takes out: the new row a start asked for begins: chora_start_asked() keeps the count of quick deaths the driver had.  chora_test [18]'s start of crash_probe, given up after five, is given up again after one more start, at six.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[18\] WRONG -- crash_probe, given up after 5 start\(s\), started through the HAL \(0\): given up again, state 3, after 6;
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -577,7 +577,6 @@
+ 	char	where[16];
+ 
+ 	record_where(r, where, sizeof where);
+-	r->quick = 0;
+ 	r->ticket++;			/* a delay still to come no longer counts */
+ 	r->state = HAL_DRIVER_RESTARTING;
+ 	if (chora_launch(r) == 0)

@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: the refusal of a name with a NUL among its bytes: update_driver() reads it as far as the NUL, and chora_test [17]'s "edu\0next" is taken as "edu", which the bytes have no operations for: refused for the operations, not for the name.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[17\] WRONG -- .*with a NUL among its bytes 18,
+
+diff --git a/uros/src/servers/hal_server/hal_mig.c b/uros/src/servers/hal_server/hal_mig.c
+--- a/uros/src/servers/hal_server/hal_mig.c
++++ b/uros/src/servers/hal_server/hal_mig.c
+@@ -461,7 +461,7 @@
+ 	 */
+ 	for (i = 0; i < nameCnt && name[i] != '\0'; i++)
+ 		continue;
+-	if (i < nameCnt) {
++	if (0 && i < nameCnt) {
+ 		printf("hal: a name with a NUL among its %u bytes, given to update "
+ 		       "the driver of %02x:%02x.%x, is no module's: refused "
+ 		       "(#964)\n", (unsigned)nameCnt, bus, slot, func);

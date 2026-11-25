@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #964
-Takes out: the module an update gives a stopped driver: update_driver() answers a stopped driver's update as taken and keeps neither its bytes nor its name, so that the driver's start brings back the module it had.  chora_test [16] gives edu's stopped driver edu_probe, and at its start edu_probe does not answer: the HAL starts edu_next again.  Before the review of 24/11, the stopped card was given the module it had, and this passed.
+Takes out: the module an update gives a stopped driver: update_driver() answers a stopped driver's update as taken and keeps neither its bytes nor its name, so that the driver's start brings back the module it had.  chora_test [16] gives edu's stopped driver edu_again, and at its start nothing answers as edu_again: the HAL starts edu_next again.  Before the review of 24/11, the stopped card was given the module it had, and this passed.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[16\] WRONG -- .*started \(0\): state 1, [0-9]+ start\(s\), NO ANSWER from edu_probe
+Expect: chora_test: \[16\] WRONG -- .*started \(0\): state 1, [0-9]+ start\(s\), nothing answers as "edu_again@
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
 --- a/uros/src/servers/hal_server/hal_modules.c
