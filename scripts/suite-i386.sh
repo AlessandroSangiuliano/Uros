@@ -127,14 +127,14 @@ PAIRS=(
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-deleted notification from its self-test for 0x[0-9a-f]*, on its trusted notification port: said, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a no-senders notification from its self-test, make-send count [0-9]*, on its trusted notification port: said, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-destroyed notification from its self-test, on its trusted notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on'
-	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: said, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: its reference let go (0x0), the name gone, and bootstrap goes on'
 	# #995: and the name server's, on its notification port, the four and a
 	# dead-name notice for a port it does not watch.
 	'name_server: making the four notifications it does not ask for'	'name_server: a send-once notification from its self-test, on its notification port: said, and the name server goes on'
 	'name_server: making the four notifications it does not ask for'	'name_server: a port-deleted notification from its self-test for 0x[0-9a-f]*, on its notification port: said, and the name server goes on'
 	'name_server: making the four notifications it does not ask for'	'name_server: a no-senders notification from its self-test, make-send count [0-9]*, on its notification port: said, and the name server goes on'
 	'name_server: making the four notifications it does not ask for'	'name_server: a port-destroyed notification from its self-test: the right 0x[0-9a-f]* it brings, none it asked for, is refused and destroyed with its message; the name server goes on'
-	'name_server: making the four notifications it does not ask for'	'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*, on its notification port, which no port it watches has: said, and the name server goes on'
+	'name_server: making the four notifications it does not ask for'	'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*, which no port it watches has: its reference let go (0x0), the name gone, and the name server goes on'
 	'=== kernel242_test ('		'=== kernel242_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'=== sig_test ('			'=== sig_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'fperr_test: x87 arm starting'	'fperr_test: x87 arm \(PASS\|SKIPPED\|FAIL\)'

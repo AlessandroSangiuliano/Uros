@@ -993,12 +993,28 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
      * is said.
      */
     if (!port_watched(name)) {
-	printf("%s: a dead-name notification%s for 0x%x, on its notification "
-	       "port, which no port it watches has: said, and the name server "
-	       "goes on (#995)\n", program,
-	       ns_selftest_paid(notify, NS_SELFTEST_DEAD_NAME), (unsigned)name);
-	(void)mach_port_mod_refs(mach_task_self(), name,
-				 MACH_PORT_RIGHT_DEAD_NAME, -1);
+	mach_port_urefs_t refs = 0;
+	kern_return_t kr, kg;
+	char left[48];
+
+	/* The release, and what it left, read (the review of 24/11). */
+	kr = mach_port_mod_refs(mach_task_self(), name,
+				MACH_PORT_RIGHT_DEAD_NAME, -1);
+	kg = mach_port_get_refs(mach_task_self(), name,
+				MACH_PORT_RIGHT_DEAD_NAME, &refs);
+	if (kg == KERN_INVALID_NAME)
+	    (void)snprintf(left, sizeof left, "the name gone");
+	else if (kg == KERN_SUCCESS)
+	    (void)snprintf(left, sizeof left,
+			   "the name kept, %u reference(s) left",
+			   (unsigned)refs);
+	else
+	    (void)snprintf(left, sizeof left, "the name not asked (0x%x)", kg);
+	printf("%s: a dead-name notification%s for 0x%x, which no port it "
+	       "watches has: its reference let go (0x%x), %s, and the name "
+	       "server goes on (#995)\n", program,
+	       ns_selftest_paid(notify, NS_SELFTEST_DEAD_NAME), (unsigned)name,
+	       kr, left);
 	return KERN_SUCCESS;
     }
 

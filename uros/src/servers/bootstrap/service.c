@@ -774,6 +774,27 @@ do_mach_notify_send_once(mach_port_t notify)
     return KERN_SUCCESS;
 }
 
+/*
+ * #995: what a dead name has left once a reference of it is let go, said in
+ * `out': gone, or the references it keeps.
+ */
+static void
+dead_name_left(mach_port_t name, char *out, size_t size)
+{
+    mach_port_urefs_t refs = 0;
+    kern_return_t kr;
+
+    kr = mach_port_get_refs(mach_task_self(), name, MACH_PORT_RIGHT_DEAD_NAME,
+			    &refs);
+    if (kr == KERN_INVALID_NAME)
+	(void)snprintf(out, size, "the name gone");
+    else if (kr == KERN_SUCCESS)
+	(void)snprintf(out, size, "the name kept, %u reference(s) left",
+		       (unsigned)refs);
+    else
+	(void)snprintf(out, size, "the name not asked (0x%x)", kr);
+}
+
 kern_return_t
 do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 {
@@ -801,14 +822,19 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
      * The notice's reference is let go, and it is said (the review of 24/11).
      */
     if (i == services_count) {
+	char left[48];
+
+	/* The release, and what it left, read (the review of 24/11). */
+	kr = mach_port_mod_refs(mach_task_self(), name,
+				MACH_PORT_RIGHT_DEAD_NAME, -1);
+	dead_name_left(name, left, sizeof left);
 	BOOTSTRAP_IO_LOCK();
 	printf("%s: a dead-name notification%s for 0x%x, on %s, which no "
-	       "service port has: said, and bootstrap goes on (#995)\n",
-	       program_name, selftest_paid(notify, SELFTEST_DEAD_NAME),
-	       (unsigned)name, notify_port_said(notify));
+	       "service port has: its reference let go (0x%x), %s, and "
+	       "bootstrap goes on (#995)\n", program_name,
+	       selftest_paid(notify, SELFTEST_DEAD_NAME), (unsigned)name,
+	       notify_port_said(notify), kr, left);
 	BOOTSTRAP_IO_UNLOCK();
-	(void)mach_port_mod_refs(mach_task_self(), name,
-				 MACH_PORT_RIGHT_DEAD_NAME, -1);
 	return KERN_SUCCESS;
     }
 

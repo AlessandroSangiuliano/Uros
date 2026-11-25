@@ -765,7 +765,7 @@ must_report 'bootstrap: making the four notifications it does not ask for' 'boot
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a port-destroyed notification from its self-test, on its trusted notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on' \
 	'Bootstrap destroyed a receive right with a port-destroyed request to its trusted notification port on it and never said, as its self-test'"'"'s, the notice that brings the right back (#995).' \
 	'bootstrap and a port-destroyed notice, trusted port'
-must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: said, and bootstrap goes on' \
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: its reference let go (0x0), the name gone, and bootstrap goes on' \
 	'Bootstrap destroyed a port of its own, no service port, with a dead-name request on its send right to its trusted notification port, and never said, as its self-test'"'"'s, the notice for the name services[] has no slot for (#995).' \
 	'bootstrap and a dead-name notice no service port'"'"'s'
 # #995: and the name server, which asks for dead names alone, makes the four
@@ -788,7 +788,7 @@ must_report 'name_server: making the four notifications it does not ask for' 'na
 must_report 'name_server: making the four notifications it does not ask for' 'name_server: a port-destroyed notification from its self-test: the right 0x[0-9a-f]* it brings, none it asked for, is refused and destroyed with its message; the name server goes on' \
 	'The name server destroyed a receive right with a port-destroyed request on it and never said, as its self-test'"'"'s, the notice that brings the right back (#995).' \
 	'the name server and a port-destroyed notice'
-must_report 'name_server: making the four notifications it does not ask for' 'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*, on its notification port, which no port it watches has: said, and the name server goes on' \
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*, which no port it watches has: its reference let go (0x0), the name gone, and the name server goes on' \
 	'The name server destroyed a port it does not watch, with a dead-name request on its send right, and never said, as its self-test'"'"'s, the notice for the name no record has (#995).' \
 	'the name server and a dead-name notice'
 
