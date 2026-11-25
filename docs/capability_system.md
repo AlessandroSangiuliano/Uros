@@ -707,9 +707,10 @@ both are #1007's, a revocation kept after its owner. And an entry still names
 the per-task port it was asked on by its name, which a later slot can be given:
 #1008.
 
-`cap_test` [58] to [60] see it: tasks made to die, with capabilities asked on
+`cap_test` [58] to [61] see it: tasks made to die, with capabilities asked on
 their ports and lent to them; one that gives its port up and lives; a loan
-through a port destroyed while its task lives.
+through a port destroyed while its task lives; and watches that go while their
+tasks live, once nothing holds them.
 
 ---
 
@@ -1034,9 +1035,10 @@ this is where to look, and what to break to confirm it still works.
 | a capability is good for its owner alone, and is derived to a named task | `cap_test [53]` | `ablations/747-owner-unchecked`, `747-owner-unchecked-rpc`, `747-kernel-port-is-a-delegate`, `747-delegate-ignored` |
 | a forked child holding its parent's capability is refused it, and cannot derive from it | `fork_cap_test [4]`, `[5]` | `ablations/747-blk-trusts-the-token`, `747-derive-by-anyone` |
 | a capability is revoked when its deadline comes: a claim made with it gives back its page and the card, and a block handle opened with it ends | `irq_claim_test [21]`, `cap_test [54]` | `ablations/747-deadline-not-swept`, `747-deadline-not-told` |
-| a task's death ends what was asked on its port and lent to it, and the kernel is told of the first alone | `cap_test [58]` | `ablations/983-death-not-acted-on`, `983-dead-owner-told-to-the-kernel`, `983-owner-watch-not-held`, `983-lender-watch-not-held`, `983-watch-never-given-up`, `983-dead-tasks-slots-kept`, `983-task-identity-is-the-callers` |
+| a task's death ends what was asked on its port and lent to it, and the kernel is told of the first alone | `cap_test [58]` | `ablations/983-death-not-acted-on`, `983-dead-owner-told-to-the-kernel`, `983-owner-watch-not-held`, `983-lender-watch-not-held`, `983-dead-tasks-slots-kept`, `983-task-identity-is-the-callers` |
 | a per-task port given up is not a death | `cap_test [59]` | `ablations/983-no-senders-taken-for-a-death`, `983-lender-watch-not-held` |
 | a loan to a task with no slot ends with the port it was named by, and with nothing else | `cap_test [60]` | `ablations/983-port-death-taken-for-the-task`, `983-port-watch-tells-the-kernel-nothing`, `983-owner-watch-not-held` |
+| a watch goes once nothing holds it, while its task lives | `cap_test [61]` | `ablations/983-watch-never-given-up` |
 
 ⚠️ Five guards of #747 have no arm yet. The deadline on #537's cache path
 (`cap_check_in_kernel()`): [50] asks the trap, which has no cache, and no arm

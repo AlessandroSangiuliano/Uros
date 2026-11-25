@@ -1,9 +1,9 @@
 Kind: ablation
 Issue: #983
-Takes out: the giving up of a watch nothing holds -- its right and its request are kept, one for each task that ever had a slot or a loan; cap_test's [58] must say WRONG
+Takes out: the giving up of a watch nothing holds -- its right and its request are kept, one for each task that ever had a slot or a loan, while it lives; cap_test's [61] must say WRONG
 Accel: tcg,kvm
 Run: --entry 14 600 -smp 4
-Expect: cap_test: \[58\] WRONG
+Expect: cap_test: \[61\] WRONG
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
