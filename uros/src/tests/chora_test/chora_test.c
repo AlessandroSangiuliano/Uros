@@ -84,9 +84,12 @@
  *       edu_again answers -- the module an update of a stopped driver gave;
  *  [17] edu's driver is refused updates under names no driver's task could
  *       carry -- empty, with a dash, with a NUL among its bytes, of 64 bytes
- *       -- each for its name, and goes on as it was.
+ *       -- each for its name, and goes on as it was;
+ *  [18] crash_probe, given up in [9], started again through the HAL, is given
+ *       up again after HAL_CHORA_STARTS_MAX more starts; updated with its own
+ *       module, it is started at once, and given up after as many more.
  *
- * Each of [12] to [17] gives the HAL a token with the routine's operation and
+ * Each of [12] to [18] gives the HAL a token with the routine's operation and
  * no other, so that a routine that asked for more is refused there, as one
  * that asked for another's is in [11].  Every arm says one line: an arm the
  * arms before it ended before is said NOT ASKED at the end, so that none is
@@ -143,7 +146,7 @@ mach_port_t	master_device;
 #define CT_SATA_CLASS	0x010601u	/* a class the manifest does not name */
 #define CT_ADMIN_ALL	(CAP_OP_DRIVER_STOP | CAP_OP_DRIVER_START | \
 			 CAP_OP_DRIVER_UPDATE)
-#define CT_ARMS		17		/* [1] to [17], each saying one line */
+#define CT_ARMS		18		/* [1] to [18], each saying one line */
 
 #define CT_BUS(b)	((unsigned)((b) >> 8))
 #define CT_SLOT(b)	((unsigned)(((b) >> 3) & 0x1F))
@@ -162,6 +165,11 @@ static natural_t	edu_bdf;
 static uint32_t		edu_class;
 static int		edu_found;
 static int		edu_looked;	/* [5] asked for it */
+
+/* The pci-testdev [9] found, and its class, for [18]. */
+static natural_t	testdev_bdf;
+static uint32_t		testdev_class;
+static int		testdev_found;
 
 /*
  * An arm's line, said.  #964: the console keeps a line whole up to
@@ -715,6 +723,10 @@ the_crash_arm(void)
 			bus = devs[i].bus;
 			slot = devs[i].slot;
 			func = devs[i].func;
+			testdev_class = devs[i].class_rev >> 8;	/* [18] */
+			testdev_bdf = (natural_t)((bus << 8) | (slot << 3) |
+						  func);
+			testdev_found = 1;
 			found = 1;
 		}
 	if (bytes != 0)
@@ -984,7 +996,7 @@ wait_answer(mach_port_t hal, natural_t bdf, const char *name,
 	return ok;
 }
 
-/* #964 [14] to [17]: memory this task was given, given back. */
+/* #964 [14] to [18]: memory this task was given, given back. */
 static void
 drop(vm_offset_t *data, mach_msg_type_number_t *len)
 {
@@ -1463,6 +1475,120 @@ the_edu_arms(void)
 	(void)mach_port_deallocate(mach_task_self(), hal);
 }
 
+/*
+ * #964 [18]: the driver of `bdf' given up with at least `starts' starts,
+ * waited for up to 30 s: the state read last, and its starts.
+ */
+static int
+wait_given_up(mach_port_t hal, natural_t bdf, int starts, int *starts_now)
+{
+	int	i, state = -1;
+
+	for (i = 0; i < CT_WAIT_STEPS; i++) {
+		driver_state(hal, bdf, &state, starts_now);
+		if (state == HAL_DRIVER_GAVE_UP && *starts_now >= starts)
+			break;
+		nap(100);
+	}
+	return state;
+}
+
+/*
+ * [18] (#964): crash_probe, which the HAL gave up in [9], started again
+ * through the HAL: a start asked for begins a new row, so the HAL starts it
+ * again after each death, up to HAL_CHORA_STARTS_MAX more starts, and gives
+ * it up again.  Then updated, with its own module from the bundle: a driver
+ * given up is started with the update at once, and given up again after as
+ * many more (the third review round of 24/11: hal.defs promised both, and no
+ * arm asked them).  Each routine with a token of its own operation, for the
+ * pci-testdev's class, which this task's manifest names, as edu's.
+ */
+static void
+the_crash_restart_arm(void)
+{
+	struct uros_cap		start_tok, upd_tok;
+	mach_port_t		hal;
+	module_name_t		pool, file;
+	vm_offset_t		crash = 0;
+	mach_msg_type_number_t	crash_len = 0;
+	natural_t		b = testdev_bdf;
+	kern_return_t		kr, k_start = -1, k_upd = -1;
+	int			state0, starts0, state1 = -1, starts1 = -1;
+	int			state2 = -1, starts2 = -1;
+
+	if (!testdev_found) {
+		not_asked(18, "no pci-testdev on this board (run-x86_64.sh "
+			  "--testdev)");
+		return;
+	}
+	if (testdev_class != CT_EDU_CLASS) {
+		not_asked(18, "the pci-testdev's class is not the one this "
+			  "task's manifest names, 00ff00");
+		return;
+	}
+	hal = the_hal();
+	if (!MACH_PORT_VALID(hal)) {
+		verdict(18, 0, "the HAL's name is gone");
+		return;
+	}
+	kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_START, &start_tok);
+	if (kr == KERN_SUCCESS)
+		kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_UPDATE, &upd_tok);
+	if (kr == KERN_SUCCESS) {
+		strcpy(pool, "misc");
+		strcpy(file, "crash_probe.so");
+		kr = bootstrap_get_module(bootstrap_port, pool, file, &crash,
+					  &crash_len);
+	}
+	if (kr != KERN_SUCCESS) {
+		verdict(18, 0, "no tokens for the pci-testdev's class, or no "
+			"crash_probe from the bundle: %d", kr);
+		drop(&crash, &crash_len);
+		(void)mach_port_deallocate(mach_task_self(), hal);
+		return;
+	}
+	driver_state(hal, b, &state0, &starts0);
+	if (state0 != HAL_DRIVER_GAVE_UP) {
+		verdict(18, 0, "crash_probe not given up before its start: state "
+			"%d (given up is %d), %d start(s)", state0,
+			HAL_DRIVER_GAVE_UP, starts0);
+		drop(&crash, &crash_len);
+		(void)mach_port_deallocate(mach_task_self(), hal);
+		return;
+	}
+	k_start = hal_start_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+				   (char *)&start_tok, sizeof start_tok);
+	if (k_start == KERN_SUCCESS)
+		state1 = wait_given_up(hal, b, starts0 + HAL_CHORA_STARTS_MAX,
+				       &starts1);
+	else
+		driver_state(hal, b, &state1, &starts1);
+	if (state1 == HAL_DRIVER_GAVE_UP) {
+		k_upd = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
+					  (char *)&upd_tok, sizeof upd_tok,
+					  "crash_probe",
+					  sizeof "crash_probe" - 1, crash,
+					  crash_len);
+		if (k_upd == KERN_SUCCESS)
+			state2 = wait_given_up(hal, b,
+					       starts1 + HAL_CHORA_STARTS_MAX,
+					       &starts2);
+		else
+			driver_state(hal, b, &state2, &starts2);
+	}
+	drop(&crash, &crash_len);
+	verdict(18, k_start == KERN_SUCCESS && state1 == HAL_DRIVER_GAVE_UP &&
+		starts1 == starts0 + HAL_CHORA_STARTS_MAX &&
+		k_upd == KERN_SUCCESS && state2 == HAL_DRIVER_GAVE_UP &&
+		starts2 == starts1 + HAL_CHORA_STARTS_MAX, "crash_probe, given "
+		"up after %d start(s), started through the HAL (%d): given up "
+		"again, state %d, after %d; updated with its own module (%d): "
+		"state %d after %d (given up is %d, %d starts a row)", starts0,
+		k_start, state1, starts1, k_upd, state2, starts2,
+		HAL_DRIVER_GAVE_UP, HAL_CHORA_STARTS_MAX);
+	(void)mach_port_deallocate(mach_task_self(), hal);
+}
+
 int
 main(void)
 {
@@ -1473,6 +1599,7 @@ main(void)
 	the_refusal_arm();
 	the_card_arms();
 	the_edu_arms();
+	the_crash_restart_arm();
 	the_arms_not_reached();
 	printf("chora_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return 0;
