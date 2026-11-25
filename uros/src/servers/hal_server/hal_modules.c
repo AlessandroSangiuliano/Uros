@@ -925,9 +925,9 @@ hal_driver_update(unsigned int bus, unsigned int slot, unsigned int func,
 	record_where(r, where, sizeof where);
 	if (!module_name_ok(name, sizeof r->file)) {
 		printf("hal: \"%.64s\", given to update the driver of %s: its "
-		       "name is not letters, digits and _, or is longer than a "
-		       "driver's task name has room for: refused (#964)\n", name,
-		       where);
+		       "name is empty, or not letters, digits and _, or longer "
+		       "than a driver's task name has room for: refused (#964)\n",
+		       name, where);
 		return KERN_INVALID_ARGUMENT;
 	}
 	if (data == 0 || len == 0 || len > CHORA_GIVEN_MODULE_MAX) {
