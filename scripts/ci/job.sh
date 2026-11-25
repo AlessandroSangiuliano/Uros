@@ -857,6 +857,10 @@ if [ -n "$SWEEP" ]; then
 		case $rc in
 		0)	say=CAUGHT ;;
 		1)	say="NOT CAUGHT" ;;
+		# #1010: a fixed boot without the premise the catch stands on --
+		# a verdict that is no pass, as 1 is, and not a missed defect.
+		4)	say="not askable: the fixed tree did not show the premise its catch stands on"
+			rc=1 ;;
 		2)	say="refused: it does not apply, or ablate.sh will not run it" ;;
 		*)	say="not run: the tree did not build, or a boot could not be made (status $rc)"
 			rc=3 ;;
