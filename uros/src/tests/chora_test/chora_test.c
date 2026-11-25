@@ -1505,10 +1505,10 @@ wait_given_up(mach_port_t hal, natural_t bdf, int starts, int *starts_now)
  * 24/11: hal.defs promised both, and no arm asked them).  The update is a new
  * build of crash_probe, under its own name, from the disk's updates and in no
  * pool, as a module's new build comes: its line says it came from an update's
- * bytes, and run-x86_64.sh counts those lines at the row's starts, which the
- * pool's crash_probe would not say (the fourth and fifth rounds: crash_probe's
- * own bytes were the pool's too, and an update under the same name was
- * asked of no arm).
+ * bytes, and run-x86_64.sh counts those lines against the starts [18] reads
+ * after the update, which the pool's crash_probe would not say (the fourth and
+ * fifth rounds: crash_probe's own bytes were the pool's too, and an update
+ * under the same name was asked of no arm).
  * Each routine with a token of its own operation, for the pci-testdev's
  * class, which this task's manifest names, as edu's.
  */
