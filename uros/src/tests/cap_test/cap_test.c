@@ -2622,6 +2622,125 @@ a_loan_ends_with_the_port_its_borrower_was_named_by(void)
 }
 
 /*
+ * Test [61]: a watch goes once nothing holds it, while its task lives (#983).
+ *
+ * A watch is given up when the last capability and slot that hold it let it
+ * go, and not only when its task dies: else cap_server would keep a right and
+ * a dead-name request for every task it ever issued to or lent through, for as
+ * long as that task lived.  [58] cannot see it, for there the tasks die and
+ * their watches go by their deaths.  Here they live:
+ *
+ *   - a task with no slot, CT61_PORTS ports in it, and a loan through each,
+ *     each port watched apart; then this task, their lender, revokes the
+ *     loans, and the watches must go;
+ *   - CT61_SLOTS tasks given per-task ports with nothing asked on them; then
+ *     the ports are given up, and the slots' watches must go with the slots.
+ *
+ * cap_census() counts the watches, and other tasks move that count meanwhile
+ * by one or two, so the arm asks for half of each set made, and gone.
+ */
+#define CT61_PORTS	16
+#define CT61_SLOTS	8		/* under the family's bound of 16 */
+#define CT61_ID		0x9b30ULL
+
+static int
+a_watch_goes_when_nothing_holds_it(void)
+{
+    struct uros_cap  mine, loan[CT61_PORTS];
+    mach_port_t      task = MACH_PORT_NULL, name, send;
+    mach_port_t      other[CT61_SLOTS], slot[CT61_SLOTS];
+    uint64_t         who = 0, id;
+    struct ct_census c0, c1, c2, c3, c4;
+    long             f0, made_w, gone_w, made_s, gone_s;
+    unsigned int     i, made = 0, revoked = 0, slots = 0, waits = 0;
+    kern_return_t    kr, k0, k1 = KERN_FAILURE, k2 = KERN_FAILURE;
+    kern_return_t    k3 = KERN_FAILURE, k4 = KERN_FAILURE;
+    int              given_up = 0, ok;
+
+    memset(other, 0, sizeof(other));
+    memset(slot, 0, sizeof(slot));
+    k0 = ct_census(&c0);
+    kr = ct983_task(&task, &who, NULL);
+    if (kr == KERN_SUCCESS)
+        kr = cap_request(RESOURCE_BLK_DEVICE, CT61_ID, CAP_OP_BLK_READ,
+                         CT983_MS, &mine);
+    for (i = 0; i < CT61_PORTS && kr == KERN_SUCCESS; i++) {
+        kr = ct983_port_in(task, &name, &send);
+        if (kr == KERN_SUCCESS)
+            kr = cap_derive_for(&mine, CAP_OP_BLK_READ, 0, send, &loan[i]);
+        if (MACH_PORT_VALID(send))
+            (void)mach_port_deallocate(mach_task_self(), send);
+        if (kr == KERN_SUCCESS)
+            made++;
+    }
+    if (kr == KERN_SUCCESS)
+        k1 = ct_census(&c1);
+    for (i = 0; i < made; i++)
+        if (cap_revoke(loan[i].cap_id) == KERN_SUCCESS)
+            revoked++;
+    if (kr == KERN_SUCCESS)
+        k2 = ct_census(&c2);
+
+    f0 = ct983_family();
+    for (i = 0; i < CT61_SLOTS && kr == KERN_SUCCESS; i++) {
+        kr = ct983_task(&other[i], &id, &slot[i]);
+        if (kr == KERN_SUCCESS)
+            slots++;
+    }
+    if (kr == KERN_SUCCESS)
+        k3 = ct_census(&c3);
+    for (i = 0; i < CT61_SLOTS; i++)
+        if (MACH_PORT_VALID(slot[i]))
+            (void)mach_port_deallocate(mach_task_self(), slot[i]);
+    if (kr == KERN_SUCCESS && f0 >= 0)
+        given_up = ct983_family_back(f0, &waits);
+    if (kr == KERN_SUCCESS)
+        k4 = ct_census(&c4);
+
+    for (i = 0; i < CT61_SLOTS; i++)
+        ct983_end(&other[i]);
+    ct983_end(&task);
+    (void)cap_revoke(mine.cap_id);
+
+    if (kr != KERN_SUCCESS || k0 != KERN_SUCCESS || k1 != KERN_SUCCESS ||
+        k2 != KERN_SUCCESS || k3 != KERN_SUCCESS || k4 != KERN_SUCCESS ||
+        f0 < 0) {
+        printf("cap_test: [61] WRONG — %u of %u loans and %u of %u tasks with "
+               "slots were made: %d; the census %d %d %d %d %d, the family "
+               "%ld (#983)\n", made, CT61_PORTS, slots, CT61_SLOTS, (int)kr,
+               (int)k0, (int)k1, (int)k2, (int)k3, (int)k4, f0);
+        return 0;
+    }
+    made_w = CT_GREW(c0.watches, c1.watches);
+    gone_w = CT_GREW(c2.watches, c1.watches);
+    made_s = CT_GREW(c2.watches, c3.watches);
+    gone_s = CT_GREW(c4.watches, c3.watches);
+    ok = revoked == CT61_PORTS && given_up &&
+         made_w >= CT61_PORTS / 2 && gone_w >= CT61_PORTS / 2 &&
+         made_s >= CT61_SLOTS / 2 && gone_s >= CT61_SLOTS / 2;
+    if (ok) {
+        printf("cap_test: [61] %u loans to a living task, each through a port "
+               "of its own: %ld watches more, and %ld of them gone once this "
+               "task, their lender, revoked the loans (#983)\n", CT61_PORTS,
+               made_w, gone_w);
+        printf("cap_test: [61] %u living tasks gave their empty per-task ports "
+               "up: %ld watches more, and %ld gone with the slots, back after "
+               "%u wait(s) of 10 ms (#983)\n", CT61_SLOTS, made_s, gone_s,
+               waits);
+        return 1;
+    }
+    printf("cap_test: [61] WRONG — %u loans to a living task, %u revoked by "
+           "this task: the watches %ld more, then %ld of them gone, where at "
+           "least %u must be (#983)\n", CT61_PORTS, revoked, made_w, gone_w,
+           CT61_PORTS / 2);
+    printf("cap_test: [61] WRONG — %u living tasks gave their empty per-task "
+           "ports up, slots back %s after %u wait(s): the watches %ld more, "
+           "then %ld gone, where at least %u must be (#983)\n", CT61_SLOTS,
+           given_up ? "yes" : "no", waits, made_s, gone_s, CT61_SLOTS / 2);
+    return 0;
+}
+
+/*
  * Test [41]: no task gives bootstrap a provisioning port (#743).
  *
  * cap_provision_task answers on one port, and bootstrap provisions through
@@ -7157,6 +7276,8 @@ main(int argc, char **argv)
     if (!a_task_that_gives_its_port_up_keeps_what_was_asked_until_it_dies())
         pass = 0;
     if (!a_loan_ends_with_the_port_its_borrower_was_named_by())
+        pass = 0;
+    if (!a_watch_goes_when_nothing_holds_it())
         pass = 0;
 
     /*
