@@ -1783,8 +1783,10 @@ parse_config_file(char *conf, size_t size)
 	    /*
 	     * #995: bootstrap_notify_dead_name() compares it for every server,
 	     * started or not, and the self-test's dead-name notice on the
-	     * servers' port meets it before any is: malloc() gave garbage (the
-	     * fourth review round of 24/11).
+	     * servers' port meets it before the most of them are: malloc() gave
+	     * garbage (the fourth review round of 24/11).  Null until the task
+	     * is made, so no request naming a task finds a server by it before
+	     * (do_bootstrap_arguments(), do_bootstrap_completed()).
 	     */
 	    sp->task_port = MACH_PORT_NULL;
 
@@ -2235,6 +2237,13 @@ do_bootstrap_arguments(mach_port_t bootstrap,
 	int i;
 	struct server *sp;
 
+	/*
+	 * #995: no task is no server's: a server not yet made has a null task
+	 * port (parse_config_file()), which a request naming no task would
+	 * otherwise find (the fifth review round of 24/11).
+	 */
+	if (!MACH_PORT_VALID(task_port))
+	    return KERN_INVALID_ARGUMENT;
 	for (i = 0, sp = servers; i < nservers; i++, sp++) {
 	    if (task_port == sp->task_port)
 		break;
@@ -2293,7 +2302,12 @@ do_bootstrap_completed(mach_port_t bootstrap,
 	unsigned i;
 	struct server *sp;
 
-	if (task_port == MACH_PORT_DEAD)
+	/*
+	 * #995: and no task, as a dead one, is no server's: a server not yet
+	 * made has a null task port, and a completion naming no task marked it
+	 * completed (the fifth review round of 24/11).
+	 */
+	if (!MACH_PORT_VALID(task_port))
 	    return KERN_INVALID_ARGUMENT;
 
 	for (i = 0, sp = servers; i < nservers; i++, sp++) {
