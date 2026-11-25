@@ -1541,14 +1541,14 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
  * WRONG in 8 boots of 9 (#974, 22/11).
  */
 struct ct_census {
-    natural_t kernel, dated, server, issued;
+    natural_t kernel, dated, server, issued, watches;
 };
 
 static kern_return_t
 ct_census(struct ct_census *c)
 {
     kern_return_t kr = mig_cap_census(cap_server_port(), &c->server,
-                                      &c->issued);
+                                      &c->issued, &c->watches);
 
     if (kr == KERN_SUCCESS)
         kr = urmach_cap_census(&c->kernel, &c->dated);

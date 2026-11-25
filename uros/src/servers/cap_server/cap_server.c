@@ -1974,13 +1974,17 @@ cap_verify(mach_port_t             server,
  * cap_census (#974).  The table's own count, and how many ids it has handed
  * out, on any port as cap_slots answers: a count says nothing about any one
  * capability.  It is how a test sees a revoked capability leave the table.
+ * #983: and how many tasks this server watches the deaths of, so that a test
+ * sees the watches go with what they were for.
  */
 kern_return_t
-cap_census(mach_port_t server, natural_t *entries, natural_t *issued)
+cap_census(mach_port_t server, natural_t *entries, natural_t *issued,
+           natural_t *watches)
 {
     (void)server;
     *entries = (natural_t)cap_table_count();
     *issued  = (natural_t)cap_table_issued_count();
+    *watches = (natural_t)cap_watch_count;
     return KERN_SUCCESS;
 }
 

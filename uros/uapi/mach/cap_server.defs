@@ -268,8 +268,13 @@ routine cap_derive_for(
  *	It is how a test sees a revoked capability leave the table, by its
  *	holder's revocation or by its deadline: an entry kept is one more than
  *	the table should hold.  Appended: MIG numbers routines by position.
+ *
+ *	#983: `watches', how many tasks cap_server watches the deaths of -- a
+ *	slot's task, and each borrower cap_derive_for() named by a port -- so
+ *	that a test sees a watch go with the last entry and slot that named it.
  */
 routine cap_census(
 		cap_server	: mach_port_t;
 	out	entries		: natural_t;
-	out	issued		: natural_t);
+	out	issued		: natural_t;
+	out	watches		: natural_t);
