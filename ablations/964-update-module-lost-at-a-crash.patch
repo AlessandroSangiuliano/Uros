@@ -11,7 +11,7 @@ Script: 68
 Script: 1200
 Script: -smp
 Script: 4
-Expect: UPDATE NOT RUN \(#964\): crash_probe.s new build ran at 1 start
+Expect: UPDATE NOT RUN \(#964\): crash_probe.s new build ran at 1 of the 5 start\(s\) after its update
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
 --- a/uros/src/servers/hal_server/hal_modules.c
