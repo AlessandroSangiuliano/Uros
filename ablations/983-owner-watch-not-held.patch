@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #983
+Takes out: an entry's hold on its owner's watch -- a capability lent to a task does not end with that task, nor with the port it was named by; cap_test's [58] and [60] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[58\] WRONG
+Expect: cap_test: \[60\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -578,7 +578,7 @@
+      */
+     e->sender = g_request_local_port;
+     e->lender = cap_watch_hold_slot(g_request_local_port);	/* #983 */
+-    e->owner  = cap_watch_hold(cap_watch_of_identity(g_request_sender));
++    e->owner  = 0;
+     cap_table_insert(e);
+     cap_expiry_note(t->expires);		/* #747 */
+ 
+@@ -658,8 +658,7 @@
+     cap_sign(t);
+     e->sender = g_request_local_port;	/* #599: see cap_acquire */
+     e->lender = cap_watch_hold_slot(g_request_local_port);	/* #983 */
+-    e->owner  = cap_watch_hold(watch != NULL ? watch
+-                                             : cap_watch_of_identity(owner));
++    e->owner  = 0;
+     cap_table_insert(e);
+     cap_expiry_note(t->expires);		/* #747 */
+ 
