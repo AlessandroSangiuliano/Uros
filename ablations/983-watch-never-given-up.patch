@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #983
+Takes out: the giving up of a watch nothing holds -- its right and its request are kept, one for each task that ever had a slot or a loan; cap_test's [58] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[58\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1450,7 +1450,7 @@
+ {
+     mach_port_t previous = MACH_PORT_NULL;
+ 
+-    if (w == NULL || w->refs != 0 || w->firing)
++    if (w == NULL || w->refs != 0 || w->firing || 1)
+         return;
+     (void)mach_port_request_notification(mach_task_self(), w->port,
+                                          MACH_NOTIFY_DEAD_NAME, 0,
