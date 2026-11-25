@@ -1244,6 +1244,61 @@ urmach_port_receiver(
 }
 
 /*
+ *	Routine:	urmach_task_identity [kernel call]
+ *	Purpose:
+ *		#983: the identity of the task `port' names -- its full task
+ *		port, or a reduced one (#927), the identity port among them.
+ *		cap_server keeps the identity port of every task it holds a
+ *		per-task port for (#938) and asks this of it, so that when the
+ *		task dies it can tell the capabilities the task owned, which
+ *		nobody can present again, from the ones it lent to tasks that
+ *		live.  Nothing is given that a message from the task does not
+ *		give: the kernel stamps the same identity in the trailer of
+ *		every message the task sends (#747).
+ *
+ *		Read under the port's lock, as convert_port_to_task() reads
+ *		the task: ipc_task_disable() takes the kobject from every port
+ *		of the task, reduced ones included, before the task can go.
+ *	Conditions:
+ *		Nothing locked.  On success the send right the request
+ *		carried is consumed here; on an error it is left to the
+ *		request's destruction, as every kernel call leaves it.
+ *	Returns:
+ *		KERN_SUCCESS		*identityp is the task's.
+ *		KERN_INVALID_ARGUMENT	no host, or not a live task's port:
+ *					the kernel's own task has no
+ *					identity of a task.
+ */
+kern_return_t
+urmach_task_identity(
+	host_t		host,
+	ipc_port_t	port,
+	uint64_t	*identityp)
+{
+	task_t		task = TASK_NULL;
+	uint64_t	id = 0;
+
+	*identityp = 0;
+	if (host == HOST_NULL || !IP_VALID(port))
+		return KERN_INVALID_ARGUMENT;
+
+	ip_lock(port);
+	if (ip_active(port) && ip_kotype(port) == IKOT_TASK)
+		task = (task_t) port->ip_kobject;
+	else if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS)
+		task = ((struct task_rights *) port->ip_kobject)->tr_task;
+	if (task != TASK_NULL)
+		id = urmach_identity_of(task->sec_token);
+	ip_unlock(port);
+
+	if ((id & URMACH_IDENTITY_TASK_BIT) == 0)
+		return KERN_INVALID_ARGUMENT;
+	*identityp = id;
+	ipc_port_release_send(port);
+	return KERN_SUCCESS;
+}
+
+/*
  *	Routine:	convert_port_to_space
  *	Purpose:
  *		Convert from a port to a space.

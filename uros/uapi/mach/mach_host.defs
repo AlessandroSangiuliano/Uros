@@ -890,3 +890,17 @@ routine urmach_port_receiver(
 		host		: host_t;
 		port		: mach_port_t;
 	out	identity	: urmach_identity_t);
+
+/*
+ *	The identity of the task `port' names (#983): its full task port, or a
+ *	reduced one, the identity port among them.  cap_server asks it of the
+ *	identity port it keeps for each task it holds a per-task port for, to
+ *	tell, when that task dies, the capabilities the task owned from the ones
+ *	it lent.  KERN_INVALID_ARGUMENT for a port that names no live task.
+ *	Asked of the host, as urmach_task_port_rights() is.  Appended: MIG
+ *	numbers routines by position.
+ */
+routine urmach_task_identity(
+		host		: host_t;
+		port		: mach_port_t;
+	out	identity	: urmach_identity_t);
