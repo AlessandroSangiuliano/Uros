@@ -386,8 +386,10 @@ notify_selftest_said(const char *step, kern_return_t kr)
  *   port-destroyed  a port-destroyed request on a receive right of its own,
  *                   and the right destroyed, which sends it to the request.
  *
- * Its server loop takes them as they come, and the harness reads a line for
- * each, and bootstrap going on after them.  They panicked bootstrap, and with
+ * A step that fails lets go of every right it made: the send-once right
+ * whether or not its request was made, and every right a port's name still
+ * has (the review of 24/11).  Its server loop takes them as they come, and
+ * the harness reads a line for each, and bootstrap going on after them.  They panicked bootstrap, and with
  * it the system, for no worse than a right let go.
  */
 void
@@ -396,7 +398,7 @@ notify_selftest(void)
     mach_port_t me = mach_task_self();
     mach_port_t so, port, prev;
     mach_msg_type_name_t type;
-    kern_return_t kr;
+    kern_return_t kr, kd;
 
     BOOTSTRAP_IO_LOCK();
     printf("%s: making the four notifications it does not ask for, on its "
@@ -424,15 +426,19 @@ notify_selftest(void)
 	kr = mach_port_request_notification(me, so, MACH_NOTIFY_DEAD_NAME, 0,
 					    bootstrap_notification_port,
 					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
-    if (kr == KERN_SUCCESS)
-	kr = mach_port_deallocate(me, so);
+    /* The right let go whether or not its request was made. */
+    if (MACH_PORT_VALID(so)) {
+	kd = mach_port_deallocate(me, so);
+	if (kr == KERN_SUCCESS)
+	    kr = kd;
+    }
     if (kr != KERN_SUCCESS)
 	notify_selftest_said("port-deleted", kr);
     if (MACH_PORT_VALID(prev))
 	(void)mach_port_deallocate(me, prev);
-    /* And the send-once notice the right's end sent to it, with it. */
+    /* And the port, with the send-once notice the right's end sent to it. */
     if (MACH_PORT_VALID(port))
-	(void)mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, -1);
+	(void)mach_port_destroy(me, port);
 
     /* no-senders */
     port = MACH_PORT_NULL;
@@ -450,8 +456,9 @@ notify_selftest(void)
 	notify_selftest_said("no-senders", kr);
     if (MACH_PORT_VALID(prev))
 	(void)mach_port_deallocate(me, prev);
+    /* The receive right, and the send right where a step after it failed. */
     if (MACH_PORT_VALID(port))
-	(void)mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, -1);
+	(void)mach_port_destroy(me, port);
 
     /* port-destroyed: the right goes to the request, not away. */
     port = MACH_PORT_NULL;
