@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #983
+Takes out: a port watch's keeping to the loans made through its port -- its death is taken for its task's, and ends everything the task owns; cap_test's [60] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[60\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1509,7 +1509,8 @@
+         slots++;
+     }
+     for (e = cap_table_next(NULL); e != NULL; e = cap_table_next(e)) {
+-        if (e->lender != w->id && e->owner != w->id)
++        if (e->lender != w->id && e->owner != w->id &&
++            !(!w->exact && e->token.owner == w->identity))
+             continue;
+         if (!e->token.revoked) {
+             /* A refusal by the kernel is said by cap_revoke_tree(). */
