@@ -39,6 +39,15 @@
 struct cap_entry {
     struct uros_cap  token;           /* signed + wire-format */
     mach_port_t      sender;          /* emission-time requester port */
+    /*
+     * #983: the deaths that end it, as the ids of cap_server's watches
+     * ("A capability ends with its lender", cap_server.c): `lender' watches
+     * the task whose per-task port it was asked on, `owner' the task it was
+     * issued to -- its slot's watch, or for a borrower with no slot the port
+     * cap_derive_for() named it by.  0: none.
+     */
+    uint64_t         lender;
+    uint64_t         owner;
     struct cap_entry *next_by_id;
 };
 

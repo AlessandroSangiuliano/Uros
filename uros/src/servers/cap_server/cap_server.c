@@ -127,10 +127,34 @@ static uint64_t g_request_sender;
  */
 static void cap_task_port_gone(mach_port_t port);
 
+/* #983: the deaths of the tasks this server watches ("A capability ends with
+ * its lender", below). */
+struct cap_watch;
+static mach_port_t cap_death_port = MACH_PORT_NULL;
+static void cap_death_notice(const mach_msg_header_t *in);
+static struct cap_watch *cap_watch_get(mach_port_t port, uint64_t identity,
+                                       int exact);
+static struct cap_watch *cap_watch_of_identity(uint64_t identity);
+static void cap_watch_unused(struct cap_watch *w);
+static uint64_t cap_watch_hold(struct cap_watch *w);
+static uint64_t cap_watch_hold_slot(mach_port_t port);
+static void cap_watch_drop(uint64_t id);
+
 static boolean_t
 cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
     boolean_t handled;
+
+    /*
+     * #983: a watched task has died, or a watch was given up.  Only the
+     * send-once rights made for the dead-name requests name this port, and
+     * the kernel holds them.  No reply.
+     */
+    if (cap_death_port != MACH_PORT_NULL &&
+        in->msgh_local_port == cap_death_port) {
+        cap_death_notice(in);
+        return TRUE;
+    }
 
     /*
      * A per-task port with no senders (#743).  Only the kernel can send
@@ -553,6 +577,8 @@ cap_acquire(mach_port_t             server,
      * could revoke any capability.
      */
     e->sender = g_request_local_port;
+    e->lender = cap_watch_hold_slot(g_request_local_port);	/* #983 */
+    e->owner  = cap_watch_hold(cap_watch_of_identity(g_request_sender));
     cap_table_insert(e);
     cap_expiry_note(t->expires);		/* #747 */
 
@@ -569,6 +595,8 @@ cap_acquire(mach_port_t             server,
 /*
  * A child of `parent_buf' with `reduced_ops', issued to `owner' (#747): the
  * requester itself for cap_derive, the task a port names for cap_derive_for.
+ * #983: `watch' is the owner's watch when cap_derive_for() made one for it;
+ * NULL takes the owner's slot's, if it has one.
  */
 static kern_return_t
 cap_derive_to(cap_token_t            parent_buf,
@@ -576,6 +604,7 @@ cap_derive_to(cap_token_t            parent_buf,
               uint64_t                reduced_ops,
               unsigned int            lifetime_ms,
               uint64_t                owner,
+              struct cap_watch       *watch,
               cap_token_t            child_buf,
               mach_msg_type_number_t *child_len)
 {
@@ -628,6 +657,9 @@ cap_derive_to(cap_token_t            parent_buf,
 
     cap_sign(t);
     e->sender = g_request_local_port;	/* #599: see cap_acquire */
+    e->lender = cap_watch_hold_slot(g_request_local_port);	/* #983 */
+    e->owner  = cap_watch_hold(watch != NULL ? watch
+                                             : cap_watch_of_identity(owner));
     cap_table_insert(e);
     cap_expiry_note(t->expires);		/* #747 */
 
@@ -659,15 +691,19 @@ cap_derive(mach_port_t             server,
 {
     (void)server;
     return cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms,
-                         g_request_sender, child_buf, child_len);
+                         g_request_sender, NULL, child_buf, child_len);
 }
 
 /*
  * #747: a child for another task, named by a port it receives on.  The kernel
  * answers whose port it is; a port no task receives on -- the kernel's, one in
  * transit, a dead one -- names nobody to issue the child to.  The request's
- * right to the port is kept by nobody: given back here when the child is made,
- * and with the request by mach_msg_server() when it is refused.
+ * right to the port is given back here when the child is made, and with the
+ * request by mach_msg_server() when it is refused.
+ *
+ * #983: and the borrower watched: by its own slot's watch when it has a slot,
+ * else by this port, with a right of the watch's own.  Its death ends the
+ * child, which nobody else may present.
  */
 kern_return_t
 cap_derive_for(mach_port_t             server,
@@ -681,6 +717,7 @@ cap_derive_for(mach_port_t             server,
 {
     mach_port_t       host = mach_host_self();
     urmach_identity_t id = 0;
+    struct cap_watch *w;
     kern_return_t     kr;
 
     (void)server;
@@ -691,10 +728,17 @@ cap_derive_for(mach_port_t             server,
                "(kr=%d) (#747)\n", (unsigned)delegate, (int)kr);
         return CAP_ERR_NO_DELEGATE;
     }
+    w = cap_watch_of_identity(id);			/* #983 */
+    if (w == NULL)
+        w = cap_watch_get(delegate, id, 0);
+    if (w == NULL)
+        return CAP_ERR_NO_MEMORY;
     kr = cap_derive_to(parent_buf, parent_len, reduced_ops, lifetime_ms, id,
-                       child_buf, child_len);
+                       w, child_buf, child_len);
     if (kr == KERN_SUCCESS)
         (void)mach_port_deallocate(mach_task_self(), delegate);
+    else
+        cap_watch_unused(w);
     return kr;
 }
 
@@ -756,9 +800,14 @@ cap_subtree_next(uint64_t root, struct cap_entry *e, int descend)
  * The number revoked now goes in *count, and the kernel's first refusal is the
  * answer; the rest of the tree is revoked all the same (#745).  cap_revoke asks
  * it for a task that may revoke, and a deadline's sweep for itself (#747).
+ *
+ * #983: and a watch whose task has died, for that task's capabilities, with
+ * `dead' its identity: what the dead task owned is marked and not told to the
+ * kernel, which would keep the revocation for nothing ("A capability ends with
+ * its lender").  0 tells the kernel of every one.
  */
 static kern_return_t
-cap_revoke_tree(struct cap_entry *root, int *count)
+cap_revoke_tree(struct cap_entry *root, uint64_t dead, int *count)
 {
     uint64_t cap_id = root->token.cap_id;
     struct cap_entry *e;
@@ -778,6 +827,8 @@ cap_revoke_tree(struct cap_entry *root, int *count)
 
         cap_table_mark_revoked(e);
         revoked++;
+        if (dead != 0 && e->token.owner == dead)
+            continue;				/* #983 */
 
         /*
          * 🔴 AND TELL THE KERNEL, WHICH NOBODY WAS DOING.  This server marks
@@ -906,9 +957,13 @@ cap_forget_tree(struct cap_entry *root)
         /* `above' is forgotten too, so its token is not signed again. */
         above->token.first_child_cap_id = e->token.next_sibling_cap_id;
         cap_table_remove(e);
+        cap_watch_drop(e->lender);		/* #983 */
+        cap_watch_drop(e->owner);
         free(e);
     }
     cap_table_remove(root);
+    cap_watch_drop(root->lender);		/* #983 */
+    cap_watch_drop(root->owner);
     free(root);
 }
 
@@ -1067,7 +1122,7 @@ cap_expiry_sweep(void)
         }
         if (!e->token.revoked && e->token.expires != 0) {
             /* A refusal by the kernel is said by cap_revoke_tree(). */
-            (void)cap_revoke_tree(e, &n);
+            (void)cap_revoke_tree(e, 0, &n);
             printf("cap: cap %llu reached its deadline %llu ms ago and was "
                    "revoked, %d cap(s) with its tree (#747)\n",
                    (unsigned long long)e->token.cap_id,
@@ -1125,7 +1180,7 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
     }
 
     int revoked;
-    kern_return_t refused = cap_revoke_tree(root, &revoked);
+    kern_return_t refused = cap_revoke_tree(root, 0, &revoked);
 
     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
            revoked, (unsigned long long)cap_id);
@@ -1191,6 +1246,339 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
 }
 
 /*
+ * ── A capability ends with its lender (#983) ───────────────────────────────
+ *
+ * An entry was kept until it was revoked, and one asked for with no lifetime
+ * by a task that then died never was.  Nobody could present it, since a token
+ * is good only for its owner (#747), and nobody could revoke it: only the task
+ * whose per-task port it was asked on may, or one above it in the tree, and
+ * that port was gone.  So every program that asked for a capability and ended
+ * grew this table for as long as this server ran.
+ *
+ * 🔑 A LOAN ENDS WITH ITS LENDER (decided in #983).  When a task dies, every
+ * capability asked for on its per-task port is revoked with its tree, the
+ * children it lent to other tasks among them, and forgotten as #974 forgets a
+ * revoked tree; and so is every child cap_derive_for() made for it, which its
+ * death leaves nobody to present.  It is Mach's rule for ports: when the task
+ * that receives dies, the send rights others hold to it go dead.
+ *
+ * A death is learnt from a dead-name notification on a port, a WATCH, of one
+ * of two kinds:
+ *
+ *   EXACT, on a task's identity port, which the slot keeps (#938) and which
+ *   dies with the task and with nothing else.  Its death is the task's: what
+ *   was asked for on its slots goes, and everything it owns, wherever it was
+ *   asked and whoever lent it.  Every capability holds its owner's exact
+ *   watch, when the owner has a slot, as well as its lender's: a task that
+ *   gives its per-task port up and lives on keeps its watch while it owns
+ *   anything.
+ *
+ *   A PORT's, on the port cap_derive_for() named a borrower by, when the
+ *   borrower has no slot: kept from then on, as the loan's owner's watch.
+ *   Its death ends the loans made to it and nothing else, for it may be the
+ *   borrower's giving the receive right up, or moving it, and not the
+ *   borrower's death.
+ *
+ * One watch for each port, shared: the kernel keeps one dead-name request for
+ * a name, and another would replace it.  An entry names its watches by ids
+ * that are never given again, as a family's number is not (#937): a port's
+ * name is, once the port has gone.  A watch goes when nothing names it -- no
+ * entry, no slot -- and its right and its request with it.
+ *
+ * 🔴 WHAT THE DEAD TASK OWNED IS FORGOTTEN, AND NOT REVOKED IN THE KERNEL.  The
+ * kernel keeps a revocation with no deadline for good (#974), and for a token
+ * whose owner has died it would keep it for nothing: the owner can never
+ * present it again, an identity is never reused, and what the token bought
+ * the kernel took back when the task terminated (device_master.c).  So an
+ * exact watch's walk tells the kernel only of a capability another task owns
+ * -- a loan, which that task could still present -- and knows whose death it
+ * is by urmach_task_identity() of the identity port.  A port's watch knows no
+ * death, and tells the kernel of all it revokes.  ⚠️ So the kernel keeps for
+ * nothing the revocation of a loan whose borrower, with no slot, has died; and
+ * that of a capability owned by a third task that has died too, whose death
+ * this server has not heard yet: both are #1007's, a revocation the kernel
+ * keeps after its owner.
+ */
+struct cap_watch {
+    uint64_t          id;        /* never given again: what an entry names */
+    mach_port_t       port;      /* a send right, with a dead-name request */
+    uint64_t          identity;  /* the task it is for */
+    int               exact;     /* an identity port: its death is the task's */
+    unsigned int      refs;      /* the entries and slots that name it */
+    int               firing;    /* its task has died: being acted on */
+    struct cap_watch *next;
+};
+
+static struct cap_watch *cap_watches;
+static uint64_t          cap_watch_last_id;
+static unsigned int      cap_watch_count;	/* cap_census() says it */
+
+static struct cap_watch *
+cap_watch_by_port(mach_port_t port)
+{
+    struct cap_watch *w;
+
+    for (w = cap_watches; w != NULL; w = w->next)
+        if (w->port == port)
+            return w;
+    return NULL;
+}
+
+/* The exact watch on the task with identity `identity', or NULL. */
+static struct cap_watch *
+cap_watch_of_identity(uint64_t identity)
+{
+    struct cap_watch *w;
+
+    for (w = cap_watches; identity != 0 && w != NULL; w = w->next)
+        if (w->exact && w->identity == identity)
+            return w;
+    return NULL;
+}
+
+static struct cap_watch *
+cap_watch_by_id(uint64_t id)
+{
+    struct cap_watch *w;
+
+    for (w = cap_watches; id != 0 && w != NULL; w = w->next)
+        if (w->id == id)
+            return w;
+    return NULL;
+}
+
+/*
+ * The watch on `port', a send right this task holds, made when there is none:
+ * a reference of its own on the name, and a dead-name request, which comes at
+ * once if the port is dead already.  `identity' is the task's, and `exact'
+ * says that `port' is its identity port.  Made with no hold on it: the caller
+ * takes one with cap_watch_hold(), or gives it up with cap_watch_unused().
+ * NULL when the request could not be made.
+ */
+static struct cap_watch *
+cap_watch_get(mach_port_t port, uint64_t identity, int exact)
+{
+    struct cap_watch *w = cap_watch_by_port(port);
+    mach_port_t       previous = MACH_PORT_NULL;
+    kern_return_t     kr;
+
+    if (w != NULL)
+        return w;
+    w = (struct cap_watch *)malloc(sizeof(*w));
+    if (w == NULL)
+        return NULL;
+    kr = mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1);
+    if (kr == KERN_SUCCESS) {
+        kr = mach_port_request_notification(mach_task_self(), port,
+                                            MACH_NOTIFY_DEAD_NAME, TRUE,
+                                            cap_death_port,
+                                            MACH_MSG_TYPE_MAKE_SEND_ONCE,
+                                            &previous);
+        if (kr != KERN_SUCCESS)
+            (void)mach_port_mod_refs(mach_task_self(), port,
+                                     MACH_PORT_RIGHT_SEND, -1);
+    }
+    if (kr != KERN_SUCCESS) {
+        printf("cap: no watch on port 0x%x (kr=%d) (#983)\n",
+               (unsigned)port, (int)kr);
+        free(w);
+        return NULL;
+    }
+    /* A request left by a watch given up the other way; none is, today. */
+    if (MACH_PORT_VALID(previous))
+        (void)mach_port_deallocate(mach_task_self(), previous);
+    w->id       = ++cap_watch_last_id;
+    w->port     = port;
+    w->identity = identity;
+    w->exact    = exact;
+    w->refs     = 0;
+    w->firing   = 0;
+    w->next     = cap_watches;
+    cap_watches = w;
+    cap_watch_count++;
+    return w;
+}
+
+/* A hold on `w', for an entry or a slot: its id, 0 for no watch. */
+static uint64_t
+cap_watch_hold(struct cap_watch *w)
+{
+    if (w == NULL)
+        return 0;
+    w->refs++;
+    return w->id;
+}
+
+/*
+ * A hold on the watch of the slot whose per-task port is `port': 0 for the
+ * well-known port, and for any other that is no slot's.
+ */
+static uint64_t
+cap_watch_hold_slot(mach_port_t port)
+{
+    mach_port_t task;
+
+    if (port == MACH_PORT_NULL || port == cap_port)
+        return 0;
+    task = cap_manifest_table_task(port);
+    return MACH_PORT_VALID(task) ? cap_watch_hold(cap_watch_by_port(task)) : 0;
+}
+
+static void
+cap_watch_unlink(struct cap_watch *w)
+{
+    struct cap_watch **pp;
+
+    for (pp = &cap_watches; *pp != NULL; pp = &(*pp)->next)
+        if (*pp == w) {
+            *pp = w->next;
+            cap_watch_count--;
+            break;
+        }
+    free(w);
+}
+
+/*
+ * Nothing holds `w' and its task lives: the request is taken back first, so
+ * that none is left on a name another of this task's rights may still hold,
+ * and then the watch's own reference.  The request's send-once right, given
+ * back, comes to the death port as a send-once notification, which says
+ * nothing.
+ */
+static void
+cap_watch_unused(struct cap_watch *w)
+{
+    mach_port_t previous = MACH_PORT_NULL;
+
+    if (w == NULL || w->refs != 0 || w->firing)
+        return;
+    (void)mach_port_request_notification(mach_task_self(), w->port,
+                                         MACH_NOTIFY_DEAD_NAME, 0,
+                                         MACH_PORT_NULL,
+                                         MACH_MSG_TYPE_MAKE_SEND_ONCE,
+                                         &previous);
+    if (MACH_PORT_VALID(previous))
+        (void)mach_port_deallocate(mach_task_self(), previous);
+    (void)mach_port_deallocate(mach_task_self(), w->port);
+    cap_watch_unlink(w);
+}
+
+/* An entry or a slot lets go of the watch with id `id'; 0 is none. */
+static void
+cap_watch_drop(uint64_t id)
+{
+    struct cap_watch *w = cap_watch_by_id(id);
+
+    if (w == NULL)
+        return;
+    if (w->refs > 0)
+        w->refs--;
+    cap_watch_unused(w);
+}
+
+/*
+ * The port `w' watches has died.  For an exact watch that is its task's death,
+ * and the task's slots go first, their per-task ports destroyed, so that a
+ * copy another task holds asks nothing more of a manifest whose task is gone.
+ * Then every capability that names the watch, as its lender's or as its
+ * owner's, is revoked with its tree, told to the subscribers, and forgotten
+ * after the walk, as the deadline's sweep forgets what it revokes and for the
+ * same reason: forgetting a tree frees entries the walk has yet to reach.
+ * Last the watch, with the dead name: its own reference and the one the
+ * notification brought.
+ */
+static void
+cap_watch_fire(struct cap_watch *w)
+{
+    struct cap_entry *e;
+    mach_port_t       slot, task;
+    uint64_t         *gone = NULL, *more;
+    size_t            ngone = 0, room = 0, i;
+    unsigned int      slots = 0;
+    int               n, revoked = 0;
+
+    w->firing = 1;
+    while (w->exact &&
+           (slot = cap_manifest_table_port_of_task(w->port)) != MACH_PORT_NULL) {
+        task = cap_manifest_table_remove(slot);
+        (void)mach_port_destroy(mach_task_self(), slot);
+        if (MACH_PORT_VALID(task))
+            (void)mach_port_deallocate(mach_task_self(), task);
+        if (w->refs > 0)
+            w->refs--;
+        slots++;
+    }
+    for (e = cap_table_next(NULL); e != NULL; e = cap_table_next(e)) {
+        if (e->lender != w->id && e->owner != w->id)
+            continue;
+        if (!e->token.revoked) {
+            /* A refusal by the kernel is said by cap_revoke_tree(). */
+            (void)cap_revoke_tree(e, w->exact ? w->identity : 0, &n);
+            cap_revoke_tell(e, n);
+            revoked += n;
+        }
+        if (ngone == room) {
+            more = realloc(gone, (room == 0 ? 64 : 2 * room) * sizeof(*gone));
+            if (more == NULL)
+                continue;		/* a later sweep meets it, revoked */
+            gone = more;
+            room = room == 0 ? 64 : 2 * room;
+        }
+        gone[ngone++] = e->token.cap_id;
+    }
+    for (i = 0; i < ngone; i++)
+        if ((e = cap_table_find_by_id(gone[i])) != NULL)
+            cap_forget_tree(e);
+    free(gone);
+    printf("cap: %s 0x%llx, watched on port 0x%x, %s: %u slot(s) given "
+           "back, %d capability(ies) revoked with their trees and forgotten "
+           "(#983)\n", w->exact ? "task" : "the port lent to task",
+           (unsigned long long)w->identity, (unsigned)w->port,
+           w->exact ? "has died" : "is dead", slots, revoked);
+    (void)mach_port_mod_refs(mach_task_self(), w->port,
+                             MACH_PORT_RIGHT_DEAD_NAME, -2);
+    cap_watch_unlink(w);
+}
+
+/*
+ * A message on the death port.  Only the send-once rights made for the
+ * dead-name requests name it, and the kernel holds them; asked all the same,
+ * as every demux written by hand asks (#981).  A dead name is a watched
+ * task's death, or a watch's given up after its task died, whose notification
+ * brought a reference to give back.  A port deleted or a send-once right
+ * given back says only that a request has ended (cap_watch_unused()): nothing
+ * to act on, and nothing to panic over (#995).
+ */
+static void
+cap_death_notice(const mach_msg_header_t *in)
+{
+    const mach_dead_name_notification_t *n =
+        (const mach_dead_name_notification_t *)in;
+    struct cap_watch *w;
+
+    if (!urmach_notification_from_kernel(in)) {
+        printf("cap: refused a message on the death port the kernel did not "
+               "send (#983)\n");
+        return;
+    }
+    if (in->msgh_id == MACH_NOTIFY_PORT_DELETED ||
+        in->msgh_id == MACH_NOTIFY_SEND_ONCE)
+        return;
+    if (in->msgh_id != MACH_NOTIFY_DEAD_NAME ||
+        in->msgh_size < offsetof(mach_dead_name_notification_t, trailer)) {
+        printf("cap: an unlooked-for notification on the death port, id %d, "
+               "%u bytes (#983)\n", (int)in->msgh_id,
+               (unsigned)in->msgh_size);
+        return;
+    }
+    w = cap_watch_by_port(n->not_port);
+    if (w != NULL)
+        cap_watch_fire(w);
+    else
+        (void)mach_port_deallocate(mach_task_self(), n->not_port);
+}
+
+/*
  * cap_task_port_make -- a fresh per-task port for `task_port', with `blob' as
  * its manifest: a receive right in cap_port_set, so that requests on it land
  * in our loop, with the manifest in the per-task table under its name.
@@ -1217,6 +1605,7 @@ cap_task_port_make(mach_port_t task_port, mach_port_t parent,
 {
     mach_port_t new_port = MACH_PORT_NULL;
     mach_port_t previous = MACH_PORT_NULL;
+    struct cap_watch *w;
     kern_return_t kr;
     int vrc;
 
@@ -1244,11 +1633,33 @@ cap_task_port_make(mach_port_t task_port, mach_port_t parent,
         return CAP_ERR_INTERNAL;
     }
 
+    /*
+     * #983: and the task watched, through the identity port the slot keeps,
+     * so that its death ends what was asked for on its port.  The watch's
+     * right is its own; the slot's is the request's.
+     */
+    {
+        mach_port_t       host = mach_host_self();
+        urmach_identity_t id = 0;
+
+        kr = urmach_task_identity(host, task_port, &id);
+        (void)mach_port_deallocate(mach_task_self(), host);
+        w = kr == KERN_SUCCESS ? cap_watch_get(task_port, id, 1) : NULL;
+    }
+    if (w == NULL) {
+        printf("cap: per-task port — the task cannot be watched (kr=%d), so "
+               "its death would leave what it asked for (#983)\n", kr);
+        (void)mach_port_destroy(mach_task_self(), new_port);
+        return CAP_ERR_INTERNAL;
+    }
+
     vrc = cap_manifest_table_install(new_port, task_port, parent, blob, len);
     if (vrc != CAP_ERR_NONE) {
+        cap_watch_unused(w);
         (void)mach_port_destroy(mach_task_self(), new_port);
         return vrc;
     }
+    (void)cap_watch_hold(w);			/* the slot's */
 
     *out_port = new_port;
     return KERN_SUCCESS;
@@ -1279,14 +1690,20 @@ is_an_identity_port(mach_port_t task_port)
 }
 
 /*
- * cap_task_port_gone -- the kernel says `port' has no senders: the task it was
- * made for is gone, and so is every copy it handed out (#743).  The slot, the
- * task port it kept and the receive right are given back.
+ * cap_task_port_gone -- the kernel says `port' has no senders: neither the task
+ * it was made for holds it any more, nor any task it handed a copy to (#743).
+ * The slot, the task port it kept and the receive right are given back.
+ *
+ * #983: the task may have died, or given the port up and live on: the
+ * capabilities asked on the port stay, for a live one presents them, and its
+ * death ends them, which the slot's watch tells; the slot gives up only its
+ * own hold on the watch.
  */
 static void
 cap_task_port_gone(mach_port_t port)
 {
     mach_port_t task;
+    struct cap_watch *w;
 
     if (port == cap_port || cap_manifest_table_get(port) == NULL) {
         printf("cap: no senders on 0x%x, which is no task's port\n",
@@ -1296,8 +1713,11 @@ cap_task_port_gone(mach_port_t port)
 
     task = cap_manifest_table_remove(port);
     (void)mach_port_destroy(mach_task_self(), port);
+    w = MACH_PORT_VALID(task) ? cap_watch_by_port(task) : NULL;
     if (MACH_PORT_VALID(task))
         (void)mach_port_deallocate(mach_task_self(), task);
+    if (w != NULL)
+        cap_watch_drop(w->id);			/* #983: the slot's */
     printf("cap: cap_port=0x%x has no senders — its slot and its task's "
            "port are given back (#743)\n", (unsigned)port);
 }
@@ -1670,6 +2090,18 @@ main(int argc, char **argv)
                             &provision_port);
     if (kr == KERN_SUCCESS)
         kr = mach_port_move_member(mach_task_self(), provision_port,
+                                   cap_port_set);
+    /*
+     * #983: and the port the deaths come to, before any slot is made: a slot
+     * that could not watch its task is refused (cap_task_port_make()).  No
+     * send right to it is ever made; the send-once rights of the dead-name
+     * requests are the only ones.
+     */
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                                &cap_death_port);
+    if (kr == KERN_SUCCESS)
+        kr = mach_port_move_member(mach_task_self(), cap_death_port,
                                    cap_port_set);
     if (kr == KERN_SUCCESS)
         kr = bootstrap_cap_provisioner(bootstrap_port, provision_port);
