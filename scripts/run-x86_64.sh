@@ -317,8 +317,8 @@ fi
 # be the mark said of a notice nobody owed, and a swap of the control's mark
 # with the owed notice's, under their names, is read (the fourth round).  A
 # second line the same as the control's stays, unexplained; an announcement
-# whose name cannot be read is said; and the control read is said on a pass
-# (the fifth round).  Its port is asked with its name: one name can come back
+# whose name cannot be read is said; and the controls read are said before the
+# verdict, whatever it is (the fifth and seventh rounds).  Its port is asked with its name: one name can come back
 # on the other port (the sixth round).
 CONTROLS_READ=""
 UNMARKED=$(grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' "$LOG" || true)
@@ -856,7 +856,8 @@ must_report 'name_server: making the four notifications it does not ask for' 'na
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a request naming no task, before any server is made: its arguments 0x[0-9a-f]*, its completion 0x[0-9a-f]*, where 0x4 refuses' \
 	'Bootstrap never said what its handlers answer a request naming no task, before any server is made (#995).' \
 	'bootstrap and a request naming no task'
-# #995: and the controls read, said on a pass, which reads their names (#507).
+# #995: and the controls read, their names and ports, said before the verdict,
+# whatever it is (#507, the seventh review round of 24/11).
 [ -n "$CONTROLS_READ" ] && echo "  $CONTROLS_READ"
 
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
