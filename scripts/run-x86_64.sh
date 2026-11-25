@@ -307,6 +307,18 @@ else
 	NOGLYPH=$(printf '%s\n' "$NOGLYPH" | sed '/^$/d; s/^/NO GLYPH (#661): line /')
 fi
 [ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
+# #995: a notification bootstrap or the name server did not ask for and did
+# not make, said without "from its self-test", is unexplained: one nobody
+# expected, which they say where they panicked -- a dead-name request
+# cancelled on a server's task port leaves bootstrap deaf to that death (the
+# third review round of 24/11).  Their self-tests' controls, a notice each
+# does not owe, are said unmarked on purpose, and announced: as many unmarked
+# lines as there are announced controls pass.
+UNMARKED=$(grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' "$LOG" || true)
+CONTROLS=$(grep -ac "the self-test's control:" "$LOG" || true)
+if [ "$(printf '%s' "$UNMARKED" | grep -c . || true)" -gt "${CONTROLS:-0}" ]; then
+	BAD=$(printf '%s\n%s' "$BAD" "$(printf '%s\n' "$UNMARKED" | sed 's/^/UNASKED NOTIFICATION (#995): /')" | sed '/^$/d')
+fi
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -768,6 +780,26 @@ must_report 'bootstrap: making the four notifications it does not ask for' 'boot
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: its reference let go (0x0), the name gone, and bootstrap goes on' \
 	'Bootstrap destroyed a port of its own, no service port, with a dead-name request on its send right to its trusted notification port, and never said, as its self-test'"'"'s, the notice for the name services[] has no slot for (#995).' \
 	'bootstrap and a dead-name notice no service port'"'"'s'
+# #995: the third review round of 24/11 -- the effect of each port-destroyed
+# refusal, read: a send-once right to the port its notice brings, kept under
+# a dead-name request, whose notice comes once the server loop has destroyed
+# the right; the dead name no server's task has, on the servers' port; and
+# the self-test's control, a notice it does not owe, said unmarked.
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on' \
+	'Bootstrap refused a port-destroyed notice on its servers'"'"' notification port, and the port it brought never died: the right was kept, not destroyed with the message (#995).' \
+	'bootstrap destroying the right a port-destroyed notice brings, servers'"'"' port'
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on' \
+	'Bootstrap refused a port-destroyed notice on its trusted notification port, and the port it brought never died: the right was kept, not destroyed with the message (#995).' \
+	'bootstrap destroying the right a port-destroyed notice brings, trusted port'
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port, which no server.s task has: its reference let go (0x0), the name gone, and bootstrap goes on' \
+	'Bootstrap destroyed a port of its own with a dead-name request on its send right to its servers'"'"' notification port, and never said the notice for a name no server'"'"'s task has, nor let its reference go (#995).' \
+	'bootstrap and a dead-name notice no server'"'"'s'
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: the self-test.s control:' \
+	'Bootstrap'"'"'s self-test never made its control, the notice it does not owe, whose unmarked line shows the mark is not said of every notice (#995).' \
+	'bootstrap'"'"'s control'
+must_report 'bootstrap: the self-test.s control:' 'bootstrap: a port-deleted notification for 0x[0-9a-f]*, on its trusted notification port: said, and bootstrap goes on' \
+	'Bootstrap'"'"'s control, a port-deleted notice its self-test does not owe, was never said unmarked: the mark is said of a notice nobody owed, which would hide an unexpected one (#995).' \
+	'bootstrap'"'"'s control said unmarked'
 # #995: and the name server, which asks for dead names alone, makes the four
 # others on its notification port as it starts, and a dead-name notice for a
 # port it does not watch, and says each as its self-test's: each of the four
@@ -791,6 +823,15 @@ must_report 'name_server: making the four notifications it does not ask for' 'na
 must_report 'name_server: making the four notifications it does not ask for' 'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*, which no port it watches has: its reference let go (0x0), the name gone, and the name server goes on' \
 	'The name server destroyed a port it does not watch, with a dead-name request on its send right, and never said, as its self-test'"'"'s, the notice for the name no record has (#995).' \
 	'the name server and a dead-name notice'
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and the name server goes on' \
+	'The name server refused a port-destroyed notice, and the port it brought never died: the right was kept, not destroyed with the message (#995).' \
+	'the name server destroying the right a port-destroyed notice brings'
+must_report 'name_server: making the four notifications it does not ask for' 'name_server: the self-test.s control:' \
+	'The name server'"'"'s self-test never made its control, the notice it does not owe (#995).' \
+	'the name server'"'"'s control'
+must_report 'name_server: the self-test.s control:' 'name_server: a port-deleted notification for 0x[0-9a-f]*, on its notification port: said, and the name server goes on' \
+	'The name server'"'"'s control, a port-deleted notice its self-test does not owe, was never said unmarked: the mark is said of a notice nobody owed (#995).' \
+	'the name server'"'"'s control said unmarked'
 
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
 # with no flag, with -D and with -H -D.  The start is said through mach_print,

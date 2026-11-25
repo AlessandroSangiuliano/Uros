@@ -128,6 +128,14 @@ PAIRS=(
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a no-senders notification from its self-test, make-send count [0-9]*, on its trusted notification port: said, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-destroyed notification from its self-test, on its trusted notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port, which no service port has: its reference let go (0x0), the name gone, and bootstrap goes on'
+	# #995: and what the third review round of 24/11 asked: each port-destroyed
+	# refusal's right destroyed, the dead name no server's task has, and the
+	# control said unmarked.
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port, which no server.s task has: its reference let go (0x0), the name gone, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: the self-test.s control:'
+	'bootstrap: the self-test.s control:'	'bootstrap: a port-deleted notification for 0x[0-9a-f]*, on its trusted notification port: said, and bootstrap goes on'
 	# #995: and the name server's, on its notification port, the four and a
 	# dead-name notice for a port it does not watch.
 	'name_server: making the four notifications it does not ask for'	'name_server: a send-once notification from its self-test, on its notification port: said, and the name server goes on'
@@ -135,6 +143,9 @@ PAIRS=(
 	'name_server: making the four notifications it does not ask for'	'name_server: a no-senders notification from its self-test, make-send count [0-9]*, on its notification port: said, and the name server goes on'
 	'name_server: making the four notifications it does not ask for'	'name_server: a port-destroyed notification from its self-test: the right 0x[0-9a-f]* it brings, none it asked for, is refused and destroyed with its message; the name server goes on'
 	'name_server: making the four notifications it does not ask for'	'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*, which no port it watches has: its reference let go (0x0), the name gone, and the name server goes on'
+	'name_server: making the four notifications it does not ask for'	'name_server: a dead-name notification from its self-test for 0x[0-9a-f]*: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and the name server goes on'
+	'name_server: making the four notifications it does not ask for'	'name_server: the self-test.s control:'
+	'name_server: the self-test.s control:'	'name_server: a port-deleted notification for 0x[0-9a-f]*, on its notification port: said, and the name server goes on'
 	'=== kernel242_test ('		'=== kernel242_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'=== sig_test ('			'=== sig_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'fperr_test: x87 arm starting'	'fperr_test: x87 arm \(PASS\|SKIPPED\|FAIL\)'
@@ -251,7 +262,7 @@ over() {
 }
 
 judge_bundle() {	# judge_bundle LOG CUT -> prints the reasons; status 0 = passed
-	local log=$1 cut=$2 bad=0 m disks
+	local log=$1 cut=$2 bad=0 m disks unmarked controls
 	# #591: every disk controller on the board must have attached, as
 	# run-x86_64.sh asks; run-qemu.sh records the board in the conditions.
 	# First, so that a boot cut short for want of a disk names the disk.
@@ -259,6 +270,15 @@ judge_bundle() {	# judge_bundle LOG CUT -> prints the reasons; status 0 = passed
 	[ -z "$disks" ] || printf '%s\n' "$disks" | sed 's/^/  /'
 	if [ -n "$cut" ]; then echo "    $cut"; bad=1; fi
 	clean "$log" | grep -aE "$FAIL_RE" | head -8 | sed 's/^/    unexplained: /' | grep . && bad=1
+	# #995: a notification bootstrap or the name server did not make, said
+	# unmarked, beyond their self-tests' announced controls, as run-x86_64.sh
+	# asks.
+	unmarked=$(clean "$log" | grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' || true)
+	controls=$(clean "$log" | grep -ac "the self-test's control:" || true)
+	if [ "$(printf '%s' "$unmarked" | grep -c . || true)" -gt "${controls:-0}" ]; then
+		printf '%s\n' "$unmarked" | head -8 | sed 's/^/    unexplained, a notification nobody made (#995): /'
+		bad=1
+	fi
 	for m in "${MUST[@]}"; do
 		clean "$log" | grep -aq "$m" || { echo "    never said: $m"; bad=1; }
 	done
