@@ -135,6 +135,9 @@ PAIRS=(
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its trusted notification port: the port its port-destroyed notice brought is destroyed; its references let go (0x0), the name gone, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a dead-name notification from its self-test for 0x[0-9a-f]*, on its servers. notification port, which no server.s task has: its reference let go (0x0), the name gone, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: the self-test.s control:'
+	# #995: and bootstrap's question of its handlers, a request naming no task,
+	# whatever they answered: an answer other than a refusal says WRONG.
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a request naming no task, before any server is made: its arguments 0x[0-9a-f]*, its completion 0x[0-9a-f]*, where 0x4 refuses'
 	# #995: and the name server's, on its notification port, the four and a
 	# dead-name notice for a port it does not watch.
 	'name_server: making the four notifications it does not ask for'	'name_server: a send-once notification from its self-test, on its notification port: said, and the name server goes on'

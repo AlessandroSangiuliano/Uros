@@ -1177,6 +1177,35 @@ main(int argc, char **argv)
  	}
 
 	/*
+	 * #995: a request naming no task finds no server.  The configuration is
+	 * read and no server is made: every task port is null, so a handler
+	 * that took a null task for a server's would find the first here.  The
+	 * two handlers that find a server by the task a request names are asked
+	 * as a request would ask them, and what they answer is said (the fifth
+	 * and sixth review rounds of 24/11).
+	 */
+	{
+	    vm_offset_t args = 0;
+	    mach_msg_type_number_t args_count = 0;
+	    kern_return_t ka, kc;
+
+	    ka = do_bootstrap_arguments(MACH_PORT_NULL, MACH_PORT_NULL, &args,
+					&args_count);
+	    if (ka == KERN_SUCCESS && args != 0)
+		(void)vm_deallocate(mach_task_self(), args,
+				    round_page(args_count));
+	    kc = do_bootstrap_completed(MACH_PORT_NULL, MACH_PORT_NULL);
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: a request naming no task, before any server is made: "
+		   "its arguments 0x%x, its completion 0x%x, where 0x%x "
+		   "refuses%s (#995)\n", program_name, ka, kc,
+		   KERN_INVALID_ARGUMENT,
+		   ka == KERN_INVALID_ARGUMENT && kc == KERN_INVALID_ARGUMENT ?
+		   "" : " -- WRONG, a server was found by no task");
+	    BOOTSTRAP_IO_UNLOCK();
+	}
+
+	/*
 	 * Start data_device thread
 	 */
 	if (ndatadev > 0) {

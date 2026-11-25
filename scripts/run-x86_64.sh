@@ -846,6 +846,14 @@ must_report 'name_server: making the four notifications it does not ask for' 'na
 must_report 'name_server: making the four notifications it does not ask for' 'name_server: the self-test.s control:' \
 	'The name server'"'"'s self-test never made its control, the notice it does not owe (#995).' \
 	'the name server'"'"'s control'
+# #995: and bootstrap's own question, before any server is made, of the two
+# handlers that find a server by the task a request names: a request naming
+# no task finds none (the fifth and sixth review rounds of 24/11).  The pair
+# asks for the line whatever they answered; an answer other than a refusal
+# says WRONG on it, which the scan above reads with the values.
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a request naming no task, before any server is made: its arguments 0x[0-9a-f]*, its completion 0x[0-9a-f]*, where 0x4 refuses' \
+	'Bootstrap never said what its handlers answer a request naming no task, before any server is made (#995).' \
+	'bootstrap and a request naming no task'
 # #995: and the controls read, said on a pass, which reads their names (#507).
 [ -n "$CONTROLS_READ" ] && echo "  $CONTROLS_READ"
 
