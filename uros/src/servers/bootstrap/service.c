@@ -546,18 +546,20 @@ do_mach_notify_port_destroyed(mach_port_t notify,
 
     if (notify != untrusted_notify_port) {
 	/*
-	 * #995: the receive right it brings is no service port's -- those
-	 * come to untrusted_notify_port -- so it is destroyed here.
+	 * #995: the right it brings is no service port's -- those come to
+	 * untrusted_notify_port.  The notice is refused, and the server loop
+	 * destroys its message, and the right with it, as the message brought
+	 * it: let go here by its name, it would be taken for a receive right,
+	 * whatever came (the review of 24/11).
 	 */
 	BOOTSTRAP_IO_LOCK();
-	printf("%s: a port-destroyed notification, on %s: the receive right "
-	       "0x%x it brings is destroyed, and bootstrap goes on (#995)\n",
-	       program_name, notify_port_said(notify), (unsigned)port);
+	printf("%s: a port-destroyed notification, on %s: the right 0x%x it "
+	       "brings is no service port's, so the notice is refused and its "
+	       "message destroyed with the right, and bootstrap goes on "
+	       "(#995)\n", program_name, notify_port_said(notify),
+	       (unsigned)port);
 	BOOTSTRAP_IO_UNLOCK();
-	if (MACH_PORT_VALID(port))
-	    (void)mach_port_mod_refs(mach_task_self(), port,
-				     MACH_PORT_RIGHT_RECEIVE, -1);
-	return KERN_SUCCESS;
+	return KERN_FAILURE;
     }
 
     /*

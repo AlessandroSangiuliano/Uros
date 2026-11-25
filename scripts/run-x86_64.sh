@@ -744,7 +744,7 @@ must_report 'bootstrap: making the four notifications it does not ask for' 'boot
 must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a no-senders notification, make-send count [0-9]*, on its servers. notification port: said, and bootstrap goes on' \
 	'Bootstrap let the one send right of a port with a no-senders request go and never said the notice (#995).' \
 	'bootstrap and a no-senders notice'
-must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a port-destroyed notification, on its servers. notification port: the receive right 0x[0-9a-f]* it brings is destroyed, and bootstrap goes on' \
+must_report 'bootstrap: making the four notifications it does not ask for' 'bootstrap: a port-destroyed notification, on its servers. notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on' \
 	'Bootstrap destroyed a receive right with a port-destroyed request on it and never said the notice that brings the right back (#995).' \
 	'bootstrap and a port-destroyed notice'
 

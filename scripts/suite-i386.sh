@@ -121,7 +121,7 @@ PAIRS=(
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a send-once notification, on its servers. notification port: said, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-deleted notification for 0x[0-9a-f]*, on its servers. notification port: said, and bootstrap goes on'
 	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a no-senders notification, make-send count [0-9]*, on its servers. notification port: said, and bootstrap goes on'
-	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-destroyed notification, on its servers. notification port: the receive right 0x[0-9a-f]* it brings is destroyed, and bootstrap goes on'
+	'bootstrap: making the four notifications it does not ask for'	'bootstrap: a port-destroyed notification, on its servers. notification port: the right 0x[0-9a-f]* it brings is no service port.s, so the notice is refused and its message destroyed with the right, and bootstrap goes on'
 	'=== kernel242_test ('		'=== kernel242_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'=== sig_test ('			'=== sig_test: [0-9]* PASS, [0-9]* FAIL ==='
 	'fperr_test: x87 arm starting'	'fperr_test: x87 arm \(PASS\|SKIPPED\|FAIL\)'
