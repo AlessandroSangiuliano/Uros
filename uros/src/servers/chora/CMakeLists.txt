@@ -285,3 +285,27 @@ set_target_properties(host_bridge_wrong_ops_module PROPERTIES
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
+
+# #964: edu_probe a third time, named edu_again, in user/updates beside
+# edu_next: the module chora_test [16] gives edu's stopped driver.  In no
+# pool, so that its start, answered by edu_again, can only be the update's
+# module, where edu_probe would also be the pools' choice for edu.
+add_library(edu_again_module SHARED edu_probe/edu_probe.c)
+
+add_dependencies(edu_again_module mig_mach_public_headers)
+
+target_compile_options(edu_again_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(edu_again_module PRIVATE MACH_IPC_COMPAT=0
+  EDU_MODULE=edu_again)
+
+target_include_directories(edu_again_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(edu_again_module PROPERTIES
+  OUTPUT_NAME "edu_again"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")
