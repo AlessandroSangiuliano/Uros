@@ -318,23 +318,25 @@ fi
 # with the owed notice's, under their names, is read (the fourth round).  A
 # second line the same as the control's stays, unexplained; an announcement
 # whose name cannot be read is said; and the control read is said on a pass
-# (the fifth round).
+# (the fifth round).  Its port is asked with its name: one name can come back
+# on the other port (the sixth round).
 CONTROLS_READ=""
 UNMARKED=$(grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' "$LOG" || true)
 for who in bootstrap name_server; do
 	ann=$(grep -a "$who: the self-test's control:" "$LOG" | head -n 1)
 	[ -n "$ann" ] || continue
 	ctl=$(printf '%s\n' "$ann" | sed -n 's/.*: the self-test.s control: a port-deleted notification for \(0x[0-9a-f]*\),.*/\1/p')
-	if [ -z "$ctl" ]; then
-		BAD=$(printf '%s\n%s' "$BAD" "CONTROL (#995): $who's control was announced, and its name could not be read off its announcement: $ann" | sed '/^$/d')
+	port=$(printf '%s\n' "$ann" | sed -n 's/.*: the self-test.s control: a port-deleted notification for 0x[0-9a-f]*, on \(.*\), which it does not owe.*/\1/p')
+	if [ -z "$ctl" ] || [ -z "$port" ]; then
+		BAD=$(printf '%s\n%s' "$BAD" "CONTROL (#995): $who's control was announced, and its name or its port could not be read off its announcement: $ann" | sed '/^$/d')
 		continue
 	fi
-	said=$(printf '%s\n' "$UNMARKED" | grep -nF "$who: a port-deleted notification for $ctl," | head -n 1 | cut -d: -f1)
+	said=$(printf '%s\n' "$UNMARKED" | grep -nF "$who: a port-deleted notification for $ctl, on $port:" | head -n 1 | cut -d: -f1)
 	if [ -n "$said" ]; then
 		UNMARKED=$(printf '%s\n' "$UNMARKED" | sed "${said}d" | sed '/^$/d')
-		CONTROLS_READ="$CONTROLS_READ${CONTROLS_READ:+; }$who's control $ctl said unmarked under its name"
+		CONTROLS_READ="$CONTROLS_READ${CONTROLS_READ:+; }$who's control $ctl said unmarked under its name, on $port"
 	else
-		BAD=$(printf '%s\n%s' "$BAD" "CONTROL (#995): $who's control, the port-deleted notification for $ctl it does not owe, was not said unmarked under its name" | sed '/^$/d')
+		BAD=$(printf '%s\n%s' "$BAD" "CONTROL (#995): $who's control, the port-deleted notification for $ctl it does not owe, was not said unmarked under its name, on $port" | sed '/^$/d')
 	fi
 done
 [ -n "$UNMARKED" ] && BAD=$(printf '%s\n%s' "$BAD" "$(printf '%s\n' "$UNMARKED" | sed 's/^/UNASKED NOTIFICATION (#995): /')" | sed '/^$/d')

@@ -263,7 +263,7 @@ over() {
 }
 
 judge_bundle() {	# judge_bundle LOG CUT -> prints the reasons; status 0 = passed
-	local log=$1 cut=$2 bad=0 m disks unmarked who ann ctl said
+	local log=$1 cut=$2 bad=0 m disks unmarked who ann ctl port said controls=
 	# #591: every disk controller on the board must have attached, as
 	# run-x86_64.sh asks; run-qemu.sh records the board in the conditions.
 	# First, so that a boot cut short for want of a disk names the disk.
@@ -273,25 +273,30 @@ judge_bundle() {	# judge_bundle LOG CUT -> prints the reasons; status 0 = passed
 	clean "$log" | grep -aE "$FAIL_RE" | head -8 | sed 's/^/    unexplained: /' | grep . && bad=1
 	# #995: a notification bootstrap or the name server did not make, said
 	# unmarked, is unexplained, but each self-test's control, said unmarked
-	# once under the name it announces, as run-x86_64.sh asks.
+	# once under the name and on the port it announces, as run-x86_64.sh asks;
+	# and the controls read are said, as there (#507, the sixth review round
+	# of 24/11).
 	unmarked=$(clean "$log" | grep -a '\(bootstrap\|name_server\): a \(send-once\|port-deleted\|no-senders\|port-destroyed\|dead-name\) notification\(,\| for\|:\)' || true)
 	for who in bootstrap name_server; do
 		ann=$(clean "$log" | grep -a "$who: the self-test's control:" | head -n 1)
 		[ -n "$ann" ] || continue
 		ctl=$(printf '%s\n' "$ann" | sed -n 's/.*: the self-test.s control: a port-deleted notification for \(0x[0-9a-f]*\),.*/\1/p')
-		if [ -z "$ctl" ]; then
-			echo "    $who's control was announced, and its name could not be read off its announcement (#995): $ann"
+		port=$(printf '%s\n' "$ann" | sed -n 's/.*: the self-test.s control: a port-deleted notification for 0x[0-9a-f]*, on \(.*\), which it does not owe.*/\1/p')
+		if [ -z "$ctl" ] || [ -z "$port" ]; then
+			echo "    $who's control was announced, and its name or its port could not be read off its announcement (#995): $ann"
 			bad=1
 			continue
 		fi
-		said=$(printf '%s\n' "$unmarked" | grep -nF "$who: a port-deleted notification for $ctl," | head -n 1 | cut -d: -f1)
+		said=$(printf '%s\n' "$unmarked" | grep -nF "$who: a port-deleted notification for $ctl, on $port:" | head -n 1 | cut -d: -f1)
 		if [ -n "$said" ]; then
 			unmarked=$(printf '%s\n' "$unmarked" | sed "${said}d" | sed '/^$/d')
+			controls="$controls${controls:+; }$who's control $ctl said unmarked under its name, on $port"
 		else
-			echo "    $who's control, the port-deleted notification for $ctl it does not owe, was not said unmarked under its name (#995)"
+			echo "    $who's control, the port-deleted notification for $ctl it does not owe, was not said unmarked under its name, on $port (#995)"
 			bad=1
 		fi
 	done
+	[ -z "$controls" ] || echo "    read: $controls (#995)"
 	if [ -n "$unmarked" ]; then
 		printf '%s\n' "$unmarked" | head -8 | sed 's/^/    unexplained, a notification nobody made (#995): /'
 		bad=1
