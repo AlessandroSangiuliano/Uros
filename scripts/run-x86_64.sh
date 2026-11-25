@@ -317,7 +317,9 @@ fi
 # review rounds of 24/11).  The lines are counted against the starts the
 # update had, as [18] read them, and what is said is the two numbers (the
 # sixth round: counted against a whole row, a WRONG of [18]'s own, with fewer
-# starts, had the HAL blamed for a module it never ran).
+# starts, had the HAL blamed for a module it never ran).  With no start after
+# the update, nothing is said of it but [18]'s WRONG (the seventh round: "ran
+# at 0 of the 0" was said of an update that never ran).
 UPDATE_RAN=""
 if grep -aq 'chora_test: \[18\] .*updated with a new build of it (0)' "$LOG"; then
 	l18=$(grep -a 'chora_test: \[18\] ' "$LOG" | head -n 1)
@@ -328,7 +330,7 @@ if grep -aq 'chora_test: \[18\] .*updated with a new build of it (0)' "$LOG"; th
 		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT READ (#964): chora_test [18]'s line gives no starts to count the update's runs against: $l18" | sed '/^$/d')
 	elif [ "${ran:-0}" -lt $((after - before)) ]; then
 		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT RUN (#964): crash_probe's new build ran at ${ran:-0} of the $((after - before)) start(s) after its update, $before to $after" | sed '/^$/d')
-	else
+	elif [ $((after - before)) -gt 0 ]; then
 		UPDATE_RAN="crash_probe's update ran at $ran of the $((after - before)) start(s) after it, $before to $after"
 	fi
 fi
@@ -741,7 +743,7 @@ must_report 'chora_test: \[17\] .*under names no driver' 'hal: a name of 64 byte
 	'chora_test gave the HAL a name of 64 bytes, and the HAL never said it refused it for its terminator: it read the name past its room, or refused it another way (#964).' \
 	'the HAL refusing a name of 64 bytes'
 # #964: and what chora_test [18]'s update ran, read with the unexplained lines
-# above (UPDATE_RAN), said here on a pass.
+# above (UPDATE_RAN), said here, before the verdict, whatever it is.
 [ -n "$UPDATE_RAN" ] && echo "  $UPDATE_RAN"
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
