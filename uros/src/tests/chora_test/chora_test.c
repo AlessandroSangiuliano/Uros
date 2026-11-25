@@ -86,8 +86,9 @@
  *       carry -- empty, with a dash, with a NUL among its bytes, of 64 bytes
  *       -- each for its name, and goes on as it was;
  *  [18] crash_probe, given up in [9], started again through the HAL, is given
- *       up again after HAL_CHORA_STARTS_MAX more starts; updated with its own
- *       module, it is started at once, and given up after as many more.
+ *       up again after HAL_CHORA_STARTS_MAX more starts; updated with
+ *       crash_again, crash_probe under another name and in no pool, it is
+ *       started with it at once, and given up after as many more.
  *
  * Each of [12] to [18] gives the HAL a token with the routine's operation and
  * no other, so that a routine that asked for more is refused there, as one
@@ -1500,15 +1501,18 @@ wait_given_up(mach_port_t hal, natural_t bdf, int starts, int *starts_now)
  * it up again.  Then updated, with its own module from the bundle: a driver
  * given up is started with the update at once, and given up again after as
  * many more (the third review round of 24/11: hal.defs promised both, and no
- * arm asked them).  Each routine with a token of its own operation, for the
- * pci-testdev's class, which this task's manifest names, as edu's.
+ * arm asked them).  The update is crash_again, crash_probe built under
+ * another name, from the disk's updates and in no pool, so that its line at
+ * each start, which run-x86_64.sh asks for, can only be the update's module
+ * running (the fourth round: crash_probe's own bytes were the pool's too).
+ * Each routine with a token of its own operation, for the pci-testdev's
+ * class, which this task's manifest names, as edu's.
  */
 static void
 the_crash_restart_arm(void)
 {
 	struct uros_cap		start_tok, upd_tok;
 	mach_port_t		hal;
-	module_name_t		pool, file;
 	vm_offset_t		crash = 0;
 	mach_msg_type_number_t	crash_len = 0;
 	natural_t		b = testdev_bdf;
@@ -1534,15 +1538,11 @@ the_crash_restart_arm(void)
 	kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_START, &start_tok);
 	if (kr == KERN_SUCCESS)
 		kr = admin_token(CT_EDU_CLASS, CAP_OP_DRIVER_UPDATE, &upd_tok);
-	if (kr == KERN_SUCCESS) {
-		strcpy(pool, "misc");
-		strcpy(file, "crash_probe.so");
-		kr = bootstrap_get_module(bootstrap_port, pool, file, &crash,
-					  &crash_len);
-	}
+	if (kr == KERN_SUCCESS)
+		kr = disk_file(CT_UPDATES "crash_again.so", &crash, &crash_len);
 	if (kr != KERN_SUCCESS) {
 		verdict(18, 0, "no tokens for the pci-testdev's class, or no "
-			"crash_probe from the bundle: %d", kr);
+			"crash_again from the disk: %d", kr);
 		drop(&crash, &crash_len);
 		(void)mach_port_deallocate(mach_task_self(), hal);
 		return;
@@ -1566,8 +1566,8 @@ the_crash_restart_arm(void)
 	if (state1 == HAL_DRIVER_GAVE_UP) {
 		k_upd = hal_update_driver(hal, CT_BUS(b), CT_SLOT(b), CT_FUNC(b),
 					  (char *)&upd_tok, sizeof upd_tok,
-					  "crash_probe",
-					  sizeof "crash_probe" - 1, crash,
+					  "crash_again",
+					  sizeof "crash_again" - 1, crash,
 					  crash_len);
 		if (k_upd == KERN_SUCCESS)
 			state2 = wait_given_up(hal, b,
@@ -1588,7 +1588,7 @@ the_crash_restart_arm(void)
 		"starts a row)", starts0, k_start, k_start == KERN_SUCCESS ?
 		"given up again," : "the start refused, now", state1, starts1,
 		state1 != HAL_DRIVER_GAVE_UP ? "not updated, not given up" :
-		k_upd == KERN_SUCCESS ? "updated with its own module" :
+		k_upd == KERN_SUCCESS ? "updated with crash_again" :
 		"the update refused", k_upd, state2, starts2,
 		HAL_DRIVER_GAVE_UP, HAL_CHORA_STARTS_MAX);
 	(void)mach_port_deallocate(mach_task_self(), hal);

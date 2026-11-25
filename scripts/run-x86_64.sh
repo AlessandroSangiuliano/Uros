@@ -715,6 +715,14 @@ must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_brid
 must_report 'chora_test: \[17\] .*under names no driver' 'hal: a name of 64 bytes, given to update the driver of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7], has no room for its terminator: refused' \
 	'chora_test gave the HAL a name of 64 bytes, and the HAL never said it refused it for its terminator: it read the name past its room, or refused it another way (#964).' \
 	'the HAL refusing a name of 64 bytes'
+# #964: and chora_test [18]'s update of the given-up crash_probe with
+# crash_again, crash_probe under another name and in no pool: its line at a
+# start, under its own name, is the update's module running, where a HAL
+# that started the driver again with the pool's module passes [18]'s count
+# of starts all the same (the fourth review round of 24/11).
+must_report 'chora_test: \[18\] .*crash_probe, given up after' 'crash_again@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: crash_again dies at its start' \
+	'chora_test gave crash_probe'"'"'s given-up driver crash_again, and crash_again never ran: the HAL started the driver again with another module than the update'"'"'s (#964).' \
+	'the HAL starting a given-up driver with its update'
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'

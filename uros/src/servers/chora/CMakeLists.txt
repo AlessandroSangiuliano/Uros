@@ -309,3 +309,27 @@ set_target_properties(edu_again_module PROPERTIES
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")
+
+# #964: crash_probe a second time, named crash_again, in user/updates: the
+# module chora_test [18] gives crash_probe's driver once the HAL has given it
+# up.  In no pool, so that its line at each start, under its own name, can
+# only be the update's module running, where crash_probe would be the pool's.
+add_library(crash_again_module SHARED crash_probe/crash_probe.c)
+
+add_dependencies(crash_again_module mig_mach_public_headers)
+
+target_compile_options(crash_again_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(crash_again_module PRIVATE MACH_IPC_COMPAT=0
+  CRASH_MODULE=crash_again)
+
+target_include_directories(crash_again_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(crash_again_module PROPERTIES
+  OUTPUT_NAME "crash_again"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")

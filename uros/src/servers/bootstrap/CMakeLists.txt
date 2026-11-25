@@ -911,14 +911,15 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # refuses without it, and run-x86_64.sh builds the bundle, not ALL;
             # and edu_next, the update chora_test gives edu's driver, is too,
             # and host_bridge_one_too_long and host_bridge_wrong_ops, which the
-            # HAL must refuse, and edu_again, chora_test [16]'s update.
+            # HAL must refuse, and edu_again and crash_again, chora_test [16]'s
+            # and [18]'s updates.
             ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
             chora_probe_module chora_absent_module chora_bin
             modload_test_bin modload_test_twin_a modload_test_twin_b
             modload_test_only_a modload_test_only_b
             edu_probe_module crash_probe_module edu_next_module
             host_bridge_one_too_long_module host_bridge_wrong_ops_module
-            edu_again_module
+            edu_again_module crash_again_module
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
