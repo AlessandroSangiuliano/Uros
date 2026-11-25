@@ -1780,6 +1780,13 @@ parse_config_file(char *conf, size_t size)
 	    sp->flags = 0;
 	    sp->bootstrap_completed = 0;
 	    sp->bootstrap_port = MACH_PORT_NULL;
+	    /*
+	     * #995: bootstrap_notify_dead_name() compares it for every server,
+	     * started or not, and the self-test's dead-name notice on the
+	     * servers' port meets it before any is: malloc() gave garbage (the
+	     * fourth review round of 24/11).
+	     */
+	    sp->task_port = MACH_PORT_NULL;
 
 	    for (;;) {
 		ptr = pptr;
