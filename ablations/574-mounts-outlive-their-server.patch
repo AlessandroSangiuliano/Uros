@@ -6,11 +6,10 @@ Expect: name_server: sub_reference: port [0-9a-f]+ is in a record and not in the
 Expect: mount_test: \[22\] WRONG .*after its server.s death
 
 diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
-index fdbe48a0..c5adeb33 100644
 --- a/uros/src/servers/name_server/nprocs.c
 +++ b/uros/src/servers/name_server/nprocs.c
-@@ -783,7 +783,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
- 	printf("%s: do_mach_notify_dead_name: %x\n", program, name);
+@@ -1003,7 +1003,7 @@
+     }
  
      netname_remove(name);
 -    mount_remove(name);		/* #574 */
