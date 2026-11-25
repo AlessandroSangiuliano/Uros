@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #964
+Takes out: the module an update gives a driver the HAL gave up: update_driver() starts it again at once, as it should, but with the module it had, letting the update's go.  chora_test [18]'s update of crash_probe with crash_again counts its fifteen starts all the same; crash_again never runs, which the harness asks for.  Before the fourth review round of 24/11, [18] updated crash_probe with its own bytes, and this passed.
+Script: scripts/run-x86_64.sh
+Script: --testdev
+Script: --iommu
+Script: intel
+Script: --edu
+Script: --entry
+Script: 68
+Script: 1200
+Script: -smp
+Script: 4
+Expect: appeared and 'crash_again@
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -947,6 +947,11 @@
+ 		       name, CHORA_MODULE_SUFFIX);
+ 		return KERN_INVALID_VALUE;
+ 	}
++	if (r->state == HAL_DRIVER_GAVE_UP) {
++		(void)vm_deallocate(mach_task_self(), data, len);
++		chora_start_asked(r);
++		return KERN_SUCCESS;
++	}
+ 	if (r->given != 0)
+ 		(void)vm_deallocate(mach_task_self(), r->given, r->given_len);
+ 	r->given = data;

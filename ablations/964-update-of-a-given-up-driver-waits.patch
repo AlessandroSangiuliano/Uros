@@ -1,8 +1,8 @@
 Kind: ablation
 Issue: #964
-Takes out: the start an update gives a driver the HAL gave up: update_driver() keeps it given up with the new module, as it keeps a stopped one stopped.  chora_test [18]'s update of crash_probe, given up after ten starts, starts nothing.
+Takes out: the start an update gives a driver the HAL gave up: update_driver() keeps it given up with the new module, as it keeps a stopped one stopped.  chora_test [18]'s update of crash_probe with crash_again, given up after ten starts, starts nothing.
 Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
-Expect: chora_test: \[18\] WRONG -- .*updated with its own module \(0\): state 3 after 10 \(
+Expect: chora_test: \[18\] WRONG -- .*updated with crash_again \(0\): state 3 after 10 \(
 
 diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
 --- a/uros/src/servers/hal_server/hal_modules.c
