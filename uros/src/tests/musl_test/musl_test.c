@@ -90,6 +90,22 @@ pause_a_little(void)
 }
 
 /*
+ * #1009: CLOCK_MONOTONIC in milliseconds, or -1 if it is refused.  A time an
+ * arm must keep is counted by it and not in pause_a_little()s: since 963ca2cc
+ * a timed wait lasts at least what it asks, a tick more at 100 Hz, so each of
+ * a run of 10 ms sleeps lasts 20 ms and a time counted in them doubles.
+ */
+static long long
+mono_ms(void)
+{
+	struct timespec	now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return -1;
+	return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/*
  * ── [1] Formatting, which is varargs and floating point ─────────────────
  *
  * x86-64 passes a double in a vector register and a long in a general one, and
@@ -967,17 +983,19 @@ arm_own_id(void)
  * reached the wrong thread, whose own thread then never comes back.  So the
  * stat thread ends on its count or, once it has a few, on its time, and the
  * wait ends when the four have ended or when one of them has completed no call
- * for R_STALL_STEPS -- per thread, because with the stat thread stuck the fast
+ * for R_STALL_MS -- per thread, because with the stat thread stuck the fast
  * three would go on completing calls for ever.  WRONG names the thread that
- * stopped.
+ * stopped.  #1009: both times by the clock; counted in 10 ms sleeps, they
+ * doubled when each sleep came to last 20 ms, and the old arm's 15 s with them,
+ * so that 922-wait-whole-arm was caught no longer.
  */
 #define R_THREADS	4
 #define R_ROUNDS	1000	/* the least of each of the fast three */
 #define R_STAT		3	/* the kind that goes to the file server */
 #define R_STATS		20	/* and how many of it, which ends all four */
 #define R_STATS_LEAST	3	/* #922: the fewest, when its time ends it */
-#define R_STAT_STEPS	(2 * WAIT_STEPS)	/* #922: the stat thread's time */
-#define R_STALL_STEPS	(3 * WAIT_STEPS)	/* #922: no call this long */
+#define R_STAT_MS	10000	/* #922: the stat thread's time, by the clock */
+#define R_STALL_MS	15000	/* #922: no call this long, by the clock */
 
 static const char *const r_kind[R_THREADS] = {
 	"getsid", "getpgid", "kill", "stat"
@@ -985,11 +1003,11 @@ static const char *const r_kind[R_THREADS] = {
 static int	r_wrong[R_THREADS], r_round[R_THREADS], r_ended[R_THREADS];
 static int	r_done, r_over;
 /*
- * #922: the stat thread's time is up -- raised by the wait, which counts it in
- * the same 10 ms sleeps as everything else here.  Not clock_gettime(): when
- * this was written no handler served it in libposix-uros (#923), and the
- * first version of this read a timespec the call had never written, so the
- * time never ran out.
+ * #922: the stat thread's time is up -- raised by the wait, which counts it by
+ * the clock (#1009), served since #923.  When this was written no handler
+ * served clock_gettime(), and the first version of this read a timespec the
+ * call had never written, so the time never ran out: mono_ms() says -1 for a
+ * refusal, and the arm says it could not count its times.
  */
 static int	r_stat_time_up;
 
@@ -1056,8 +1074,9 @@ arm_threads_in_servers(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, k, n, rc, done, stuck = -1, steps = 0;
-	int		seen[R_THREADS] = { 0 }, still[R_THREADS] = { 0 };
+	int		i, k, n, rc, done, stuck = -1;
+	int		seen[R_THREADS] = { 0 };
+	long long	t0, now, last[R_THREADS];
 
 	if (access_by_stat(F_PATH) != 0) {
 		not_asked(22, "no disk mounted on this boot");
@@ -1076,29 +1095,43 @@ arm_threads_in_servers(void)
 	(void)pthread_attr_destroy(&attr);
 
 	/* #922: until all four have ended, or one has completed no call for
-	 * R_STALL_STEPS -- the reply it waits for is not coming */
+	 * R_STALL_MS -- the reply it waits for is not coming.  #1009: by the
+	 * clock, each thread from its last call. */
+	t0 = mono_ms();
+	for (k = 0; k < R_THREADS; k++)
+		last[k] = t0;
 	while (__atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS
-	       && stuck < 0) {
+	       && stuck < 0 && t0 >= 0) {
 		pause_a_little();
-		if (++steps == R_STAT_STEPS)
+		now = mono_ms();
+		if (now < 0) {
+			t0 = -1;
+			break;
+		}
+		if (now - t0 >= R_STAT_MS)
 			__atomic_store_n(&r_stat_time_up, 1, __ATOMIC_SEQ_CST);
 		for (k = 0; k < R_THREADS; k++) {
 			n = __atomic_load_n(&r_round[k], __ATOMIC_SEQ_CST);
 			if (__atomic_load_n(&r_ended[k], __ATOMIC_SEQ_CST)
 			    || n != seen[k])
-				still[k] = 0;
-			else if (++still[k] >= R_STALL_STEPS && stuck < 0)
+				last[k] = now;
+			else if (now - last[k] >= R_STALL_MS && stuck < 0)
 				stuck = k;
 			seen[k] = n;
 		}
 	}
 	done = __atomic_load_n(&r_done, __ATOMIC_SEQ_CST);
 	__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST); /* if stat never came back */
+	if (t0 < 0) {
+		verdict(22, 0, "CLOCK_MONOTONIC refused: the arm could not count "
+			"its times, %d of %d threads ended", done, R_THREADS);
+		return;
+	}
 	if (stuck >= 0) {
 		verdict(22, 0, "the %s thread completed no call in %d s, after "
 			"%d: a reply that never came back -- %s %d/%d, %s %d/%d, "
 			"%s %d/%d, %s %d/%d made/wrong", r_kind[stuck],
-			R_STALL_STEPS / 100, r_round[stuck],
+			R_STALL_MS / 1000, r_round[stuck],
 			r_kind[0], r_round[0], r_wrong[0],
 			r_kind[1], r_round[1], r_wrong[1],
 			r_kind[2], r_round[2], r_wrong[2],
