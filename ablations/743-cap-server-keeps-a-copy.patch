@@ -2,7 +2,8 @@ Kind: ablation
 Issue: #743
 Takes out: the per-task port made and not copied (3bd8308d) -- cap_server makes a send right of its own again, so no per-task port ever has no senders
 Run: --entry 14 600 -smp 4
-Expect: cap_test: \[40\] WRONG — port [0-9]+ of 80 refused with 2415 after 200 wait\(s\) of 10 ms: the slots of the ports given back did not come back
+Expect: cap_test: \[40\] WRONG — port [0-9]+ of 80 refused with [0-9]+ after 200 wait\(s\) of 10 ms: the slots of the ports given back did not come back
+Expect: cap_test: \[59\] WRONG
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
