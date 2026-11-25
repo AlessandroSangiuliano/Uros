@@ -171,6 +171,7 @@ static int		edu_looked;	/* [5] asked for it */
 static natural_t	testdev_bdf;
 static uint32_t		testdev_class;
 static int		testdev_found;
+static int		testdev_looked;	/* [9] listed the HAL's devices */
 
 /*
  * An arm's line, said.  #964: the console keeps a line whole up to
@@ -718,6 +719,7 @@ the_crash_arm(void)
 
 	if (!list_devices(9, &buf, &bytes, &n))
 		return;
+	testdev_looked = 1;
 	devs = (const struct hal_device_info *)buf;
 	for (i = 0; i < n && !found; i++)
 		if (devs[i].vendor_device == CT_TESTDEV_ID) {
@@ -1521,8 +1523,9 @@ the_crash_restart_arm(void)
 	int			state2 = -1, starts2 = -1;
 
 	if (!testdev_found) {
-		not_asked(18, "no pci-testdev on this board (run-x86_64.sh "
-			  "--testdev)");
+		not_asked(18, testdev_looked ? "no pci-testdev on this board "
+			  "(run-x86_64.sh --testdev)" : "[9] could not list the "
+			  "HAL's devices");
 		return;
 	}
 	if (testdev_class != CT_EDU_CLASS) {
@@ -1585,8 +1588,9 @@ the_crash_restart_arm(void)
 		starts2 == starts1 + HAL_CHORA_STARTS_MAX, "crash_probe, given "
 		"up after %d start(s), started through the HAL (%d): %s state "
 		"%d, after %d; %s (%d): state %d after %d (given up is %d, %d "
-		"starts a row)", starts0, k_start, k_start == KERN_SUCCESS ?
-		"given up again," : "the start refused, now", state1, starts1,
+		"starts a row)", starts0, k_start, k_start != KERN_SUCCESS ?
+		"the start refused, now" : state1 == HAL_DRIVER_GAVE_UP ?
+		"given up again," : "not given up in 30 s:", state1, starts1,
 		state1 != HAL_DRIVER_GAVE_UP ? "not updated, not given up" :
 		k_upd == KERN_SUCCESS ? "updated with crash_again" :
 		"the update refused", k_upd, state2, starts2,
