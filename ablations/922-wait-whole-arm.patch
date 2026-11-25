@@ -5,7 +5,7 @@ Takes out: the wait that follows progress -- arm 22 as it was, 15 s for the whol
 Run: --entry 14 600 -smp 4
 Expect: musl_test: \[22\] WRONG -- [0-9] of 4 threads ended
 Premise: musl_test: \[22\] 4 of 4 threads ended, .*, stat ([3-9]|1[0-9]) and 0
-Note: made again over the arm that counts its times by the clock (#1009): at 0aef604a on victus it was caught 4 of 4, and from 963ca2cc, which made a sleep of 10 ms last 20, it was caught no longer, the fixed arm making its 20 stats
+Note: made again over the arm that counts its times by the clock (#1009), at 9d03c634 on victus: caught 1 of 1 under TCG and 1 of 1 under KVM, the ablated arm out of its 15 s at 16 stats, and the fixed tree passing 1 of 1 each, its stat thread ending on its time at 11, the premise shown.  Before, at 0aef604a, it was caught 4 of 4; from 963ca2cc, which made a sleep of 10 ms last 20, it was caught no longer, the fixed arm making its 20 stats
 
 diff --git a/uros/src/tests/musl_test/musl_test.c b/uros/src/tests/musl_test/musl_test.c
 --- a/uros/src/tests/musl_test/musl_test.c
