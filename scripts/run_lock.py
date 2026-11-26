@@ -91,6 +91,15 @@ def give_back(mine, who):
 
 
 def _stop(signum, _frame):
+    """The run ends: from this signal on, TERM, HUP and INT are ignored until
+    it has (#1016).  give_back() ignored them only once called, and the run's
+    own finally runs before it: char-roundtrip.py's writes the boot's log and
+    waits up to 10 s for its qemu, and systemctl's second SIGTERM, 2-3 ms
+    after the first, raised SystemExit again in there.  Its FIFOs were left at
+    every stop of its unit, and in 2 boots of 4 under KVM on omen the lock as
+    well."""
+    for sig in _STOP:
+        signal.signal(sig, signal.SIG_IGN)
     raise SystemExit(128 + signum)
 
 
