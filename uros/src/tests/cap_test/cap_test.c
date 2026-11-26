@@ -6216,7 +6216,8 @@ fx_owner(void *arg)
     v.uaddr = &fx_owner_word;
     v.val = 0;
     while (!fx_stop) {
-        (void)urmach_futex_waitv(&v, 1, 1, &woken);	/* a tick, then gone */
+        /* #1009: the shortest wait, then gone: two ticks since 963ca2cc */
+        (void)urmach_futex_waitv(&v, 1, 1, &woken);
         fx_owner_waits++;
     }
     return NULL;
