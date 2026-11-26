@@ -2312,11 +2312,15 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
     mach_port_t   port = MACH_PORT_NULL;
     natural_t     before = 0, after = 0, size = 0;
     struct slots  s = { 0 };
-    unsigned      waits, waited;
+    struct ct_window w;
+    long          waits, waited;
     int           rc = -1, ok;
     kern_return_t kr, rd = -1, wr = -1, dma = -1;
 
-    for (waited = 0; ; waited += 100) {
+    /* #1009: the name's 30 s and the slots' 2 s, by the clock. */
+    ct_window_start(&w, 100);
+    for (;;) {
+        waited = ct_window_ms(&w);
         if (netname_look_up(name_server_port, "", (char *)"exec_server",
                             &exec_port) == KERN_SUCCESS)
             break;
@@ -2325,7 +2329,7 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
                    "— NOT ASKED (#743)\n");
             return 1;
         }
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+        ct_window_wait(&w);
     }
     /* The census is read before the caller's port is derived. */
     if (plen == 0 || slots_now(mach_cap_port, &s) != KERN_SUCCESS ||
@@ -2370,14 +2374,16 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
     (void)mach_port_deallocate(mach_task_self(), task);
     (void)mach_port_deallocate(mach_task_self(), thread);
 
-    for (waits = 0; ; waits++) {
+    ct_window_start(&w, 10);
+    for (;;) {
+        waits = ct_window_ms(&w);
         if (slots_now(mach_cap_port, &s) != KERN_SUCCESS)
             after = before + 1;
         else
             after = s.in_use;
-        if (after <= before || waits == 200)
+        if (after <= before || waits >= 2000)
             break;
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+        ct_window_wait(&w);
     }
 
     ok = rd == KERN_SUCCESS && wr == CAP_ERR_NOT_IN_MANIFEST &&
@@ -2393,8 +2399,8 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
                "may hand on block devices READ: its port granted READ and "
                "refused WRITE and DMA buffers (#743)\n");
         printf("cap_test: [42] once both ports were given back the slots "
-               "were back to %u of %u after %u wait(s) of 10 ms; "
-               "exec_server's name came after %u ms (#743)\n",
+               "were back to %u of %u after %ld ms; "
+               "exec_server's name came after %ld ms (#743)\n",
                (unsigned)after, (unsigned)size, waits, waited);
     }
     if (rd != KERN_SUCCESS || wr != CAP_ERR_NOT_IN_MANIFEST ||
@@ -2405,8 +2411,8 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
                (int)rd, (int)wr, (int)dma, CAP_ERR_NOT_IN_MANIFEST);
     if (after > before)
         printf("cap_test: [42] WRONG — the slots were %u before the exec "
-               "and %u after both ports were given back and %u wait(s) of "
-               "10 ms (#743)\n", (unsigned)before, (unsigned)after, waits);
+               "and %u after both ports were given back and %ld ms "
+               "(#743)\n", (unsigned)before, (unsigned)after, waits);
     return ok;
 }
 
@@ -2645,23 +2651,25 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
     proc_pid_t    pid = 0, fpid = 0;
     int           rc = -1, frc = -1;
     int           full_held = -1, reduced_held = -1, full_after = -1;
-    unsigned      waited;
+    struct ct_window w;
     int           ok;
     kern_return_t kr, kr_rights = -1, kr_full_read = -1, kr_read = -1;
     kern_return_t kr_info = -1, kr_idstop = -1, kr_amp = -1, kr_odd = -1;
     kern_return_t kr_end = -1, kr_trap_info = -1, kr_trap_stop = -1;
     mach_msg_type_number_t tcnt = TASK_BASIC_INFO_COUNT;
 
-    for (waited = 0; ; waited += 100) {
+    /* #1009: the name's 30 s by the clock. */
+    ct_window_start(&w, 100);
+    for (;;) {
         if (netname_look_up(name_server_port, "", (char *)"proc_server",
                             &proc) == KERN_SUCCESS)
             break;
-        if (waited >= 30000) {
+        if (ct_window_over(&w, 30000)) {
             printf("cap_test: [45] proc_server's name did not come in 30 s "
                    "— NOT ASKED (#927)\n");
             return 1;
         }
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+        ct_window_wait(&w);
     }
 
     kr = task_create(me, NULL, 0, FALSE, &child);
