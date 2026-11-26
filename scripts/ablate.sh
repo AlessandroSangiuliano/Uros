@@ -31,14 +31,24 @@
 # arm read NOT CAUGHT for 700 commits after a sleep of 10 ms came to last 20,
 # its window with it, #1009).
 #
+# With --before REV, an ablated arm read NOT CAUGHT raises the question a
+# union's giro asks first: did the tree under test lose the catch, or was it
+# so before?  The run boots the ablated arm again over REV, the tree the one
+# under test was made from -- the epic, in a giro -- with the same patches,
+# boots and accelerators that missed, and says which of the two it is (#1010:
+# on 25/11 that took a boot of the epic by hand, for 922-wait-whole-arm).
+#
 # Usage:
-#   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
+#   ablate.sh [--base REV] [--before REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --check [--base REV] PATCH...
 #   ablate.sh --check-all [--base REV]
 #   ablate.sh --plan [--base REV] [--boots N] [--accel L] [--ab] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --make COMMIT PATH...
 #
 #   --base REV   the tree to take the fix out of (default HEAD)
+#   --before REV boot an ablated arm read NOT CAUGHT again over REV, and say
+#                whether the tree under test lost the catch or REV did not
+#                have it either
 #   --boots N    boots per accelerator and arm (default 1)
 #   --accel L    accelerators, comma-separated, of tcg and kvm (default tcg)
 #   --ab         alternate every ablated boot with a boot of the fixed tree:
@@ -61,10 +71,12 @@
 # 1 at least one was not · 2 a patch does not apply, or the command line is
 # wrong · 3 a tree did not build, or the harness could not run a boot -- which
 # says nothing about the test · 4 no boot was uncaught or failed, and a fixed
-# boot was without its premise: the ablation could not be asked there.  Sent SIGTERM, it stops what it is doing, the
-# boot it is running or the build, says so -- a stopped boot has a row whose
-# verdict is "stopped" -- prints what the boots it made said, removes its
-# worktrees and ends by the signal (#951).
+# boot was without its premise: the ablation could not be asked there.  What
+# --before finds over the other tree is said and leaves the status as it is.
+# Sent SIGTERM, it stops what it is doing, the boot it is running or the
+# build, says so -- a stopped boot has a row whose verdict is "stopped" --
+# prints what the boots it made said, removes its worktrees and ends by the
+# signal (#951).
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -104,31 +116,36 @@ EOF
 fi
 
 BASE=HEAD
+BEFORE=""
 BOOTS=1
 ACCEL=tcg
 AB=0
+AB_GIVEN=0
 KEEP=0
 CHECK=0
 ALL=0
 PLAN=0
 PATCHES=()
 RUN=()
+RUN_GIVEN=0
+SELF=$(realpath "$0")
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--base|--boots|--accel)
+	--base|--before|--boots|--accel)
 		[ $# -ge 2 ] || die 2 "$1 needs a value"
 		case "$1" in
 		--base)		BASE=$2 ;;
+		--before)	BEFORE=$2 ;;
 		--boots)	BOOTS=$2 ;;
 		--accel)	ACCEL=$2 ;;
 		esac
 		shift 2 ;;
-	--ab)		AB=1; shift ;;
+	--ab)		AB=1; AB_GIVEN=1; shift ;;
 	--keep)		KEEP=1; shift ;;
 	--check)	CHECK=1; shift ;;
 	--check-all)	CHECK=1; ALL=1; shift ;;
 	--plan)		PLAN=1; shift ;;
-	--)		shift; RUN=("$@"); break ;;
+	--)		shift; RUN=("$@"); RUN_GIVEN=1; break ;;
 	-*)		die 2 "unknown option $1" ;;
 	*)		[ -e "$1" ] || die 2 "no patch $1"
 			PATCHES+=("$(realpath "$1")"); shift ;;
@@ -156,6 +173,11 @@ done
 
 REV=$(git -C "$REPO" rev-parse -q --verify "$BASE^{commit}") || die 2 "no revision $BASE"
 SHORT=$(git -C "$REPO" rev-parse --short "$REV")
+if [ -n "$BEFORE" ]; then
+	BREV=$(git -C "$REPO" rev-parse -q --verify "$BEFORE^{commit}") || die 2 "no revision $BEFORE (--before)"
+	BSHORT=$(git -C "$REPO" rev-parse --short "$BREV")
+	[ "$BREV" != "$REV" ] || die 2 "--before $BEFORE is the tree under test itself: nothing to tell apart"
+fi
 
 # A patch, after the bases its Over: lines name (theirs first), each once.  A
 # base the command line did not name is said: the run is not then the patches
@@ -381,6 +403,8 @@ if [ $PLAN = 1 ]; then
 		echo "ablate: plan: one arm, $SHORT with all ${#EXPANDED[@]} patch(es)"
 	fi
 	echo "ablate: plan: $BOOTS boot(s) per arm under each of ${ACCELS[*]}, $((BOOTS * ${#ACCELS[@]} * ${#ARMS[@]})) in all"
+	[ -z "$BEFORE" ] ||
+		echo "ablate: plan: an ablated boot read NOT CAUGHT is booted again over $BSHORT, under its accelerator, to say whether $SHORT lost the catch (--before)"
 	exit 0
 fi
 
@@ -544,6 +568,9 @@ caught=0 missed=0 passed=0 failed=0
 # #1010: fixed boots without their premise, and the ablated boots beside them
 # that were not caught: not asked, rather than uncaught.
 unpremised=0 unaskable=0
+# #1010: the accelerators under which an ablated boot read NOT CAUGHT, for
+# --before.
+MISSED_ACCS=""
 # #951: the boots made so far, of all the run plans, for the line a stopped run
 # ends with.
 MADE=0
@@ -641,6 +668,10 @@ for i in $(seq 1 "$BOOTS"); do
 					else
 						verdict="NOT CAUGHT"
 						missed=$((missed + 1))
+						case ",$MISSED_ACCS," in
+						*",$acc,"*) ;;
+						*) MISSED_ACCS=${MISSED_ACCS:+$MISSED_ACCS,}$acc ;;
+						esac
 					fi
 				elif [ $rc = 0 ] && [ $hit = 0 ]; then
 					lacks=$(premise_missing "$log")
@@ -688,6 +719,43 @@ echo "ablate: ablated tree caught $caught of $((caught + missed))"
 [ $unaskable = 0 ] || echo "ablate: $unaskable ablated boot(s) not askable, not caught beside a fixed boot without its premise (#1010)"
 [ $AB = 1 ] && echo "ablate: fixed tree passed $passed of $((passed + failed + unpremised))"
 [ $unpremised = 0 ] || echo "ablate: the premise was missing in $unpremised of $((passed + failed + unpremised)) fixed boot(s): the ablation could not be asked there (#1010)"
+# #1010: --before.  The ablated arm read NOT CAUGHT is booted again over the
+# tree the one under test was made from, by this same script: the same patches
+# and boots, under the accelerators that missed, with the fixed arm only where
+# this run had it (--ab, or a premise, which the run over there reads again).
+# Its worktrees, rows and log are its own, its rows naming that tree; this
+# run's worktrees go first.  Its answer is said as one of the two, and it does
+# not change this run's status: a catch lost or never had is not caught here.
+if [ -n "$BEFORE" ] && [ $missed -gt 0 ] && [ -z "$STOP" ]; then
+	cleanup
+	bargs=(--base "$BREV" --boots "$BOOTS" --accel "$MISSED_ACCS")
+	[ $AB_GIVEN = 0 ] || bargs+=(--ab)
+	[ $KEEP = 0 ] || bargs+=(--keep)
+	bargs+=("${PATCHES[@]}")
+	[ $RUN_GIVEN = 0 ] || bargs+=(-- "${RUN[@]}")
+	echo "ablate: $missed ablated boot(s) not caught over $SHORT: the ablated arm booted again over $BSHORT, under $MISSED_ACCS (--before)"
+	set +e
+	waited "$SELF" "${bargs[@]}" > "$RUNDIR/before.out" 2>&1 < /dev/null
+	brc=$?
+	set -e
+	sed 's/^/    /' "$RUNDIR/before.out"
+	read -r bcaught basked < <(sed -n 's/^ablate: ablated tree caught \([0-9]*\) of \([0-9]*\)$/\1 \2/p' "$RUNDIR/before.out" | tail -n 1) || true
+	if [ -n "$STOP" ]; then
+		:
+	elif [ $brc = 2 ]; then
+		echo "ablate: the patches do not apply over $BSHORT, so whether $SHORT lost the catch is not asked (--before)"
+	elif [ $brc = 4 ]; then
+		echo "ablate: over $BSHORT the premise was missing too: not askable there either (--before)"
+	elif [ -z "${basked:-}" ] || [ "$basked" = 0 ] || { [ $brc != 0 ] && [ $brc != 1 ]; }; then
+		echo "ablate: over $BSHORT the run was not made (status $brc), so whether $SHORT lost the catch is not asked (--before)"
+	elif [ "$bcaught" = "$basked" ]; then
+		echo "ablate: over $BSHORT the ablated tree caught $bcaught of $basked: the catch was LOST by $SHORT (--before)"
+	elif [ "$bcaught" = 0 ]; then
+		echo "ablate: over $BSHORT the ablated tree caught 0 of $basked: NOT CAUGHT THERE EITHER, so $SHORT did not lose it (--before)"
+	else
+		echo "ablate: over $BSHORT the ablated tree caught $bcaught of $basked: caught there in part, so $SHORT alone does not tell (--before)"
+	fi
+fi
 # And it ends by the signal, its worktrees removed first, with the signals
 # that could cut the removal short ignored, as stopped_by() does.
 if [ -n "$STOP" ]; then
