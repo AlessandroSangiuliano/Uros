@@ -571,7 +571,7 @@ arm_console(void)
  * the bytes at an offset must be the bytes that offset holds.
  */
 #define F_PATH		"/mach_servers/cow_test"	/* on the root disk, and nobody writes it */
-#define F_MOUNT_WAIT	(15 * 100)			/* 15 s of 10 ms steps */
+#define F_MOUNT_MS	15000				/* by the clock (#1009) */
 
 static void
 arm_file(void)
@@ -579,14 +579,20 @@ arm_file(void)
 	struct stat	by_name, by_fd;
 	unsigned char	head[16], again[16];
 	off_t		end, middle;
-	int		fd, i;
+	struct mt_window w;
+	int		fd, found = 0;
 
-	for (i = 0; i < F_MOUNT_WAIT; i++) {
-		if (stat(F_PATH, &by_name) == 0)
+	mt_window_start(&w, 10);
+	for (;;) {
+		if (stat(F_PATH, &by_name) == 0) {
+			found = 1;
 			break;
-		pause_a_little();
+		}
+		if (mt_window_over(&w, F_MOUNT_MS))
+			break;
+		mt_window_pause(&w);
 	}
-	if (i == F_MOUNT_WAIT) {
+	if (!found) {
 		not_asked(9, "no file on a mounted disk on this boot");
 		return;
 	}
@@ -2667,8 +2673,9 @@ static void
 arm_wait_nohang(void)
 {
 	struct timespec	t0, t1;
+	struct mt_window w;
 	pid_t		pid, first, got, after;
-	int		st = 0, step, e_after;
+	int		st = 0, e_after;
 	long		first_ms;
 
 	pid = fork();
@@ -2686,8 +2693,9 @@ arm_wait_nohang(void)
 	first_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
 		   (t1.tv_nsec - t0.tv_nsec) / 1000000;
 	got = first;
-	for (step = 0; got == 0 && step < 1000; step++) {
-		pause_a_little();
+	mt_window_start(&w, 10);		/* #1009: 10 s by the clock */
+	while (got == 0 && !mt_window_over(&w, 10000)) {
+		mt_window_pause(&w);
 		got = waitpid(pid, &st, WNOHANG);
 	}
 	if (got == 0) {
@@ -3172,10 +3180,11 @@ static void wait_to_be_killed(void) __attribute__((noreturn));
 static void
 wait_to_be_killed(void)
 {
-	int	i;
+	struct mt_window w;
 
-	for (i = 0; i < 100; i++)
-		nap_ms(100);
+	mt_window_start(&w, 100);		/* #1009: 10 s by the clock */
+	while (!mt_window_over(&w, 10000))
+		mt_window_pause(&w);
 	_exit(9);
 }
 
@@ -3414,7 +3423,8 @@ static int
 wait_group_nohang_run(void)
 {
 	pid_t	a, b, c, r, r0g, r0o, g1 = 0, g2 = 0, o1 = 0, gend, oend;
-	int	s, s1 = 0, s2 = 0, s3 = 0, e_g, e_o, step, wrong = 0;
+	int	s, s1 = 0, s2 = 0, s3 = 0, e_g, e_o, wrong = 0;
+	struct mt_window w;
 
 	a = fork();
 	if (a < 0)
@@ -3441,7 +3451,8 @@ wait_group_nohang_run(void)
 	(void)setpgid(b, a);			/* as a shell does */
 	r0g = waitpid(-a, NULL, WNOHANG);
 	r0o = waitpid(0, NULL, WNOHANG);
-	for (step = 0; step < 1000 && (g2 == 0 || o1 == 0); step++) {
+	mt_window_start(&w, 10);		/* #1009: 10 s by the clock */
+	while ((g2 == 0 || o1 == 0) && !mt_window_over(&w, 10000)) {
 		if (g2 == 0) {
 			s = 0;
 			r = waitpid(-a, &s, WNOHANG);
@@ -3465,7 +3476,7 @@ wait_group_nohang_run(void)
 				s3 = s;
 			}
 		}
-		nap_ms(10);
+		mt_window_pause(&w);
 	}
 	gend = waitpid(-a, NULL, WNOHANG);
 	e_g = errno;
@@ -3593,14 +3604,15 @@ static void dfl_child(int sig) __attribute__((noreturn));
 static void
 dfl_child(int sig)
 {
-	int	i;
+	struct mt_window w;
 
 	(void)signal(sig, SIG_DFL);
 	(void)signal(SIGUSR1, dfl_mark);
 	(void)raise(sig);
 	(void)raise(SIGUSR1);
-	for (i = 0; i < 1000 && !dfl_marked; i++)
-		nap_ms(10);
+	mt_window_start(&w, 10);		/* #1009: 10 s by the clock */
+	while (!dfl_marked && !mt_window_over(&w, 10000))
+		mt_window_pause(&w);
 	_exit(dfl_marked ? 0 : 9);
 }
 
