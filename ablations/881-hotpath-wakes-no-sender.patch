@@ -3,7 +3,7 @@ Issue: #881
 Over: 881-widen-receiver-held.patch
 Takes out: the hot path's wakeup of a sender -- its parked receiver lowers the count as it always did and wakes no one, so a sender with no timeout stays parked on a port with room
 Run: --entry 14 600 -smp 4
-Expect: act_test: \[45\] after [0-9]+ ticks the sender stayed parked on a port with room
+Expect: act_test: \[45\] after [0-9]+ ms the sender stayed parked on a port with room
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
 index 47be94b4..b8ae0df6 100644

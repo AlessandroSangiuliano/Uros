@@ -8933,7 +8933,7 @@ arm_forty_four_index_zero_name(void)
 #define	A45_FIN		4503
 #define	A45_NO_SUCH_ID	999999	/* the kernel answers it with MIG_BAD_ID */
 #define	A45_TIMEOUT	500
-#define	A45_TICKS	2000	/* how long it may stay parked: 20 s */
+#define	A45_PARKED_MS	20000	/* how long it may stay parked (#1009: by the clock) */
 
 static mach_port_t	a45_port;
 static volatile mach_port_t a45_server_thread, a45_sender_thread;
@@ -9037,6 +9037,7 @@ a45_round(int with_rpc)
 	kern_return_t		kr;
 	unsigned		i;
 	int			parked = 0, gone = 0, ok = 1;
+	struct act_window	held_w;
 
 	a45_port = arm_own_port(45);
 	reply = arm_own_port(45);
@@ -9112,14 +9113,16 @@ a45_round(int with_rpc)
 	/*
 	 * In time, and not in polls: a depressed thread_switch() comes back at
 	 * once with nothing else to run, and 4000 of those are over before the
-	 * sender has got anywhere under the widen.
+	 * sender has got anywhere under the widen.  #1009: and the time by the
+	 * clock, not 2000 waits of a tick, which since 963ca2cc last two.
 	 */
-	for (i = 0; i < A45_TICKS && !a45_done; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	act_window_start(&held_w, 1);
+	while (!a45_done && !act_window_over(&held_w, A45_PARKED_MS))
+		act_window_wait(&held_w);
 
 	if (!a45_done) {
-		printf("act_test: [45] after %u ticks the sender stayed parked on "
-		       "a port with room — WRONG (#881)\n", i);
+		printf("act_test: [45] after %ld ms the sender stayed parked on "
+		       "a port with room — WRONG (#881)\n", act_window_ms(&held_w));
 		ok = 0;
 		(void) mach_port_destroy(task, a45_port);
 		gone = 1;
