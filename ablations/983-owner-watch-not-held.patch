@@ -9,7 +9,7 @@ Expect: cap_test: \[60\] WRONG
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -578,7 +578,7 @@
+@@ -582,7 +582,7 @@
       */
      e->sender = g_request_local_port;
      e->lender = cap_watch_hold_slot(g_request_local_port);	/* #983 */
@@ -18,7 +18,7 @@ diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_ser
      cap_table_insert(e);
      cap_expiry_note(t->expires);		/* #747 */
  
-@@ -658,8 +658,7 @@
+@@ -662,8 +662,7 @@
      cap_sign(t);
      e->sender = g_request_local_port;	/* #599: see cap_acquire */
      e->lender = cap_watch_hold_slot(g_request_local_port);	/* #983 */

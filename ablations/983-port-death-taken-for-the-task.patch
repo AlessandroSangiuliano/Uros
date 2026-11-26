@@ -8,7 +8,7 @@ Expect: cap_test: \[60\] WRONG
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -1509,7 +1509,8 @@
+@@ -1529,7 +1529,8 @@
          slots++;
      }
      for (e = cap_table_next(NULL); e != NULL; e = cap_table_next(e)) {

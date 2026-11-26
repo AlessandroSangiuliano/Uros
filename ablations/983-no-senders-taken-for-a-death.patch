@@ -8,7 +8,7 @@ Expect: cap_test: \[59\] WRONG
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -1717,7 +1717,7 @@
+@@ -1737,7 +1737,7 @@
      if (MACH_PORT_VALID(task))
          (void)mach_port_deallocate(mach_task_self(), task);
      if (w != NULL)

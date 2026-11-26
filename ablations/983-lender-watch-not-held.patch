@@ -9,7 +9,7 @@ Expect: cap_test: \[59\] WRONG
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -577,7 +577,7 @@
+@@ -581,7 +581,7 @@
       * could revoke any capability.
       */
      e->sender = g_request_local_port;

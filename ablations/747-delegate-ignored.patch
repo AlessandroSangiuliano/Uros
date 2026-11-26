@@ -8,7 +8,7 @@ Expect: cap_test: \[53\] WRONG
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -733,8 +733,8 @@
+@@ -737,8 +737,8 @@
          w = cap_watch_get(delegate, id, 0);
      if (w == NULL)
          return CAP_ERR_NO_MEMORY;

@@ -8,7 +8,7 @@ Expect: cap_test: \[61\] WRONG
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -1450,7 +1450,7 @@
+@@ -1470,7 +1470,7 @@
  {
      mach_port_t previous = MACH_PORT_NULL;
  

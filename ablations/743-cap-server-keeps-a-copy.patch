@@ -8,7 +8,7 @@ Expect: cap_test: \[59\] WRONG
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 --- a/uros/src/servers/cap_server/cap_server.c
 +++ b/uros/src/servers/cap_server/cap_server.c
-@@ -1660,6 +1660,8 @@
+@@ -1680,6 +1680,8 @@
          return vrc;
      }
      (void)cap_watch_hold(w);			/* the slot's */
