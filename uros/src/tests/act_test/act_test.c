@@ -168,6 +168,60 @@ act_ms_since(const struct timespec *t0)
 }
 
 /*
+ * #1009: a window, read with act_ms_since(), its waits only pacing it: by
+ * nap() or by thread_switch(), as the arm waited before.  A window whose start
+ * the clock cannot give counts its waits, a tick each at the least, as the
+ * windows ran before 963ca2cc.
+ */
+struct act_window {
+	struct timespec	t0;
+	int		clocked;
+	unsigned	waits;
+	unsigned	step_ms;
+};
+
+static void
+act_window_start(struct act_window *w, unsigned step_ms)
+{
+	w->clocked = getclock(TIMEOFDAY, &w->t0) == 0;
+	w->waits = 0;
+	w->step_ms = step_ms;
+}
+
+static long
+act_window_ms(struct act_window *w)
+{
+	long	d = w->clocked ? act_ms_since(&w->t0) : -1;
+
+	if (d >= 0)
+		return d;
+	/* A timed wait lasts a tick at least, 10 ms at 100 Hz. */
+	w->clocked = 0;
+	return (long) w->waits * (w->step_ms > 10 ? w->step_ms : 10);
+}
+
+static int
+act_window_over(struct act_window *w, unsigned ms)
+{
+	return act_window_ms(w) >= (long) ms;
+}
+
+/* A nap of the window's step; what nap() answered, as it said. */
+static kern_return_t
+act_window_nap(struct act_window *w)
+{
+	w->waits++;
+	return nap((int) w->step_ms);
+}
+
+static void
+act_window_wait(struct act_window *w)
+{
+	w->waits++;
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, w->step_ms);
+}
+
+/*
  * ── Arm one: terminate a thread stopped inside exception_raise() ──────
  *
  * The thread faults on an address its task does not own.  The kernel composes
@@ -1811,6 +1865,7 @@ arm_nine_refused_create_running(void)
 	natural_t	st[4] = { 0, 0, 0, 0 };
 	int		before = 0, after = 0, refused = 0, waited = 0, i;
 	int		passed = 0;
+	struct act_window w;
 	kern_return_t	kr;
 
 	kr = bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
@@ -1852,13 +1907,14 @@ arm_nine_refused_create_running(void)
 		 * that patience in microseconds, so it is checked.
 		 */
 		kr = arm_nine_thread_count(pset, &after);
+		act_window_start(&w, 10);	/* #1009: by the clock */
 		while (kr == KERN_SUCCESS && after - before >= ARM9_CALLS / 2 &&
-		       waited < ARM9_WAIT_MS) {
-			if (nap(10) != MACH_RCV_TIMED_OUT)
+		       !act_window_over(&w, ARM9_WAIT_MS)) {
+			if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 				break;
-			waited += 10;
 			kr = arm_nine_thread_count(pset, &after);
 		}
+		waited = (int) act_window_ms(&w);
 
 		if (refused != ARM9_CALLS)
 			printf("act_test: [9] a flavor that does not exist was "
@@ -7430,23 +7486,32 @@ static pthread_t volatile arm_thirty_nine_noise_self;
  * running was 5 us on that desktop and 1.3 ms at the median on EPYC under KVM,
  * and 19 boots of 2256 there said of a good kernel that a thread never came.
  */
+/*
+ * #1009: 40 s by the clock.  They were 4000 waits of 1 ms, which lasted a tick
+ * each when this bound was set and passed -- 40 s -- and two since 963ca2cc,
+ * 80 s.  The 40 that passed are kept.
+ */
+#define	ARM_WAITING_MS	40000
+
 static int
 arm_thread_waiting(volatile mach_port_t *thread)
 {
 	struct thread_basic_info	info;
 	mach_msg_type_number_t		n;
-	unsigned			i;
+	struct act_window		w;
 
-	for (i = 0; i < 4000; i++) {
+	act_window_start(&w, 1);
+	for (;;) {
 		n = THREAD_BASIC_INFO_COUNT;
 		if (*thread != MACH_PORT_NULL &&
 		    thread_info(*thread, THREAD_BASIC_INFO, (thread_info_t) &info,
 				&n) == KERN_SUCCESS &&
 		    info.run_state == TH_STATE_WAITING)
 			return 1;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+		if (act_window_over(&w, ARM_WAITING_MS))
+			return 0;
+		act_window_wait(&w);
 	}
-	return 0;
 }
 
 /* -N, as the kernel says it.  arm 39 and arm 40. */
