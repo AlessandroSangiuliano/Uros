@@ -744,10 +744,15 @@ if [ -n "$BEFORE" ] && [ $missed -gt 0 ] && [ -z "$STOP" ]; then
 		n=$(basename "$p")
 		if [ -e "$bdir/ablations/$n" ]; then
 			bpatches+=("$bdir/ablations/$n")
-			cmp -s "$p" "$bdir/ablations/$n" || bchanged+=("$n")
 		else
 			bnew+=("$n")
 		fi
+	done
+	# Changed since: the bases too, which the run over there takes from
+	# its own ablations/ by their Over: lines.
+	for p in "${EXPANDED[@]}"; do
+		n=$(basename "$p")
+		[ ! -e "$bdir/ablations/$n" ] || cmp -s "$p" "$bdir/ablations/$n" || bchanged+=("$n")
 	done
 fi
 if [ ${#bnew[@]} -gt 0 ]; then
