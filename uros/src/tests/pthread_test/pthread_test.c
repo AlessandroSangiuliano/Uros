@@ -215,7 +215,10 @@ test_cond_signal(void)
 	pthread_t th;
 	void *retval;
 	int seq_before = -1, seq_after = -1, waiters_seen = -1, unused;
-	int waiters_now = -1, waited_ms;
+	int waiters_now = -1;
+	struct timespec t0, t;
+	int clocked;
+	long waited_ms = 0;
 
 	cond_flag = 0;
 	pthread_create(&th, NULL, thread_cond_waiter, NULL);
@@ -230,9 +233,23 @@ test_cond_signal(void)
 	 * is counted under the variable's lock, before it lets the mutex go, so
 	 * once it is counted it is in the wait or on its way into it.
 	 */
-	for (waited_ms = 0; waited_ms < COND_JOIN_LIMIT_S * 1000; waited_ms++) {
+	/*
+	 * #1009: the thirty seconds by the clock.  They were counted as 30000
+	 * waits of 1 ms, which a tick made 300 s, and since 963ca2cc's tick
+	 * more 600 s: a waiter that never came held the boot ten minutes, the
+	 * harness's whole silence.  A clock refused counts the waits, as before.
+	 */
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (;;) {
 		if (pthread_cond_state_np(&cond_var, &unused, &waiters_now) == 0
 		    && waiters_now > 0)
+			break;
+		if (clocked && getclock(TIMEOFDAY, &t) == 0)
+			waited_ms = (long) (t.tv_sec - t0.tv_sec) * 1000 +
+				    (t.tv_nsec - t0.tv_nsec) / 1000000;
+		else
+			waited_ms++;
+		if (waited_ms >= COND_JOIN_LIMIT_S * 1000)
 			break;
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
 	}
