@@ -2461,7 +2461,7 @@ static int
 rpc_pair_start(struct rpc_pair *p, pthread_t *server, pthread_t *asker)
 {
 	kern_return_t	kr;
-	int		i;
+	struct act_window w;
 
 	kr = arm_ten_port(&p->port, 1);
 	if (kr == KERN_SUCCESS)
@@ -2486,8 +2486,11 @@ rpc_pair_start(struct rpc_pair *p, pthread_t *server, pthread_t *asker)
 		       "— WRONG\n", p->arm);
 		return 0;
 	}
-	for (i = 0; i < PATIENCE && p->thread == MACH_PORT_NULL; i++)
-		nap(10);
+	/* #1009: a second by the clock, not PATIENCE naps of 10 ms. */
+	act_window_start(&w, 10);
+	while (p->thread == MACH_PORT_NULL &&
+	       !act_window_over(&w, PATIENCE * 10))
+		(void) act_window_nap(&w);
 	if (p->thread == MACH_PORT_NULL) {
 		printf("act_test: %s the thread never published its port "
 		       "— WRONG\n", p->arm);
@@ -4670,7 +4673,8 @@ arm_twenty_three_float_state_is_what_the_thread_finds(void)
 	kern_return_t			kr_bad, kr_good, kr_regs, kr_go;
 	uint32_t			mask, bit;
 	unsigned			i;
-	int				waited = 0, init_ok, unchanged = 1;
+	int				init_ok, unchanged = 1;
+	struct act_window		w;
 
 	__asm__ volatile("fxsave %0" : "=m" (fx));
 	mask = *(uint32_t *) (fx + 28);
@@ -4733,11 +4737,11 @@ arm_twenty_three_float_state_is_what_the_thread_finds(void)
 	kr_go = KERN_FAILURE;
 	if (kr_good == KERN_SUCCESS && kr_regs == KERN_SUCCESS)
 		kr_go = thread_resume(t);
+	act_window_start(&w, 10);	/* #1009: by the clock */
 	while (kr_go == KERN_SUCCESS && !arm23_looked &&
-	       waited < ARM23_WAIT_MS) {
-		if (nap(10) != MACH_RCV_TIMED_OUT)
+	       !act_window_over(&w, ARM23_WAIT_MS)) {
+		if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 			break;
-		waited += 10;
 	}
 	(void) thread_terminate(t);
 	(void) mach_port_deallocate(mach_task_self(), t);
@@ -4817,12 +4821,12 @@ arm_twenty_four_zero_the_vectors(void)
 static int
 arm_twenty_four_wait(int step)
 {
-	int	waited = 0;
+	struct act_window	w;
 
-	while (arm24_step != step && waited < ARM24_WAIT_MS) {
-		if (nap(10) != MACH_RCV_TIMED_OUT)
+	act_window_start(&w, 10);	/* #1009: by the clock */
+	while (arm24_step != step && !act_window_over(&w, ARM24_WAIT_MS)) {
+		if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 			break;
-		waited += 10;
 	}
 	return arm24_step == step;
 }
@@ -5259,6 +5263,7 @@ static void *
 arm_26_sender(void *arg)
 {
 	mach_msg_header_t	msg;
+	struct act_window	w;
 	int			i;
 
 	(void) arg;
@@ -5266,7 +5271,9 @@ arm_26_sender(void *arg)
 	for (i = 0; i < PATIENCE && !arm_26_ready; i++)
 		nap(100);
 
-	for (i = 0; i < 10 * PATIENCE && arm_26_ready; i++) {
+	/* #1009: 10 s by the clock, not 1000 naps of 10 ms. */
+	act_window_start(&w, 10);
+	while (arm_26_ready && !act_window_over(&w, 10 * PATIENCE * 10)) {
 		struct thread_basic_info	basic;
 		mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
 
@@ -5277,7 +5284,7 @@ arm_26_sender(void *arg)
 			arm_26_saw_waiting = 1;
 			break;
 		}
-		nap(10);
+		(void) act_window_nap(&w);
 	}
 
 	/*
