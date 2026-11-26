@@ -30,6 +30,8 @@
 # that is not caught is said not askable, not uncaught (#1010: 922-wait-whole-
 # arm read NOT CAUGHT for 700 commits after a sleep of 10 ms came to last 20,
 # its window with it, #1009).
+# A patch that needs none says why, `Premise: none -- WHY', and nothing is
+# read off a boot for it.
 #
 # With --before REV, an ablated arm read NOT CAUGHT raises the question a
 # union's giro asks first: did the tree under test lose the catch, or was it
@@ -205,6 +207,13 @@ with_bases() {
 		-e p "$p" | head -n 1)
 	[ -z "$stray" ] ||
 		die 2 "$(basename "$p") has a header line with no key, which nothing reads: '$stray' -- one Expect: per line"
+	# #1010: `Premise: none -- WHY' says why a patch needs no premise -- a
+	# window its hold opens on every boot that drives the path, a condition
+	# it puts in place.  It is no ERE, and stands alone, with its reason.
+	if header "$p" Premise | grep -q '^none'; then
+		[ "$(header "$p" Premise | wc -l)" = 1 ] && header "$p" Premise | grep -q '^none -- [^ ]' ||
+			die 2 "$(basename "$p")'s Premise: none stands alone and gives its reason: Premise: none -- WHY"
+	fi
 	for b in $(header "$p" Over); do
 		[ -r "$(dirname "$p")/$b" ] ||
 			die 2 "$(basename "$p") goes over $b, which is not next to it"
@@ -357,8 +366,10 @@ done)
 
 # #1010: what each fixed boot must show for the ablated arm to be asked, from
 # every patch of the run, the bases too, each once.  A premise is read off a
-# fixed boot, so it brings the fixed arm in when --ab was not given.
-PREMISE=$(for p in "${EXPANDED[@]}"; do header "$p" Premise; done | awk '!seen[$0]++')
+# fixed boot, so it brings the fixed arm in when --ab was not given.  A patch
+# that says it needs none says so to its reader, and nothing is read off a
+# boot for it.
+PREMISE=$(for p in "${EXPANDED[@]}"; do header "$p" Premise; done | grep -v '^none -- ' | awk '!seen[$0]++')
 PREMISE_AB=0
 if [ -n "$PREMISE" ] && [ $AB = 0 ]; then
 	AB=1
