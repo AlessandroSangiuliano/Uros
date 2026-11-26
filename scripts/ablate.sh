@@ -26,10 +26,10 @@
 # stands on, such as a window of time the test must still have.  It is read
 # from every patch of the run, the bases too, and it brings the fixed arm in
 # without --ab.  A fixed boot no line of whose log or output matches every
-# premise is said to be without its premise and not passed, and an ablated
-# boot beside it that is not caught is said not askable, not uncaught (#1010:
-# 922-wait-whole-arm read NOT CAUGHT for 700 commits after a sleep of 10 ms
-# came to last 20, its window with it, #1009).
+# premise is said to be without its premise and not passed, whatever its
+# harness said, and an ablated boot beside it that is not caught is said not
+# askable, not uncaught (#1010: 922-wait-whole-arm read NOT CAUGHT for 700
+# commits after a sleep of 10 ms came to last 20, its window with it, #1009).
 # A patch that needs none says why, `Premise: none -- WHY', and nothing is
 # read off a boot for it.
 #
@@ -694,20 +694,30 @@ for i in $(seq 1 "$BOOTS"); do
 						*) MISSED_ACCS=${MISSED_ACCS:+$MISSED_ACCS,}$acc ;;
 						esac
 					fi
-				elif [ $rc = 0 ] && [ $hit = 0 ]; then
-					lacks=$(premise_missing "$RUNDIR/$arm-$acc-$i.log" "$RUNDIR/$arm-$acc-$i.out")
+				else
+					# #1010: the premise before the harness's
+					# status.  A harness that asks for what a widen
+					# holds open fails the boot where the widen did
+					# not open it: in the rotation's first batch a
+					# fixed boot of 762-refusal-unsaid read FAILED,
+					# its flood having never overrun the ring.  A
+					# fixed boot whose Expect matched says the test
+					# took the fixed tree for the defect, and fails
+					# whatever its premise.
+					[ $hit = 1 ] ||
+						lacks=$(premise_missing "$RUNDIR/$arm-$acc-$i.log" "$RUNDIR/$arm-$acc-$i.out")
 					if [ -n "$lacks" ]; then
 						verdict="NO PREMISE"
 						unpremised=$((unpremised + 1))
 						pair_premise=missing
-					else
+					elif [ $rc = 0 ] && [ $hit = 0 ]; then
 						verdict=PASSED
 						passed=$((passed + 1))
 						pair_premise=shown
+					else
+						verdict=FAILED
+						failed=$((failed + 1))
 					fi
-				else
-					verdict=FAILED
-					failed=$((failed + 1))
 				fi
 			fi
 			clock=$(sed -n 's/.*clock in run: median \([0-9]*\)MHz.*/\1/p' "$log" | head -n 1)
