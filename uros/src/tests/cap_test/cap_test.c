@@ -5409,15 +5409,19 @@ static int
 a_port_no_claim_covers_is_refused(mach_port_t device_port)
 {
     const unsigned int port = 0x2EF;
-    unsigned int data = 0, released = 0, klog_from = 0, tries;
+    unsigned int data = 0, released = 0, klog_from = 0;
     kern_return_t bare, claim = KERN_RESOURCE_SHORTAGE, claimed, wide;
+    struct ct_window w;
 
     bare = device_io_port_read(device_port, port, 1, &data);
-    for (tries = 0; tries < 50 && claim == KERN_RESOURCE_SHORTAGE; tries++) {
-        if (tries != 0)
-            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+    /* #1009: the second by the clock, in waits of 20 ms. */
+    ct_window_start(&w, 20);
+    for (;;) {
         claim = device_io_port_claim(device_port, port, 1, &released,
                                      &klog_from);
+        if (claim != KERN_RESOURCE_SHORTAGE || ct_window_over(&w, 1000))
+            break;
+        ct_window_wait(&w);
     }
     if (claim == KERN_RESOURCE_SHORTAGE) {
         if (bare != KERN_NO_ACCESS) {
