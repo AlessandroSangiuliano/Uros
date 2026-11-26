@@ -157,6 +157,10 @@ endif()
 # arrive only on the target where the server already builds.
 add_subdirectory(tests/pci_bar_test)
 
+# The reading of a module's declaration, on the build machine (#964): a pure
+# function too, compiled into hal_server and judged here.
+add_subdirectory(tests/chora_drives_test)
+
 if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib)
   add_subdirectory(mach_services/lib)
@@ -588,6 +592,12 @@ endif()
 # is derived for a child with the address its parent names (#982).
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/pci_function_test)
+endif()
+
+# The driver's port: what it takes and what it refuses, asked by a task that
+# holds the master port and no device (#964).
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/driver_port_test)
 endif()
 
 # A right a server kept must survive the server's next message (#583): the

@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: update_driver()'s look for the module's operations by its name: bytes are taken under a name they define no `name'_chora_ops for, and every chora started with them dies at its start.  chora_test [14]'s edu_next under a name of 23 characters, which has room in a driver's task name and no operations in the bytes, is taken.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[14\] WRONG -- edu.s driver refused updates no chora could run: .*, of 23 0,
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -939,7 +939,7 @@
+ 		       "declare it: refused (#964)\n", name, where);
+ 		return KERN_INVALID_VALUE;
+ 	}
+-	if (!module_has_ops((const void *)data, len, name)) {
++	if (0) {
+ 		printf("hal: %s.so, given to update the driver of %s, defines no "
+ 		       "%s%s for chora to find: refused (#964)\n", name, where,
+ 		       name, CHORA_MODULE_SUFFIX);

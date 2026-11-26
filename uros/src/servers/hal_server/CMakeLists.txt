@@ -182,14 +182,31 @@ set_target_properties(hal_pci_scan_module PROPERTIES
 # HAL server executable
 # ===========================================================================
 
+# #964: exec_server's client, for the image load that starts a chora.
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
+    -I${CMAKE_SOURCE_DIR}/src/servers/exec_server)
+set(_HAL_EXEC_OUT ${CMAKE_CURRENT_BINARY_DIR}/exec_mig)
+set(HAL_EXEC_GENERATED)
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs
+                        ${_HAL_EXEC_OUT} HAL_EXEC)
+
 set(HAL_SOURCES
   hal_server.c
   hal_registry.c
   hal_driver_reg.c
   hal_mig.c
+  # #964: which module of its pool drives a device, read from the module's
+  # file; chora_drives.c is the pure reading of a declaration, beside the
+  # format in libdriver, compiled here as pci_scan compiles libpci's pci_bar.c.
+  hal_modules.c
+  ${CMAKE_SOURCE_DIR}/src/lib/libdriver/chora_drives.c
   ${DM_USER_C}
   ${HAL_SERVER_C}
   ${HAL_NOTIFY_USER_C}
+  ${HAL_EXEC_GENERATED}
 )
 
 add_executable(hal_server
@@ -207,10 +224,23 @@ target_compile_definitions(hal_server PRIVATE
   MACH_IPC_COMPAT=0
 )
 
-target_include_directories(hal_server PRIVATE ${HAL_INCLUDE_DIRS})
+# Of libdriver's headers (#964): chora_drives.h, for what a module declares;
+# chora_given.h, to give a chora its module; and chora_module.h, with the
+# libdriver.h it includes, for the name a module's operations go by and the
+# room a driver's task name leaves the module's -- macros, which the HAL asks
+# of a module as a chora would run it.  It links nothing of libdriver.
+target_include_directories(hal_server PRIVATE ${HAL_INCLUDE_DIRS}
+  ${CMAKE_SOURCE_DIR}/src/lib/libdriver
+  ${CMAKE_SOURCE_DIR}/src/servers/exec_server
+  ${_HAL_EXEC_OUT})
 
+# libelf by name (#964): hal_modules.c reads a module's sections with it.
+# libdl links it too, for its own reading, and that is libdl's business.
 target_link_libraries(hal_server PRIVATE
   -Wl,--start-group
+  libvfs		# #964: the disk's pools, and the FLIPC it reads by
+  libflipc2
+  libelf
   libmodload
   libdl
   libpthreads

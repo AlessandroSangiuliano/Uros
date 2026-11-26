@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: modload_load_given()'s refusal of a name the cache already holds: the bytes given are cached beside the old ones and dlopen()ed by the same path, and libdl hands back the object it loaded first -- a module that runs which is not the one given.  modload_test's [6] gives modload_b/twin.so's bytes as modload_a/twin.so, which [1] cached, and gets modload_a's twin back.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: modload_test: \[6\] modload_b/twin.so.s bytes given as modload_a/twin.so, which is cached: gave modload_a/twin.so A, where a refusal was asked for; modload_a/twin.so gives modload_a/twin.so A -- WRONG
+
+diff --git a/uros/src/lib/libmodload/modload.c b/uros/src/lib/libmodload/modload.c
+index bc7c2e8d..1ff06091 100644
+--- a/uros/src/lib/libmodload/modload.c
++++ b/uros/src/lib/libmodload/modload.c
+@@ -419,7 +419,7 @@ modload_load_given(const char *class, const char *name, vm_offset_t data,
+ 	 * A module of that name in the cache would be the one dlopen() reads,
+ 	 * and not the one given: refused, not chosen between.
+ 	 */
+-	if (find_cached_module(class, name) != NULL) {
++	if (0 && find_cached_module(class, name) != NULL) {
+ 		printf("%s: \"%s/%s\" is in the cache already: the module "
+ 		       "given is not loaded\n", log_tag, class, name);
+ 		return NULL;

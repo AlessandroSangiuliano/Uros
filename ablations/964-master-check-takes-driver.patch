@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: the line between the routines a driver calls and the rest: check_master_port() takes the driver's port too, and every routine of device_master.defs with it, the debugger's and the I/O ports' among them.  driver_port_test's [4] asks device_claim_holder(), which no driver calls, on the driver's port, and is answered.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: \[4\] device_claim_holder\(00:00\.0\), which no driver calls, on the driver's port: answered, 0x0; on the master port: 0x0 -- WRONG
+Note: [2] reads WRONG too, the driver's port given out on itself.
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index ba590518..11d4ff5a 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -435,7 +435,7 @@ check_master_port(ipc_port_t port)
+ {
+ 	if (port == IP_NULL)
+ 		return KERN_INVALID_ARGUMENT;
+-	if (port != master_device_port)
++	if (port != master_device_port && port != driver_device_port)
+ 		return KERN_INVALID_ARGUMENT;
+ 	return KERN_SUCCESS;
+ }

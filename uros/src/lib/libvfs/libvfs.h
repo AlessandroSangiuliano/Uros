@@ -96,6 +96,16 @@ off_t           vfs_lseek(vfs_fd_t fd, off_t offset, int whence);
 int             vfs_stat(const char *path, vfs_stat_t *out);
 int             vfs_fstat(vfs_fd_t fd, vfs_stat_t *out);
 
+/*
+ * #964: the entries of the directory open on `fd' -- vfs_open() of a
+ * directory -- from *cookie on, 0 the first time: up to `max' of them into
+ * `out'.  How many came, with *cookie set to where the next call goes on
+ * from, 0 when the directory has no more; -1 on an error.  The HAL reads a
+ * pool of modules on the disk so.
+ */
+int             vfs_readdir(vfs_fd_t fd, vfs_dirent_t *out, unsigned int max,
+                            uint64_t *cookie);
+
 int             vfs_sync(vfs_fd_t fd);
 
 /*

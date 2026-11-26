@@ -138,6 +138,15 @@ probe_attach(struct driver *d)
 	return 0;
 }
 
+/*
+ * The two cards it was written for (#964): QEMU's 82540EM, on the 1996 board,
+ * and its 82574L, on q35.  By vendor and device, not by class: what it does
+ * to the card -- ICS, IMS and IVAR -- is Intel's, and another network card's
+ * registers are not these.
+ */
+CHORA_DRIVES(CHORA_DRIVES_PCI_ID(0x8086, 0x100e),
+	     CHORA_DRIVES_PCI_ID(0x8086, 0x10d3));
+
 const struct chora_module_ops chora_probe_chora_ops = {
 	.name	= "chora_probe",
 	.attach	= probe_attach,

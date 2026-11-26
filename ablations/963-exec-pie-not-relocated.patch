@@ -6,17 +6,17 @@ Expect: hello_pie: WRONG -- pointer 0 holds 0x00000000000[0-9a-f]*, and its obje
 Expect: hello_pie: 0 of 4 pointers relocated
 
 diff --git a/uros/src/servers/exec_server/exec_load.c b/uros/src/servers/exec_server/exec_load.c
-index f577bccd..9adaaf05 100644
+index e6f56de3..193c2b62 100644
 --- a/uros/src/servers/exec_server/exec_load.c
 +++ b/uros/src/servers/exec_server/exec_load.c
-@@ -781,11 +781,7 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
+@@ -825,11 +825,7 @@ load_image(mach_port_t new_task, mach_port_t parent_caps,
       *      relocated here, in the file's bytes, before they are copied into
       *      the task (#963).  One that names a dynamic linker is left to it.
       */
 -    if (elf_type(&img) == ET_DYN && elf_interp(&img) == NULL) {
 -        rc = relocate_pie(file_buf, &img, main_bias, path);
 -        if (rc != EXEC_OK)
--            return fail_after_task(&img, file_buf, rc);
+-            return fail_after_task(&img, rc);
 -    }
 +    (void)relocate_pie;	/* 963-exec-pie-not-relocated: left as it was, as before */
  

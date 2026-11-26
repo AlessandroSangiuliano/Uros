@@ -19,15 +19,19 @@
 /*
  * chora -- one program for every device, and one task per device (#963, #773).
  *
- *   chora CLASS MODULE BB:DD.F
+ *   chora CLASS MODULE BB:DD.F MODULE-PORT
  *
- * Whoever found the device starts it -- chora_test now, the HAL in #964 --
- * with exec_load(), which gives this task a capability port derived from its
- * parent's: what chora's manifest asks for, any PCI class, cut to what the
- * parent may hand on (#743).  chora then opens the device through libdriver,
- * which names the task MODULE@BB:DD.F and claims the device; fetches the one
- * module it was told from its class's pool; and hands the module the device.
- * Then it stays, for as long as the module drives it.
+ * The HAL starts it on a device it found (#964): a task given the drivers'
+ * bootstrap port, loaded by exec_server from chora's image with a manifest
+ * naming the one function, and given the module the HAL chose for the device,
+ * as bytes on a port of its own whose name is MODULE-PORT (chora_given.h).
+ * chora takes the module it was given, first: a chora given none claims
+ * nothing.  Then it opens the device through libdriver, which names the task
+ * MODULE@BB:DD.F and claims the device; loads the module as CLASS/MODULE.so,
+ * asking nobody else for one; and hands it the device.  Then it checks a
+ * control port in under its name, MODULE@BB:DD.F, and serves it (chora.defs)
+ * for as long as the module drives the device, which happens on the module's
+ * own threads.
  *
  * Whatever refuses, chora says which step and ends: a chora that drives no
  * device has no reason to be.
@@ -36,15 +40,83 @@
 #include <mach.h>
 #include <mach/thread_switch.h>
 #include <mach/module_pool.h>		/* MODULE_NAME_MAX */
+#include <mach_init.h>			/* name_server_port, the signature */
+#include <servers/netname.h>
+#include <servers/netname_defs.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "libdriver.h"
 #include "chora_module.h"
+#include "chora_given.h"
 #include "modload.h"
+#include "chora_server.h"		/* chora.defs's server half, #964 */
 
 /* The interrupt thread keeps a pointer to it for the task's whole life. */
 static struct driver	the_device;
+
+/* The module that drives it, once it does: chora_status() says its name. */
+static const struct chora_module_ops	*the_module;
+
+#define CHORA_NAME_TRIES	50	/* of 100 ms: the name a dead one left */
+
+
+/* #964: chora_status(), what this chora drives (chora.defs). */
+kern_return_t
+chora_S_status(mach_port_t port, module_name_t module,
+	       mach_msg_type_number_t *moduleCnt, unsigned int *bdf)
+{
+	size_t	n = strlen(the_module->name);
+
+	(void)port;
+	if (*moduleCnt == 0)
+		return KERN_INVALID_ARGUMENT;
+	if (n >= *moduleCnt)
+		n = *moduleCnt - 1;
+	memcpy(module, the_module->name, n);
+	module[n] = '\0';
+	*moduleCnt = (mach_msg_type_number_t)(n + 1);
+	*bdf = (unsigned int)the_device.bdf;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #964: a control port checked in under the task's name, MODULE@BB:DD.F, or
+ * MACH_PORT_NULL said.  The name may still be the chora's that drove this
+ * device before and died, until the name server has taken it out with its
+ * port: that refusal is waited out, a little.
+ */
+static mach_port_t
+control_port(void)
+{
+	mach_port_t	port = MACH_PORT_NULL, sig = MACH_PORT_NULL;
+	kern_return_t	kr;
+	int		tries;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr == KERN_SUCCESS)
+		kr = mach_port_insert_right(mach_task_self(), port, port,
+					    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr == KERN_SUCCESS)
+		kr = urmach_netname_signature(&sig);
+	for (tries = 0; kr == KERN_SUCCESS && tries < CHORA_NAME_TRIES;
+	     tries++) {
+		kr = netname_check_in(name_server_port, the_device.name, sig,
+				      port);
+		if (kr != NETNAME_NOT_YOURS)
+			break;
+		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	}
+	if (kr != KERN_SUCCESS) {
+		driver_log(&the_device, "no control port checked in (0x%x): no "
+			   "consumer finds it by its name", kr);
+		return MACH_PORT_NULL;
+	}
+	driver_log(&the_device, "its control port is checked in as \"%s\" "
+		   "(#964)", the_device.name);
+	return port;
+}
 
 /* Two hex digits, a colon, two, a dot, one: "00:03.0". */
 static int
@@ -85,32 +157,111 @@ parse_bdf(const char *s, natural_t *bdf)
 	return 0;
 }
 
+/* "0x" and up to eight hexadecimal digits: a port's name in this task. */
+static int
+parse_port(const char *s, mach_port_t *port)
+{
+	unsigned long	v = 0;
+	int		digits = 0;
+	const char	*p;
+
+	if (s[0] != '0' || (s[1] != 'x' && s[1] != 'X'))
+		return -1;
+	for (p = s + 2; *p != '\0'; p++) {
+		unsigned int	d;
+
+		if (*p >= '0' && *p <= '9')
+			d = (unsigned int)(*p - '0');
+		else if (*p >= 'a' && *p <= 'f')
+			d = (unsigned int)(*p - 'a' + 10);
+		else if (*p >= 'A' && *p <= 'F')
+			d = (unsigned int)(*p - 'A' + 10);
+		else
+			return -1;
+		if (++digits > 8)
+			return -1;
+		v = v * 16 + d;
+	}
+	if (digits == 0 || !MACH_PORT_VALID((mach_port_t)v))
+		return -1;
+	*port = (mach_port_t)v;
+	return 0;
+}
+
+/*
+ * The module given on `box' (chora_given.h), received without waiting: it was
+ * queued before this task ran.  Its bytes, this task's from here, or -1 said
+ * as `who', the name the task is about to take.  The port goes either way,
+ * and nothing can be sent on it again.
+ */
+static int
+take_given_module(const char *who, mach_port_t box, vm_offset_t *data,
+		  vm_size_t *size)
+{
+	chora_given_module_rcv_t	r;
+	kern_return_t			kr;
+
+	memset(&r, 0, sizeof r);
+	kr = mach_msg(&r.m.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof r,
+		      box, 0, MACH_PORT_NULL);
+	(void)mach_port_mod_refs(mach_task_self(), box, MACH_PORT_RIGHT_RECEIVE,
+				 -1);
+	if (kr != KERN_SUCCESS) {
+		printf("%s: no module given on port 0x%x (0x%x): whoever "
+		       "started this gave it none\n", who, box, kr);
+		return -1;
+	}
+	if (r.m.head.msgh_id != CHORA_GIVEN_MODULE_ID ||
+	    (r.m.head.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0 ||
+	    r.m.body.msgh_descriptor_count != 1 ||
+	    r.m.module.type != MACH_MSG_OOL_DESCRIPTOR ||
+	    r.m.module.size == 0 || r.m.module.size > CHORA_GIVEN_MODULE_MAX) {
+		printf("%s: the message on port 0x%x is no module: id %d, %u "
+		       "descriptors, %u bytes\n", who, box,
+		       (int)r.m.head.msgh_id,
+		       (unsigned)r.m.body.msgh_descriptor_count,
+		       (unsigned)r.m.module.size);
+		mach_msg_destroy(&r.m.head);
+		return -1;
+	}
+	*data = (vm_offset_t)r.m.module.address;
+	*size = (vm_size_t)r.m.module.size;
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
 	const struct chora_module_ops	*ops;
 	char				file[MODULE_NAME_MAX];
+	char				who[MODULE_NAME_MAX + 16];
 	natural_t			bdf = 0;
+	mach_port_t			box = MACH_PORT_NULL;
+	vm_offset_t			data = 0;
+	vm_size_t			size = 0;
 	int				n;
 
-	if (argc != 4 || parse_bdf(argv[3], &bdf) != 0) {
-		printf("chora: usage: chora CLASS MODULE BB:DD.F\n");
+	if (argc != 5 || parse_bdf(argv[3], &bdf) != 0 ||
+	    parse_port(argv[4], &box) != 0) {
+		printf("chora: usage: chora CLASS MODULE BB:DD.F MODULE-PORT\n");
 		return 1;
 	}
-	if (driver_open(&the_device, argv[2], bdf) != 0)
-		return 1;
-
 	n = snprintf(file, sizeof file, "%s.so", argv[2]);
 	if (n < 0 || (size_t)n >= sizeof file) {
-		driver_log(&the_device, "%s.so is longer than a module's name",
-			   argv[2]);
+		printf("chora: %s.so is longer than a module's name\n", argv[2]);
 		return 1;
 	}
+	(void)snprintf(who, sizeof who, "%s@%s", argv[2], argv[3]);
+	if (take_given_module(who, box, &data, &size) != 0)
+		return 1;
+	if (driver_open(&the_device, argv[2], bdf) != 0)
+		return 1;
 	modload_init(the_device.name);
-	ops = modload_load_named(argv[1], file, CHORA_MODULE_SUFFIX);
+	ops = modload_load_given(argv[1], file, data, size,
+				 CHORA_MODULE_SUFFIX);
 	if (ops == NULL) {
-		driver_log(&the_device, "modules/%s/%s did not load", argv[1],
-			   file);
+		driver_log(&the_device, "%s/%s, the module it was given, did not "
+			   "load", argv[1], file);
 		return 1;
 	}
 	if (ops->attach(&the_device) != 0) {
@@ -118,8 +269,23 @@ main(int argc, char **argv)
 		return 1;
 	}
 	driver_log(&the_device, "%s drives the device", ops->name);
+	the_module = ops;
 
-	/* What happens from here happens on the module's interrupt thread. */
-	for (;;)
-		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 60000);
+	/*
+	 * The device is driven on the module's threads; this one serves the
+	 * control port, for as long as the task lives -- or, without one,
+	 * only stays.
+	 */
+	{
+		mach_port_t	port = control_port();
+
+		for (;;) {
+			if (MACH_PORT_VALID(port))
+				(void)mach_msg_server(chora_server, 512, port,
+						      MACH_MSG_OPTION_NONE);
+			else
+				(void)thread_switch(MACH_PORT_NULL,
+						    SWITCH_OPTION_WAIT, 60000);
+		}
+	}
 }

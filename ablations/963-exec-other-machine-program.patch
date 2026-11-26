@@ -5,12 +5,12 @@ Run: --entry 14 600 -smp 4
 Expect: musl_test: \[51\] WRONG -- an execve of an i386 program left status 0x[0-9a-f]*, and of a program whose dynamic linker is i386 0xc800
 
 diff --git a/uros/src/servers/exec_server/exec_load.c b/uros/src/servers/exec_server/exec_load.c
-index f577bccd..550519a5 100644
+index e6f56de3..32546dde 100644
 --- a/uros/src/servers/exec_server/exec_load.c
 +++ b/uros/src/servers/exec_server/exec_load.c
-@@ -737,15 +737,7 @@ exec_do_load(mach_port_t new_task, mach_port_t parent_caps,
-             return EXEC_ERR_NOT_STATIC;
-         }
+@@ -782,14 +782,7 @@ load_image(mach_port_t new_task, mach_port_t parent_caps,
+         elf_close(&img);
+         return EXEC_ERR_NOT_STATIC;
      }
 -    if (!image_is_this_machine(&img)) {
 -        printf("exec: %s is an image of another machine (machine %u, "
@@ -18,7 +18,6 @@ index f577bccd..550519a5 100644
 -               (unsigned)elf_machine(&img), elf_is_64bit(&img) ? 64 : 32,
 -               ELF_TARGET_NAME);
 -        elf_close(&img);
--        free(file_buf);
 -        return EXEC_ERR_PARSE;
 -    }
 +    /* 963-exec-other-machine-program: whose machine the program is goes unasked */

@@ -1,16 +1,22 @@
 # chora_test's manifest (#963).
 #
-# It holds nothing itself: it finds the network card through the HAL, asks
+# It drives nothing itself: it finds the network card through the HAL, asks
 # the kernel whether the card is claimed, and starts chora on it twice -- and
 # once on QEMU's educational device, where the board has one (#977).
 #
-# 🔑 What it MAY HAND ON is the whole of it.  A chora it starts asks for any
-# PCI class, and exec_load() cuts that to these lines (#743): the network
-# class, and edu's, which QEMU 11.1.2's edu reports as 00ff00h (base class
-# 00h, subclass ffh), each with DMA, registers and the interrupt.  So each
-# chora holds those two classes and no other, and the second chora on the
-# card is refused by the claim the first holds, not by a capability it lacks.
+# 🔑 What it MAY HAND ON is the whole of that.  A chora it starts asks for a
+# capability for its one function (#964), and exec_load() cuts that to this
+# line (#743): any function, since a manifest names no address (#982), with
+# DMA, registers and the interrupt.  So the second chora on the card is
+# refused by the claim the first holds, not by a capability it lacks.
 
 name chora_test
-delegatable 5 0x020000 0x7
-delegatable 5 0x00ff00 0x7
+delegatable 12 any 0x7
+
+# RESOURCE_DRIVER_ADMIN (13), stop, start and update (0x7), for the network
+# class and for edu's (#964): [11] to [16] ask the HAL to stop and start the
+# card's driver, and to update, stop and start edu's.  By class and not
+# `any': [11] asks cap_server for a class this file does not name, which must
+# be refused, so the type is shown to be one a manifest decides.
+required 13 0x020000 0x7
+required 13 0x00ff00 0x7

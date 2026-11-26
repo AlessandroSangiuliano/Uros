@@ -23,10 +23,17 @@
  * modules/<class>/<name>.so, and exports one table, <name>_chora_ops.  chora
  * fetches that one file, with modload_load_named(), and finds the table by
  * that name.
+ *
+ * A module says which devices it drives with CHORA_DRIVES(), in
+ * chora_drives.h: the HAL reads that from the module's file and starts a chora
+ * with the module for each device it names (#964).  A module that declares
+ * nothing is started only by whoever names it.
  */
 
 #ifndef _CHORA_MODULE_H_
 #define _CHORA_MODULE_H_
+
+#include "chora_drives.h"
 
 #include "libdriver.h"
 

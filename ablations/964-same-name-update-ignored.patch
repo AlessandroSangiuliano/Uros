@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #964
+Takes out: an update under the name of the module the driver has: update_driver() answers it as taken, and keeps neither its bytes nor its start, as if a new build of the same module were nothing new.  chora_test [18]'s update of the given-up crash_probe with a new build of it starts nothing (the fifth review round of 24/11: no arm gave an update the module's own name).
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[18\] WRONG -- .*updated with a new build of it \(0\): state 3 after 10 \(
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -947,6 +947,15 @@
+ 		       name, CHORA_MODULE_SUFFIX);
+ 		return KERN_INVALID_VALUE;
+ 	}
++	{
++		char	same[MODULE_NAME_MAX + sizeof ".so"];
++
++		(void)snprintf(same, sizeof same, "%s.so", name);
++		if (strcmp(same, r->file) == 0) {
++			(void)vm_deallocate(mach_task_self(), data, len);
++			return KERN_SUCCESS;
++		}
++	}
+ 	if (r->given != 0)
+ 		(void)vm_deallocate(mach_task_self(), r->given, r->given_len);
+ 	r->given = data;

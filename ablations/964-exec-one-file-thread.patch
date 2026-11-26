@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: the pool on exec_server's file port, EXEC_FILE_THREADS threads, so that one execve held on a file does not hold the next.  With one thread a load waits for every load before it, and mount_test's [32] has a load of /hello_exec wait behind one of /mount_test/stall, which the liar holds at its open until the arm lets it go after 30 s.
+Run: --entry 14 600 -smp 4
+Expect: mount_test: \[32\] WRONG — a load of /hello_exec not back in 30 s, one of /mount_test/stall held at this mount's open: exec_server's file loads wait for each other; let go, the first came back \(-1\), the second came back \(0\)
+Note: every other file load asked of exec_server in those 30 s waits too; the image port keeps its own thread.
+
+diff --git a/uros/src/servers/exec_server/exec_main.c b/uros/src/servers/exec_server/exec_main.c
+index 1ccd3371..9a53e4e1 100644
+--- a/uros/src/servers/exec_server/exec_main.c
++++ b/uros/src/servers/exec_server/exec_main.c
+@@ -63,7 +63,7 @@ static mach_port_t      exec_port;      /* our service port: file loads */
+  * thread on (#540).
+  */
+ static mach_port_t      exec_image_port;
+-#define EXEC_FILE_THREADS       4
++#define EXEC_FILE_THREADS       1
+ 
+ /* ------------------------------------------------------------------ */
+ /*  MIG handler — called from the generated exec_server() dispatcher  */

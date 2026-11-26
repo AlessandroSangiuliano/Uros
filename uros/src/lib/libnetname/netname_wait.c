@@ -26,8 +26,15 @@
  * the caller lives.  Whether one is coming is known to whoever starts what the
  * bundle holds, not to the name server, and #696 is to say it.
  */
-kern_return_t
-netname_wait(mach_port_t server, const char *name, mach_port_t *port)
+/*
+ * The wait itself, for a name and for a mount (#964): a receive right only the
+ * name server is given a right to, once, by `ask', and the one message on it,
+ * which must be the notification `id' with a port.
+ */
+static kern_return_t
+wait_on(mach_port_t server, const char *key,
+	kern_return_t (*ask)(mach_port_t, const char *, mach_port_t),
+	mach_msg_id_t id, mach_port_t *port)
 {
 	netname_notify_msg_t	m;
 	mach_port_t		recv = MACH_PORT_NULL;
@@ -38,13 +45,13 @@ netname_wait(mach_port_t server, const char *name, mach_port_t *port)
 				&recv);
 	if (kr != KERN_SUCCESS)
 		return kr;
-	kr = netname_notify(server, name, recv);
+	kr = (*ask)(server, key, recv);
 	if (kr == KERN_SUCCESS)
 		kr = mach_msg(&m.head, MACH_RCV_MSG, 0, sizeof(m), recv,
 			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	if (kr == KERN_SUCCESS) {
 		/* Only the name server holds a right to `recv', and once. */
-		if (m.head.msgh_id == NETNAME_NOTIFY_MSID &&
+		if (m.head.msgh_id == id &&
 		    (m.head.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 &&
 		    m.body.msgh_descriptor_count == 1 &&
 		    m.service.type == MACH_MSG_PORT_DESCRIPTOR)
@@ -57,4 +64,29 @@ netname_wait(mach_port_t server, const char *name, mach_port_t *port)
 	(void)mach_port_mod_refs(mach_task_self(), recv,
 				 MACH_PORT_RIGHT_RECEIVE, -1);
 	return kr;
+}
+
+static kern_return_t
+ask_name(mach_port_t server, const char *name, mach_port_t recv)
+{
+	return netname_notify(server, name, recv);
+}
+
+static kern_return_t
+ask_mount(mach_port_t server, const char *prefix, mach_port_t recv)
+{
+	return netname_notify_mount(server, prefix, recv);
+}
+
+kern_return_t
+netname_wait(mach_port_t server, const char *name, mach_port_t *port)
+{
+	return wait_on(server, name, ask_name, NETNAME_NOTIFY_MSID, port);
+}
+
+kern_return_t
+netname_wait_mount(mach_port_t server, const char *prefix, mach_port_t *port)
+{
+	return wait_on(server, prefix, ask_mount, NETNAME_NOTIFY_MOUNT_MSID,
+		       port);
 }

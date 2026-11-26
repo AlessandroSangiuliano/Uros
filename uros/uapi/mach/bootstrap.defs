@@ -139,3 +139,27 @@ routine bootstrap_cap_provisioner(
 skip;	/* bootstrap_cap_provisioner — userspace only */
 #endif
 
+
+/*
+ *	#964: the drivers' bootstrap port, one for every driver, which a server
+ *	that holds the master device port (-D) gives a child it makes to drive
+ *	a device: its bootstrap_ports() answers the kernel's driver's port in
+ *	place of the master device port, and bootstrap keeps nothing of the
+ *	tasks that hold it.  And a program's bytes, from the bundle, as a
+ *	module's are given: the HAL hands them to exec_server, which loads a
+ *	driver before any disk is served.  Both asked only on the bootstrap
+ *	port of a -D server.  Appended: MIG numbers routines by position.
+ */
+#if	!KERNEL_SERVER
+routine bootstrap_drivers_port(
+		bootstrap		: mach_port_t;
+	out	drivers			: mach_port_t);
+
+routine bootstrap_get_program(
+		bootstrap		: mach_port_t;
+		program			: module_name_t;
+	out	data			: pointer_t, Dealloc);
+#else
+skip;	/* bootstrap_drivers_port — userspace only */
+skip;	/* bootstrap_get_program — userspace only */
+#endif

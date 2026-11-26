@@ -119,5 +119,6 @@ typedef pointer_t       exec_blob_t;
 #define EXEC_ERR_BAD_BLOB       -8   /* argv/envp blob malformed */
 #define EXEC_ERR_TOO_BIG        -9   /* image or argv exceeds limits */
 #define EXEC_ERR_PERMISSION    -10   /* future: manifest denial */
+#define EXEC_ERR_WRONG_PORT    -11   /* a file load on the image port, or an image load on the file port (#964) */
 
 #endif /* _EXEC_TYPES_H_ */

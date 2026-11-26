@@ -300,10 +300,10 @@ ENTRIES="
 65 harness - 1
 67 wakee
 67 wakee - 1
-68 chora --iommu_intel_--edu
-68 chora --iommu_intel_--edu 1
-70 chora --edu_--iommu_intel
-70 chora --edu_--iommu_amd
+68 chora --testdev_--iommu_intel_--edu
+68 chora --testdev_--iommu_intel_--edu 1
+70 chora --testdev_--edu_--iommu_intel
+70 chora --testdev_--edu_--iommu_amd
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -636,7 +636,7 @@ chora_dma() {	# entry full-log
 }
 
 judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
-	local e=$1 v=$2 h=$3 f=$4 a=$5 n=${6:-} out dma
+	local e=$1 v=$2 h=$3 f=$4 a=$5 n=${6:-} out dma unasked
 	NOTE=""
 	case $v in
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
@@ -878,6 +878,14 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	# #978: after a DMA round trip through it, at an address of the kind
 	# the boot's translation says; #417: and again within the 28 bits its
 	# reach is then declared as, and a buffer within 20 refused (chora_dma).
+	# #964: and --testdev, QEMU's pci-testdev, whose module crash_probe dies
+	# at its start every time: chora_test's [9] counts the HAL's starts of
+	# it up to its limit, and is in chora_test's count.  And no arm of
+	# chora_test says NOT ASKED: every arm says a line, one the arms before
+	# it ended before among them, and this entry boots every device they
+	# ask, so a NOT ASKED is a board, or a line, that changed, and the boot
+	# fails, its arms named (the reviews of 24/11: the update's arms could go
+	# and nothing here said so; the user, 25/11: this entry exists to ask).
 	chora)	grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'bootstrap: configuration [^ ]*chora\.conf, as -f asks' "$f" &&
 		grep -aqE '@[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: claimed ' "$f" &&
@@ -890,7 +898,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 		dma=$(chora_dma "$e" "$f") &&
 		out=$(grep -aoE 'chora_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		mod=$(grep -aoE 'modload_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
-		[ -n "$out" ] && [ -n "$mod" ] && NOTE="$out; $mod; DMA round trip at device address $dma" ;;
+		[ -n "$out" ] && [ -n "$mod" ] && NOTE="$out; $mod; DMA round trip at device address $dma" &&
+		unasked=$(grep -aoE 'chora_test: \[[0-9]+\] NOT ASKED' "$f" | grep -oE '\[[0-9]+\]' | tr '\n' ' ') &&
+		{ [ -z "$unasked" ] || { NOTE="chora_test did not ask ${unasked% }, on a board with every device they ask: $NOTE"; false; }; } ;;
 	esac
 }
 

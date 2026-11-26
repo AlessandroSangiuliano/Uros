@@ -307,6 +307,33 @@ else
 	NOGLYPH=$(printf '%s\n' "$NOGLYPH" | sed '/^$/d; s/^/NO GLYPH (#661): line /')
 fi
 [ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
+# #964: chora_test [18] updates crash_probe's given-up driver with a new
+# build of crash_probe, under its name, whose line at a start says it came
+# from an update's bytes.  The HAL starts it at once, and again after each
+# death until it gives it up: the update's module at every start after the
+# update, which [18]'s line counts, "after N" before it and "after M" at its
+# end.  A HAL that started the driver with the module it had, or let the
+# update go at a death, passes [18]'s count all the same (the fourth and fifth
+# review rounds of 24/11).  The lines are counted against the starts the
+# update had, as [18] read them, and what is said is the two numbers (the
+# sixth round: counted against a whole row, a WRONG of [18]'s own, with fewer
+# starts, had the HAL blamed for a module it never ran).  With no start after
+# the update, nothing is said of it but [18]'s WRONG (the seventh round: "ran
+# at 0 of the 0" was said of an update that never ran).
+UPDATE_RAN=""
+if grep -aq 'chora_test: \[18\] .*updated with a new build of it (0)' "$LOG"; then
+	l18=$(grep -a 'chora_test: \[18\] ' "$LOG" | head -n 1)
+	before=$(printf '%s\n' "$l18" | sed -n 's/.*, after \([0-9][0-9]*\); .*/\1/p')
+	after=$(printf '%s\n' "$l18" | sed -n 's/.*updated with a new build of it (0): state -*[0-9]* after \([0-9][0-9]*\) (.*/\1/p')
+	ran=$(grep -ac "crash_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: crash_probe dies at its start, as it is made to, from an update's bytes" "$LOG" || true)
+	if [ -z "$before" ] || [ -z "$after" ]; then
+		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT READ (#964): chora_test [18]'s line gives no starts to count the update's runs against: $l18" | sed '/^$/d')
+	elif [ "${ran:-0}" -lt $((after - before)) ]; then
+		BAD=$(printf '%s\n%s' "$BAD" "UPDATE NOT RUN (#964): crash_probe's new build ran at ${ran:-0} of the $((after - before)) start(s) after its update, $before to $after" | sed '/^$/d')
+	elif [ $((after - before)) -gt 0 ]; then
+		UPDATE_RAN="crash_probe's update ran at $ran of the $((after - before)) start(s) after it, $before to $after"
+	fi
+fi
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -651,15 +678,84 @@ must_report 'modload_test: started' 'modload_test: [0-9]* of [0-9]* arms passed'
 # #977: and edu_probe's chora, on QEMU's educational device, in a pair of its
 # own: the pair above is met by the network card's chora alone, and the boot
 # ends on chora_test's count, which may come before edu_probe's last line.
-must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|modules/.* did not load\)' \
+must_report 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: claimed ' 'edu_probe@[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]: \(edu_probe drives the device\|.* did not take the device\|.* did not load\)' \
 	'The chora on the edu device claimed it and never said whether edu_probe took it.  edu_probe waits a second for its interrupt and three for each half of its DMA round trip, and says so either way (#977, #978).' \
 	edu_probe
+
+# #964: the HAL says, for each device it finds, which module of the device's
+# pool declares it.  Each pair here is a device's line and the decision that
+# line must end in: the network card's chora_probe, which declares QEMU's two
+# cards by vendor and device, and edu's edu_probe, on a board with --edu.  A
+# HAL that decided otherwise writes the device's line all the same, with
+# another ending, and the pair says which.  chora_probe is on the disk and in
+# no pool of the bundle: at its scan the HAL finds none for the card, and
+# leaves it to others or waits for "/"; once "/" is served it reads the disk's
+# pools for the devices that waited, which the second pair asks for the card.
+must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: no module of the bundle.s net declares it' \
+	'The HAL named the network card and did not say that no module of the bundle declares it, chora_probe being on the disk alone: its line says what it decided instead (#964).' \
+	'the HAL on the network card'
+must_report 'hal: "/" is served: the disk.s pools are read' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: \(net/chora_probe\.so, on the disk, declares it\|no module of the bundle.s net declares it, and the HAL.s line leaves class 020000\)' \
+	'The HAL read the disk.s pools and did not say that chora_probe, on the disk, declares the card, nor had it left the card to others: its line says what it decided instead (#964).' \
+	'the HAL on the card, from the disk'
+must_report 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class ' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 1234:11e8 class [0-9a-f]*: misc/edu_probe\.so declares it' \
+	'The HAL named the edu device and did not say that edu_probe drives it, which declares edu by its vendor and device: its line says what it decided instead (#964).' \
+	'the HAL on edu'
+# And where the HAL's line leaves the network class to others, the card is left:
+# irq_claim_test drives it there, and a chora the HAL started would fight it for
+# the claim.  The pair's first line is the HAL's own, said only in those lists.
+must_report 'hal: class 0x020000 left to others by its line' 'hal: [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] 8086:\(100e\|10d3\) class 0200[0-9a-f][0-9a-f]: no module of the bundle.s net declares it, and the HAL.s line leaves class 020000' \
+	'The HAL was told to leave the network class to others and did not say the card was left: its line says what it decided instead (#964).' \
+	'the HAL leaving the card'
+# #964: a driver stopped or updated through the HAL, as chora_test [12], [15]
+# and [16] ask, ends by the HAL's own hand, and its death is no crash: the HAL
+# says so at the death.  A death taken for a crash says instead that the chora
+# is started again after a delay -- which for an update starts the new module
+# all the same, one start, so that chora_test's count cannot tell it: these
+# lines can.  The update's pair names edu_next, since [13]'s start of the card
+# and [16]'s of edu write lines of the same shape.
+must_report 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is stopped on request' 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] was stopped on request: it is not started again' \
+	'The HAL ended a chora it was asked to stop and did not say, at its death, that it is not started again: it took the death for a crash, or never heard of it (#964).' \
+	'the HAL stopping a driver'
+must_report 'hal: the driver of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is updated on request: misc/edu_next\.so' 'hal: the chora of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7] is started on request, with misc/edu_next\.so: start' \
+	'The HAL took edu_next to update a driver with and never said it started the driver with it on request: it took the old chora'"'"'s death for a crash, which waits and counts in the row, or never heard of it (#964).' \
+	'the HAL updating a driver'
+# #964: and a module of a pool no chora could run declares nothing, which the
+# HAL says as it reads the pool, as it refuses an update's.  The disk's misc
+# holds host_bridge_one_too_long, whose name is one character past the room a
+# driver's task name leaves, and which declares the host bridge: every board
+# has one, and it waits for the disk's pools, so the HAL reads misc once "/" is
+# served.  A HAL that took the module would start a chora on the host bridge
+# that died at each start until the HAL gave up.
+must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_bridge_one_too_long\.so on the disk: its name is not letters, digits and _, or is longer than a driver.s task name has room for, so no chora could run it: it declares nothing' \
+	'The HAL read the disk'"'"'s pools and did not say that host_bridge_one_too_long, whose name has no room in a driver'"'"'s task name, declares nothing: it took a module no chora can run, or never read the disk'"'"'s misc (#964).' \
+	'the HAL refusing a module of a pool'
+# And its other half: host_bridge_wrong_ops, in the same pool, has a name with
+# room and its operations under another name than its own (the third review
+# round of 24/11: no module of a pool was refused for its operations).
+must_report 'hal: "/" is served: the disk.s pools are read' 'hal: misc/host_bridge_wrong_ops\.so on the disk: it defines no operations under its name, so no chora could run it: it declares nothing' \
+	'The HAL read the disk'"'"'s pools and did not say that host_bridge_wrong_ops, whose operations are under another name than its own, declares nothing: it took a module no chora can run, or never read the disk'"'"'s misc (#964).' \
+	'the HAL refusing a module of a pool for its operations'
+# #964: and chora_test [17]'s name of 64 bytes, MIG's room, refused before it
+# is read, with no room for its terminator: [17] reads the refusal, which a
+# name too long for a driver's task answers alike, and the HAL's line alone
+# says which refused it.
+must_report 'chora_test: \[17\] .*under names no driver' 'hal: a name of 64 bytes, given to update the driver of [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7], has no room for its terminator: refused' \
+	'chora_test gave the HAL a name of 64 bytes, and the HAL never said it refused it for its terminator: it read the name past its room, or refused it another way (#964).' \
+	'the HAL refusing a name of 64 bytes'
+# #964: and what chora_test [18]'s update ran, read with the unexplained lines
+# above (UPDATE_RAN), said here, before the verdict, whatever it is.
+[ -n "$UPDATE_RAN" ] && echo "  $UPDATE_RAN"
 
 must_report 'notify_forge_test: started' 'notify_forge_test: [0-9]* of [0-9]* arms passed' \
 	'It sends the HAL, a token of pipe_server'"'"'s and an endpoint of its own a message with a notification'"'"'s id, and every wait in it is bounded -- two seconds for each answer and for each thing the endpoint says -- so silence is a stop inside one of those servers, or inside the endpoint'"'"'s thread (#981).'
 
 must_report 'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
 	'It asks the HAL for two edu devices, claims one, derives a child it never starts and asks its port, and nothing in it waits but for the HAL'"'"'s name, so silence is a stop inside the HAL, cap_server or the kernel'"'"'s claim (#982).  Without two edu devices it says NOT ASKED and counts 0 of 0.'
+
+must_report 'driver_port_test: started' 'driver_port_test: [0-9]* of [0-9]* arms passed' \
+	'It asks the kernel for the driver'"'"'s port and asks seven routines on it, each answered at once, then has bootstrap load it into a task of its own, and waits for nothing but the HAL'"'"'s name, for its device list, so silence is a stop inside the kernel'"'"'s device master, the HAL or bootstrap (#964).'
+must_report 'driver_port_test: child: started' 'driver_port_test: child: [0-9]* of [0-9]* arms passed' \
+	'The child bootstrap loaded as a driver asks what it was given, each question answered at once, so silence is a stop inside bootstrap'"'"'s answers or the kernel'"'"'s device master (#964).'
 
 must_report 'hello_pie: started' 'hello_pie: [0-9]* of [0-9]* pointers relocated' \
 	'exec_server started it and it did not get as far as counting its own pointers.  It prints with nothing but its code and one trap, and takes no address out of its data to do it, so a stop here is not an image left unrelocated -- that it says, as WRONG -- but a task that stopped before its first line or between two (#963).'
@@ -984,6 +1080,7 @@ BOARD=""
 KVM_ARGS=""
 HPET_ARGS=""
 EDU_ARGS=""
+TESTDEV_ARGS=""
 SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
@@ -1041,6 +1138,12 @@ while :; do
 		# no register that says its mask, so edu_probe's EDU_DMA_REACH
 		# is this line's word.
 		EDU_ARGS="-device edu,dma_mask=0xffffffffffffffff"
+		shift ;;
+	--testdev)
+		# #964: QEMU's pci-testdev, vendor 1b36h and device 0005h, which
+		# crash_probe declares: a module that dies at its start every
+		# time, for the HAL to start again up to its limit and give up.
+		TESTDEV_ARGS="-device pci-testdev"
 		shift ;;
 	--edu2)
 		# #982: two of them, the same class twice, for
@@ -1582,7 +1685,7 @@ QERR="$LOG.qemu-stderr"
 # sets what the boot wrote in a superblock against it.
 QEMU_STARTED_EPOCH=$(date +%s)
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $EDU_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $EDU_ARGS $TESTDEV_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
@@ -1765,6 +1868,8 @@ expected_reports() {
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
 		'pci_function_test: started' 'pci_function_test: [0-9]* of [0-9]* arms passed' \
+		'driver_port_test: started' 'driver_port_test: [0-9]* of [0-9]* arms passed' \
+		'driver_port_test: child: started' 'driver_port_test: child: [0-9]* of [0-9]* arms passed' \
 		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
 		'musl_test: started'    'musl_test: [0-9]* of [0-9]* arms passed' \

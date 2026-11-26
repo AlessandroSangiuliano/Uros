@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: the drivers' bootstrap port on the task the HAL makes: the chora inherits the HAL's bootstrap port, and with it the master device port, as a task created by a -D server does.  Each chora finds that its port opens the console, and stops.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: @[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: WRONG -- the port bootstrap gave it opens the console: the master device port, which no driver holds
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+index 0591fa7e..9059cd7d 100644
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -338,8 +338,6 @@ chora_start(const struct hal_device_info *dev, const char *pool,
+ 	}
+ 
+ 	kr = task_create(mach_task_self(), NULL, 0, FALSE, &task);
+-	if (kr == KERN_SUCCESS)
+-		kr = task_set_bootstrap_port(task, drivers_bootstrap);
+ 	if (kr == KERN_SUCCESS) {
+ 		box = module_give(task, mod, mod_len, where);
+ 		if (box == MACH_PORT_NULL)

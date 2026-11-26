@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: the request's sender in the HAL's check: the token is verified as presented by the task it was issued to, whoever sends it, so a token issued to another task is good for anyone holding its bytes.  chora_test [11]'s stop with a token cap_derive_for() issued to the HAL stops the card's driver.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[11\] WRONG -- refused without the capability: .*HAL.s own 0;
+
+diff --git a/uros/src/servers/hal_server/hal_mig.c b/uros/src/servers/hal_server/hal_mig.c
+--- a/uros/src/servers/hal_server/hal_mig.c
++++ b/uros/src/servers/hal_server/hal_mig.c
+@@ -386,7 +386,7 @@
+ 		kr = CAP_ERR_INVALID_TOKEN;
+ 	else {
+ 		memcpy(&t, token, sizeof t);
+-		kr = urmach_cap_verify(&t, hal_request_sender,
++		kr = urmach_cap_verify(&t, t.owner,
+ 				       RESOURCE_DRIVER_ADMIN, (uint32_t)op,
+ 				       (uint64_t)(dev->class_rev >> 8));
+ 	}

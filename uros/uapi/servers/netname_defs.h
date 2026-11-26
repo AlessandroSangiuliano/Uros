@@ -103,6 +103,12 @@ typedef const char *netname_path_in_t;
  */
 #define NETNAME_NOTIFY_MSID	1099
 
+/*
+ * #964: the same message, sent to a watcher of a mount prefix when a mount is
+ * checked in there (netname_notify_mount()), with the mount's port.
+ */
+#define NETNAME_NOTIFY_MOUNT_MSID	1098
+
 typedef struct {
 	mach_msg_header_t		head;
 	mach_msg_body_t			body;

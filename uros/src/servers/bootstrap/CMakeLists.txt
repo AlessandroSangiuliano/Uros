@@ -68,6 +68,12 @@ mig_server_stub(
 mig_server_stub(
   "${CMAKE_SOURCE_DIR}/src/servers/gpu_server/gpu_server.defs"
   gpu_server  ${MIG_OUT})
+# 6) device_master.defs -- bootstrap asks the kernel for the driver's port,
+#    which it gives the drivers it loads for the HAL (#964).  The user stub
+#    alone; the server side is the kernel's.
+mig_server_stub(
+  "${UROS_UAPI_DIR}/device/device_master.defs"
+  device_master  ${MIG_OUT})
 
 set(MIG_SERVER_SOURCES
   ${MIG_OUT}/bootstrapServer.c
@@ -75,6 +81,7 @@ set(MIG_SERVER_SOURCES
   ${MIG_OUT}/notifyServer.c
   ${MIG_OUT}/serviceServer.c
   ${MIG_OUT}/gpu_serverUser.c
+  ${MIG_OUT}/device_masterUser.c
 )
 
 # ===========================================================================
@@ -668,10 +675,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   option(UROS_BUNDLE_USH "The x86-64 bundle boots to ush on the serial line" OFF)
   if(UROS_BUNDLE_USH)
     file(GENERATE OUTPUT ${_CONF}
-         CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-H proc_server proc_server\npipe_server pipe_server\n-D char_server char_server\nush ush\n")
+         CONTENT "name_server name_server\ncap_server cap_server\nexec_server exec_server\n-D hal_server hal_server --leave 0x020000 --leave 0x01 --leave 0x00ff\n-D block_device_server block_device_server\n-D ext_server ext_server\n-H proc_server proc_server\npipe_server pipe_server\n-D char_server char_server\nush ush\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D pci_function_test pci_function_test\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nmount_test mount_test\nmount_test mount_test die\nexec_server exec_server\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\nnotify_forge_test notify_forge_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\nexec_server exec_server\n-D hal_server hal_server --leave 0x020000 --leave 0x01 --leave 0x00ff\n-D pci_function_test pci_function_test\n-D driver_port_test driver_port_test\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\nmount_test mount_test\nmount_test mount_test die\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\nnotify_forge_test notify_forge_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
   endif()
 
@@ -734,16 +741,18 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # #963: chora_test's own list, which the GRUB entry that gives bootstrap
   # `-f chora.conf' reads.  Every other bundle entry reads bootstrap.conf,
   # where irq_claim_test owns the network card.  This one runs what a chora
-  # needs -- cap_server for its port, the HAL to name the card, the disk and
-  # the root that chora is read from, exec_server to start it -- and
-  # chora_test last, so that its last line ends the run (run-x86_64.sh).
-  # chora itself is on the root disk and not in the bundle: exec_server reads
-  # the programs it starts through libvfs.
+  # needs -- cap_server for its port, exec_server to load it and the HAL to
+  # start one on each device, with chora's image from this bundle (#964) --
+  # then the disk and the root, and chora_test last, so that its last line
+  # ends the run (run-x86_64.sh).  The HAL's line leaves no class to others
+  # here: the card and edu are its choras'.  chora_test's line has -H, the
+  # master host port, for its [10] to find the card's chora among the tasks
+  # and kill it, as an administrator would (#964).
   # #973: modload_test before it, waited for (-w): libmodload is how a chora
   # fetches its module, and the test's two pools are in the bundle.
   set(_CHORA_CONF ${CMAKE_CURRENT_BINARY_DIR}/chora.conf)
   file(GENERATE OUTPUT ${_CHORA_CONF}
-       CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-w modload_test modload_test\n-D chora_test chora_test\n")
+       CONTENT "name_server name_server\ncap_server cap_server\nexec_server exec_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\n-w modload_test modload_test\n-H -D chora_test chora_test\n")
   set(_CHORA_TEST_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/chora_test.cmf")
   add_custom_command(
@@ -789,6 +798,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             hal_server:${_SBIN}/hal_server
             # #982: after the HAL, whose device list it reads.
             pci_function_test:${_SBIN}/pci_function_test
+            # #964: the driver's port, asked with the master port; after
+            # the HAL, whose device list gives it a line no device raises.
+            driver_port_test:${_SBIN}/driver_port_test
             modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
             block_device_server:${_SBIN}/block_device_server
             # #427: last, and after the block server on purpose.  It
@@ -846,11 +858,15 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
-            # #963: the test that starts chora, chora's test module in the
-            # pool of its class, and a module of that class no chora is told
-            # to load, which a chora that loaded its class would load too.
+            # #963: the test of the HAL's choras, and a module of the network
+            # class no chora is told to load, which a chora that loaded its
+            # class would load too.  chora_probe, the card's module, is on the
+            # disk and in no pool here (make-disk-x86_64.sh, #964): a card's
+            # chora shows a module the HAL read from the disk.
             chora_test:${_SBIN}/chora_test
-            modules/net/chora_probe.so:${_MOD}/net/chora_probe.so
+            # #964: and chora itself, whose image the HAL hands exec_server:
+            # a driver starts before any disk is served.
+            chora:${_SBIN}/chora
             modules/net/chora_absent.so:${_MOD}/net/chora_absent.so
             # #973: libmodload's test, and its two pools, each with a
             # twin.so and a module of its own.
@@ -862,6 +878,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # #977: chora's module for QEMU's educational device, which
             # has MSI and no MSI-X table.
             modules/misc/edu_probe.so:${_MOD}/misc/edu_probe.so
+            # #964: a module that dies at its start every time, on QEMU's
+            # pci-testdev, which the HAL starts again up to its limit.
+            modules/misc/crash_probe.so:${_MOD}/misc/crash_probe.so
             ${_CHAR_FILES}
             ${_MUSL_FILES}
             ${_IPC_BENCH_FILE}
@@ -885,15 +904,22 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             exec_server_bin proc_server_bin pipe_server_bin sig_test_bin
             notify_forge_test_bin
             pci_function_test_bin
+            driver_port_test_bin
             ${_IPC_BENCH_DEP}
             ${_CONF}
-            # #963: chora is on the disk, which make-disk-x86_64.sh refuses
-            # without it, and run-x86_64.sh builds the bundle, not ALL.
+            # #964: chora_probe is on the disk, which make-disk-x86_64.sh
+            # refuses without it, and run-x86_64.sh builds the bundle, not ALL;
+            # and edu_next, the update chora_test gives edu's driver, is too,
+            # and host_bridge_one_too_long and host_bridge_wrong_ops, which the
+            # HAL must refuse, and edu_again and crash_probe_update, chora_test
+            # [16]'s and [18]'s updates.
             ${_CHORA_CONF} ${_CHORA_TEST_CMF} chora_test_bin
             chora_probe_module chora_absent_module chora_bin
             modload_test_bin modload_test_twin_a modload_test_twin_b
             modload_test_only_a modload_test_only_b
-            edu_probe_module
+            edu_probe_module crash_probe_module edu_next_module
+            host_bridge_one_too_long_module host_bridge_wrong_ops_module
+            edu_again_module crash_update_module
     COMMENT "Bundle: bootstrap.conf + 15 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
@@ -913,7 +939,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_NODISK_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap-nodisk.bundle)
   set(_NODISK_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-nodisk.conf)
   file(GENERATE OUTPUT ${_NODISK_CONF}
-       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\nexec_server exec_server\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}")
+       CONTENT "name_server name_server\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\nexec_server exec_server\n-D hal_server hal_server --leave 0x020000 --leave 0x01 --leave 0x00ff\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}")
   add_custom_command(
     OUTPUT ${_NODISK_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_NODISK_BUNDLE}
@@ -994,7 +1020,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     COMMENT "mkmanifest: ext_server_log.manifest -> ext_server_log.cmf"
     VERBATIM)
   file(GENERATE OUTPUT ${_LOG_CONF}
-       CONTENT "name_server name_server\nbootlog bootlog /log\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\nexec_server exec_server\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}-D ext_server_log ext_server -p label:${UROS_LOG_LABEL}:/log\nblk_write_label_test blk_write_label_test ${UROS_LOG_LABEL}\n-D block_device_server block_device_server -W ${UROS_LOG_LABEL}\n")
+       CONTENT "name_server name_server\nbootlog bootlog /log\n-w netname_test netname_test\nboot_ports_test boot_ports_test none\n-D boot_ports_test boot_ports_test device\n-H -D boot_ports_test boot_ports_test both\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\nexec_server exec_server\n-D hal_server hal_server --leave 0x020000 --leave 0x01 --leave 0x00ff\n-H proc_server proc_server\npipe_server pipe_server\nsig_test sig_test\n${_MUSL_LINE}-H taskpanic_load taskpanic_load\n${_CHAR_LINE}-D ext_server_log ext_server -p label:${UROS_LOG_LABEL}:/log\nblk_write_label_test blk_write_label_test ${UROS_LOG_LABEL}\n-D block_device_server block_device_server -W ${UROS_LOG_LABEL}\n")
   add_custom_command(
     OUTPUT ${_LOG_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_LOG_BUNDLE}

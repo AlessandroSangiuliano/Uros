@@ -288,6 +288,116 @@ void hal_driver_reg_handle_dead_name(mach_port_t dead_port);
 int  hal_driver_reg_known(mach_port_t port);
 
 /* ================================================================
+ * Which module drives a device (hal_modules.c, #964)
+ *
+ * The module of the device's pool that says it drives the device, read from
+ * the module's file and never loaded: chora_drives.h.
+ * ================================================================ */
+
+enum hal_module_verdict {
+	HAL_MODULE_NONE,	/* no module of its pool declares it */
+	HAL_MODULE_ONE,		/* `module', of `pool' */
+	HAL_MODULE_TIE,		/* `module' and `rival' declare it alike */
+	HAL_MODULE_UNREAD,	/* its pool could not be read */
+};
+
+struct hal_module_choice {
+	int		verdict;	/* enum hal_module_verdict */
+	int		disk;		/* from the disk's pool, not the bundle's */
+	const char	*pool;
+	const char	*module;	/* ONE, TIE */
+	const char	*rival;		/* TIE */
+};
+
+/*
+ * The choice for one device from the bundle's pool of its class, or from the
+ * disk's when `disk' (#964), and its verdict.  The names live as long as the
+ * HAL.
+ */
+int  hal_module_for(const struct hal_device_info *dev,
+		    struct hal_module_choice *c, int disk);
+
+/*
+ * The choice, said on one line: the HAL says what it decided for each device.
+ * A device no module of the bundle declares, and whose class is not left to
+ * others, waits for the disk's pools (#964).
+ */
+void hal_module_report(const struct hal_device_info *dev);
+
+/*
+ * #964: the port the name server tells when "/" is mounted, asked for when
+ * some device waits for the disk's pools; MACH_PORT_NULL otherwise.  Its one
+ * message makes the HAL call hal_modules_disk_served().
+ */
+mach_port_t hal_modules_disk_watch(void);
+
+/* #964: "/" is served: the waiting devices are decided from the disk's pools. */
+void hal_modules_disk_served(void);
+
+/*
+ * "--leave CODE": a class the HAL's line leaves to others (hal_modules.c).
+ * 0, or -1 when CODE is no class: 0x and two, four or six hex digits.
+ */
+int  hal_modules_leave(const char *arg);
+
+/*
+ * A death notice for `name': 1 when it was a chora's, its slot given back and
+ * said; 0 when it is no chora's, for the drivers' subscriptions to look at.
+ */
+int  hal_chora_dead(mach_port_t name);
+
+/* The task of the chora the HAL started for a device, or MACH_PORT_NULL. */
+mach_port_t hal_chora_task(unsigned int bus, unsigned int slot,
+			   unsigned int func);
+
+/*
+ * #964: the state of the driver the HAL started for a device, which
+ * get_driver_state() answers, and how many times it was started.  A chora
+ * that dies is started again after a delay, HAL_CHORA_BACKOFF_MS doubled with
+ * each death that comes within HAL_CHORA_STEADY_S of its start; after
+ * HAL_CHORA_STARTS_MAX such starts in a row the HAL gives up, and says so.
+ * A death the HAL asked for is no crash: a stopped driver stays ended, and an
+ * updated one is started at its end with its new module, once.
+ */
+#define HAL_DRIVER_NONE		0	/* the HAL started no driver for it */
+#define HAL_DRIVER_RUNNING	1	/* its chora runs */
+#define HAL_DRIVER_RESTARTING	2	/* it died, and is started again soon */
+#define HAL_DRIVER_GAVE_UP	3	/* it died soon after each of its last starts */
+#define HAL_DRIVER_STOPPED	4	/* stopped on request, started only on request */
+#define HAL_DRIVER_UPDATING	5	/* ended on request, started again at its end */
+
+#define HAL_CHORA_STARTS_MAX	5
+#define HAL_CHORA_STEADY_S	10
+#define HAL_CHORA_BACKOFF_MS	100
+
+/* HAL_DRIVER_* for a device, with its starts in *starts. */
+int  hal_chora_state(unsigned int bus, unsigned int slot, unsigned int func,
+		     int *starts);
+
+/*
+ * #964: the driver of a device, stopped, started again, or given a new module,
+ * on request -- stop_driver(), start_driver() and update_driver() in hal.defs,
+ * once hal_mig.c has checked the capability.  KERN_INVALID_ARGUMENT for a
+ * device the HAL started no driver for.  hal_driver_update() keeps `data' when
+ * it answers KERN_SUCCESS, and leaves it to the caller otherwise.
+ */
+kern_return_t hal_driver_stop(unsigned int bus, unsigned int slot,
+			      unsigned int func);
+kern_return_t hal_driver_start(unsigned int bus, unsigned int slot,
+			       unsigned int func);
+kern_return_t hal_driver_update(unsigned int bus, unsigned int slot,
+				unsigned int func, const char *name,
+				vm_offset_t data, mach_msg_type_number_t len);
+
+/*
+ * #964: the HAL's own port for its restarts: a timer's message on it says a
+ * chora's delay is over.  The HAL alone holds a send right to it, so a message
+ * on it is one of the HAL's timers.  hal_modules_restart_due() takes it.
+ */
+mach_port_t hal_modules_restart_port(void);
+void hal_modules_restart_due(const mach_msg_header_t *in);
+
+/* ================================================================
  * Global state (defined in hal_server.c)
  * ================================================================ */
 
@@ -298,5 +408,8 @@ extern mach_port_t	security_port;
 extern mach_port_t	root_ledger_wired;
 extern mach_port_t	root_ledger_paged;
 extern mach_port_t	hal_service_port;
+
+/* #964: the task that sent the request being served, by its identity (#747). */
+extern uint64_t		hal_request_sender;
 
 #endif /* _HAL_SERVER_H_ */

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: exec_server's refusal of a file load on its image port: a load that reads a file could hold the thread image loads have for themselves.  driver_port_test's [9] asks one there, and exec_server goes looking for the file.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: \[9\] a file load asked on exec_server's image port: 0x0, -?[0-9]+ -- WRONG
+
+diff --git a/uros/src/servers/exec_server/exec_main.c b/uros/src/servers/exec_server/exec_main.c
+index 1ccd3371..a239421a 100644
+--- a/uros/src/servers/exec_server/exec_main.c
++++ b/uros/src/servers/exec_server/exec_main.c
+@@ -87,7 +87,7 @@ exec_S_load(
+     *new_thread = MACH_PORT_NULL;
+ 
+     /* #964: the image port loads images alone, so that it never waits. */
+-    if (server_port == exec_image_port) {
++    if (0 && server_port == exec_image_port) {
+         printf("exec: a file load, %s, asked on the image port: refused "
+                "(#964)\n", path);
+         rc = EXEC_ERR_WRONG_PORT;

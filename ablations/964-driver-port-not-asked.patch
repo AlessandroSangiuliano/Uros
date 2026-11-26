@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #964
+Takes out: bootstrap's asking the kernel for the driver's port at start: the drivers' bootstrap port answers no device port, and no driver reaches its device.  driver_port_test's child finds its device slot empty.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: child: \[1\] bootstrap_ports\(\): 0x0, none in the device slot, none in the host slot -- WRONG
+Note: made again over 748feff4, where exec_server loads a driver and bootstrap keeps no state for one.
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index f8a88075..64586c2f 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -924,8 +924,7 @@ main(int argc, char **argv)
+ 	 * the drivers' bootstrap port answers no device port, and no driver
+ 	 * reaches its device; the servers of bootstrap.conf do not need it.
+ 	 */
+-	kr = device_driver_port(bootstrap_master_device_port,
+-				&bootstrap_driver_device_port);
++	kr = KERN_FAILURE;
+ 	if (kr != KERN_SUCCESS) {
+ 	    bootstrap_driver_device_port = MACH_PORT_NULL;
+ 	    BOOTSTRAP_IO_LOCK();

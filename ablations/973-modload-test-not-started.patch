@@ -12,15 +12,15 @@ Expect: merge-test: entry 68 kvm -smp 4 \([^)]*\) -- WRONG \(chora\)
 Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take (as 765-char-build-without-char-server says).  Read in the ablated arm's harness log that the boot passed, "reached the end, nothing unexplained", and in its full log that there is no "modload_test: started".
 
 diff --git a/uros/src/servers/bootstrap/CMakeLists.txt b/uros/src/servers/bootstrap/CMakeLists.txt
-index 876392a0..c4b55341 100644
+index b9c0f178..baa75c04 100644
 --- a/uros/src/servers/bootstrap/CMakeLists.txt
 +++ b/uros/src/servers/bootstrap/CMakeLists.txt
-@@ -740,7 +740,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
+@@ -752,7 +752,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
    # fetches its module, and the test's two pools are in the bundle.
    set(_CHORA_CONF ${CMAKE_CURRENT_BINARY_DIR}/chora.conf)
    file(GENERATE OUTPUT ${_CHORA_CONF}
--       CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-w modload_test modload_test\n-D chora_test chora_test\n")
-+       CONTENT "name_server name_server\ncap_server cap_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\nexec_server exec_server\n-D chora_test chora_test\n")
+-       CONTENT "name_server name_server\ncap_server cap_server\nexec_server exec_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\n-w modload_test modload_test\n-H -D chora_test chora_test\n")
++       CONTENT "name_server name_server\ncap_server cap_server\nexec_server exec_server\n-D hal_server hal_server\n-D block_device_server block_device_server\n-D ext_server ext_server\n-H -D chora_test chora_test\n")
    set(_CHORA_TEST_CMF
      "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/chora_test.cmf")
    add_custom_command(

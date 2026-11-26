@@ -125,3 +125,105 @@ routine get_device_state(
 	in	slot		: unsigned;
 	in	func		: unsigned;
 	out	state		: unsigned);
+
+/*
+ * #964 — the name of the driver the HAL started for a device: the task's own,
+ * as urmach_task_get_name() reads it, MODULE@BB:DD.F once libdriver has named
+ * it.  Empty when the HAL started none for the device, or it is gone.
+ * KERN_INVALID_ARGUMENT for a device the HAL does not know.  For a test, or an
+ * administrator, to see which task drives a device without holding it.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+#include <mach/task_name.h>
+type hal_driver_name_t = array[*:URMACH_TASK_NAME_MAX] of char
+	ctype: urmach_task_name_t;	/* <mach/mach_types.h>, a task name */
+
+routine get_device_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	out	name		: hal_driver_name_t, CountInOut);
+
+/*
+ * #964 — what the HAL knows of the driver it started for a device: its state,
+ * one of HAL_DRIVER_* (hal_server.h), and how many times it was started.  The
+ * HAL starts a chora again when it dies, after a delay that doubles with each
+ * death that comes soon after a start, and gives up after HAL_CHORA_STARTS_MAX
+ * such starts in a row.  HAL_DRIVER_NONE and 0 for a device the HAL started
+ * no driver for; KERN_INVALID_ARGUMENT for a device it does not know.  A test
+ * counts the starts with it.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+routine get_driver_state(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	out	state		: int;
+	out	starts		: int);
+
+/*
+ * #964 — stop, start and update the driver the HAL started for a device.
+ *
+ * Only the HAL holds a chora's task, so a driver is ended on purpose through
+ * these and no other way.  The HAL marks the device before it ends the task,
+ * so that a death it asked for is not taken for a crash and started again.
+ *
+ *   stop_driver    the driver ends, and stays ended: HAL_DRIVER_STOPPED.
+ *   start_driver   a driver stopped, or given up after its starts, is started
+ *                  again with the module it has.  KERN_FAILURE for one that
+ *                  runs, or is to be started: after a restart's delay, or at
+ *                  the end of its chora.
+ *   update_driver  its module becomes `module', named `name' without ".so",
+ *                  which must declare the device and define `name'_chora_ops
+ *                  among its dynamic symbols: KERN_INVALID_VALUE otherwise,
+ *                  and for bytes of no module's size.  KERN_INVALID_ARGUMENT
+ *                  for a name that is empty, has a byte other than a letter,
+ *                  a digit or _ -- a NUL among them too -- or is longer than
+ *                  a driver's task name leaves room for
+ *                  (DRIVER_MODULE_NAME_MAX).  A chora
+ *                  that runs is ended and started again with it, once, at its
+ *                  end (HAL_DRIVER_UPDATING); a stopped driver stays stopped
+ *                  with it until start_driver(); one given up after its
+ *                  starts, or waiting for a restart's delay, is started with
+ *                  it now.  Each refusal of the module is said by the HAL.
+ *
+ * Each takes a RESOURCE_DRIVER_ADMIN token for the device's class and the
+ * routine's operation, issued to the task that sends the request; for any
+ * other token the kernel's refusal comes back.  KERN_INVALID_ARGUMENT for a
+ * device the HAL does not know, or started no driver for.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+type cap_token_t = array[*:256] of char;
+import <mach/cap_types.h>;
+import <mach/module_pool.h>;
+
+type hal_module_name_t = array[*:64] of char	/* MODULE_NAME_MAX */
+	ctype: module_name_t;
+
+routine stop_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	token		: cap_token_t);
+
+routine start_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	token		: cap_token_t);
+
+routine update_driver(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	token		: cap_token_t;
+	in	name		: hal_module_name_t;
+	in	module		: pointer_t);

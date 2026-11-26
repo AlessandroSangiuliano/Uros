@@ -161,6 +161,9 @@ extern void bootstrap_wake(void);
 #define SERVER_HOST_PRIV_F 0x10
 /* #620: -D, for bootstrap_ports() to hand this server the master device port */
 #define SERVER_DEVICE_F	   0x20
+/* #964: the drivers' bootstrap port, one for every driver: bootstrap_ports()
+   hands it the kernel's driver's port, and not the master device port */
+#define SERVER_DRIVER_F	   0x40
 
 struct server {
 	const char 	*symtab_name;

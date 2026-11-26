@@ -45,7 +45,16 @@ set(CHORA_INCLUDE_DIRS
 # goes in whole -- a call a module makes and chora does not is still there to
 # be found -- and the program is exec'd, so exec_server relocates it (#963).
 
-add_executable(chora_bin chora.c)
+# #964: the server half of chora.defs, the control port each chora serves.
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel)
+set(_CHORA_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
+set(CHORA_MIG_GENERATED)
+add_mig_userland_server(${CMAKE_CURRENT_SOURCE_DIR}/chora.defs ${_CHORA_OUT}
+                        CHORA_MIG)
+
+add_executable(chora_bin chora.c ${CHORA_MIG_GENERATED})
 
 target_compile_options(chora_bin PRIVATE
   -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC
@@ -53,7 +62,7 @@ target_compile_options(chora_bin PRIVATE
 
 target_compile_definitions(chora_bin PRIVATE MACH_IPC_COMPAT=0)
 
-target_include_directories(chora_bin PRIVATE ${CHORA_INCLUDE_DIRS})
+target_include_directories(chora_bin PRIVATE ${CHORA_INCLUDE_DIRS} ${_CHORA_OUT})
 
 target_link_libraries(chora_bin PRIVATE
   -Wl,--start-group
@@ -158,6 +167,28 @@ set_target_properties(chora_absent_module PROPERTIES
 # no message before #977.  chora_test starts a chora on it, where the board
 # has one (run-x86_64.sh --edu).
 
+# #964: a module that dies at its start, every time, on QEMU's pci-testdev
+# (run-x86_64.sh --testdev): the HAL starts it again up to its limit, and
+# chora_test counts the starts.
+add_library(crash_probe_module SHARED crash_probe/crash_probe.c)
+
+add_dependencies(crash_probe_module mig_mach_public_headers)
+
+target_compile_options(crash_probe_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(crash_probe_module PRIVATE MACH_IPC_COMPAT=0)
+
+target_include_directories(crash_probe_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(crash_probe_module PROPERTIES
+  OUTPUT_NAME "crash_probe"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
+
 add_library(edu_probe_module SHARED edu_probe/edu_probe.c)
 
 add_dependencies(edu_probe_module mig_mach_public_headers)
@@ -176,3 +207,131 @@ set_target_properties(edu_probe_module PROPERTIES
   SUFFIX ".so"
   LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
+
+# #964: edu_probe again, named edu_next: the module chora_test hands the HAL to
+# update edu's driver with.  It goes to user/updates, which make-disk-x86_64.sh
+# writes to the disk's /mach_servers/updates and which is no pool: in the
+# bundle's misc, or the disk's, it would declare edu alike with edu_probe, a
+# tie the HAL does not break, and edu would get no driver.
+add_library(edu_next_module SHARED edu_probe/edu_probe.c)
+
+add_dependencies(edu_next_module mig_mach_public_headers)
+
+target_compile_options(edu_next_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(edu_next_module PRIVATE MACH_IPC_COMPAT=0
+  EDU_MODULE=edu_next)
+
+target_include_directories(edu_next_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(edu_next_module PROPERTIES
+  OUTPUT_NAME "edu_next"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")
+
+# #964: a module no chora could run, in the disk's pool misc: its name has 24
+# characters, one past the room a driver's task name leaves a module's, and
+# it declares the host bridge every board has.  The HAL must refuse it as it
+# reads the pool, and say so, which run-x86_64.sh asks.  make-disk-x86_64.sh
+# writes it to /mach_servers/modules/misc; no bundle holds it.
+add_library(host_bridge_one_too_long_module SHARED
+  host_bridge_one_too_long/host_bridge_one_too_long.c)
+
+add_dependencies(host_bridge_one_too_long_module mig_mach_public_headers)
+
+target_compile_options(host_bridge_one_too_long_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(host_bridge_one_too_long_module PRIVATE
+  MACH_IPC_COMPAT=0)
+
+target_include_directories(host_bridge_one_too_long_module PRIVATE
+  ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(host_bridge_one_too_long_module PROPERTIES
+  OUTPUT_NAME "host_bridge_one_too_long"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
+
+# #964: and its other half, host_bridge_wrong_ops, in the same pool: a name
+# with room in a driver's task name, its operations under another name than
+# its own, and the host bridge declared.  The HAL must refuse it for its
+# operations as it reads the pool, which run-x86_64.sh asks.
+add_library(host_bridge_wrong_ops_module SHARED
+  host_bridge_wrong_ops/host_bridge_wrong_ops.c)
+
+add_dependencies(host_bridge_wrong_ops_module mig_mach_public_headers)
+
+target_compile_options(host_bridge_wrong_ops_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(host_bridge_wrong_ops_module PRIVATE
+  MACH_IPC_COMPAT=0)
+
+target_include_directories(host_bridge_wrong_ops_module PRIVATE
+  ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(host_bridge_wrong_ops_module PROPERTIES
+  OUTPUT_NAME "host_bridge_wrong_ops"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/misc")
+
+# #964: edu_probe a third time, named edu_again, in user/updates beside
+# edu_next: the module chora_test [16] gives edu's stopped driver.  In no
+# pool, so that its start, answered by edu_again, can only be the update's
+# module, where edu_probe would also be the pools' choice for edu.
+add_library(edu_again_module SHARED edu_probe/edu_probe.c)
+
+add_dependencies(edu_again_module mig_mach_public_headers)
+
+target_compile_options(edu_again_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(edu_again_module PRIVATE MACH_IPC_COMPAT=0
+  EDU_MODULE=edu_again)
+
+target_include_directories(edu_again_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(edu_again_module PROPERTIES
+  OUTPUT_NAME "edu_again"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")
+
+# #964: crash_probe a second time, under its own name, with CRASH_UPDATE, as
+# crash_probe_update.so in user/updates: the new build of the same module that
+# chora_test [18] gives crash_probe's driver once the HAL has given it up.  In
+# no pool; its line says it came from an update's bytes, which run-x86_64.sh
+# counts against the starts after the update, as [18] reads them, where the
+# pool's would be the module the driver had.
+add_library(crash_update_module SHARED crash_probe/crash_probe.c)
+
+add_dependencies(crash_update_module mig_mach_public_headers)
+
+target_compile_options(crash_update_module PRIVATE
+  -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -fPIC -fno-stack-protector
+  -include stdint.h)
+
+target_compile_definitions(crash_update_module PRIVATE MACH_IPC_COMPAT=0
+  CRASH_UPDATE)
+
+target_include_directories(crash_update_module PRIVATE ${CHORA_INCLUDE_DIRS})
+
+set_target_properties(crash_update_module PROPERTIES
+  OUTPUT_NAME "crash_probe_update"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/updates")

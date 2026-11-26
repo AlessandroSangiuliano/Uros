@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: the HAL's answer to the kernel's refusal of a token: every one of the three routines is served whatever token it brings, the refusal only said.  chora_test [11]'s first call, a stop with no token, stops the card's driver.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[11\] WRONG -- refused without the capability: cap_server SATA 2413; HAL no token 0,
+
+diff --git a/uros/src/servers/hal_server/hal_mig.c b/uros/src/servers/hal_server/hal_mig.c
+--- a/uros/src/servers/hal_server/hal_mig.c
++++ b/uros/src/servers/hal_server/hal_mig.c
+@@ -395,7 +395,7 @@
+ 		       "administer the drivers of class %06x (%d) (#964)\n",
+ 		       what, bus, slot, func, (unsigned)(dev->class_rev >> 8),
+ 		       (int)kr);
+-	return kr;
++	return KERN_SUCCESS;
+ }
+ 
+ kern_return_t

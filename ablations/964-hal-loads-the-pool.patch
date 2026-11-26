@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #964
+Takes out: the HAL's reading of a pool without loading it: pool_read() also dlopens every module of the pool, as modload_load_class() does, and a module's code runs inside the HAL, with the bus the HAL holds.  chora_absent, in modules/net, says WRONG from its DT_INIT whichever program loads it.
+Run: --entry 14 600 -smp 4
+Expect: chora_absent: WRONG -- loaded, and no chora is ever told to load it
+Note: the declarations are still read, and every decision is the same: what this one asks is only whether a module is loaded.
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -68,6 +68,7 @@
+ #include "chora_module.h"		/* CHORA_MODULE_SUFFIX, #964 */
+ #include <mach/task_name.h>		/* URMACH_TASK_NAME_MAX, #964 */
+ #include "libelf.h"
++#include "modload.h"
+ #include <mach/elf.h>			/* SHT_DYNSYM, SHN_UNDEF: #964 */
+ #include "exec_types.h"			/* EXEC_OK */
+ #include "exec.h"			/* exec_load_image */
+@@ -1197,6 +1198,12 @@
+ 		return p;
+ 	}
+ 	p->listed = 1;
++	{
++		void	*ops[HAL_POOL_MODULES];
++
++		(void)modload_load_class(name, "_chora_ops", ops,
++					 HAL_POOL_MODULES);
++	}
+ 
+ 	for (q = (const char *)names; q < (const char *)names + names_count; ) {
+ 		size_t			len = strlen(q);

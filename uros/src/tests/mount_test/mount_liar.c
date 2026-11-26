@@ -21,6 +21,8 @@
 #include <mach.h>
 #include <mach/message.h>
 #include <mach/mach_syscalls.h>		/* syscall_vm_deallocate(), #911 */
+#include <mach/mach_traps.h>
+#include <mach/thread_switch.h>		/* the hold of LIAR_STALL, #964 */
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -87,6 +89,47 @@ liar_left(vfs_u64_t offset, uint64_t count)
 	return n < count ? n : count;
 }
 
+/*
+ * #964 [32]: the hold of an open of LIAR_STALL.  Whoever asked waits for the
+ * answer the whole time -- in [32], a thread of exec_server's with a load in
+ * flight.  The hold ends when mount_test lets it go, or by itself after
+ * LIAR_STALL_LIMIT, which only a mount_test that never lets go reaches, and
+ * which it says.
+ */
+#define LIAR_STALL_LIMIT	1800		/* x 100 ms */
+
+volatile uint32_t	liar_stall_held;
+static volatile uint32_t liar_stall_free;
+
+void
+liar_stall_let_go(void)
+{
+	__atomic_store_n(&liar_stall_free, 1, __ATOMIC_RELEASE);
+}
+
+static int
+liar_is_stall(const char *path)
+{
+	const char *base = strrchr(path, '/');
+
+	return strcmp(base ? base + 1 : path, LIAR_STALL) == 0;
+}
+
+static void
+liar_stall_hold(void)
+{
+	unsigned int step;
+
+	__atomic_fetch_add(&liar_stall_held, 1, __ATOMIC_RELEASE);
+	for (step = 0; step < LIAR_STALL_LIMIT &&
+	     !__atomic_load_n(&liar_stall_free, __ATOMIC_ACQUIRE); step++)
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+	if (step == LIAR_STALL_LIMIT)
+		printf("mount_test: the liar let an open of \"" LIAR_STALL "\" "
+		       "go by itself after %u s: nobody did\n",
+		       LIAR_STALL_LIMIT / 10);
+}
+
 kern_return_t
 liar_open(mach_port_t fs_port, mach_port_t client_token, vfs_path_t path,
 	  int flags, int mode, vfs_u64_t *handle, vfs_u32_t *type)
@@ -94,6 +137,10 @@ liar_open(mach_port_t fs_port, mach_port_t client_token, vfs_path_t path,
 	int h = liar_handle_of(path);
 
 	(void)fs_port; (void)flags; (void)mode;
+	if (liar_is_stall(path)) {
+		liar_stall_hold();
+		return KERN_INVALID_ARGUMENT;	/* as a name it does not have */
+	}
 	if (h == 0)
 		return KERN_INVALID_ARGUMENT;	/* the request, right and all,
 						 * goes back with it */

@@ -1,0 +1,53 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ */
+
+/*
+ * chora.defs -- a chora's control port (#964).
+ *
+ * Once its module drives the device, a chora checks a port in with the name
+ * server under its own name, MODULE@BB:DD.F -- the device's -- and answers on
+ * it.  A consumer finds the driver of a device by that name; when the HAL
+ * starts a dead chora again, the name is the new chora's, and the consumer
+ * asks it as it asked the old one.  chora_status() is the one routine for
+ * now: what the chora drives.  The control plane the queue capability brings
+ * (#965) is to be built on this port.
+ *
+ * Routines are appended at the end: MIG numbers them by position.
+ */
+
+subsystem chora 9650;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+userprefix	chora_;
+serverprefix	chora_S_;
+
+import <mach/module_pool.h>;
+
+type chora_module_name_t = array[*:64] of char	/* MODULE_NAME_MAX */
+	ctype: module_name_t;
+
+/*
+ * The module that drives the device, its name with no ".so", and the
+ * device's address, bus << 8 | slot << 3 | func.
+ */
+routine status(
+		chora_port	: mach_port_t;
+	out	module		: chora_module_name_t, CountInOut;
+	out	bdf		: unsigned);

@@ -402,3 +402,37 @@ modload_load_named(const char *class, const char *name, const char *sym_suffix)
 		return NULL;
 	return load_cached(cm, sym_suffix);
 }
+
+void *
+modload_load_given(const char *class, const char *name, vm_offset_t data,
+		   vm_size_t size, const char *sym_suffix)
+{
+	struct cached_module *cm;
+
+	if (strlen(class) >= MODULE_NAME_MAX || strlen(name) >= MODULE_NAME_MAX) {
+		printf("%s: module \"%s/%s\": a name longer than %u "
+		       "characters is no pool's\n", log_tag, class, name,
+		       (unsigned)(MODULE_NAME_MAX - 1));
+		return NULL;
+	}
+	/*
+	 * A module of that name in the cache would be the one dlopen() reads,
+	 * and not the one given: refused, not chosen between.
+	 */
+	if (find_cached_module(class, name) != NULL) {
+		printf("%s: \"%s/%s\" is in the cache already: the module "
+		       "given is not loaded\n", log_tag, class, name);
+		return NULL;
+	}
+	if (n_cached_modules >= MAX_CACHED_MODULES) {
+		printf("%s: module cache full, \"%s/%s\" not loaded\n",
+		       log_tag, class, name);
+		return NULL;
+	}
+	cm = &cached_modules[n_cached_modules++];
+	strcpy(cm->class, class);
+	strcpy(cm->name, name);
+	cm->data = data;
+	cm->size = size;
+	return load_cached(cm, sym_suffix);
+}

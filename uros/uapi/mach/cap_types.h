@@ -100,6 +100,21 @@ typedef enum {
      */
     RESOURCE_PCI_FUNCTION  = 12,
 
+    /*
+     * The drivers the HAL starts (#964): whether a task may stop, start or
+     * update the driver of a device, through the HAL's stop_driver(),
+     * start_driver() and update_driver().  The id is the device's class, as
+     * RESOURCE_PCI_DEVICE's is, so that a manifest can say which kinds of
+     * device a task administers -- the network cards and not the disks --
+     * which a bus address could not say in a file written before the machine
+     * exists.  The HAL checks it against the class of the device a request
+     * names.
+     *
+     * ⚠️ Below RESOURCE_TYPE_MAX, where it must stay: cap_server asks a
+     * manifest only of the types below it, and issues the others to anyone.
+     */
+    RESOURCE_DRIVER_ADMIN  = 13,
+
     RESOURCE_TYPE_MAX
 } cap_resource_type_t;
 
@@ -159,6 +174,11 @@ typedef enum {
 
 /* RESOURCE_REVOKE_NOTICES (#744) */
 #define CAP_OP_REVOKE_SUBSCRIBE  0x0000000000000001ULL  /* be told of them */
+
+/* RESOURCE_DRIVER_ADMIN (#964): what may be asked of the HAL for a driver. */
+#define CAP_OP_DRIVER_STOP       0x0000000000000001ULL  /* stop it            */
+#define CAP_OP_DRIVER_START      0x0000000000000002ULL  /* start it again     */
+#define CAP_OP_DRIVER_UPDATE     0x0000000000000004ULL  /* replace its module */
 
 /*
  * RESOURCE_MOUNT_POINT (#716).  The resource is a path PREFIX in the name

@@ -39,6 +39,7 @@
 #include <mach/message.h>
 #include <mach/mig_errors.h>
 #include <mach/notify.h>
+#include <mach/urmach_identity.h>	/* a request's sender (#964) */
 #include <sa_mach.h>
 #include <servers/netname.h>
 #include <stdio.h>
@@ -181,6 +182,13 @@ hal_run_discovery(void)
 			/* #173: only fresh devices trigger hal_device_added
 			 * — repeated rescans over a stable bus stay quiet. */
 			hal_driver_reg_notify_match(&scan_buf[i]);
+
+			/*
+			 * #964: and which module of its pool drives it, said
+			 * for every device the HAL finds, the boot's and a
+			 * rescan's, once: here, where a device is new.
+			 */
+			hal_module_report(&scan_buf[i]);
 			new_devs++;
 		}
 
@@ -258,9 +266,63 @@ dump_registry(void)
  * MIG demux
  * ================================================================ */
 
+/* #964: the port the name server tells when "/" is mounted, while watched. */
+static mach_port_t	disk_watch = MACH_PORT_NULL;
+
+/* #964: the HAL's own port for its restarts' timers. */
+static mach_port_t	restart_port = MACH_PORT_NULL;
+
+/*
+ * #964: the task that sent the request being served, from the message's
+ * trailer, which the HAL's receive asks for (URMACH_RCV_SENDER).  A routine
+ * that takes a capability verifies it as this task's: a token is good only for
+ * the task it was issued to (#747).
+ */
+uint64_t	hal_request_sender;
+
 static boolean_t
 hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	hal_request_sender = urmach_msg_sender(in);
+
+	/*
+	 * #964: a restart's delay is over.  The HAL alone holds a send right to
+	 * this port, for its timers, so what arrives on it is theirs.
+	 */
+	if (MACH_PORT_VALID(restart_port) &&
+	    in->msgh_local_port == restart_port) {
+		hal_modules_restart_due(in);
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
+	/*
+	 * #964: "/" is mounted.  The HAL alone holds this port and gave the name
+	 * server the one send-once right to it, so what arrives on it is the
+	 * name server's, and comes once: the watch ends with it.  The message
+	 * brings a right to the mount's port, which the HAL does not keep.
+	 */
+	if (MACH_PORT_VALID(disk_watch) && in->msgh_local_port == disk_watch) {
+		if (in->msgh_id == NETNAME_NOTIFY_MOUNT_MSID)
+			hal_modules_disk_served();
+		else
+			printf("hal: a message with id %d on the watch of "
+			       "\"/\", which is no mount's notification "
+			       "(#964)\n", (int)in->msgh_id);
+		mach_msg_destroy(in);
+		(void)mach_port_move_member(mach_task_self(), disk_watch,
+					    MACH_PORT_NULL);
+		(void)mach_port_mod_refs(mach_task_self(), disk_watch,
+					 MACH_PORT_RIGHT_RECEIVE, -1);
+		disk_watch = MACH_PORT_NULL;
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	/*
 	 * #981: a dead-name notification is the kernel's, sent through the
 	 * send-once right hal_register_driver() made for it.  This port is the
@@ -277,7 +339,9 @@ hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	else if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
 		const mach_dead_name_notification_t *n =
 			(const mach_dead_name_notification_t *)in;
-		hal_driver_reg_handle_dead_name(n->not_port);
+		/* #964: a chora's, or a subscribed driver's. */
+		if (!hal_chora_dead(n->not_port))
+			hal_driver_reg_handle_dead_name(n->not_port);
 		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
 		((mig_reply_error_t *)out)->Head.msgh_size =
 			sizeof(mig_reply_error_t);
@@ -312,6 +376,27 @@ main(int argc, char **argv)
 	master_device = device_port;
 
 	printf("\n=== HAL server ===\n");
+
+	/* #964: the classes its line leaves to others, "--leave CODE". */
+	{
+		int	i;
+
+		for (i = 1; i < argc; i++) {
+			if (strcmp(argv[i], "--leave") != 0 || i + 1 >= argc) {
+				printf("hal: '%s' is no option of the HAL's "
+				       "(#964)\n", argv[i]);
+				continue;
+			}
+			i++;
+			if (hal_modules_leave(argv[i]) != 0)
+				printf("hal: --leave '%s' is no class: 0x and "
+				       "two, four or six hex digits (#964)\n",
+				       argv[i]);
+			else
+				printf("hal: class %s left to others by its "
+				       "line (#964)\n", argv[i]);
+		}
+	}
 
 	/*
 	 * ── The bus is claimed before anything is scanned (#511) ──────────
@@ -402,10 +487,44 @@ main(int argc, char **argv)
 	hal_run_discovery();
 	dump_registry();
 
-	printf("hal: init complete, entering message loop\n");
+	/*
+	 * #964: two ports of the HAL's own, received beside the service port in
+	 * one set: its restarts' timers, and, while some device waits for the
+	 * disk's pools, the name server's word that "/" is served.
+	 */
+	{
+		mach_port_t	set = MACH_PORT_NULL, served = hal_service_port;
 
-	mach_msg_server(hal_demux, 8192, hal_service_port,
-			MACH_MSG_OPTION_NONE);
+		restart_port = hal_modules_restart_port();
+		disk_watch = hal_modules_disk_watch();
+		kr = mach_port_allocate(mach_task_self(),
+					MACH_PORT_RIGHT_PORT_SET, &set);
+		if (kr == KERN_SUCCESS)
+			kr = mach_port_move_member(mach_task_self(),
+						   hal_service_port, set);
+		if (kr == KERN_SUCCESS && MACH_PORT_VALID(restart_port))
+			kr = mach_port_move_member(mach_task_self(),
+						   restart_port, set);
+		if (kr == KERN_SUCCESS && MACH_PORT_VALID(disk_watch))
+			kr = mach_port_move_member(mach_task_self(),
+						   disk_watch, set);
+		if (kr == KERN_SUCCESS)
+			served = set;
+		else {
+			/* The service port is received alone again. */
+			(void)mach_port_move_member(mach_task_self(),
+						    hal_service_port,
+						    MACH_PORT_NULL);
+			printf("hal: no port set (0x%x): no chora is started "
+			       "again, and the disk's pools are not read "
+			       "(#964)\n", kr);
+		}
+
+		printf("hal: init complete, entering message loop\n");
+
+		/* #964: every request with its sender, for the capabilities. */
+		mach_msg_server(hal_demux, 8192, served, URMACH_RCV_SENDER);
+	}
 
 	printf("hal: mach_msg_server exited unexpectedly\n");
 	return 1;

@@ -44,6 +44,12 @@ add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs
                         ${_CT_OUT} CT_EXEC)
 list(APPEND CT_MIG_GENERATED ${CT_EXEC_GENERATED})
 
+# #964: a chora's control port, which [10] asks before and after the kill.
+set(CT_CHORA_GENERATED)
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/chora/chora.defs
+                        ${_CT_OUT} CT_CHORA)
+list(APPEND CT_MIG_GENERATED ${CT_CHORA_GENERATED})
+
 add_executable(chora_test_bin chora_test.c ${CT_MIG_GENERATED})
 
 target_compile_options(chora_test_bin PRIVATE
@@ -58,6 +64,7 @@ target_include_directories(chora_test_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/src/servers/hal_server
   ${CMAKE_SOURCE_DIR}/src/lib/libpci
+  ${CMAKE_SOURCE_DIR}/src/lib/libdriver          # chora_given.h, #964
   ${CMAKE_SOURCE_DIR}/src/servers/exec_server
   ${_CT_OUT}
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
@@ -73,6 +80,8 @@ target_include_directories(chora_test_bin PRIVATE
 
 target_link_libraries(chora_test_bin PRIVATE
   -Wl,--start-group
+  libvfs		# #964: the card's module, read from the disk
+  libflipc2
   libpthreads
   libmach
   libcap

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: a stop's mark at the chora's death: the HAL takes the death of a chora it was asked to stop for a crash, and starts it again after its delay.  chora_test [12] finds the card's driver running 3 s after the stop, with one start more.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[12\] WRONG -- the card.s driver stopped through the HAL: state 1, 3 s on 1 \(stopped is 4\)
+Note: the harness's pair "the HAL stopping a driver" fails too: the death never says the chora is not started again.
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -603,7 +603,7 @@
+ 	unsigned int		ms;
+ 
+ 	record_where(r, where, sizeof where);
+-	if (r->state == HAL_DRIVER_STOPPED) {
++	if (0 && r->state == HAL_DRIVER_STOPPED) {
+ 		printf("hal: the chora of %s was stopped on request: it is not "
+ 		       "started again (#964)\n", where);
+ 		return;

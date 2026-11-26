@@ -39,6 +39,15 @@
 #include <mach/cap_types.h>	/* struct uros_cap */
 
 /*
+ * The name a driver's task is given, MODULE@BB:DD.F (#963, #964), and the
+ * room it leaves a module's name: the kernel keeps a task's name to
+ * URMACH_TASK_NAME_MAX with its terminator.  One place, so that the HAL, which
+ * refuses a module no chora could name its task after, counts as chora does.
+ */
+#define DRIVER_TASK_NAME_FMT	"%s@%02x:%02x.%x"
+#define DRIVER_MODULE_NAME_MAX	(URMACH_TASK_NAME_MAX - sizeof "@BB:DD.F")
+
+/*
  * The device a chora drives.  Filled by driver_open(), read by the module;
  * the interrupt half is driver_interrupt()'s.
  */

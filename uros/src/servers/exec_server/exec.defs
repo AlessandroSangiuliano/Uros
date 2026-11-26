@@ -89,3 +89,37 @@ routine exec_load(
 	in	envp_blob	: exec_blob_t;
 	out	new_thread	: mach_port_move_send_t;
 	out	result_code	: int);
+
+/*
+ * #964: exec_load_image -- an image the caller hands, loaded into a task the
+ * caller made, as exec_load() loads a file: a driver, for the HAL, whose
+ * program comes from the boot bundle before any disk is served.
+ *
+ *   image       — the program's bytes, out-of-line.
+ *   manifest    — a manifest the caller wrote, standing for the program's
+ *                 own: cut to the caller's `delegatable' lines as the
+ *                 program's would be, so it asks and grants nothing by
+ *                 itself.  Empty for the program's own.
+ *   the rest    — as exec_load()'s; new_thread comes back SUSPENDED.
+ *
+ * Asked on the image port alone, which exec_server checks in as
+ * "exec_image" and serves on a thread of its own: an image load reads no
+ * file, and must never wait behind a load that does -- once the disk's driver
+ * is one of the HAL's, an execve held on a file of a disk whose driver died
+ * would hold the request that starts that driver again (#966).  A file load
+ * asked there, and an image load asked on exec_server's port, come back
+ * EXEC_ERR_WRONG_PORT; an image that names a dynamic linker, which would be
+ * read from a file, EXEC_ERR_NOT_STATIC.
+ *
+ * ⚠️ IN THE TAIL OF THIS FILE: MIG numbers a subsystem's routines by position.
+ */
+routine exec_load_image(
+		exec_port	: mach_port_t;
+	in	task		: task_t;
+	in	parent_caps	: mach_port_t;
+	in	image		: exec_blob_t;
+	in	manifest	: exec_blob_t;
+	in	argv_blob	: exec_blob_t;
+	in	envp_blob	: exec_blob_t;
+	out	new_thread	: mach_port_move_send_t;
+	out	result_code	: int);

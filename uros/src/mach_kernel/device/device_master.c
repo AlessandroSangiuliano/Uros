@@ -319,10 +319,35 @@ irq_forward_thread_start(void)
 	(void)kernel_thread(kernel_task, irq_forward_thread, NULL);
 }
 
+/*
+ * ── The driver's port (#964) ─────────────────────────────────────────
+ *
+ * 🔴 THE MASTER PORT OPENS MORE THAN A DEVICE.  device_open() on it opens the
+ * kernel's own devices, the boot disk among them; and of the routines below,
+ * it takes the debugger, the I/O ports and DMA for another task.  A driver
+ * needs none of that: what it does to its device, it does through its claim.
+ *
+ * 🔑 So a driver is given this port instead.  Bootstrap asks for it on the
+ * master port, ds_master_device_driver_port(), and puts it in the device slot
+ * of a driver's bootstrap_ports().  The routines a driver calls take it,
+ * through check_driver_port(); every other routine takes the master port
+ * alone, and so does device.defs whole -- ds_device_open() compares its port
+ * with the master's.
+ *
+ * ⚠️ A kobject type of its own: ds_master_notify() asserts that a port of the
+ * master's type is the master (#442).
+ */
+static ipc_port_t	driver_device_port = IP_NULL;
+
 void
 device_master_init(void)
 {
 	int i;
+
+	driver_device_port = ipc_port_alloc_kernel();
+	if (driver_device_port == IP_NULL)
+		panic("can't allocate the driver's device port");
+	ipc_kobject_set(driver_device_port, 1, IKOT_DRIVER_DEVICE);
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
 	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
@@ -413,6 +438,32 @@ check_master_port(ipc_port_t port)
 	if (port != master_device_port)
 		return KERN_INVALID_ARGUMENT;
 	return KERN_SUCCESS;
+}
+
+/*
+ * #964: the master port, or the driver's port, for the routines a driver
+ * calls.  Each of them is bound to the caller's claim by current_task(), so
+ * that with no claim none of them does anything to a device, whichever port
+ * the call came on -- read routine by routine on 23/11.  Two do something
+ * without one, and on the driver's port they bind themselves to the caller's
+ * device, asking port_is_driver(): device_intr_register(), which takes a line
+ * no claimed device raises, and device_dma_faults(), which answers for any
+ * device.
+ */
+static kern_return_t
+check_driver_port(ipc_port_t port)
+{
+	if (port == IP_NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (port != master_device_port && port != driver_device_port)
+		return KERN_INVALID_ARGUMENT;
+	return KERN_SUCCESS;
+}
+
+static boolean_t
+port_is_driver(ipc_port_t port)
+{
+	return port != IP_NULL && port == driver_device_port;
 }
 
 /*
@@ -968,7 +1019,7 @@ ds_master_device_pci_config_read(
 #if NPCI > 0
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -998,7 +1049,7 @@ ds_master_device_pci_config_write(
 #if NPCI > 0
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1277,7 +1328,7 @@ ds_master_device_intr_register(
 	spl_t s;
 	natural_t bdf = DEVICE_DMA_NO_BDF;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1296,6 +1347,20 @@ ds_master_device_intr_register(
 	kr = check_irq_owner(irq, &bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
+
+	/*
+	 * #964: a line no claimed device raises is taken by whoever asks on the
+	 * master port -- ISA's servers, the keyboard's and the serial port's,
+	 * hold no claim.  On the driver's port it is refused: a driver has its
+	 * device's line and no other, and would otherwise take the keyboard's
+	 * before its server did.
+	 */
+	if (bdf == DEVICE_DMA_NO_BDF && port_is_driver(master_port)) {
+		printf("device_intr_register: irq %u is raised by no device "
+		       "task 0x%lx holds, and it asked on a driver's port "
+		       "(#964)\n", irq, (unsigned long)me);
+		return KERN_NO_ACCESS;
+	}
 
 	if (notify_port == IP_NULL)
 		return KERN_INVALID_ARGUMENT;
@@ -1383,7 +1448,7 @@ ds_master_device_msi_register(
 	spl_t		s;
 	unsigned int	slot = 0;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1475,7 +1540,7 @@ ds_master_device_intr_unregister(
 	kern_return_t kr;
 	spl_t s;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1544,7 +1609,7 @@ ds_master_device_intr_enable(
 	kern_return_t kr;
 	spl_t s;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2188,7 +2253,7 @@ ds_master_device_dma_alloc(
 	vm_offset_t max_pa;
 	uint64_t region_id = 0;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2299,7 +2364,7 @@ ds_master_device_dma_free(
 {
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2814,7 +2879,7 @@ ds_master_device_dma_map_user(
 	vm_offset_t	pa;
 	kern_return_t	kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -3215,7 +3280,7 @@ ds_master_device_region_map(
 	unsigned	n;
 	uint64_t	rbase, rsize;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -3289,7 +3354,7 @@ ds_master_device_mmio_unmap(
 	task_t		task;
 	kern_return_t	kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -3983,10 +4048,13 @@ ds_master_device_dma_faults(
 	struct device_md_faults a;
 	kern_return_t kr;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
+	/* #964: on the driver's port, the faults of the caller's own device. */
+	if (port_is_driver(master_port) && check_claim(bdf) != KERN_SUCCESS)
+		return KERN_NO_ACCESS;
 	/*
 	 * #599: a bdf that is not a device is refused.  It was answered
 	 * "confined 0, count 0" -- a question about nothing, answered as data.
@@ -4101,7 +4169,7 @@ ds_master_device_dma_reach(
 	kern_return_t	kr;
 	unsigned	i;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -4901,7 +4969,7 @@ ds_master_device_claim(
 	uint32_t		check_type;
 	uint64_t		check_id;
 
-	kr = check_master_port(master_port);
+	kr = check_driver_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -5636,4 +5704,23 @@ urmach_dma_region_owner(
 
 	task_deallocate(t);
 	return kr;
+}
+
+/*
+ * #964: the driver's port, for bootstrap to give a driver in place of the
+ * master port -- asked for on the master port alone, since it is the master
+ * port's holder that decides who drives.  The same port every time.
+ */
+kern_return_t
+ds_master_device_driver_port(
+	ipc_port_t		master_port,
+	ipc_port_t		*driver_port)
+{
+	kern_return_t	kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	*driver_port = ipc_port_make_send(driver_device_port);
+	return KERN_SUCCESS;
 }

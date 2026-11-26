@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #964
+Takes out: the reading of a module's declaration: module_read() never looks for the .uros_drives section, and the HAL takes every module of a pool for one that declares nothing, as a HAL that never found the section would.  Once "/" is served, the network card's line says no module of net, in the bundle or on the disk, declares it, where chora_probe, on the disk, declares the card by its vendor and device; and no chora is started on it.
+Run: --iommu intel --edu --entry 68 600 -smp 4
+Expect: hal: [0-9a-f]{2}:[0-9a-f]{2}\.[0-7] 8086:(100e|10d3) class 0200[0-9a-f]{2}: no module of net, in the bundle or on the disk, declares it
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+index 0591fa7e..a080fe71 100644
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -541,7 +541,7 @@ module_read(struct pool_module *m, const char *pool, const char *on,
+ 		       "nothing\n", pool, m->name, on, rc);
+ 		return;
+ 	}
+-	rc = elf_shdr_find(&img, CHORA_DRIVES_SECTION, &sh);
++	rc = ELF_ERR_NOT_FOUND;
+ 	if (rc != ELF_OK) {
+ 		elf_close(&img);
+ 		return;			/* no declaration: not an error */

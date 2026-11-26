@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #964
+Takes out: who may ask for the drivers' bootstrap port: any task gets it, a driver's among them, and with it the driver's port for whatever task it makes.  driver_port_test's child asks for it, and is given it.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: child: \[4\] bootstrap_drivers_port\(\) asked by a driver: given, 0x0 -- WRONG
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index f8a88075..c9527401 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -2561,8 +2561,8 @@ do_bootstrap_drivers_port(mach_port_t bootstrap, mach_port_t *drivers_p)
+ {
+ 	struct server	*sp = server_by_bootstrap_port(bootstrap);
+ 
+-	if (sp == NULL || !(sp->flags & SERVER_DEVICE_F) ||
+-	    (sp->flags & SERVER_DRIVER_F)) {
++	if (0 && (sp == NULL || !(sp->flags & SERVER_DEVICE_F) ||
++	    (sp->flags & SERVER_DRIVER_F))) {
+ 	    BOOTSTRAP_IO_LOCK();
+ 	    printf("%s: bootstrap_drivers_port: refused to %s, which holds no "
+ 		   "master device port (#964)\n", program_name,

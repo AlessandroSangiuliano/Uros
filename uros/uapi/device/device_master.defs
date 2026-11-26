@@ -930,3 +930,22 @@ routine device_dma_reach(
 	in	bdf		: natural_t;
 	in	reach		: vm_address_t
 	);
+
+/*
+ * #964: the driver's port -- a send right to the port bootstrap gives a driver
+ * in place of the master port, asked for on the master port and on no other.
+ * It takes the routines of this file that a driver calls, each bound to the
+ * caller's claim: device_claim, device_pci_config_read and _write,
+ * device_region_map, device_mmio_unmap, device_intr_register, _enable and
+ * _unregister, device_msi_register, device_dma_alloc, _free, _map_user,
+ * _reach and _faults.  On it, device_intr_register takes only a line the
+ * caller's device raises, and device_dma_faults answers only for the caller's
+ * device.  Every other routine of this file, and device_open, take the master
+ * port alone.
+ *
+ * ⚠️ IN THE TAIL OF THIS FILE: MIG numbers a subsystem's routines by position.
+ */
+routine device_driver_port(
+		master_port	: mach_port_t;
+	out	driver_port	: mach_port_t
+	);

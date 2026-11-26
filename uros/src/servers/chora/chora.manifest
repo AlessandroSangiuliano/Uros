@@ -1,16 +1,17 @@
 # chora's manifest (#963).
 #
-# chora drives whatever device it is started on, so it asks for any PCI
-# class, with the three operations a driver needs: DMA, its registers and its
-# interrupt.
+# chora drives the one function it is started on, and asks for a capability
+# for that function (#982, #964), with the three operations a driver needs:
+# DMA, its registers and its interrupt.
 #
-# 🔑 And it is given only what its parent may hand on.  exec_load() cuts what
-# this file asks for to the parent's `delegatable' lines (#743), so a chora
-# holds the one class its parent hands on and nothing else: chora_test hands
-# on the network class.  Two choras started by two parents hold what each was
-# given, and this file grants nothing by itself.
+# 🔑 This file counts only for a chora started with exec_load(), which cuts
+# what it asks for to the parent's `delegatable' lines (#743): a manifest
+# names no address, so `any' here, and the chora asks for its own.  A chora
+# the HAL starts gets no manifest of this file's: the HAL writes the
+# function's address into one at run time and derives the task's port from
+# its own.  This file grants nothing by itself.
 
 name chora
-required 5 any 0x7
+required 12 any 0x7
 
 # No `delegatable' lines: a chora starts nothing.

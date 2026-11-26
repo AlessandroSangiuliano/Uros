@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #964
+Takes out: the name server telling the watchers of a mount prefix at the check-in of a mount there (netname_notify_mount()): a watcher that asked before the mount is never told.  mount_test's [33] watches /mount_test before it mounts it, and finds nothing on its port at the check-in.
+Run: --entry 14 600 -smp 4
+Expect: mount_test: \[33\] WRONG — a watcher of "/": 0x0, its port; one of /mount_test: before the mount 0x10004003 \(nothing is 0x10004003\), mounted, at the check-in 0x10004003, not told its port; netname_wait_mount\("/"\): its port
+Note: a watcher of a prefix already mounted is still told at once, which [33] asks first.
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+index 237973c6..dba7204d 100644
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -683,7 +683,8 @@ do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
+     add_reference(port);
+ 
+     /* #964: and whoever waits for a mount here is told, with its port. */
+-    notify_mount_watchers_for(this->prefix, port);
++    if (0)
++	notify_mount_watchers_for(this->prefix, port);
+     return NETNAME_SUCCESS;
+ }
+ 

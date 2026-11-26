@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: the restart's delay doubled with the starts of the row: chora_died() doubles it with every start the driver ever had, so that the row a start asked begins, after five starts, waits 3.2, 6.4, 12.8 and 25.6 s between its starts, and the HAL has not given the driver up again 30 s after the start.  chora_test [18] says it not given up in 30 s and, the driver not given up, not updated (the seventh review round of 24/11: no Expect read either label).  [9]'s row is the driver's first, whose starts are the row's, and passes.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[18\] WRONG -- crash_probe, given up after 5 start\(s\), started through the HAL \(0\): not given up in 30 s: state [0-9]+, after [0-9]+; not updated, not given up \(-1\)
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -625,7 +625,7 @@
+ 		       HAL_CHORA_STARTS_MAX);
+ 		return;
+ 	}
+-	ms = HAL_CHORA_BACKOFF_MS << (r->quick > 0 ? r->quick - 1 : 0);
++	ms = HAL_CHORA_BACKOFF_MS << (r->starts > 0 ? r->starts - 1 : 0);
+ 	r->state = HAL_DRIVER_RESTARTING;
+ 	r->ticket++;
+ 	t = malloc(sizeof *t);

@@ -245,6 +245,12 @@ typedef struct watcher_record {
 
 static watcher_record_t watchers;
 
+/*
+ * #964: and watchers waiting for a mount at a prefix (netname_notify_mount()),
+ * on the same terms: one-shot, sent the mount's port when it is checked in.
+ */
+static watcher_record_t mount_watchers;
+
 static boolean_t
 netname_find(netname_name_in_t key, name_record_t *thisp, name_record_t **prevp)
 {
@@ -296,11 +302,13 @@ netname_remove(mach_port_t name)
 }
 
 /*
- * Send a one-shot notification to a watcher with the service port.
+ * Send a one-shot notification to a watcher with the service port, a name's
+ * (NETNAME_NOTIFY_MSID) or a mount's (NETNAME_NOTIFY_MOUNT_MSID, #964).
  * The notify port is a send-once right; it is consumed by the send.
  */
 static void
-notify_watcher(mach_port_t notify, mach_port_t service_port)
+notify_watcher_with(mach_port_t notify, mach_port_t service_port,
+		    mach_msg_id_t id)
 {
     netname_notify_msg_t msg;
     kern_return_t kr;
@@ -311,7 +319,7 @@ notify_watcher(mach_port_t notify, mach_port_t service_port)
     msg.head.msgh_size = sizeof(msg) - sizeof(mach_msg_trailer_t);
     msg.head.msgh_remote_port = notify;
     msg.head.msgh_local_port = MACH_PORT_NULL;
-    msg.head.msgh_id = NETNAME_NOTIFY_MSID;
+    msg.head.msgh_id = id;
 
     msg.body.msgh_descriptor_count = 1;
 
@@ -325,6 +333,30 @@ notify_watcher(mach_port_t notify, mach_port_t service_port)
     if (kr != KERN_SUCCESS && Debug)
 	printf("%s: notify_watcher: mach_msg: %s\n",
 	       program, mach_error_string(kr));
+}
+
+static void
+notify_watcher(mach_port_t notify, mach_port_t service_port)
+{
+    notify_watcher_with(notify, service_port, NETNAME_NOTIFY_MSID);
+}
+
+/*
+ * #964: every watcher of the mount prefix `prefix', sent `port', and taken off
+ * the list: a mount is told once to each who asked before it came.
+ */
+static void
+notify_mount_watchers_for(const char *prefix, mach_port_t port)
+{
+    watcher_record_t *prev = &mount_watchers, this;
+
+    while ((this = *prev) != NULL)
+	if (strncmp(this->key, prefix, sizeof(this->key)) == 0) {
+	    *prev = this->next;
+	    notify_watcher_with(this->notify, port, NETNAME_NOTIFY_MOUNT_MSID);
+	    free(this);
+	} else
+	    prev = &this->next;
 }
 
 /*
@@ -649,6 +681,9 @@ do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
 
     add_reference(sig);
     add_reference(port);
+
+    /* #964: and whoever waits for a mount here is told, with its port. */
+    notify_mount_watchers_for(this->prefix, port);
     return NETNAME_SUCCESS;
 }
 
@@ -827,6 +862,42 @@ do_netname_notify(mach_port_t server, netname_name_in_t key,
 	watchers = w;
     }
 
+    return NETNAME_SUCCESS;
+}
+
+/*
+ * #964: netname_notify for a mount: at once if one is checked in at exactly
+ * `prefix', else when one is.  The send-once right is kept until then, as
+ * do_netname_notify keeps a name's watcher.
+ */
+kern_return_t
+do_netname_notify_mount(mach_port_t server, netname_name_in_t prefix,
+			mach_port_t notify)
+{
+    mount_record_t this;
+    watcher_record_t w;
+
+    if (Debug)
+	printf("%s: netname_notify_mount(%.80s, notify=%x)\n",
+	       program, prefix, notify);
+
+    if (prefix[0] != '/')
+	return NETNAME_NOT_YOURS;	/* as a check-in of it would be */
+
+    for (this = mounts; this != NULL; this = this->next)
+	if (strncmp(this->prefix, prefix, sizeof(this->prefix)) == 0) {
+	    notify_watcher_with(notify, this->port, NETNAME_NOTIFY_MOUNT_MSID);
+	    return NETNAME_SUCCESS;
+	}
+
+    w = (watcher_record_t) malloc(sizeof *w);
+    if (w == NULL)
+	return KERN_RESOURCE_SHORTAGE;
+    (void) strncpy(w->key, prefix, sizeof(netname_name_t) - 1);
+    w->key[sizeof(netname_name_t) - 1] = '\0';
+    w->notify = notify;
+    w->next = mount_watchers;
+    mount_watchers = w;
     return NETNAME_SUCCESS;
 }
 

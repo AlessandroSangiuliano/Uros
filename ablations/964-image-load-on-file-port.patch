@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: exec_server's refusal of an image load on its file port, where an image load could wait behind a file read -- the load that starts the disk's driver again behind an execve held on the dead disk.  driver_port_test's [10] asks one there, and it is loaded.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: \[10\] an image load asked on exec_server's file port: 0x0, 0 -- WRONG
+Note: the task loaded is the test's to end, and it ends it before its thread is resumed.
+
+diff --git a/uros/src/servers/exec_server/exec_main.c b/uros/src/servers/exec_server/exec_main.c
+index 1ccd3371..dd40c144 100644
+--- a/uros/src/servers/exec_server/exec_main.c
++++ b/uros/src/servers/exec_server/exec_main.c
+@@ -155,7 +155,7 @@ exec_S_load_image(
+ 
+     *new_thread = MACH_PORT_NULL;
+ 
+-    if (server_port != exec_image_port) {
++    if (0 && server_port != exec_image_port) {
+         printf("exec: an image load asked on exec_server's port, where it "
+                "could wait behind a file: refused (#964)\n");
+         rc = EXEC_ERR_WRONG_PORT;

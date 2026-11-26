@@ -35,12 +35,20 @@
  *       none of modload_a's, whose twin is cached by then;
  *   [4] modload_load_class("modload_a") gives modload_a's two and none of
  *       modload_b's, both of which are cached by then.
+ *   [5] modload_load_given() of modload_a/only_a.so's bytes as
+ *       modload_given/only_a.so loads those bytes: a pool bootstrap does not
+ *       have, so that only the bytes given can be what runs (#964);
+ *   [6] modload_load_given() as modload_a/twin.so, which [1] cached, is
+ *       refused: libdl knows an object by its path, and would hand back the
+ *       cached module in place of the one given.
  *
  * It runs in chora.conf, before chora_test: libmodload is how a chora fetches
  * its module, and the pools travel in the bundle every entry reads.
  */
 
 #include <mach.h>
+#include <mach/module_pool.h>		/* before <mach/bootstrap.h> */
+#include <mach/bootstrap.h>		/* [5], [6]: the bytes to give */
 #include <stdio.h>
 #include <string.h>
 
@@ -129,6 +137,108 @@ arm_class(int n, const char *class, int twin_answer, const char *own,
 	       got == 0 ? "none" : line, own);
 }
 
+/* `class'/`file' of the bundle, as bytes: 0, or -1 said in arm `n'. */
+static int
+fetch_bytes(int n, const char *class, const char *file, vm_offset_t *data,
+	    mach_msg_type_number_t *count)
+{
+	module_name_t	c, f;
+	kern_return_t	kr;
+
+	strcpy(c, class);
+	strcpy(f, file);
+	kr = bootstrap_get_module(bootstrap_port, c, f, data, count);
+	if (kr != KERN_SUCCESS || *count == 0) {
+		printf("modload_test: [%d] WRONG -- not asked: bootstrap gave no "
+		       "%s/%s (0x%x)\n", n, class, file, kr);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * [5] modload_load_given(): the bytes of modload_a/only_a.so, given as
+ * modload_given/only_a.so.  bootstrap has no pool modload_given -- the arm
+ * asks it, the control -- so a module that answers is the one given.
+ */
+static void
+arm_given(int n)
+{
+	const struct modload_test_ops	*ops;
+	vm_offset_t			data = 0, none = 0;
+	mach_msg_type_number_t		count = 0, none_count = 0;
+	module_name_t			c, f;
+	kern_return_t			absent;
+	char				got[DESCRIBED];
+
+	arms_run++;
+	if (fetch_bytes(n, "modload_a", "only_a.so", &data, &count) != 0)
+		return;
+	strcpy(c, "modload_given");
+	strcpy(f, "only_a.so");
+	absent = bootstrap_get_module(bootstrap_port, c, f, &none, &none_count);
+	if (absent == KERN_SUCCESS) {
+		(void)vm_deallocate(mach_task_self(), none, none_count);
+		(void)vm_deallocate(mach_task_self(), data, count);
+		printf("modload_test: [%d] WRONG -- not asked: bootstrap has a "
+		       "modload_given/only_a.so, so a module loaded under that "
+		       "name need not be the one given\n", n);
+		return;
+	}
+	ops = modload_load_given("modload_given", "only_a.so", data, count,
+				 MODLOAD_TEST_SUFFIX);
+	describe(ops, got, sizeof got);
+	if (ops == NULL || strcmp(ops->class, "modload_a") != 0 ||
+	    strcmp(ops->file, "only_a.so") != 0 || ops->answer() != 'a') {
+		printf("modload_test: [%d] modload_load_given() of modload_a/"
+		       "only_a.so's %u bytes, as modload_given/only_a.so, gave "
+		       "%s, where modload_a/only_a.so a was given -- WRONG\n", n,
+		       (unsigned)count, got);
+		if (ops == NULL)
+			(void)vm_deallocate(mach_task_self(), data, count);
+		return;
+	}
+	printf("modload_test: [%d] modload_load_given() of modload_a/only_a.so's "
+	       "%u bytes, as modload_given/only_a.so, which bootstrap does not "
+	       "have (0x%x), gave %s\n", n, (unsigned)count, absent, got);
+	arms_passed++;
+}
+
+/*
+ * [6] A module given as modload_a/twin.so, which [1] cached: refused, and the
+ * cached one is what modload_a/twin.so still gives.
+ */
+static void
+arm_given_cached(int n)
+{
+	const struct modload_test_ops	*given, *named;
+	vm_offset_t			data = 0;
+	mach_msg_type_number_t		count = 0;
+	char				got[DESCRIBED], still[DESCRIBED];
+
+	arms_run++;
+	if (fetch_bytes(n, "modload_b", "twin.so", &data, &count) != 0)
+		return;
+	given = modload_load_given("modload_a", "twin.so", data, count,
+				   MODLOAD_TEST_SUFFIX);
+	if (given == NULL)
+		(void)vm_deallocate(mach_task_self(), data, count);
+	named = modload_load_named("modload_a", "twin.so", MODLOAD_TEST_SUFFIX);
+	describe(given, got, sizeof got);
+	describe(named, still, sizeof still);
+	if (given != NULL || named == NULL || named->answer() != 'A') {
+		printf("modload_test: [%d] modload_b/twin.so's bytes given as "
+		       "modload_a/twin.so, which is cached: gave %s, where a "
+		       "refusal was asked for; modload_a/twin.so gives %s -- "
+		       "WRONG\n", n, got, still);
+		return;
+	}
+	printf("modload_test: [%d] modload_b/twin.so's bytes given as "
+	       "modload_a/twin.so, which is cached: refused, and "
+	       "modload_a/twin.so still gives %s\n", n, still);
+	arms_passed++;
+}
+
 int
 main(void)
 {
@@ -139,6 +249,8 @@ main(void)
 	arm_named(2, "modload_b", 'B');
 	arm_class(3, "modload_b", 'B', "only_b.so", 'b');
 	arm_class(4, "modload_a", 'A', "only_a.so", 'a');
+	arm_given(5);
+	arm_given_cached(6);
 
 	printf("modload_test: %d of %d arms passed\n", arms_passed, arms_run);
 	return arms_passed == arms_run ? 0 : 1;

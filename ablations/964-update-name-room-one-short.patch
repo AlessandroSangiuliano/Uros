@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #964
+Takes out: the last character of the room a driver's task name leaves for a module's name: module_name_ok() refuses a name of 23 characters, which a chora names its task with whole.  chora_test [14]'s name of 23 characters is refused for its name, before its bytes are read.  [14] asks the edge from either side since the review of 24/11, where a name of 28 let any bound below it pass.
+Run: --testdev --iommu intel --edu --entry 68 600 -smp 4
+Expect: chora_test: \[14\] WRONG -- edu.s driver refused updates no chora could run: .*, of 23 4,
+
+diff --git a/uros/src/servers/hal_server/hal_modules.c b/uros/src/servers/hal_server/hal_modules.c
+--- a/uros/src/servers/hal_server/hal_modules.c
++++ b/uros/src/servers/hal_server/hal_modules.c
+@@ -817,7 +817,7 @@
+ {
+ 	size_t	i, n = strlen(name);
+ 
+-	if (n == 0 || n + sizeof ".so" > room || n > DRIVER_MODULE_NAME_MAX)
++	if (n == 0 || n + sizeof ".so" > room || n >= DRIVER_MODULE_NAME_MAX)
+ 		return 0;
+ 	for (i = 0; i < n; i++)
+ 		if (!((name[i] >= 'a' && name[i] <= 'z') ||

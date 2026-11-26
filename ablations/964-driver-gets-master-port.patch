@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #964
+Takes out: the driver's port in a driver's bootstrap_ports(): bootstrap hands a driver the master device port, as a task created by a -D server inherits it today.  driver_port_test's child opens the console on the port it was given.
+Run: --entry 14 600 -smp 4
+Expect: driver_port_test: child: \[2\] device_open\("console"\) on it: opened, 0x0 -- WRONG
+Note: [3] reads WRONG too, the master port answering for any device.
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index ebaf6411..8595c397 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -2185,7 +2185,7 @@ do_bootstrap_ports(mach_port_t bootstrap,
+ 					       : MACH_PORT_NULL;
+ 	/* #964: a driver gets the driver's port, and never the master port. */
+ 	*devicep = (flags & SERVER_DEVICE_F) ? bootstrap_master_device_port
+-		 : (flags & SERVER_DRIVER_F) ? bootstrap_driver_device_port
++		 : (flags & SERVER_DRIVER_F) ? bootstrap_master_device_port
+ 		 : MACH_PORT_NULL;
+ 	*root_ledger_wiredp = MACH_PORT_NULL;
+ 	*root_ledger_pagedp = MACH_PORT_NULL;

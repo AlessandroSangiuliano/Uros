@@ -152,9 +152,29 @@ DISK_SERVERS="cow_test"
 # linker is elf32_ldso_probe, an i386 one: musl_test asks exec_server to run
 # the two programs, and must be refused each time; hello_pie is a
 # position-independent program that names no dynamic linker, which it must
-# relocate (#963).  chora is the program for every device, which exec_server
-# starts on a device when whoever found it asks (#963).
-ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test mach_error_dyn static_lc_test fork_tty_test elf32_probe elf32_ldso_probe interp_probe hello_pie chora"
+# relocate (#963).  chora is not among them: the HAL starts each chora from
+# the image the bundle holds, before any disk is served (#964).
+ROOT_PROGRAMS="hello_exec hello_world hello_dyn_world musl_test mach_error_test mach_error_dyn static_lc_test fork_tty_test elf32_probe elf32_ldso_probe interp_probe hello_pie"
+
+# The modules the bundle does not hold, in pools by class under
+# /mach_servers/modules on the same disk, which the HAL reads once "/" is
+# served (#964): a machine may want two hundred drivers, and the bundle carries
+# the ones a boot needs.  chora_probe, the network card's, is here and in no
+# pool of the bundle, so that a card's chora shows a module read from the disk.
+# And host_bridge_one_too_long, whose name has no room in a driver's task name,
+# and host_bridge_wrong_ops, whose operations are under another name than its
+# own: the HAL must refuse each as it reads the disk's misc, and say so.
+MODULES="$BUILD/export/uros/x86_64/user/modules"
+DISK_MODULES="net/chora_probe.so misc/host_bridge_one_too_long.so misc/host_bridge_wrong_ops.so"
+
+# And modules in no pool, in /mach_servers/updates on the same disk (#964):
+# edu_next and edu_again, edu_probe under other names, which chora_test hands
+# the HAL to update edu's driver with, and crash_probe_update, a new build of
+# crash_probe under its own name, for the pci-testdev's.  In a pool each would
+# declare its device alike with the pool's module, a tie the HAL does not
+# break.
+UPDATES="$BUILD/export/uros/x86_64/user/updates"
+DISK_UPDATES="edu_next.so edu_again.so crash_probe_update.so"
 
 # The dynamic linker, where PT_INTERP says it is (#414).  It is the umbrella
 # libc.so under the name musl gives it for this target.
@@ -183,6 +203,20 @@ done
 for s in $DISK_SERVERS $ROOT_PROGRAMS; do
 	[ -f "$SBIN/$s" ] || {
 		echo "make-disk-x86_64: $SBIN/$s is missing — build first" >&2
+		exit 1
+	}
+done
+
+for m in $DISK_MODULES; do
+	[ -f "$MODULES/$m" ] || {
+		echo "make-disk-x86_64: $MODULES/$m is missing — build first" >&2
+		exit 1
+	}
+done
+
+for m in $DISK_UPDATES; do
+	[ -f "$UPDATES/$m" ] || {
+		echo "make-disk-x86_64: $UPDATES/$m is missing — build first" >&2
 		exit 1
 	}
 done
@@ -402,6 +436,29 @@ for AHCI_DISK in $AHCI_DISKS; do
 		for s in $DISK_SERVERS; do
 			echo "write $SBIN/$s $s"
 		done
+		if [ $ahci_disk_n = 1 ]; then
+			# The disk's pools, which the HAL reads under "/" (#964).
+			echo "mkdir /mach_servers/modules"
+			# Each pool made once: misc holds two modules (#964).
+			made=" "
+			for m in $DISK_MODULES; do
+				pool=${m%%/*}
+				case $made in
+				*" $pool "*) ;;
+				*)	echo "mkdir /mach_servers/modules/$pool"
+					made="$made$pool " ;;
+				esac
+				echo "cd /mach_servers/modules/$pool"
+				echo "write $MODULES/$m ${m##*/}"
+			done
+			# And the modules in no pool (#964).
+			echo "mkdir /mach_servers/updates"
+			echo "cd /mach_servers/updates"
+			for m in $DISK_UPDATES; do
+				echo "write $UPDATES/$m $m"
+			done
+			echo "cd /"
+		fi
 	} | debugfs -w -f /dev/stdin "$AHCI_PART" >/dev/null 2>&1
 
 	rm -f "$AHCI_DISK"

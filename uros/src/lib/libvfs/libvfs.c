@@ -705,6 +705,55 @@ vfs_fstat(vfs_fd_t fd, vfs_stat_t *out)
     return kr;
 }
 
+/*
+ * #964: fs_readdir() gives up to VFS_DIRENT_MAX entries out of line, each
+ * carrying the cookie that goes on after it.  When `max' is fewer than came,
+ * the next call goes on after the last one copied, and nothing is skipped.
+ */
+int
+vfs_readdir(vfs_fd_t fd, vfs_dirent_t *out, unsigned int max, uint64_t *cookie)
+{
+    struct vfs_fd_entry *e;
+    mach_port_t fs_port;
+    vfs_u64_t handle, next = 0;
+    pointer_t entries = 0;
+    mach_msg_type_number_t count = 0;
+    unsigned int got, n;
+    kern_return_t kr;
+
+    if (out == NULL || cookie == NULL || max == 0)
+        return -1;
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (!e || e->dead) {
+        pthread_mutex_unlock(&vfs_lock);
+        return -1;
+    }
+    fs_port = e->fs_port;
+    handle  = e->handle;
+    pthread_mutex_unlock(&vfs_lock);
+
+    kr = fs_readdir(fs_port, handle, (vfs_u64_t)*cookie, &entries, &count,
+                    &next);
+    if (kr != KERN_SUCCESS) {
+        if (vfs_send_died(kr)) {
+            pthread_mutex_lock(&vfs_lock);
+            vfs_mark_port_dead_locked(fs_port);
+            pthread_mutex_unlock(&vfs_lock);
+        }
+        return -1;
+    }
+    got = count / (mach_msg_type_number_t)sizeof(vfs_dirent_t);
+    n = got < max ? got : max;
+    if (n > 0)
+        memcpy(out, (const void *)entries, (size_t)n * sizeof(vfs_dirent_t));
+    if (entries != 0)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)entries, count);
+    *cookie = (n < got) ? out[n - 1].d_cookie : (uint64_t)next;
+    return (int)n;
+}
+
 int
 vfs_sync(vfs_fd_t fd)
 {
