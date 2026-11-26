@@ -333,7 +333,7 @@ section is not.
 | `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy for the task its identity port names, return the principal port; refuse a port that carries more than identity (#938) |
 | `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`, for the child its identity port names (#938); refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
 | `cap_slots() → in_use, size, derived, quota, family, family_max` | anyone | how many manifest slots are taken, how many by derived ports, and their bounds: how a test sees a slot come back (#743) and a bound met (#937) |
-| `cap_census() → entries, issued, watches` | anyone | how many capabilities the issuance table holds, how many ids it has handed out, and how many deaths it watches: how a test sees a revoked capability leave the table (#974), and a watch go with the last capability and slot that held it (#983) |
+| `cap_census() → entries, issued, watches, untold` | anyone | how many capabilities the issuance table holds, how many ids it has handed out, how many deaths it watches, and how many revocations at a death it told no subscriber of: how a test sees a revoked capability leave the table (#974), a watch go with the last capability and slot that held it, and a dead owner's capabilities go unannounced (#983) |
 
 ### Traps — `syscall_sw.h`
 
@@ -690,14 +690,22 @@ dead-name notification ──▶ cap_server's death port
 - **A per-task port given up is not a death.** Its no-senders notification gives
   the slot back, and the capabilities asked on it stay, for their owner may live
   and present them, until the watch says the task has died.
-- 🔴 **What the dead task owned is forgotten, not revoked in the kernel.** The
-  kernel keeps a revocation with no deadline for good (§6.3), and for a token
-  nobody can present again it would keep it for nothing; what the token bought
-  the kernel took back when the task terminated. So an exact watch's walk tells
-  the kernel only of capabilities other tasks own, and knows whose death it is
-  by `urmach_task_identity()`, a kernel call that answers the identity of the
-  task any task port names, reduced ports included. A port's watch knows no
-  death, and tells the kernel of all it revokes.
+- 🔴 **What the dead task owned is forgotten, not revoked in the kernel, and
+  no subscriber is told of it.** The kernel keeps a revocation with no deadline
+  for good (§6.3), and for a token nobody can present again it would keep it
+  for nothing; what the token bought the kernel took back when the task
+  terminated, and what a subscriber kept for it ends with the dead task's ports
+  -- the block server's handle with its no-senders -- as it did before #983,
+  when a death revoked nothing. So an exact watch's walk tells the kernel and
+  the subscribers only of capabilities other tasks own, and knows whose death
+  it is by `urmach_task_identity()`, a kernel call that answers the identity of
+  the task any task port names, reduced ports included. A port's watch knows
+  no death, and tells of all it revokes. `cap_census` counts the revocations
+  told to no subscriber.
+- ⚠️ **A notice is a console line when it misses**, and a full subscriber's
+  queue makes most of a burst miss: under char_server, at one processor and
+  TCG, a burst of them overran the kernel's log ring (#762), and the lines other
+  tasks were waiting on went with it.
 
 ⚠️ What it does not do. A capability asked for on the well-known port -- a tag,
 on i386 alone since #511 -- has no slot to watch and stays. The kernel keeps,
