@@ -148,6 +148,26 @@ nap(int ms)
 }
 
 /*
+ * #1009: the milliseconds since t0 by the clock, or -1 when the clock is
+ * refused.  A window is a time, and a count of naps or timed waits is not one:
+ * since 963ca2cc a timed wait lasts a tick more, so that it never ends early,
+ * and a wait of 1 or 10 ms in a loop lasts 20.  The windows counted in them
+ * doubled at once, and one of them took 889-switch-hint-port-first past the
+ * silence its harness waits.  So a window reads this, and its waits only pace
+ * the reading.
+ */
+static long
+act_ms_since(const struct timespec *t0)
+{
+	struct timespec	t;
+
+	if (getclock(TIMEOFDAY, &t) != 0)
+		return -1;
+	return (long) (t.tv_sec - t0->tv_sec) * 1000 +
+	       (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+/*
  * ── Arm one: terminate a thread stopped inside exception_raise() ──────
  *
  * The thread faults on an address its task does not own.  The kernel composes
@@ -9522,20 +9542,50 @@ a48_kill_loop(void *arg)
 	return NULL;
 }
 
+/*
+ * #1009: by the clock, ms of it, or until done.  The waits were counted, ms /
+ * 10 of them, and since 963ca2cc each lasts 20 ms: a stopped tree took 184 s to
+ * say so where 92 had been written, past the 150 s of silence its harness
+ * gives 889-switch-hint-port-first.  The clock is an RPC, as printf() is, and
+ * needs no lock of the task's; the arm opens the clock's service before the
+ * threads start, so that no later reading asks the host for it.  A clock
+ * refused at the start counts the waits, as before; one refused on the way
+ * ends the wait, and the line after it says so.
+ */
+static int	a48_clock_refused;
+
 static void
 a48_wait(volatile int *done, unsigned ms)
 {
+	struct timespec	t0;
 	unsigned	i;
+	long		d;
 
-	for (i = 0; i < ms / 10 && (done == NULL || !*done); i++)
+	if (getclock(TIMEOFDAY, &t0) != 0) {
+		a48_clock_refused = 1;
+		for (i = 0; i < ms / 10 && (done == NULL || !*done); i++)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, 10);
+		return;
+	}
+	while (done == NULL || !*done) {
+		d = act_ms_since(&t0);
+		if (d < 0)
+			a48_clock_refused = 1;
+		if (d < 0 || d >= (long) ms)
+			return;
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+	}
 }
 
 static int
 arm_forty_eight_hint_and_lock_order(void)
 {
 	pthread_t	self, sw, kill;
+	struct timespec	opened;
 
+	/* #1009: the clock's service opened before anything races. */
+	(void) getclock(TIMEOFDAY, &opened);
 	if (pthread_create(&self, NULL, a48_self_loop, NULL) != 0) {
 		printf("act_test: [48] pthread_create failed — WRONG\n");
 		return 0;
@@ -9556,6 +9606,9 @@ arm_forty_eight_hint_and_lock_order(void)
 	a48_stop = 1;
 	a48_wait(&a48_switch_done, A48_MS_LIMIT / 4);
 	a48_wait(&a48_self_done, A48_MS_LIMIT / 4);
+	if (a48_clock_refused)
+		printf("act_test: [48] the clock was refused: its waits were "
+		       "counted, of 20 ms each since 963ca2cc (#1009)\n");
 
 	if (!a48_kill_done || !a48_switch_done || !a48_self_done) {
 		printf("act_test: [48] hint against the lock order stopped: "
