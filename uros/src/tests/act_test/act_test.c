@@ -3488,7 +3488,7 @@ arm_fifty_four_create_on_a_dying_task(void)
 #define	ARM55_ROUNDS	20
 #define	ARM55_STACK	(4 * 4096)
 #define	ARM55_SETTLE_MS	20
-#define	ARM55_SAMPLES	10	/* five milliseconds apart */
+#define	ARM55_SAMPLES	10	/* a nap of 5 ms apart: 20 since 963ca2cc */
 #define	ARM55_BOUND_MS	2000
 
 static mach_port_t		arm55_child;
@@ -3542,7 +3542,8 @@ arm55_round(mach_port_t me, int round)
 	mach_port_t			t = MACH_PORT_NULL;
 	pthread_t			helper;
 	kern_return_t			kr;
-	int				ok = 0, rs = -1, i, running, waited;
+	int				ok = 0, rs = -1, i, running;
+	struct act_window		w;
 
 	arm55_child = MACH_PORT_NULL;
 	arm55_go = 0;
@@ -3601,19 +3602,22 @@ arm55_round(mach_port_t me, int round)
 		else {
 			/* The task resumed, it must run. */
 			(void) task_resume(arm55_child);
-			for (waited = 0; waited < ARM55_BOUND_MS; waited += 5) {
+			/* #1009: the bound by the clock, not 400 naps. */
+			act_window_start(&w, 5);
+			for (;;) {
 				if ((rs = arm55_run_state(t))
-				    == TH_STATE_RUNNING)
+				    == TH_STATE_RUNNING ||
+				    act_window_over(&w, ARM55_BOUND_MS))
 					break;
-				nap(5);
+				(void) act_window_nap(&w);
 			}
 			if (rs == TH_STATE_RUNNING)
 				ok = 1;
 			else
 				printf("act_test: [55] round %d: the thread is "
-				       "still held %d ms after its task was "
+				       "still held %ld ms after its task was "
 				       "resumed (run state %d) — WRONG (#935)\n",
-				       round, ARM55_BOUND_MS, rs);
+				       round, act_window_ms(&w), rs);
 		}
 	}
 	if (arm55_child != MACH_PORT_NULL) {
