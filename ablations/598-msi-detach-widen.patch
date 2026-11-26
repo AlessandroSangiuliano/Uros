@@ -1,6 +1,7 @@
 Kind: widen
 Issue: #598
 Holds open: the window between a detach's question "was that the function's last?" and its clearing of the enable -- a spin, so that the other processor's attach can land inside it on demand
+Premise: msi_race: PASS .* the other side was mid-round for [1-9][0-9]* of them
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
 index 746ddcb2..369988d8 100644

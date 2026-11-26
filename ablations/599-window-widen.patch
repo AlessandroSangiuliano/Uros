@@ -2,6 +2,7 @@ Kind: widen
 Issue: #599
 Holds open: the I/O APIC's window -- 100 reads of port 0x80 between selecting a register and using it, so that a second processor's select lands in the gap far more often; the fixed tree must still pass -Y
 Run: --entry 23 1200 -smp 4
+Premise: ioapic_race: PASS .* the other side was mid-round for [1-9][0-9]* of them
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic.c b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
 index b099a851..c8fe4953 100644
