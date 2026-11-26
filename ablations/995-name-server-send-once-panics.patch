@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #995
+Takes out: the name server going on after a send-once notification on its notification port: it panics again, as before #995, and every look-up with it.  ns_notify_selftest() makes one as the name server starts.
+Run: --entry 14 600 -smp 4
+Expect: name_server: do_mach_notify_send_once
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -963,6 +963,7 @@
+ kern_return_t
+ do_mach_notify_send_once(mach_port_t notify)
+ {
++    panic("%s: do_mach_notify_send_once\n", program);
+     printf("%s: a send-once notification%s, on its notification port: said, "
+ 	   "and the name server goes on (#995)\n", program,
+ 	   ns_selftest_paid(notify, NS_SELFTEST_SEND_ONCE));

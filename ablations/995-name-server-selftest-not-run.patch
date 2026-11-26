@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #995
+Takes out: the name server's self-test: it starts and serves without making the notifications it does not ask for, so the pairs on its notices open on nothing; the harness must fail the boot once bootstrap loads a server.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 4
+Expect: FAILED: 'bootstrap: loading \[\^0-9\]' appeared and 'name_server: making the four notifications it does not ask for' never did\.
+
+diff --git a/uros/src/servers/name_server/netname.c b/uros/src/servers/name_server/netname.c
+--- a/uros/src/servers/name_server/netname.c
++++ b/uros/src/servers/name_server/netname.c
+@@ -268,7 +268,7 @@
+      * port now that the port is in the set: the service loop below takes
+      * them, before any request.
+      */
+-    ns_notify_selftest();
++    (void)0;
+ 
+     /*
+      * Let the bootstrap know we are finished.

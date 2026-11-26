@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #995
+Takes out: bootstrap going on after a send-once notification on its own notification ports: it panics again, as before #995, and the system with it.  notify_selftest() makes one on each of them as bootstrap starts.
+Run: --entry 14 600 -smp 4
+Expect: bootstrap: do_mach_notify_send_once
+
+diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
+--- a/uros/src/servers/bootstrap/service.c
++++ b/uros/src/servers/bootstrap/service.c
+@@ -726,6 +726,7 @@
+     if (notify == untrusted_notify_port)
+ 	return KERN_SUCCESS;
+ 
++    panic("%s: do_mach_notify_send_once\n", program_name);
+     BOOTSTRAP_IO_LOCK();
+     printf("%s: a send-once notification%s, on %s: said, and bootstrap goes "
+ 	   "on (#995)\n", program_name,

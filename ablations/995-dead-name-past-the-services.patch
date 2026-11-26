@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #995
+Takes out: bootstrap's look for a dead name among its service ports before it counts it as one: a dead-name notification on its trusted port for a name no service port has asks two references of a name that has one, and would write the slot past services[] next.  notify_selftest() makes such a notice as bootstrap starts, and bootstrap panics on the references, before the write.
+Run: --entry 14 600 -smp 4
+Expect: bootstrap: mach_port_mod_refs: [0-9]+
+
+diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
+--- a/uros/src/servers/bootstrap/service.c
++++ b/uros/src/servers/bootstrap/service.c
+@@ -980,7 +980,7 @@
+      * references asked of a name whose right was not bootstrap's to count.
+      * The notice's reference is let go, and it is said (the review of 24/11).
+      */
+-    if (i == services_count)
++    if (0 && i == services_count)
+ 	return dead_name_of_none(notify, name, "which no service port has");
+ 
+ #ifdef	DEBUG

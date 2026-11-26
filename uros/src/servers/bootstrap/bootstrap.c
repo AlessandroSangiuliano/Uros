@@ -1062,6 +1062,14 @@ main(int argc, char **argv)
 	service_init();
 
 	/*
+	 * #995: and the notifications it does not ask for, on the port it asks
+	 * for its servers' deaths on and on the one it asks for its service
+	 * ports' on, made here, where both are in the set the service thread
+	 * receives from.
+	 */
+	notify_selftest();
+
+	/*
 	 * #744: libcap asks the cap_server bootstrap starts, not a name.  Every
 	 * child finds the port in its registered ports, and bootstrap, whose own
 	 * were read before it made them, is told here.
@@ -1202,6 +1210,35 @@ main(int argc, char **argv)
             }
             break;
  	}
+
+	/*
+	 * #995: a request naming no task finds no server.  The configuration is
+	 * read and no server is made: every task port is null, so a handler
+	 * that took a null task for a server's would find the first here.  The
+	 * two handlers that find a server by the task a request names are asked
+	 * as a request would ask them, and what they answer is said (the fifth
+	 * and sixth review rounds of 24/11).
+	 */
+	{
+	    vm_offset_t args = 0;
+	    mach_msg_type_number_t args_count = 0;
+	    kern_return_t ka, kc;
+
+	    ka = do_bootstrap_arguments(MACH_PORT_NULL, MACH_PORT_NULL, &args,
+					&args_count);
+	    if (ka == KERN_SUCCESS && args != 0)
+		(void)vm_deallocate(mach_task_self(), args,
+				    round_page(args_count));
+	    kc = do_bootstrap_completed(MACH_PORT_NULL, MACH_PORT_NULL);
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: a request naming no task, before any server is made: "
+		   "its arguments 0x%x, its completion 0x%x, where 0x%x "
+		   "refuses%s (#995)\n", program_name, ka, kc,
+		   KERN_INVALID_ARGUMENT,
+		   ka == KERN_INVALID_ARGUMENT && kc == KERN_INVALID_ARGUMENT ?
+		   "" : " -- WRONG, a server was found by no task");
+	    BOOTSTRAP_IO_UNLOCK();
+	}
 
 	/*
 	 * Start data_device thread
@@ -1807,6 +1844,15 @@ parse_config_file(char *conf, size_t size)
 	    sp->flags = 0;
 	    sp->bootstrap_completed = 0;
 	    sp->bootstrap_port = MACH_PORT_NULL;
+	    /*
+	     * #995: bootstrap_notify_dead_name() compares it for every server,
+	     * started or not, and the self-test's dead-name notice on the
+	     * servers' port meets it before most of them are: malloc() gave
+	     * garbage (the fourth review round of 24/11).  Null until the task
+	     * is made, so no request naming a task finds a server by it before
+	     * (do_bootstrap_arguments(), do_bootstrap_completed()).
+	     */
+	    sp->task_port = MACH_PORT_NULL;
 
 	    for (;;) {
 		ptr = pptr;
@@ -2261,6 +2307,13 @@ do_bootstrap_arguments(mach_port_t bootstrap,
 	int i;
 	struct server *sp;
 
+	/*
+	 * #995: no task is no server's: a server not yet made has a null task
+	 * port (parse_config_file()), which a request naming no task would
+	 * otherwise find (the fifth review round of 24/11).
+	 */
+	if (!MACH_PORT_VALID(task_port))
+	    return KERN_INVALID_ARGUMENT;
 	for (i = 0, sp = servers; i < nservers; i++, sp++) {
 	    if (task_port == sp->task_port)
 		break;
@@ -2319,7 +2372,12 @@ do_bootstrap_completed(mach_port_t bootstrap,
 	unsigned i;
 	struct server *sp;
 
-	if (task_port == MACH_PORT_DEAD)
+	/*
+	 * #995: and no task, as a dead one, is no server's: a server not yet
+	 * made has a null task port, and a completion naming no task marked it
+	 * completed (the fifth review round of 24/11).
+	 */
+	if (!MACH_PORT_VALID(task_port))
 	    return KERN_INVALID_ARGUMENT;
 
 	for (i = 0, sp = servers; i < nservers; i++, sp++) {

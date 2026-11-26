@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #995
+Takes out: bootstrap going on after a port-destroyed notification on its own notification ports: it panics again, as before #995, and the system with it.  notify_selftest() makes one on each of them as bootstrap starts.
+Run: --entry 14 600 -smp 4
+Expect: bootstrap: do_mach_notify_port_destroyed
+
+diff --git a/uros/src/servers/bootstrap/service.c b/uros/src/servers/bootstrap/service.c
+--- a/uros/src/servers/bootstrap/service.c
++++ b/uros/src/servers/bootstrap/service.c
+@@ -632,6 +632,7 @@
+ 	 * it: let go here by its name, it would be taken for a receive right,
+ 	 * whatever came (the review of 24/11).
+ 	 */
++	panic("%s: do_mach_notify_port_destroyed\n", program_name);
+ 	BOOTSTRAP_IO_LOCK();
+ 	printf("%s: a port-destroyed notification%s, on %s: the right 0x%x it "
+ 	       "brings is no service port's, so the notice is refused and its "

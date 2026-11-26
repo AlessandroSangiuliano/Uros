@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #995
+Takes out: the release of the notice's reference, for a dead name the name server does not watch: it says the notice and keeps the name.  ns_notify_selftest() makes such a notice as the name server starts, and its line reads the name kept, with the reference the notice brought.
+Run: --entry 14 600 -smp 4
+Expect: name_server: a dead-name notification from its self-test for 0x[0-9a-f]+, which no port it watches has: its reference let go \(0x0\), the name kept, 1 reference\(s\) left
+
+diff --git a/uros/src/servers/name_server/nprocs.c b/uros/src/servers/name_server/nprocs.c
+--- a/uros/src/servers/name_server/nprocs.c
++++ b/uros/src/servers/name_server/nprocs.c
+@@ -1000,8 +1000,7 @@
+ 	char left[48];
+ 
+ 	/* The release, and what it left, read (the review of 24/11). */
+-	kr = mach_port_mod_refs(mach_task_self(), name,
+-				MACH_PORT_RIGHT_DEAD_NAME, -1);
++	kr = KERN_SUCCESS;
+ 	kg = mach_port_get_refs(mach_task_self(), name,
+ 				MACH_PORT_RIGHT_DEAD_NAME, &refs);
+ 	if (kg == KERN_INVALID_NAME)
