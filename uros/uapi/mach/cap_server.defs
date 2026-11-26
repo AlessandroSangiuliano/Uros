@@ -271,10 +271,13 @@ routine cap_derive_for(
  *
  *	#983: `watches', how many tasks cap_server watches the deaths of -- a
  *	slot's task, and each borrower cap_derive_for() named by a port -- so
- *	that a test sees a watch go with the last entry and slot that named it.
+ *	that a test sees a watch go with the last entry and slot that named it;
+ *	`untold', how many revocations at a death were told to no subscriber,
+ *	the capabilities the dead task owned.
  */
 routine cap_census(
 		cap_server	: mach_port_t;
 	out	entries		: natural_t;
 	out	issued		: natural_t;
-	out	watches		: natural_t);
+	out	watches		: natural_t;
+	out	untold		: natural_t);
