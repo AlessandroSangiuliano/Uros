@@ -56,6 +56,7 @@
 #include <mach/ndr.h>
 #include <mach/notify.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>		/* #1009: getclock(), wait_for()'s ms */
 #include <mach_init.h>			/* name_server_port */
 
 #include <pthread.h>
@@ -362,18 +363,31 @@ pump(void *arg)
 	return NULL;
 }
 
-/* Waits up to ms for *counter to reach want; whether it did. */
+/*
+ * Waits up to ms for *counter to reach want; whether it did.  #1009: the ms by
+ * the clock.  They were counted, waited += 10 for each wait of 10 ms, which
+ * since 963ca2cc lasts 20: [4]'s "within 2000 ms" was 4 s.  A clock refused
+ * counts the waits, as before.
+ */
 static int
 wait_for(volatile int *counter, int want, int ms)
 {
-	int	waited;
+	struct timespec	t0, t;
+	int		clocked, waited = 0;
 
-	for (waited = 0; waited < ms; waited += 10) {
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (;;) {
 		if (*counter >= want)
 			return 1;
+		if (clocked && getclock(TIMEOFDAY, &t) == 0)
+			waited = (int)((t.tv_sec - t0.tv_sec) * 1000 +
+				       (t.tv_nsec - t0.tv_nsec) / 1000000);
+		else
+			waited += 10;
+		if (waited >= ms)
+			return *counter >= want;
 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
 	}
-	return *counter >= want;
 }
 
 static void
