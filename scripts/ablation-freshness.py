@@ -21,8 +21,15 @@
 # and keep the others from their turn.
 #
 # A row counts as a catch of an ablation when it is an ablated boot read
-# CAUGHT and that ablation is the only patch of Kind `ablation' in its run: two
-# ablations booted together cannot be told apart.  A patch with a Machine:
+# CAUGHT and that ablation is the only patch of Kind `ablation' in its run
+# that no other patch of the run is written over: two ablations booted
+# together cannot be told apart, but a base came in by another's Over: line,
+# and ablate.sh reads the Expect: lines of the patches given only.  Counted as
+# two, 593-no-countdown over 594-tsc-skews and six more read never caught,
+# though four of them were caught 4 of 4 in the rotation's first batch.  The
+# row names every patch applied, the bases first, and does not say which were
+# given; one given beside its own base is counted as if the base had come by
+# its Over: line.  A patch with a Machine:
 # line wants a machine of its own, one with Measure: and no Expect: is judged
 # by hand, and one whose Run: is no run-x86_64.sh arguments and that has no
 # Script: or Screen: is booted some other way; --stalest leaves them out, as a
@@ -99,13 +106,15 @@ def main(argv):
     if git("rev-parse", "-q", "--verify", ref + "^{commit}") is None:
         die("no commit " + ref)
 
-    kinds, bootable = {}, {}
+    kinds, bootable, over = {}, {}, {}
     for name in sorted(os.listdir(ABL)):
         if not name.endswith(".patch"):
             continue
         h = header(os.path.join(ABL, name))
         n = name[:-len(".patch")]
         kinds[n] = (h.get("Kind") or ["?"])[0]
+        over[n] = [b[:-len(".patch")] if b.endswith(".patch") else b
+                   for b in h.get("Over", [])]
         # A giro boots what ablate.sh can judge: a Run: line of run-x86_64.sh
         # arguments, or a Script: or Screen: line, with an Expect:, on any
         # machine.  "Run: i386, not run-x86_64.sh -- ..." it cannot.
@@ -128,7 +137,9 @@ def main(argv):
                 if len(col) < 14 or col[0] == "date" or col[5] != "ablated":
                     continue
                 when = col[0] + " " + col[1]
-                names = [n for n in col[4].split("+") if kinds.get(n) == "ablation"]
+                run = col[4].split("+")
+                bases = {b for n in run for b in over.get(n, [])}
+                names = [n for n in run if kinds.get(n) == "ablation" and n not in bases]
                 if len(names) != 1:
                     continue
                 n = names[0]
