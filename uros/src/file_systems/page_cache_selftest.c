@@ -36,6 +36,7 @@
 #include <pthread.h>
 #include <mach.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>		/* #1009: getclock(), the waits' 5 s */
 #include "page_cache.h"
 
 #define ST_BLOCK	1024u
@@ -93,14 +94,53 @@ st_gate_reset(daddr_t block)
 	st_gate_open = 0;
 }
 
+/*
+ * #1009: whether the 5 s of a bounded wait have gone, by the clock.  The waits
+ * of 1 ms were counted, 5000 of them, and lasted a tick each, then since
+ * 963ca2cc two: 5 s became 100, and a case that failed held ext_server's
+ * start, and "/" with it, that long for each wait.  A clock refused counts
+ * the waits, as before.
+ */
+struct st_bound {
+	struct timespec	t0;
+	int		clocked;
+	unsigned int	waits;
+};
+
+static void
+st_bound_start(struct st_bound *b)
+{
+	b->clocked = getclock(TIMEOFDAY, &b->t0) == 0;
+	b->waits = 0;
+}
+
+static int
+st_bound_over(struct st_bound *b)
+{
+	struct timespec	t;
+
+	if (b->clocked && getclock(TIMEOFDAY, &t) == 0)
+		return (long) (t.tv_sec - b->t0.tv_sec) * 1000 +
+		       (t.tv_nsec - b->t0.tv_nsec) / 1000000 >= 5000;
+	return b->waits >= 5000;
+}
+
+static void
+st_bound_wait(struct st_bound *b)
+{
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	b->waits++;
+}
+
 /* A bounded wait for a flag: 1 ms at a time, 5 s at most. */
 static int
 st_wait_for(volatile int *flag)
 {
-	unsigned int i;
+	struct st_bound	b;
 
-	for (i = 0; i < 5000 && !*flag; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	st_bound_start(&b);
+	while (!*flag && !st_bound_over(&b))
+		st_bound_wait(&b);
 	return *flag;
 }
 
@@ -463,11 +503,12 @@ st_get_start(struct st_getter *g, struct page_cache *pc, daddr_t block)
 static int
 st_wait_waiters(struct page_cache *pc, unsigned int n)
 {
-	unsigned int i;
+	struct st_bound	b;
 
-	for (i = 0; i < 5000 && *(volatile unsigned int *)&pc->pc_nwaiters < n;
-	     i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	st_bound_start(&b);
+	while (*(volatile unsigned int *)&pc->pc_nwaiters < n &&
+	       !st_bound_over(&b))
+		st_bound_wait(&b);
 	return *(volatile unsigned int *)&pc->pc_nwaiters >= n;
 }
 
