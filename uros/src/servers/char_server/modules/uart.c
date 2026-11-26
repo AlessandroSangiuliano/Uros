@@ -55,7 +55,7 @@
  *   the kernel still writes (the claim reply says), the fill is instead
  *   "everything the chip takes right now", so a line stays tight.  The only
  *   wait is a full ring, and it yields with the lock released rather than
- *   spinning; after UART_TX_RING_WAITS of that the bytes are dropped,
+ *   spinning; after UART_TX_RING_MS of that the bytes are dropped,
  *   counted, and the write says so.  No DMA on 16550.  A mutex, not a
  *   flag, serialises the two writers this server now has.
  */
@@ -64,6 +64,7 @@
 #include <mach/mach_traps.h>
 #include <mach/message.h>
 #include <mach/thread_switch.h>	/* #497: a full ring yields, never spins */
+#include <sys/timers.h>		/* #1009: getclock(), the waits' time */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -108,16 +109,17 @@
  * The ring is twice CHR_BUF_MAX so that one MIG write always fits an empty
  * ring (a ring of N holds N-1) with a second in flight behind it.
  *
- * ⚠️ UART_TX_RING_WAITS is the one wait left, and it is a count of YIELDS and
- * not of polls: a writer that finds the ring full gives the CPU up for a
- * millisecond at a time and looks again.  At 115200 baud the chip frees a
- * FIFO-full every 1.4 ms, so 64 tries is some forty FIFOs of wire time -- a
- * ring that stays full that long is a chip that has stopped, and the bytes
- * are then dropped and counted rather than waited for (#551).
+ * ⚠️ UART_TX_RING_MS is the one wait left, and it is a time of YIELDS and not
+ * of polls: a writer that finds the ring full gives the CPU up and looks
+ * again, for 640 ms of the clock -- a ring that stays full that long is a
+ * chip that has stopped, and the bytes are then dropped and counted rather
+ * than waited for (#551).  #1009: it was 64 yields of 1 ms, "some forty FIFOs
+ * of wire time", 64 ms; a timed wait lasted a tick, so it was 640 ms, and
+ * since 963ca2cc two ticks, 1.28 s.  The 640 that ran are kept.
  */
 #define UART_TX_RING_SIZE	8192u	/* power of two, > CHR_BUF_MAX */
 #define UART_TX_RING_MASK	(UART_TX_RING_SIZE - 1u)
-#define UART_TX_RING_WAITS	64u
+#define UART_TX_RING_MS		640u
 #define UART_TX_YIELD_MS	1
 
 #define UART_RHR	0u	/* DLAB=0: receive holding		*/
@@ -316,7 +318,7 @@ struct uart_priv {
 	 * same reason rx_by_irq and rx_by_poll are: "bytes went out" and
 	 * "the interrupt drove them" are two claims.  tx_waits is how often
 	 * a writer found the ring full and yielded; tx_drops is bytes given
-	 * up on after UART_TX_RING_WAITS of that.  Both zero on a healthy
+	 * up on after UART_TX_RING_MS of that.  Both zero on a healthy
 	 * boot under qemu, whose transmitter is always ready.
 	 */
 	uint32_t	tx_by_irq;
@@ -510,14 +512,33 @@ uart_tx_kick(struct uart_priv *p, uint32_t *counter)
  * already" was true of this loop and false of a writer whose closing kick
  * came before the FIFO drained.
  *
- * Returns 1 when a byte fits, 0 after UART_TX_RING_WAITS tries.
+ * Returns 1 when a byte fits, 0 after UART_TX_RING_MS of the clock.
  */
+/*
+ * #1009: whether ms of the clock have gone since t0; a clock refused counts
+ * the waits at a tick each, 10 ms, as the waits ran before 963ca2cc.
+ */
+static int
+uart_waited(const struct timespec *t0, int clocked, unsigned int waits,
+	    unsigned int ms)
+{
+	struct timespec	t;
+
+	if (clocked && getclock(TIMEOFDAY, &t) == 0)
+		return (t.tv_sec - t0->tv_sec) * 1000 +
+		       (t.tv_nsec - t0->tv_nsec) / 1000000 >= (long)ms;
+	return waits * 10u >= ms;
+}
+
 static int
 uart_tx_wait_ring(struct uart_priv *p)
 {
-	unsigned int tries;
+	unsigned int	tries;
+	struct timespec	t0;
+	int		clocked = getclock(TIMEOFDAY, &t0) == 0;
 
-	for (tries = 0; tries < UART_TX_RING_WAITS; tries++) {
+	for (tries = 0; !uart_waited(&t0, clocked, tries, UART_TX_RING_MS);
+	     tries++) {
 		uart_tx_kick(p, &p->tx_by_kick);
 		if (((p->tx_head + 1u) & UART_TX_RING_MASK) != p->tx_tail)
 			return 1;
@@ -695,6 +716,8 @@ uart_probe(const struct hal_device_info *dev)
 	natural_t	released = 0, klog_from = 0;
 	kern_return_t	kr = KERN_RESOURCE_SHORTAGE;
 	unsigned int	tries;
+	struct timespec	t0;
+	int		clocked;
 
 	(void)dev;
 	if (uart_singleton.attached)
@@ -714,7 +737,10 @@ uart_probe(const struct hal_device_info *dev)
 	 * moment -- and a probe that took that for a refusal would take COM1
 	 * away for the whole boot.
 	 */
-	for (tries = 0; tries < 50 && kr == KERN_RESOURCE_SHORTAGE; tries++) {
+	/* #1009: the second by the clock; 50 tries 20 ms apart were 1.5 s */
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (tries = 0; kr == KERN_RESOURCE_SHORTAGE &&
+	     !uart_waited(&t0, clocked, tries * 2u, 1000u); tries++) {
 		if (tries != 0)
 			thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
 		kr = device_io_port_claim(char_core_device_port(), UART_BASE,
@@ -1002,9 +1028,9 @@ uart_tty_write(void *priv, const char *buf, size_t len)
 			 */
 			if (p->tx_drops == 0)
 				printf("uart: dropping %u bytes — the ring "
-				       "stayed full for %u yields, the chip "
+				       "stayed full for %u ms, the chip "
 				       "has stopped taking them (#497)\n",
-				       (unsigned)(len - i), UART_TX_RING_WAITS);
+				       (unsigned)(len - i), UART_TX_RING_MS);
 			p->tx_drops += (uint32_t)(len - i);
 			dropped = 1;
 			break;
