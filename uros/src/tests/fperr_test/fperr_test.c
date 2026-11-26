@@ -395,8 +395,9 @@ run_the_arm(void)
 	/*
 	 * The x87 arm's second half.  Bounded, because a thread that does not
 	 * come back is the failure this is looking for and must not become a
-	 * hang: twenty turns of 50 ms is a second, against a routine whose
-	 * remaining work is two instructions.
+	 * hang: twenty turns of 50 ms, against a routine whose remaining work
+	 * is two instructions.  They were a second; since 963ca2cc each lasts
+	 * 60 ms, so 1.2 s, which bounds a hang just as well (#1009).
 	 */
 	for (i = 0; i < 20 && !victim_returned; i++)
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 50);
