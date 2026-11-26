@@ -5,10 +5,9 @@ Run: --entry 14 300 -smp 1
 Premise: act_test: \[48\] 889-widen-a48-round-robin: the arm's threads at POLICY_RR, quantum 50 ms, priority [0-9]+ -- this thread's set taken
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
-index e33584c5..8ac4a3cf 100644
 --- a/uros/src/tests/act_test/act_test.c
 +++ b/uros/src/tests/act_test/act_test.c
-@@ -7767,6 +7767,44 @@ static volatile int		a48_go, a48_kill_go, a48_stop;
+@@ -9585,6 +9585,44 @@ static volatile int		a48_go, a48_kill_go, a48_stop;
  static volatile int		a48_self_done, a48_switch_done, a48_kill_done;
  static volatile unsigned	a48_selfs, a48_switches, a48_kills;
  
@@ -53,7 +52,7 @@ index e33584c5..8ac4a3cf 100644
  static void
  a48_wait_for(volatile int *flag)
  {
-@@ -7780,6 +7818,7 @@ a48_self_loop(void *arg)
+@@ -9598,6 +9636,7 @@ a48_self_loop(void *arg)
  	mach_port_t	t;
  
  	(void) arg;
@@ -61,7 +60,7 @@ index e33584c5..8ac4a3cf 100644
  	a48_hint = mach_thread_self();
  	a48_wait_for(&a48_go);
  	while (!a48_stop) {
-@@ -7796,6 +7835,7 @@ static void *
+@@ -9614,6 +9653,7 @@ static void *
  a48_switch_loop(void *arg)
  {
  	(void) arg;
@@ -69,7 +68,7 @@ index e33584c5..8ac4a3cf 100644
  	a48_wait_for(&a48_go);
  	while (!a48_stop) {
  		(void) thread_switch(a48_hint, SWITCH_OPTION_NONE, 0);
-@@ -7822,6 +7862,7 @@ a48_kill_loop(void *arg)
+@@ -9640,6 +9680,7 @@ a48_kill_loop(void *arg)
  	unsigned			i, round;
  
  	(void) arg;
@@ -77,7 +76,7 @@ index e33584c5..8ac4a3cf 100644
  	a48_wait_for(&a48_kill_go);
  	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE)
  	    != KERN_SUCCESS)
-@@ -7834,6 +7875,7 @@ a48_kill_loop(void *arg)
+@@ -9652,6 +9693,7 @@ a48_kill_loop(void *arg)
  	for (round = 0; round < A48_KILLS; round++) {
  		if (thread_create(mach_task_self(), &t) != KERN_SUCCESS)
  			break;
@@ -85,10 +84,10 @@ index e33584c5..8ac4a3cf 100644
  		if (thread_set_state(t, x86_64_THREAD_STATE,
  				     (thread_state_t) &state,
  				     x86_64_THREAD_STATE_COUNT) != KERN_SUCCESS ||
-@@ -7868,6 +7910,28 @@ arm_forty_eight_hint_and_lock_order(void)
- {
- 	pthread_t	self, sw, kill;
+@@ -9716,6 +9758,28 @@ arm_forty_eight_hint_and_lock_order(void)
  
+ 	/* #1009: the clock's service opened before anything races. */
+ 	(void) getclock(TIMEOFDAY, &opened);
 +	/* 889-widen-a48-round-robin: the set's port and the arm's priority. */
 +	{
 +		mach_port_t			hp, dev, lw, lp, sec, name;
@@ -114,12 +113,12 @@ index e33584c5..8ac4a3cf 100644
  	if (pthread_create(&self, NULL, a48_self_loop, NULL) != 0) {
  		printf("act_test: [48] pthread_create failed — WRONG\n");
  		return 0;
-@@ -7888,6 +7952,8 @@ arm_forty_eight_hint_and_lock_order(void)
+@@ -9736,6 +9800,8 @@ arm_forty_eight_hint_and_lock_order(void)
  	a48_stop = 1;
  	a48_wait(&a48_switch_done, A48_MS_LIMIT / 4);
  	a48_wait(&a48_self_done, A48_MS_LIMIT / 4);
 +	printf("act_test: [48] 889-widen-a48-round-robin: %u thread(s) set to "
 +	       "POLICY_RR, %u refused\n", a48_rr_set, a48_rr_refused);
- 
- 	if (!a48_kill_done || !a48_switch_done || !a48_self_done) {
- 		printf("act_test: [48] hint against the lock order stopped: "
+ 	if (a48_clock_refused)
+ 		printf("act_test: [48] the clock was refused: its waits were "
+ 		       "counted, of 20 ms each since 963ca2cc (#1009)\n");
