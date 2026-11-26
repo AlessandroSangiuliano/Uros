@@ -2,6 +2,7 @@ Kind: widen
 Issue: #686
 Holds open: the window between QEMU's two reports of one refused DMA write, when it maps the bounce buffer and when it writes it back (address_space_map() and address_space_unmap()), by reading the engines out right after the AHCI driver starts the [iommu] self-test's first refused read and on every turn of its completion poll, and by repeating that read, up to 64 times, until it leaves two records, as the first read of the campaign boot that failed did; a line says on which try and how many times the engines were read out, so that a fixed arm that passes shows the window was open
 Run: --iommu intel --entry 36 600 -smp 4
+Premise: #686 widen: the first refused read left 2 record\(s\) on try [0-9]+, its engines read out [0-9]+ times
 
 diff --git a/uros/src/servers/block_device_server/ahci/ahci_io.c b/uros/src/servers/block_device_server/ahci/ahci_io.c
 index 4ad5f664..4583aee8 100644

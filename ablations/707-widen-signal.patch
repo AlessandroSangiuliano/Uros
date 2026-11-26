@@ -2,6 +2,7 @@ Kind: widen
 Issue: #707
 Holds open: semaphore_signal_common()'s window between marking its waiter done and clear_wait()ing it -- 100 ms, still under the semaphore's lock, so that cap_test [32]'s 40 ms wait times out inside it; each spin says so, so that a fixed arm that passes shows the window was open; in the fixed tree the waiter takes that lock before it reads its state, and waits for the spin
 Run: --entry 14 600 -smp 4
+Premise: #707 widen: a signal holds its waiter off the queue, done and not yet woken, for [0-9]+ us
 
 diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
 index 7eee6ce3..fe4f5936 100644

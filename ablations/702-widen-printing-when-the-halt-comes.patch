@@ -2,6 +2,7 @@ Kind: widen
 Issue: #702
 Holds open: a third processor inside printf(), holding printf_lock in the middle of a line, when a panic's report begins -- -Z's driver starts a chatter bound to a processor that is neither of the two that panic, printing from the moment they are told to go, and kern/printf.c holds it after the first byte of the first line it starts once panic() has said its message is out (a flag of the widen's own, set after panicwait is cleared), until another processor holds the console's report; then the line goes on, each byte waiting for every report, as the processor halted at printf+0xc0 in the campaign's boots was; a line says which processor, or that the widen did not open
 Run: --entry 24 600 -smp 4
+Premise: #702 widen: processor [0-9]+ prints while the two panic, and is held inside a line once the message is out
 
 diff --git a/uros/src/mach_kernel/kern/debug.c b/uros/src/mach_kernel/kern/debug.c
 index 8af3ac74..e2c9a421 100644

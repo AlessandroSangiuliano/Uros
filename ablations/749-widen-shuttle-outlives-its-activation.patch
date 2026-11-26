@@ -2,6 +2,7 @@ Kind: widen
 Issue: #749
 Holds open: a shuttle's last reference past act_free() -- the reaper takes a reference on the shuttle before the drops that free its activation and lets it go 50 ms later, the order a fired timer's reference in flight to thread_timeout() makes by chance; meanwhile the activation zone gives the freed activation to a new thread, and with the fix out thread_machine_destroy() then frees that live thread's floating-point area through the shuttle's top_act, and its next switch-in panics; each hold says so on the console, so that a fixed run that passes shows the window was open; at most 8 holds in a boot, because the reaper waits through each and 128 backed its queue up until act_test's arm 9 (#660) saw thousands of threads not yet freed
 Run: --entry 14 600 -smp 4
+Premise: #749 widen: the reaper held shuttle 0x[0-9a-f]+'s last reference for [0-9]+ ms after its activation 0x[0-9a-f]+ was freed
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
 index e14d740a..dfbf48d4 100644

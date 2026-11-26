@@ -2,6 +2,7 @@ Kind: widen
 Issue: #617
 Holds open: a thread ending through the full pool, between giving its stack back and thread_terminate() -- it waits 100 ms there, and pthread_test's full-pool case creates nine threads meanwhile, the ninth taking a stack from free_stacks; with the fix in, the ending thread's stack waits on dying_stacks for its port to die and the ninth gets another, with the fix out the ninth gets that stack while the thread is still on it; each wait says so on the console that needs no lock, so that a fixed run that passes shows the window was open; at most 64 waits in a task
 Run: --entry 14 600 -smp 4
+Premise: #617 widen: a thread ending through the full pool waits 100 ms between giving its stack back and thread_terminate\(\)
 
 diff --git a/uros/src/lib/libpthreads/pthread.c b/uros/src/lib/libpthreads/pthread.c
 index 7d17d2b6..af23271e 100644
