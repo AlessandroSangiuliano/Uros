@@ -811,14 +811,19 @@ a_no_senders_forgery_ends_nothing(void)
  * back the family must come back to none, within two seconds.
  */
 static int
-family_drained(struct slots *s, unsigned *waits)
+family_drained(struct slots *s, long *ms)
 {
-    for (*waits = 0; ; (*waits)++) {
+    struct ct_window w;
+
+    /* #1009: the two seconds by the clock, in waits of 10 ms. */
+    ct_window_start(&w, 10);
+    for (;;) {
+        *ms = ct_window_ms(&w);
         if (slots_now(mach_cap_port, s) != KERN_SUCCESS)
             return 0;
-        if (s->family == 0 || *waits == 200)
+        if (s->family == 0 || *ms >= 2000)
             return s->family == 0;
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+        ct_window_wait(&w);
     }
 }
 
@@ -837,7 +842,8 @@ derived_ports_are_bounded(void)
     mach_port_t   child = MACH_PORT_NULL, eport = MACH_PORT_NULL;
     struct slots  s0 = { 0 }, s1 = { 0 }, at = { 0 }, s2 = { 0 };
     kern_return_t kr_empty, kr = KERN_SUCCESS, want;
-    unsigned      n, i, w0 = 0, w2 = 0;
+    unsigned      n, i;
+    long          w0 = 0, w2 = 0;
     int           room_family, room_quota, want_n;
     int           ok_start, ok_empty, ok_bound, ok_free, ok_back, ok;
 
@@ -901,12 +907,12 @@ derived_ports_are_bounded(void)
                (unsigned)at.family, (unsigned)at.family_max,
                (unsigned)at.derived, (unsigned)at.quota,
                (unsigned)at.in_use, (unsigned)at.size);
-        printf("cap_test: [46] all given back, the family at %u after %u "
-               "wait(s) of 10 ms (#937)\n", (unsigned)s2.family, w2);
+        printf("cap_test: [46] all given back, the family at %u after %ld "
+               "ms (#937)\n", (unsigned)s2.family, w2);
     }
     if (!ok_start)
         printf("cap_test: [46] WRONG — this task's family held %u derived "
-               "port(s) before the arm, after %u wait(s) of 10 ms (#937)\n",
+               "port(s) before the arm, after %ld ms (#937)\n",
                (unsigned)s0.family, w0);
     if (!ok_empty)
         printf("cap_test: [46] WRONG — a derivation that keeps nothing "
@@ -925,7 +931,7 @@ derived_ports_are_bounded(void)
                (unsigned)at.in_use, (unsigned)at.size);
     if (!ok_back)
         printf("cap_test: [46] WRONG — the family held %u derived port(s) "
-               "after all were given back and %u wait(s) of 10 ms (#937)\n",
+               "after all were given back and %ld ms (#937)\n",
                (unsigned)s2.family, w2);
     return ok;
 }
