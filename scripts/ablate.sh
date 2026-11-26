@@ -25,11 +25,11 @@
 # ablated arm to be asked at all: what a widen holds open, or what the catch
 # stands on, such as a window of time the test must still have.  It is read
 # from every patch of the run, the bases too, and it brings the fixed arm in
-# without --ab.  A fixed boot no line of whose log matches every premise is
-# said to be without its premise and not passed, and an ablated boot beside it
-# that is not caught is said not askable, not uncaught (#1010: 922-wait-whole-
-# arm read NOT CAUGHT for 700 commits after a sleep of 10 ms came to last 20,
-# its window with it, #1009).
+# without --ab.  A fixed boot no line of whose log or output matches every
+# premise is said to be without its premise and not passed, and an ablated
+# boot beside it that is not caught is said not askable, not uncaught (#1010:
+# 922-wait-whole-arm read NOT CAUGHT for 700 commits after a sleep of 10 ms
+# came to last 20, its window with it, #1009).
 # A patch that needs none says why, `Premise: none -- WHY', and nothing is
 # read off a boot for it.
 #
@@ -405,7 +405,7 @@ if [ $PLAN = 1 ]; then
 	done <<< "$EXPECT"
 	if [ -n "$PREMISE" ]; then
 		while IFS= read -r e; do
-			echo "ablate: plan: asked only beside a fixed boot that shows, in $read_from: $e (Premise:)"
+			echo "ablate: plan: asked only beside a fixed boot that shows, in its log or what its run printed: $e (Premise:)"
 		done <<< "$PREMISE"
 		[ $PREMISE_AB = 0 ] || echo "ablate: plan: the fixed arm is booted for the premise, though --ab was not given"
 	fi
@@ -428,12 +428,21 @@ if [ -n "$PREMISE" ]; then
 	[ $PREMISE_AB = 0 ] || echo "ablate: the fixed arm is booted for the premise, though --ab was not given (#1010)"
 fi
 
-# #1010: the first premise no line of the log matches, or nothing.
-premise_missing() {
-	local pr
+# #1010: the first premise no line of the boot's files matches, or nothing.
+# Its files are the serial log and what the run printed: a Script: run's
+# output is what its Expect is read off, and the kernel's lines, where a
+# widen says its window was open, are in the log beside it.  Read off the
+# output alone, 889-widen-a48-round-robin's line was in none of its fixed
+# boots, which said it 4 times of 4 in their logs.
+premise_missing() {	# FILE...
+	local pr f
 	[ -s "$RUNDIR/premise" ] || return 0
 	while IFS= read -r pr; do
-		LC_ALL=C.UTF-8 grep -Eq -- "$pr" "$1" || { printf '%s\n' "$pr"; return 0; }
+		for f in "$@"; do
+			[ -f "$f" ] && LC_ALL=C.UTF-8 grep -Eq -- "$pr" "$f" && continue 2
+		done
+		printf '%s\n' "$pr"
+		return 0
 	done < "$RUNDIR/premise"
 }
 
@@ -686,7 +695,7 @@ for i in $(seq 1 "$BOOTS"); do
 						esac
 					fi
 				elif [ $rc = 0 ] && [ $hit = 0 ]; then
-					lacks=$(premise_missing "$log")
+					lacks=$(premise_missing "$RUNDIR/$arm-$acc-$i.log" "$RUNDIR/$arm-$acc-$i.out")
 					if [ -n "$lacks" ]; then
 						verdict="NO PREMISE"
 						unpremised=$((unpremised + 1))
