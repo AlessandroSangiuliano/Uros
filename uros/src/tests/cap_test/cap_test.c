@@ -2285,17 +2285,23 @@ ct983_family_back(long n, unsigned int *waits)
  *     them gone;
  *   - the ones lent to them, owned by tasks that are no more: forgotten
  *     without a word to the kernel, which would keep the revocation for
- *     nothing.  So the trap still takes each one, as presented by its owner,
- *     an identity no task has any more and none will have again; and
+ *     nothing, nor to the subscribers, whose state for them ended with the
+ *     dead tasks' ports.  So the trap still takes each one, as presented by
+ *     its owner, an identity no task has any more and none will have again;
  *     cap_revoke() finds it gone, where a loan still held would be revoked by
- *     this task, its lender.
+ *     this task, its lender; and cap_census()'s count of revocations told to
+ *     no subscriber grows by at least as many -- other tasks die meanwhile.
  *
  * This task's own capability is untouched, and cap_server's watches come back:
  * a watch kept would be a right and a request kept for each task that died.
+ *
+ * ⚠️ Kept small: each revocation told is a line or two on the console, and
+ * under char_server at one processor and TCG a burst of them overran the
+ * kernel's log, with lines other tasks were waiting on in it (#762, #983).
  */
-#define CT58_TASKS	12		/* under the family's bound of 16 */
+#define CT58_TASKS	6		/* under the family's bound of 16 */
 #define CT58_ASKED	2
-#define CT58_LENT	8
+#define CT58_LENT	4
 #define CT58_ID		0x9830ULL
 
 static int
@@ -2313,7 +2319,7 @@ a_tasks_death_ends_what_was_asked_on_its_port_and_lent_to_it(void)
     unsigned int           told = 0, kept = 0, mine_kept = 0;
     unsigned int           a_gone = 0, l_gone = 0, l_untold = 0;
     kern_return_t          kr, k0, k1 = KERN_FAILURE, k2 = KERN_FAILURE;
-    long                   shrank;
+    long                   shrank, quiet;
     int                    ok;
 
     memset(task, 0, sizeof(task));
@@ -2382,10 +2388,12 @@ a_tasks_death_ends_what_was_asked_on_its_port_and_lent_to_it(void)
     (void)cap_revoke(mine.cap_id);
 
     shrank = k2 == KERN_SUCCESS ? CT_GREW(c2.server, c1.server) : 0;
+    quiet = k2 == KERN_SUCCESS ? CT_GREW(c1.untold, c2.untold) : 0;
     ok = heard && k2 == KERN_SUCCESS && mine_kept &&
          told == CT58_TASKS * CT58_ASKED && a_gone == CT58_TASKS * CT58_ASKED &&
          l_untold == CT58_TASKS * CT58_LENT &&
          l_gone == CT58_TASKS * CT58_LENT &&
+         quiet >= (long)(CT58_TASKS * CT58_LENT) &&
          shrank >= (long)(CT58_TASKS * (CT58_ASKED + CT58_LENT)) - CT55_SLACK &&
          CT_GREW(c0.watches, c2.watches) <= CT58_TASKS / 2;
     if (ok) {
@@ -2398,6 +2406,8 @@ a_tasks_death_ends_what_was_asked_on_its_port_and_lent_to_it(void)
                "and not of the %u the dead owned: the trap takes those for "
                "identities no task has any more (#983)\n",
                told, l_untold);
+        printf("cap_test: [58] and no subscriber was told of those: the count "
+               "of revocations told to none grew by %ld (#983)\n", quiet);
         printf("cap_test: [58] cap_server's table went %u, %u, %u, its "
                "watches %u, %u, %u; this task's own capability kept (#983)\n",
                (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
@@ -2417,6 +2427,9 @@ a_tasks_death_ends_what_was_asked_on_its_port_and_lent_to_it(void)
            (unsigned)c0.server, (unsigned)c1.server, (unsigned)c2.server,
            (int)k2, (unsigned)c0.watches, (unsigned)c1.watches,
            (unsigned)c2.watches, mine_kept ? "kept" : "gone");
+    printf("cap_test: [58] WRONG — revocations told to no subscriber grew by "
+           "%ld, where the %u the dead owned are at least as many (#983)\n",
+           quiet, CT58_TASKS * CT58_LENT);
     return 0;
 }
 
@@ -2639,8 +2652,8 @@ a_loan_ends_with_the_port_its_borrower_was_named_by(void)
  * cap_census() counts the watches, and other tasks move that count meanwhile
  * by one or two, so the arm asks for half of each set made, and gone.
  */
-#define CT61_PORTS	16
-#define CT61_SLOTS	8		/* under the family's bound of 16 */
+#define CT61_PORTS	8		/* small: see [58] */
+#define CT61_SLOTS	4		/* under the family's bound of 16 */
 #define CT61_ID		0x9b30ULL
 
 static int
