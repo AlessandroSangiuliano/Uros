@@ -106,6 +106,50 @@ mono_ms(void)
 }
 
 /*
+ * #1009: a window by the clock, its pauses only pacing it.  Every window of
+ * this program was counted in pause_a_little()s or naps, "15 s of 10 ms steps",
+ * and doubled at once with 963ca2cc, the times it prints with it.  A clock
+ * refused counts the pauses at what they ask, as before.
+ */
+struct mt_window {
+	long long	t0;
+	int		pauses;
+	int		step_ms;
+};
+
+static void
+mt_window_start(struct mt_window *w, int step_ms)
+{
+	w->t0 = mono_ms();
+	w->pauses = 0;
+	w->step_ms = step_ms;
+}
+
+static long long
+mt_window_ms(const struct mt_window *w)
+{
+	long long	now = w->t0 >= 0 ? mono_ms() : -1;
+
+	return now >= 0 ? now - w->t0 : (long long)w->pauses * w->step_ms;
+}
+
+static int
+mt_window_over(const struct mt_window *w, long long limit_ms)
+{
+	return mt_window_ms(w) >= limit_ms;
+}
+
+static void
+mt_window_pause(struct mt_window *w)
+{
+	struct timespec	ts = { w->step_ms / 1000,
+			       (long)(w->step_ms % 1000) * 1000 * 1000 };
+
+	(void)nanosleep(&ts, NULL);
+	w->pauses++;
+}
+
+/*
  * ── [1] Formatting, which is varargs and floating point ─────────────────
  *
  * x86-64 passes a double in a vector register and a long in a general one, and
@@ -1821,13 +1865,16 @@ arm_pipe(void)
 static int
 watch_children(pid_t *pid, int n, int secs, int *status, int *others)
 {
-	int	left = n, killed = 0, i, step, st, ours;
+	int	left = n, killed = 0, i, st, ours;
 	pid_t	got;
+	struct mt_window w;
 
 	*others = 0;
 	for (i = 0; i < n; i++)
 		status[i] = -1;
-	for (step = 0; left > 0 && step < secs * 100; step++) {
+	/* #1009: secs by the clock, which the lines that print them say. */
+	mt_window_start(&w, 10);
+	while (left > 0 && !mt_window_over(&w, (long long)secs * 1000)) {
 		while (left > 0 && (got = waitpid(-1, &st, WNOHANG)) > 0) {
 			ours = 0;
 			for (i = 0; i < n; i++)
@@ -1840,7 +1887,7 @@ watch_children(pid_t *pid, int n, int secs, int *status, int *others)
 				(*others)++;
 		}
 		if (left > 0)
-			pause_a_little();
+			mt_window_pause(&w);
 	}
 	for (i = 0; i < n; i++) {
 		if (status[i] != -1)
@@ -2571,20 +2618,23 @@ static int
 run_bounded(int (*fn)(void), int secs)
 {
 	pid_t	pid, got;
-	int	st = 0, step;
+	int	st = 0;
+	struct mt_window w;
 
 	pid = fork();
 	if (pid < 0)
 		return -2;
 	if (pid == 0)
 		_exit(fn());
-	for (step = 0; step < secs * 100; step++) {
+	/* #1009: secs by the clock, which the lines that print them say. */
+	mt_window_start(&w, 10);
+	while (!mt_window_over(&w, (long long)secs * 1000)) {
 		got = waitpid(pid, &st, WNOHANG);
 		if (got == pid)
 			return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 		if (got < 0)
 			return -1;
-		pause_a_little();
+		mt_window_pause(&w);
 	}
 	(void)kill(pid, SIGKILL);
 	(void)waitpid(pid, &st, 0);
