@@ -4,6 +4,7 @@ Over: 709-widen-get-state.patch
 Takes out: 17a406e9 -- thread_go() carries its own copy of the wakeup's state change again, setting TH_RUN and calling thread_setrun() whatever TH_SUSP says; over 709-widen-get-state, the receiver act_test [13] stops with thread_get_state() is put back on a run queue by the message sent to it inside the hold, runs its copyout, and the arm finds the message in its buffer before thread_get_state() has returned
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[13\] the receiver took a message while thread_get_state\(\) held it stopped
+Premise: act_test: \[13\] a message delivered to a receiver thread_get_state\(\) held stopped waited in the kernel
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
 index 5c9aec6b..f6cc1c72 100644
