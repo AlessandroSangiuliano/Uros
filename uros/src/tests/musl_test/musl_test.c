@@ -70,8 +70,8 @@ not_asked(int arm, const char *why)
 	printf("musl_test: [%d] NOT ASKED -- %s\n", arm, why);
 }
 
-/* The longest a thread is given to do what an arm waits for, in 10 ms steps. */
-#define WAIT_STEPS	500
+/* The longest a thread is given to do what an arm waits for, by the clock. */
+#define WAIT_MS		5000
 
 static int
 access_by_stat(const char *path)
@@ -288,7 +288,8 @@ arm_tls(void)
 {
 	static struct tls_report	r;	/* the thread may never get to it */
 	pthread_t		th;
-	int			rc, i;
+	struct mt_window	w;
+	int			rc;
 
 	if (tls_word != 0x5a5a || tls_zero != 0) {
 		verdict(4, 0, "the main thread's __thread variables read %#x "
@@ -309,9 +310,10 @@ arm_tls(void)
 	 * so and not stop here for good.  pause_a_little() keeps errno, and
 	 * the check below reads it.
 	 */
-	for (i = 0; i < WAIT_STEPS && !__atomic_load_n(&r.done, __ATOMIC_SEQ_CST);
-	     i++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (!__atomic_load_n(&r.done, __ATOMIC_SEQ_CST) &&
+	       !mt_window_over(&w, WAIT_MS))
+		mt_window_pause(&w);
 	if (!__atomic_load_n(&r.done, __ATOMIC_SEQ_CST)) {
 		verdict(4, 0, "a new thread never got as far as its own word");
 		return;
@@ -419,7 +421,7 @@ detached_thread(void *arg)
  * by which time the boot had ended with the verdict unsaid.
  */
 static int
-address_is_free(uintptr_t where, int *steps_left)
+address_is_free(uintptr_t where, struct mt_window *budget)
 {
 	uintptr_t	page = where & ~(uintptr_t)(PAGE - 1);
 	void		*p;
@@ -431,10 +433,9 @@ address_is_free(uintptr_t where, int *steps_left)
 			(void)munmap(p, PAGE);
 			return 1;
 		}
-		if (*steps_left <= 0)
+		if (mt_window_over(budget, WAIT_MS))
 			return 0;
-		(*steps_left)--;
-		pause_a_little();
+		mt_window_pause(budget);
 	}
 }
 
@@ -443,7 +444,8 @@ arm_detached(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, rc, freed = 0, steps = WAIT_STEPS;
+	struct mt_window w, budget;
+	int		i, rc, freed = 0;
 
 	(void)pthread_attr_init(&attr);
 	(void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -457,15 +459,18 @@ arm_detached(void)
 	}
 	(void)pthread_attr_destroy(&attr);
 
-	for (i = 0; i < WAIT_STEPS && __atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS; i++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (__atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS &&
+	       !mt_window_over(&w, WAIT_MS))
+		mt_window_pause(&w);
 	if (__atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS) {
 		verdict(6, 0, "%d of %d detached threads ran",
 			__atomic_load_n(&d_done, __ATOMIC_SEQ_CST), D_THREADS);
 		return;
 	}
+	mt_window_start(&budget, 10);
 	for (i = 0; i < D_THREADS; i++)
-		freed += address_is_free(d_stack[i], &steps);
+		freed += address_is_free(d_stack[i], &budget);
 	verdict(6, freed == D_THREADS, "%d detached threads ended and %d of "
 		"their stacks were given back", D_THREADS, freed);
 }
@@ -944,13 +949,15 @@ own_id_thread(void *arg)
 {
 	pthread_mutex_t	*m = arg;
 	pid_t		first = gettid();
-	int		i, rc;
+	struct mt_window w;
+	int		rc;
 
 	rc = pthread_mutex_lock(m);
 	if (rc == 0) {
 		pause_a_little();
-		for (i = 0; i < WAIT_STEPS && gettid() == 0; i++)
-			pause_a_little();
+		mt_window_start(&w, 10);
+		while (gettid() == 0 && !mt_window_over(&w, WAIT_MS))
+			mt_window_pause(&w);
 		rc = pthread_mutex_unlock(m);
 	}
 	if (first == 0)
@@ -968,7 +975,9 @@ arm_own_id(void)
 {
 	pthread_mutexattr_t	attr;
 	pthread_t		th[O_THREADS];
-	int			i, rc = 0, made = 0, waited;
+	struct mt_window	w;
+	long long		waited;
+	int			i, rc = 0, made = 0;
 	int			answered, nameless, refused;
 
 	(void)pthread_mutexattr_init(&attr);
@@ -981,17 +990,19 @@ arm_own_id(void)
 		if (rc == 0)
 			made++;
 	}
-	for (waited = 0; waited < WAIT_STEPS &&
-	     __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made; waited++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (__atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made &&
+	       !mt_window_over(&w, WAIT_MS))
+		mt_window_pause(&w);
+	waited = mt_window_ms(&w);
 	answered = __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST);
 	nameless = __atomic_load_n(&o_nameless, __ATOMIC_SEQ_CST);
 	refused = __atomic_load_n(&o_refused, __ATOMIC_SEQ_CST);
 	if (rc != 0)
 		verdict(24, 0, "pthread_create %d said %d", made, rc);
 	else if (answered < made)
-		verdict(24, 0, "of %d threads, %d had answered after %d "
-			"sleeps of 10 ms asked", made, answered, waited);
+		verdict(24, 0, "of %d threads, %d had answered after %lld ms",
+			made, answered, waited);
 	else
 		verdict(24, nameless == 0 && refused == 0,
 			"%d threads asked for their id as their first act, %d "
@@ -1335,7 +1346,7 @@ arm_page_zero(void)
  */
 #define CLK_READERS	4
 #define CLK_READS	25000			/* each, 100000 in all */
-#define CLK_STEPS	(12 * WAIT_STEPS)	/* the readers' time, 60 s */
+#define CLK_MS		(12 * WAIT_MS)		/* the readers' time, 60 s */
 #define CLK_NAP_NS	(10LL * 1000 * 1000)
 
 static long long	clk_published;	/* ns, the largest reading published */
@@ -1397,7 +1408,9 @@ arm_clocks(void)
 	struct timeval	tv = { -1, -1 };
 	pthread_t	th[CLK_READERS];
 	int		rc_mono, rc_cal, rc_tv, rc_other, err_other, i;
-	int		rc = 0, made = 0, finished, waited;
+	int		rc = 0, made = 0, finished;
+	struct mt_window w;
+	long long	waited;
 	int		short_both = 0, short_mono = 0;
 	long long	dm, dc, longer, shortest = -1, took = -1;
 
@@ -1414,9 +1427,11 @@ arm_clocks(void)
 		if (rc == 0)
 			made++;
 	}
-	for (waited = 0; waited < CLK_STEPS &&
-	     __atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST) < made; waited++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (__atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST) < made &&
+	       !mt_window_over(&w, CLK_MS))
+		mt_window_pause(&w);
+	waited = mt_window_ms(&w);
 	finished = __atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST);
 	if (finished == made) {
 		for (i = 0; i < made; i++)
@@ -1446,8 +1461,7 @@ arm_clocks(void)
 		verdict(25, 0, "pthread_create %d said %d", made, rc);
 	else if (finished < made)
 		verdict(25, 0, "of %d threads reading the monotonic clock, %d "
-			"had finished after %d sleeps of 10 ms asked", made,
-			finished, waited);
+			"had finished after %lld ms", made, finished, waited);
 	else
 		verdict(25, rc_mono == 0 && rc_cal == 0 && rc_tv == 0 &&
 			rc_other == -1 && err_other == EINVAL &&
