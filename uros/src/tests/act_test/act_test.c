@@ -10372,7 +10372,8 @@ arm_fifty_two_fs_base_goes_with_the_thread(void)
 #define	A53_TASKS	32
 #define	A53_THREADS	4
 #define	A53_WAIT_MS	5000
-#define	A53_GONE_WAITS	500	/* ten milliseconds each, on a tick */
+#define	A53_GONE_WAITS	500	/* the clock refused: the waits, as before */
+#define	A53_GONE_MS	5000	/* #1009: the 500 waits of a tick, by the clock */
 #define	A53_SLACK	4	/* tasks of the rest of the system */
 #define	A53_LATE_MS	30000	/* #979: then by the clock, late or never */
 #define	A53_LATE_NAP_MS	100
@@ -10496,8 +10497,10 @@ arm_fifty_three_threads_fault_together(void)
 {
 	mach_port_t	me = mach_task_self();
 	mach_port_t	host = mach_host_self();
-	int		before = 0, after = 0, asked;
+	int		before = 0, after = 0, asked, clocked;
 	unsigned	i, waited = 0;
+	struct timespec	t0;
+	long		d;
 
 	asked = a43_zone(host, "tasks", &before);
 	for (i = 0; i < A53_TASKS; i++)
@@ -10505,7 +10508,24 @@ arm_fifty_three_threads_fault_together(void)
 			(void) mach_port_deallocate(me, host);
 			return 0;
 		}
-	while (asked && waited++ < A53_GONE_WAITS) {
+	/*
+	 * #1009: the tasks have A53_GONE_MS by the clock to leave.  It was 500
+	 * waits of 1 ms, "ten milliseconds each, on a tick", and since 963ca2cc
+	 * each lasts 20: 10 s.  A reaper late by less than the window would no
+	 * longer be called late; 979-reaper-late's came back 15.6 s after a
+	 * window of 10, on 21/11, so its catch held, but the window is the 5 s
+	 * written.  The waits are still counted, for the line
+	 * 414-reaper-left-behind reads.
+	 */
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	while (asked) {
+		if (clocked) {
+			d = act_ms_since(&t0);
+			if (d < 0 || d >= A53_GONE_MS)
+				break;
+		} else if (waited >= A53_GONE_WAITS)
+			break;
+		waited++;
 		asked = a43_zone(host, "tasks", &after);
 		if (after <= before + A53_SLACK)
 			break;
