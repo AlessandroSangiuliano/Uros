@@ -2,6 +2,7 @@ Kind: widen
 Issue: #602
 Holds open: the table full of retiring slots at arm [3]'s control claim -- four ranges, 0x280..0x29f in steps of eight, claimed and given back just before it, so every free slot is in its grace period whether or not uart.so holds one; the fixed test waits for them across the grace period and must pass
 Run: --entry 14 1200 -smp 4
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_claim_race/io_claim_race.c
 index 577caf46..943dd649 100644

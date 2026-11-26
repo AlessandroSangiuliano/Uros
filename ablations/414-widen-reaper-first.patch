@@ -2,6 +2,7 @@ Kind: widen
 Issue: #414
 Holds open: holds a thread 2 ms in task_wait_locked() after the thread it waited for has stopped, which lets the reaper give up that activation's references first, so that the reference taken here is the last one, every time
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
 --- a/uros/src/mach_kernel/kern/task.c

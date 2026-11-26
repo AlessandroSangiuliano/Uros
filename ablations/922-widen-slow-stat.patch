@@ -2,6 +2,7 @@ Kind: widen
 Issue: #922
 Holds open: musl_test [22]'s stat thread at about a second a call -- ext_server's vfs_stat() sleeps 900 ms for cow_test, as GitHub's EPYC 7763 served those stats under TCG at -smp 4 (12 to 16 of 20 in 15 s); the fixed arm must still pass, its stat thread ending on its time
 Run: --entry 14 600 -smp 4
+Premise: none -- its hold is on every stat of cow_test; what the catch stands on, the stat thread ending on its time, is 922-wait-whole-arm's premise
 
 diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
 --- a/uros/src/servers/ext_server/ext_server.c

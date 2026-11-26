@@ -2,6 +2,7 @@ Kind: widen
 Issue: #659
 Holds open: an engine whose IRTA_REG does not take EIME -- the write drops it, as an engine without EIM, where the bit is RsvdZ, would -- so that the word read back is not the word composed
 Run: --iommu intel-eim --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c

@@ -2,6 +2,7 @@ Kind: widen
 Issue: #811
 Holds open: the window between pmap_unmap_page()'s exchange and its flush, for the address of collect_bench.c's lost-race arm only (LOST_VA, PML4 slot 14) -- 50000 pauses, so that pmap_page_protect() on another processor lands in it every round
 Run: --entry 9 1200 -smp 4
+Premise: none -- no patch is written over it
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
 --- a/uros/src/mach_kernel/x86_64/pmap/map.c

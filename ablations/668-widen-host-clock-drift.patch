@@ -2,6 +2,7 @@ Kind: widen
 Issue: #668
 Holds open: a host whose clocks are 2% from the TSC's exact source -- the second's measurement taken 2% slow, as pavillion's host clocks once made it (19065 ppm from KVM's clock).  Under KVM the exact source is adopted and the check meets that distance on every boot; under TCG there is no exact source, and the refinement says WRONG past one part in 64, so the runs are KVM's
 Run: --entry 41 120 -smp 4
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/mach_kernel/x86_64/time/tsc_refine.c b/uros/src/mach_kernel/x86_64/time/tsc_refine.c
 index a0c31857..ad064a89 100644

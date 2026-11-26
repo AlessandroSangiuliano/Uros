@@ -2,6 +2,7 @@ Kind: widen
 Issue: #659
 Holds open: a tick another processor took before ISA 0 was masked and dispatches only after the reach test gave the vector back -- vector 0x40 sent to the target by IPI once reach_pin_selftest() has returned, with a millisecond to land; the boot processor goes on printing, and the target's report must come out whole all the same (cons_report_begin())
 Run: --entry 0 600 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
 --- a/uros/src/mach_kernel/x86_64/boot/boot_c.c

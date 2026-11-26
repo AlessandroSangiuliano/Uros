@@ -2,6 +2,7 @@ Kind: widen
 Issue: #659
 Holds open: an application processor's fatal report while the boot processor goes on printing -- the vector given back as zero, as 659-vector-back-zero takes it out, so the tick 659-widen-tick-in-flight sends to the target finds no handler there and the target reports and halts
 Run: --entry 0 600 -smp 4
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
 --- a/uros/src/mach_kernel/x86_64/boot/boot_c.c

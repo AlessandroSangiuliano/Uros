@@ -2,6 +2,7 @@ Kind: widen
 Issue: #777
 Holds open: the woken threads of act_test's arms 39 and 40 for 20 ms or so, running, before their first receive and before they count a wakeup -- what a virtual processor that is slow to wake looks like to these arms, on any host: a spin, because a thread asleep in a wait would read as one that has come to wait.  The arms' waits sleep and sit it out
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
 index 8b1cb80e..a5ee2e2f 100644

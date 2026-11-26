@@ -2,6 +2,7 @@ Kind: widen
 Issue: #733
 Holds open: the parent takes 5 ms by the TSC to come back from thread_resume(), so that a new thread runs, and takes its first mutex, before the parent has gone on
 Run: --entry 14 120 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/lib/libposix-uros/posix_clone.c b/uros/src/lib/libposix-uros/posix_clone.c
 index 3175a931..f4be1200 100644

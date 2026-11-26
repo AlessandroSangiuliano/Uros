@@ -2,6 +2,7 @@ Kind: widen
 Issue: #935
 Holds open: delays thread_create() 2 ms after thread_create_in() has returned.  In the fixed tree the thread is already listed and started by then, under the task lock, and the delay is harmless; with 935-start-after-return the thread is listed and not yet started for those 2 ms, which is the window in which act_test [54]'s task_terminate() reaches it, stops it and starts it through thread_unstop() before thread_create() starts it again
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
 index f02c3ed6..340ba2e7 100644

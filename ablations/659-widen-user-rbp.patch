@@ -2,6 +2,7 @@ Kind: widen
 Issue: #659
 Holds open: a ring-3 frame pointer the kernel's pmap calls mapped -- user_probe_enter leaves 0x1000 in rbp, where boot.S's identity map of the low gigabyte maps it in the kernel's tables and the probe's own space has nothing -- for the walk made in the handler to meet, as #518's printer did
 Run: --entry 0 600 -smp 1
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/mach_kernel/x86_64/syscall/probe.S b/uros/src/mach_kernel/x86_64/syscall/probe.S
 --- a/uros/src/mach_kernel/x86_64/syscall/probe.S

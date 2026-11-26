@@ -11,6 +11,7 @@ Script: -s
 Script: 4
 Script: -G
 Note: the boots are under KVM, asked of the merge test with -a kvm, as 765's are; Accel: tcg is only what ablate.sh writes on the rows.
+Premise: none -- the pause is fixed, but another processor's line must land in it, and the fixed tree, which holds the lock across it, keeps every such line out: no line of a fixed boot can show the window met
 
 diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
 index c75f335a..5085d24b 100644

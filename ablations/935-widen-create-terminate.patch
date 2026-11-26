@@ -2,6 +2,7 @@ Kind: widen
 Issue: #935
 Holds open: delays thread_create_in() 2 ms after it has attached the new thread and before it takes the task lock, so a task_terminate() racing it clears the task's active flag first and the create meets a dead task every time -- the window in which thr_act->thread is set but the task may already be gone
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
 index 1d05e9f1..0a4d1583 100644

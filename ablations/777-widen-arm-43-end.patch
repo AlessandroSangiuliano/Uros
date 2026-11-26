@@ -2,6 +2,7 @@ Kind: widen
 Issue: #777
 Holds open: the thread of act_test's arm 43 for 20 ms or so, running, after its receive has ended and before it says so -- what a virtual processor can take to wake on a shared host
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
 --- a/uros/src/tests/act_test/act_test.c

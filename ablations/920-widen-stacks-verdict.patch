@@ -6,6 +6,7 @@ Screen: --smp=4
 Screen: --wait-for=quiet_census: kernel stacks taken
 Screen: --freeze
 Screen: --expect=WRONG, a kernel stack outlived its thread
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
 index e42bce2a..c798e959 100644

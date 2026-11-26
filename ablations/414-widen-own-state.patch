@@ -2,6 +2,7 @@ Kind: widen
 Issue: #414
 Holds open: holds a thread 2 ms after it has set its own state and woken the creator, which on more than one processor lets thread_resume() in ahead of the thread's suspension, every time
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
 --- a/uros/src/mach_kernel/kern/thread_act.c

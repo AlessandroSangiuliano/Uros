@@ -2,6 +2,7 @@ Kind: widen
 Issue: #764
 Holds open: the gap a console write leaves when it ends without a newline, every time.  libposix-uros's console_write() follows such a write with a line of its own, "[764-widen: a line in the gap]", where at four processors another task's line lands in some boots only -- hello_server's one line over 80 characters in 100 of 211 i386 logs, ush's lines in 190 of 212.  A line written in two writes then comes out cut in every boot, at any number of processors, and scripts/suite-i386.sh does not find hello_server's line arm whole.  Each task says "[764-widen: armed ...]" at its first console write, so a log shows the widen was in its build.
 Run: i386 -- UROS_BUILD_DIR=<worktree>/uros/build scripts/suite-i386.sh -r bundle-kvm-4, from a worktree with the patch and a build of its own; scripts/ablate.sh cannot judge it
+Premise: none -- booted by hand on i386, where ablate.sh boots nothing and reads no premise
 
 diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
 index 9a35f197..38144c90 100644

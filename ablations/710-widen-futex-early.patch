@@ -2,6 +2,7 @@ Kind: widen
 Issue: #710
 Holds open: futex_wait()'s window as i386 has it, between its first read of the word and splsched -- the waiter spins 100 ms with interrupts on, says on which processor it ended and whether the task's pmap still maps the page, and if it does sleeps 100 ms more and says it again; only for a word holding 0x07100710, pthread_test's, and at most 16 times; pthread_test's last case unmaps the page 20 ms after the waiter says it is calling the kernel, so the unmap and its shootdown land inside the hold, and after assert_wait() the second read finds no translation; in the fixed tree it fails and the wait answers KERN_NOT_WAITING; 710-widen-futex-reread holds inside the declared wait, at splsched, which on i386 is cli, so there the shootdown waits and the second read finds the page; a spin alone opened nothing on OMEGA in six boots of six, every try timing out
 Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-4
+Premise: none -- booted by hand on i386, where ablate.sh boots nothing and reads no premise
 
 diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
 index c6301e2d..b21ef537 100644

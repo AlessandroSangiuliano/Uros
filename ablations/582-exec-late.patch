@@ -2,6 +2,7 @@ Kind: widen
 Issue: #582
 Holds open: the time between #269's fork and its execve -- the child waits two seconds before it calls execve, past the 600 ms beat after which its parent used to kill it; the fixed tree must still see the exec in /proc before the kill, and pass
 Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-1
+Premise: none -- booted by hand on i386, where ablate.sh boots nothing and reads no premise
 
 diff --git a/uros/src/servers/hello_server/hello_server.c b/uros/src/servers/hello_server/hello_server.c
 index ea0df6d8..d56d8b14 100644
