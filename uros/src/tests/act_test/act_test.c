@@ -2708,16 +2708,50 @@ arm13_receiver(void *arg)
 	return NULL;
 }
 
+/*
+ * #1009: the sender's times by the clock, from the moment it sees the call.  It
+ * found the call by naps of 1 ms and then napped 20 and 30, and since 963ca2cc
+ * a nap lasts a tick more: the look came 60 to 90 ms into the widen's 100 ms
+ * hold, where 40 to 60 had been meant, close enough to its end for a slow
+ * host to put it after.  So it yields until it sees the call, and then until
+ * 20 ms and 50 ms of the clock have gone; a clock refused naps as before.
+ */
+#define	ARM13_SEND_MS		20
+#define	ARM13_LOOK_MS		50
+
+static void
+arm13_until(const struct timespec *t0, int clocked, long ms, int nap_ms)
+{
+	long	d;
+
+	if (!clocked) {
+		nap(nap_ms);
+		return;
+	}
+	while ((d = act_ms_since(t0)) >= 0 && d < ms)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+}
+
 static void *
 arm13_sender(void *arg)
 {
 	mach_msg_header_t	msg;
-	int			i;
+	struct timespec		t0;
+	int			clocked, i;
+	long			d;
 
 	(void) arg;
-	for (i = 0; i < PATIENCE * 10 && !arm13_calling; i++)
-		nap(1);
-	nap(20);
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	if (clocked)
+		while (!arm13_calling && (d = act_ms_since(&t0)) >= 0 &&
+		       d < PATIENCE * 100)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_DEPRESS, 1);
+	else
+		for (i = 0; i < PATIENCE * 10 && !arm13_calling; i++)
+			nap(1);
+	clocked = clocked && getclock(TIMEOFDAY, &t0) == 0;
+	arm13_until(&t0, clocked, ARM13_SEND_MS, ARM13_SEND_MS);
 	msg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	msg.msgh_size = sizeof msg;
 	msg.msgh_remote_port = arm13_port;
@@ -2726,7 +2760,7 @@ arm13_sender(void *arg)
 	arm13_sent = mach_msg(&msg, MACH_SEND_MSG, sizeof msg, 0,
 			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
 			      MACH_PORT_NULL);
-	nap(30);
+	arm13_until(&t0, clocked, ARM13_LOOK_MS, ARM13_LOOK_MS - ARM13_SEND_MS);
 	arm13_returned_at_look = arm13_returned;
 	arm13_seen = ((volatile mach_msg_header_t *) &arm13_buf.h)->msgh_id
 		     == ARM13_ID;
