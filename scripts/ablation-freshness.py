@@ -14,7 +14,11 @@
 # them together and says, for each ablation, its last catch: the date, the
 # machine, the tree it was booted over, the accelerator, and the commits of
 # the reference tree since that tree.  A union's giro boots the stalest again,
-# so that every ablation comes round in turn.
+# so that every ablation comes round in turn: the stalest by its last ablated
+# boot, caught or not, since a turn is a question asked, and one asked lately
+# and left uncaught is known -- its answer is an issue, not another boot.  By
+# its last catch, an ablation that stays uncaught would come first every time
+# and keep the others from their turn.
 #
 # A row counts as a catch of an ablation when it is an ablated boot read
 # CAUGHT and that ablation is the only patch of Kind `ablation' in its run: two
@@ -31,8 +35,9 @@
 #                ~/uros-tests/ablations/ablate.csv)
 #   --ref REV    the tree the distance is counted to (default HEAD)
 #   --stalest N  only the names of the N stalest a giro can boot, one per
-#                line: those never caught in these rows first, then those
-#                whose tree is the most commits behind, then the oldest
+#                line: those never booted in these rows first, then by the
+#                date of their last ablated boot, caught or not, the oldest
+#                first
 #
 # Exit status: 0 · 2 a CSV cannot be read, or the command line is wrong.
 
@@ -152,8 +157,10 @@ def main(argv):
     rows.sort()
 
     if stalest is not None:
-        for r in [r for r in rows if bootable[r[3]]][:stalest]:
-            print(r[3])
+        turn = sorted((n for n in kinds if kinds[n] == "ablation" and bootable[n]),
+                      key=lambda n: (booted.get(n, ""), n))
+        for n in turn[:stalest]:
+            print(n)
         return 0
     print("ablation-freshness: %d ablations, read from %s, distances to %s"
           % (len(rows), ", ".join(csvs), git("rev-parse", "--short=8", ref)))
