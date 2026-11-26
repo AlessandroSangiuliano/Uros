@@ -43,6 +43,7 @@
 
 #include <mach.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>			/* #1009: getclock(), the wait */
 
 #define E1000_ICR		0x000C0u	/* cause read; reading clears */
 #define E1000_ICS		0x000C8u	/* cause set */
@@ -53,7 +54,23 @@
 #define E1000_ICR_OTHER		0x01000000u	/* 82574L: the "other" causes */
 #define E1000_IVAR_OTHER_ENTRY0	(0x8u << 16)	/* "other": entry 0, valid */
 
-#define PROBE_WAIT_STEPS	100		/* of 10 ms: a second */
+#define PROBE_WAIT_MS		1000		/* a second, by the clock */
+
+/*
+ * #1009: whether ms of the clock have gone since t0.  The waits were counted,
+ * 100 of 10 ms, and since 963ca2cc each lasts 20: "in a second" was two.  A clock refused
+ * counts the waits, as before.
+ */
+static int
+probe_over(const struct timespec *t0, int clocked, int waits, int ms)
+{
+	struct timespec	t;
+
+	if (clocked && getclock(TIMEOFDAY, &t) == 0)
+		return (t.tv_sec - t0->tv_sec) * 1000 +
+		       (t.tv_nsec - t0->tv_nsec) / 1000000 >= ms;
+	return waits * 10 >= ms;
+}
 
 static volatile uint32_t	*regs;
 static volatile int		rang;
@@ -96,7 +113,8 @@ probe_attach(struct driver *d)
 	volatile void	*va = NULL;
 	vm_size_t	size = 0;
 	kern_return_t	kr;
-	int		i;
+	int		i, clocked;
+	struct timespec	t0;
 
 	kr = driver_map_region(d, 0, &va, &size);
 	if (kr != KERN_SUCCESS) {
@@ -119,7 +137,8 @@ probe_attach(struct driver *d)
 
 	reg_write(E1000_IMS, E1000_ICR_LSC | (d->irq_message ? E1000_ICR_OTHER : 0));
 	reg_write(E1000_ICS, E1000_ICR_LSC);
-	for (i = 0; i < PROBE_WAIT_STEPS && rang == 0; i++)
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (i = 0; rang == 0 && !probe_over(&t0, clocked, i, PROBE_WAIT_MS); i++)
 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
 
 	quiet();
