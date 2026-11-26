@@ -1,9 +1,9 @@
 Kind: ablation
 Issue: #715
-Takes out: the server's own copy of the forward channel's size as a FLIPC read's cap -- the cap is the header's again, which the client writes, so a read runs past the mapping; mount_test's [34] must say WRONG
+Takes out: the server's own copy of the forward channel's size as a FLIPC read's cap -- the cap is the header's again, which the client writes, so a read runs past the mapping; mount_test's [36] must say WRONG
 Accel: tcg,kvm
 Run: --entry 14 600 -smp 4
-Expect: mount_test: \[34\] WRONG
+Expect: mount_test: \[36\] WRONG
 
 diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
 --- a/uros/src/servers/ext_server/ext_server.c

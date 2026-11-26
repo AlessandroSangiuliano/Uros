@@ -1,9 +1,9 @@
 Kind: ablation
 Issue: #715
-Takes out: fs_offset_ok() itself -- it answers yes to any offset, so neither path refuses past 4 GiB; mount_test's [36] must say WRONG
+Takes out: fs_offset_ok() itself -- it answers yes to any offset, so neither path refuses past 4 GiB; mount_test's [38] must say WRONG
 Accel: tcg,kvm
 Run: --entry 14 600 -smp 4
-Expect: mount_test: \[36\] WRONG
+Expect: mount_test: \[38\] WRONG
 
 diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
 --- a/uros/src/servers/ext_server/ext_server.c

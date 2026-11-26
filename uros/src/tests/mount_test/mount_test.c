@@ -68,15 +68,15 @@
  *
  * Any task could look the endpoint up by name and connect, and the server
  * took the write's source and the read's cap from memory the client writes:
- * a write's data offset and length, and the forward channel's header.  [32]
+ * a write's data offset and length, and the forward channel's header.  [34]
  * asks that the name is gone and that "/"'s port hands the endpoint's out.
- * The rest connect on a channel of 4 KiB, the smallest: [33] writes whose
+ * The rest connect on a channel of 4 KiB, the smallest: [35] writes whose
  * data lie past the reverse channel's region, its header saying 0xFFFFFFFF,
- * on a directory so that nothing is written whatever the answer; [34] a read
+ * on a directory so that nothing is written whatever the answer; [36] a read
  * longer than the forward channel's region, its header saying the same, which
- * must answer the region's length and the bytes the Mach path reads; [35] a
+ * must answer the region's length and the bytes the Mach path reads; [37] a
  * handle with bit 32 set over this task's own fid, which must be no handle;
- * [36] a read and a write at offset 2^44, past the 4 GiB the backend takes,
+ * [38] a read and a write at offset 2^44, past the 4 GiB the backend takes,
  * which both paths must refuse.  Each asks after that ext_server still
  * answers.
  */
@@ -791,7 +791,7 @@ mt_rights_arms(mach_port_t liar, mach_port_t root, int have_root,
 }
 
 /*
- * [32] to [36] (#715): what ext_server's FLIPC endpoint takes from a client,
+ * [34] to [38] (#715): what ext_server's FLIPC endpoint takes from a client,
  * asked of "/"'s on a channel of 4 KiB.  See the top of this file.
  */
 #define	MT715_CHANNEL	4096u		/* FLIPC2_CHANNEL_SIZE_MIN */
@@ -870,7 +870,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 	int			res = -1, ok, got_a, got_b, same = 0, i;
 
 	if (!have_root) {
-		for (i = 32; i <= 36; i++) {
+		for (i = 34; i <= 38; i++) {
 			printf("mount_test: [%d] WRONG — not asked: no \"/\"\n", i);
 			mt_result(0);
 		}
@@ -878,7 +878,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 	}
 
 	/*
-	 * [32] Who may connect: a task that holds the mount's port.  The name
+	 * [34] Who may connect: a task that holds the mount's port.  The name
 	 * the endpoint had is not in the name server, and the mount's port
 	 * hands out the endpoint's.
 	 */
@@ -890,11 +890,11 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 	     MACH_PORT_VALID(ep);
 	mt_result(ok);
 	if (ok)
-		printf("mount_test: [32] \"/\"'s FLIPC endpoint has no name -- \""
+		printf("mount_test: [34] \"/\"'s FLIPC endpoint has no name -- \""
 		       MT715_OLD_NAME "\" answered %d -- and the mount's port "
 		       "hands its port out (#715)\n", look);
 	else
-		printf("mount_test: [32] WRONG — \"" MT715_OLD_NAME "\" in the "
+		printf("mount_test: [34] WRONG — \"" MT715_OLD_NAME "\" in the "
 		       "name server: %d, where it must be none; the mount's port "
 		       "handed out %s (%d, result %d) (#715)\n", look,
 		       MACH_PORT_VALID(ep) ? "a port" : "none", kr, res);
@@ -913,7 +913,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 			     &type);
 	}
 	if (con != FLIPC2_SUCCESS || kd != KERN_SUCCESS || kf != KERN_SUCCESS) {
-		for (i = 33; i <= 36; i++) {
+		for (i = 35; i <= 38; i++) {
 			printf("mount_test: [%d] WRONG — not asked: the connect "
 			       "%d, the opens of " MT715_DIR " %d and of " MT715_FILE
 			       " %d\n", i, con, kd, kf);
@@ -923,7 +923,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 		region = rev->data_size;
 
 		/*
-		 * [33] Two writes whose data lie outside the reverse channel's
+		 * [35] Two writes whose data lie outside the reverse channel's
 		 * region -- one byte past its end, and one byte longer than
 		 * it -- its header saying the region is as large as can be.
 		 * On MT715_DIR, a directory: no file is written, whatever is
@@ -938,13 +938,13 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 		     b.status == VFS_FLIPC_ERR_INVAL && mt715_alive(root);
 		mt_result(ok);
 		if (ok)
-			printf("mount_test: [33] two FLIPC writes whose data lie "
+			printf("mount_test: [35] two FLIPC writes whose data lie "
 			       "outside a 4 KiB channel's region of %u bytes, its "
 			       "header saying 0xFFFFFFFF, were refused "
 			       "VFS_FLIPC_ERR_INVAL, and ext_server answers after "
 			       "them (#715)\n", (unsigned)region);
 		else
-			printf("mount_test: [33] WRONG — two FLIPC writes outside a "
+			printf("mount_test: [35] WRONG — two FLIPC writes outside a "
 			       "4 KiB channel's region of %u bytes: %s %d and %s "
 			       "%d, where both must be VFS_FLIPC_ERR_INVAL (%d); "
 			       "ext_server %s (#715)\n", (unsigned)region,
@@ -954,7 +954,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 			       mt715_alive(root) ? "answers" : "does not answer");
 
 		/*
-		 * [34] A read longer than the forward channel's region, its
+		 * [36] A read longer than the forward channel's region, its
 		 * header saying the region is as large as can be: the answer
 		 * must fit the region, and be what the Mach path reads.
 		 */
@@ -974,13 +974,13 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 		ok = ok && same && mt715_alive(root);
 		mt_result(ok);
 		if (ok)
-			printf("mount_test: [34] a FLIPC read of %u bytes on a 4 "
+			printf("mount_test: [36] a FLIPC read of %u bytes on a 4 "
 			       "KiB channel, its header saying 0xFFFFFFFF, was "
 			       "answered %u, the region's, the same bytes the Mach "
 			       "path reads, and ext_server answers after it "
 			       "(#715)\n", MT715_READ, (unsigned)region);
 		else
-			printf("mount_test: [34] WRONG — a FLIPC read of %u bytes on "
+			printf("mount_test: [36] WRONG — a FLIPC read of %u bytes on "
 			       "a 4 KiB channel, its header saying 0xFFFFFFFF: %s, "
 			       "status %d, %llu bytes at %llu, where it must be the "
 			       "region's %u at 0%s; ext_server %s (#715)\n",
@@ -992,7 +992,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 			       mt715_alive(root) ? "answers" : "does not answer");
 
 		/*
-		 * [35] A handle at its full width: this task's fid with bit 32
+		 * [37] A handle at its full width: this task's fid with bit 32
 		 * set is no handle, where the fid itself reads.
 		 */
 		got_a = mt715_ask(fwd, rev, VFS_FLIPC_OP_READ,
@@ -1004,14 +1004,14 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 		     mt715_alive(root);
 		mt_result(ok);
 		if (ok)
-			printf("mount_test: [35] a FLIPC read naming handle 0x%llx, "
+			printf("mount_test: [37] a FLIPC read naming handle 0x%llx, "
 			       "fid %llu with bit 32 set, was refused "
 			       "VFS_FLIPC_ERR_BADHANDLE, where fid %llu read 64 "
 			       "bytes (#715)\n",
 			       (unsigned long long)((1ULL << 32) + file),
 			       (unsigned long long)file, (unsigned long long)file);
 		else
-			printf("mount_test: [35] WRONG — a FLIPC read naming handle "
+			printf("mount_test: [37] WRONG — a FLIPC read naming handle "
 			       "0x%llx: %s %d, where it must be "
 			       "VFS_FLIPC_ERR_BADHANDLE (%d); fid %llu itself: %s "
 			       "%d, %llu bytes; ext_server %s (#715)\n",
@@ -1023,7 +1023,7 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 			       mt715_alive(root) ? "answers" : "does not answer");
 
 		/*
-		 * [36] An offset past the 4 GiB the backend takes: a read of
+		 * [38] An offset past the 4 GiB the backend takes: a read of
 		 * the file and a write on the directory at 2^44, which
 		 * bext2_lblkno() would make block 0, refused as the Mach path
 		 * refuses a read there -- one limit, fs_offset_ok(), asked of
@@ -1041,13 +1041,13 @@ mt_flipc_bounds_arms(mach_port_t root, int have_root)
 		     far == KERN_INVALID_ARGUMENT && mt715_alive(root);
 		mt_result(ok);
 		if (ok)
-			printf("mount_test: [36] a FLIPC read and write at offset "
+			printf("mount_test: [38] a FLIPC read and write at offset "
 			       "0x%llx, past the 4 GiB the backend takes, were "
 			       "refused VFS_FLIPC_ERR_INVAL, as the Mach path "
 			       "refuses a read there: KERN_INVALID_ARGUMENT "
 			       "(#715)\n", (unsigned long long)MT715_FAR);
 		else
-			printf("mount_test: [36] WRONG — a FLIPC read and write at "
+			printf("mount_test: [38] WRONG — a FLIPC read and write at "
 			       "offset 0x%llx: %s %d and %s %d, where both must be "
 			       "VFS_FLIPC_ERR_INVAL (%d); the Mach path's read %d, "
 			       "where it must be KERN_INVALID_ARGUMENT (%d) "
@@ -1748,7 +1748,7 @@ main(int argc, char **argv)
 	}
 
 	mt_rights_arms(mine, root, have_root, eps_why);	/* [27] to [31], #911 */
-	mt_flipc_bounds_arms(root, have_root);		/* [32] to [36], #715 */
+	mt_flipc_bounds_arms(root, have_root);		/* [34] to [38], #715 */
 
 	if (have_root)
 		(void)mach_port_deallocate(mach_task_self(), root);
