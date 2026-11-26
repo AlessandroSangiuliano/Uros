@@ -203,6 +203,10 @@ cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 static mach_port_t revoke_subscribers[CAP_MAX_REVOKE_SUBSCRIBERS];
 static int         n_revoke_subscribers = 0;
 
+/* #983: revocations told to no subscriber, their owner dead
+ * (cap_revoke_tell()). */
+static natural_t   cap_untold;
+
 static int
 revoke_subscribers_contains(mach_port_t p)
 {
@@ -880,18 +884,34 @@ cap_revoke_tree(struct cap_entry *root, uint64_t dead, int *count)
  * one notification per cap in the cascade so a subscriber that
  * only knows about a specific child can still react.  `count' is
  * what cap_revoke_tree() revoked: none, and there is nothing to tell.
+ *
+ * #983: and `dead' the identity of a task whose death revoked the tree, or 0.
+ * What it owned is told to no subscriber, as it is not told to the kernel
+ * ("A capability ends with its lender"): a subscriber keeps for it only what
+ * the dead task opened, and that ends with the dead task's ports -- the block
+ * server's handle with its no-senders -- as it did before #983, when a death
+ * revoked nothing.  A notice of each was a line for each that missed a full
+ * queue, and a dying task's tens of them overran the kernel's log under
+ * char_server (#762), with the lines other tasks were waiting on in it.
+ * Counted, for cap_census().
  */
 static void
-cap_revoke_tell(struct cap_entry *root, int count)
+cap_revoke_tell(struct cap_entry *root, int count, uint64_t dead)
 {
     struct cap_entry *e;
 
-    if (n_revoke_subscribers > 0 && count > 0) {
+    if (count > 0) {
         /* The same walk again, every node of the tree now revoked: a
          * notice for each, as there was for each before (#745). */
         for (e = root; e != NULL;
-             e = cap_subtree_next(root->token.cap_id, e, 1))
-            fanout_revoke_notify(e->token.cap_id);
+             e = cap_subtree_next(root->token.cap_id, e, 1)) {
+            if (dead != 0 && e->token.owner == dead) {
+                cap_untold++;				/* #983 */
+                continue;
+            }
+            if (n_revoke_subscribers > 0)
+                fanout_revoke_notify(e->token.cap_id);
+        }
     }
 }
 
@@ -1128,7 +1148,7 @@ cap_expiry_sweep(void)
                    (unsigned long long)e->token.cap_id,
                    (unsigned long long)((now - e->token.expires) / 1000000ULL),
                    n);
-            cap_revoke_tell(e, n);
+            cap_revoke_tell(e, n, 0);
         }
         if (!e->token.revoked)
             continue;
@@ -1184,7 +1204,7 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
 
     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
            revoked, (unsigned long long)cap_id);
-    cap_revoke_tell(root, revoked);
+    cap_revoke_tell(root, revoked, 0);
     cap_forget_tree(root);		/* #974 */
     return refused;
 }
@@ -1514,7 +1534,7 @@ cap_watch_fire(struct cap_watch *w)
         if (!e->token.revoked) {
             /* A refusal by the kernel is said by cap_revoke_tree(). */
             (void)cap_revoke_tree(e, w->exact ? w->identity : 0, &n);
-            cap_revoke_tell(e, n);
+            cap_revoke_tell(e, n, w->exact ? w->identity : 0);
             revoked += n;
         }
         if (ngone == room) {
