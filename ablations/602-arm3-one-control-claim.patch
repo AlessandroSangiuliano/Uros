@@ -9,12 +9,12 @@ Note: at more than one processor only. At one, a released slot finishes its grac
 diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_claim_race/io_claim_race.c
 --- a/uros/src/tests/io_claim_race/io_claim_race.c
 +++ b/uros/src/tests/io_claim_race/io_claim_race.c
-@@ -858,7 +858,7 @@
- 
+@@ -908,7 +908,7 @@ main(int argc, char **argv)
  		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
  					  &released, &klog_from);
+ 		race_window_start(&rw, RETIRE_STEP_MS);
 -		while (kr == KERN_RESOURCE_SHORTAGE
 +		while (0 && kr == KERN_RESOURCE_SHORTAGE
- 		       && waited < RETIRE_WAIT_MS) {
- 			(void) thread_switch(MACH_PORT_NULL,
- 					     SWITCH_OPTION_WAIT, RETIRE_STEP_MS);
+ 		       && (waited = race_window_ms(&rw)) < RETIRE_WAIT_MS) {
+ 			race_window_wait(&rw);
+ 			kr = device_io_port_claim(device, RACE_PORT,
