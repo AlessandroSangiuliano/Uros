@@ -34,9 +34,10 @@
 # With --before REV, an ablated arm read NOT CAUGHT raises the question a
 # union's giro asks first: did the tree under test lose the catch, or was it
 # so before?  The run boots the ablated arm again over REV, the tree the one
-# under test was made from -- the epic, in a giro -- with the same patches,
-# boots and accelerators that missed, and says which of the two it is (#1010:
-# on 25/11 that took a boot of the epic by hand, for 922-wait-whole-arm).
+# under test was made from -- the epic, in a giro -- with REV's own patches of
+# the same names, the same boots, under the accelerators that missed, and says
+# which of the two it is (#1010: on 25/11 that took a boot of the epic by
+# hand, for 922-wait-whole-arm).
 #
 # Usage:
 #   ablate.sh [--base REV] [--before REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
@@ -720,20 +721,44 @@ echo "ablate: ablated tree caught $caught of $((caught + missed))"
 [ $AB = 1 ] && echo "ablate: fixed tree passed $passed of $((passed + failed + unpremised))"
 [ $unpremised = 0 ] || echo "ablate: the premise was missing in $unpremised of $((passed + failed + unpremised)) fixed boot(s): the ablation could not be asked there (#1010)"
 # #1010: --before.  The ablated arm read NOT CAUGHT is booted again over the
-# tree the one under test was made from, by this same script: the same patches
-# and boots, under the accelerators that missed, with the fixed arm only where
-# this run had it (--ab, or a premise, which the run over there reads again).
-# Its worktrees, rows and log are its own, its rows naming that tree; this
-# run's worktrees go first.  Its answer is said as one of the two, and it does
-# not change this run's status: a catch lost or never had is not caught here.
+# tree the one under test was made from, by this same script: the same boots,
+# under the accelerators that missed, with the fixed arm only where this run
+# had it (--ab, or a premise, which the run over there reads again).  Its
+# worktrees, rows and log are its own, its rows naming that tree; this run's
+# worktrees go first.  Its answer is said as one of the two, and it does not
+# change this run's status: a catch lost or never had is not caught here.
+#
+# Over there it boots that tree's own patches of the same names, its
+# ablations/ as they were: the question is whether the catch was had before,
+# and a union may have made a patch again -- 922-widen-slow-stat, remade by
+# #996 around a new include, no longer applies to the epic it came from.  A
+# patch that tree does not have is new since, and nothing is asked there.
+bnew=()
 if [ -n "$BEFORE" ] && [ $missed -gt 0 ] && [ -z "$STOP" ]; then
 	cleanup
+	bdir="$RUNDIR/before"
+	mkdir -p "$bdir"
+	git -C "$REPO" archive "$BREV" ablations | tar -x -C "$bdir"
+	bpatches=() bchanged=()
+	for p in "${PATCHES[@]}"; do
+		n=$(basename "$p")
+		if [ -e "$bdir/ablations/$n" ]; then
+			bpatches+=("$bdir/ablations/$n")
+			cmp -s "$p" "$bdir/ablations/$n" || bchanged+=("$n")
+		else
+			bnew+=("$n")
+		fi
+	done
+fi
+if [ ${#bnew[@]} -gt 0 ]; then
+	echo "ablate: $missed ablated boot(s) not caught over $SHORT, and $BSHORT has no ${bnew[*]}: new since, nothing to ask there (--before)"
+elif [ -n "$BEFORE" ] && [ $missed -gt 0 ] && [ -z "$STOP" ]; then
 	bargs=(--base "$BREV" --boots "$BOOTS" --accel "$MISSED_ACCS")
 	[ $AB_GIVEN = 0 ] || bargs+=(--ab)
 	[ $KEEP = 0 ] || bargs+=(--keep)
-	bargs+=("${PATCHES[@]}")
+	bargs+=("${bpatches[@]}")
 	[ $RUN_GIVEN = 0 ] || bargs+=(-- "${RUN[@]}")
-	echo "ablate: $missed ablated boot(s) not caught over $SHORT: the ablated arm booted again over $BSHORT, under $MISSED_ACCS (--before)"
+	echo "ablate: $missed ablated boot(s) not caught over $SHORT: the ablated arm booted again over $BSHORT, under $MISSED_ACCS, with its own patches${bchanged[*]:+, of which ${bchanged[*]} changed since} (--before)"
 	set +e
 	waited "$SELF" "${bargs[@]}" > "$RUNDIR/before.out" 2>&1 < /dev/null
 	brc=$?
