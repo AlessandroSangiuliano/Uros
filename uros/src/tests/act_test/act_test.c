@@ -10518,7 +10518,8 @@ a53_round(mach_port_t me)
 	mach_msg_type_number_t		n;
 	kern_return_t			kr;
 	unsigned			i, made = 0;
-	int				waited = 0, gone = 0;
+	int				gone = 0;
+	struct act_window		w;
 
 	kr = task_create(me, NULL, 0, FALSE, &child);
 	if (kr == KERN_SUCCESS)
@@ -10548,21 +10549,25 @@ a53_round(mach_port_t me)
 	}
 	for (i = 0; i < made; i++)
 		(void) thread_resume(th[i]);
-	while (waited < A53_WAIT_MS) {
+	/*
+	 * #1009: A53_WAIT_MS by the clock.  It was 5000 waits of 1 ms, which
+	 * lasted a tick each, 50 s, and since 963ca2cc two.
+	 */
+	act_window_start(&w, 1);
+	while (!act_window_over(&w, A53_WAIT_MS)) {
 		n = TASK_BASIC_INFO_COUNT;
 		if (task_info(child, TASK_BASIC_INFO, (task_info_t) &info, &n)
 		    != KERN_SUCCESS) {
 			gone = 1;
 			break;
 		}
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
-		waited++;
+		act_window_wait(&w);
 	}
 	for (i = 0; i < made; i++)
 		(void) mach_port_deallocate(me, th[i]);
 	if (!gone) {
 		printf("act_test: [53] a task whose threads all faulted was "
-		       "still there after %d waits — WRONG\n", waited);
+		       "still there after %ld ms — WRONG\n", act_window_ms(&w));
 		(void) task_terminate(child);
 	}
 	(void) mach_port_deallocate(me, child);
