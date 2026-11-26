@@ -2,6 +2,8 @@ Kind: widen
 Issue: #687
 Holds open: an aborted RPC's window between its reply being written and the wakeup that comes with it -- a thread the hot path parked, let go by an abort, comes back for its reply 100 ms late, so that a reply sent after the abort finds it still queued, and the reply's deliverer, finding its receiver already out of its wait, holds the wakeup 300 ms; each side says so, so that a fixed arm that passes shows the window was open; in the fixed tree the receiver waits for that wakeup under imq_lock; the deliverer says when its wakeup is about to end a later wait; only the first 16 of each in a boot, since act_test [11] aborts a thread some 2000 times
 Run: --entry 14 600 -smp 4
+Premise: #687 widen: a message goes to thread 0x[0-9a-f]+, which an abort or a timeout has let go, and its wakeup waits [0-9]+ us
+Premise: #687 widen: an RPC aborted on the hot path comes back for its reply [0-9]+ us late, thread 0x[0-9a-f]+
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
 index 37620827..5fea599c 100644

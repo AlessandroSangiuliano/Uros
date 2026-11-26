@@ -2,6 +2,7 @@ Kind: widen
 Issue: #924
 Holds open: the window between a wake choosing a multi-waiter's slot and waking it -- 20 ms of delay() before the wake, only for a wake between threads of one task, so that cap_test's [37] meets it and the rest of the boot (ext_server's FLIPC reactor and its clients, other tasks) does not; with the fix the delay is spent holding futexv_lock, and the slot cannot change owner
 Run: --entry 14 600 -smp 4
+Premise: cap_test: \[37\] [0-9]+ WAITVs of [0-9]+ ms on a word nobody changed all timed out, beside [0-9]+ waits and [1-9][0-9]* wakes of another word
 
 diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
 index 1a91bed8..e10986b1 100644

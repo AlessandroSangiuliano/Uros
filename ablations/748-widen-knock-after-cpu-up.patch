@@ -2,6 +2,7 @@ Kind: widen
 Issue: #748
 Holds open: the window run 39620820519's processor 3 was knocked in -- after cpu_up() has made a processor RUNNING and lowered its level again, before cpu_launch_first_thread() gives it a thread; every processor the scheduler gate knocks sends the AST message to itself there and waits until its handler has run, and machine_processors_ready() says how many did, in thread context; the fixed tree must pass, ast_check() answering each by doing nothing; at four processors, so that three are knocked
 Run: --entry 0 600 -smp 4
+Premise: 748-widen: [1-9][0-9]* processors knocked between cpu_up\(\) and their first thread
 
 diff --git a/uros/src/mach_kernel/kern/startup.c b/uros/src/mach_kernel/kern/startup.c
 index 6a57c428..51b3b7c5 100644

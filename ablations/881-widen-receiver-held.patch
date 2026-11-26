@@ -2,6 +2,7 @@ Kind: widen
 Issue: #881
 Holds open: the moment between a receiver parked by the hot path being given its message and taking it off the count -- 60 ms, on a port with a limit of one, so that at more than one processor a sender finds the count full and parks; act_test [45] is the only one that sets such a limit
 Run: --entry 14 600 -smp 4
+Premise: act_test: \[45\] a sender parked by a message the hot path held went on when it was taken
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
 index a86c9251..47be94b4 100644

@@ -2,6 +2,7 @@ Kind: widen
 Issue: #687
 Holds open: the hot path's park window, where a thread marked TH_WAIT for its reply gave back the reference on its reply port under the port's lock -- a status call that finds a thread parked on the port and not yet asleep holds the port's lock 10 ms longer, so that the parked thread finds it held if it takes it before it switches away; each hold says so, so that a fixed arm that passes shows the window was open, and says again when the parked thread is found asleep on the lock with its receive in progress; in the fixed tree the thread takes the lock only after its wait has ended; only the first 16 holds in a boot, since act_test [12] reads the status thousands of times
 Run: --entry 14 600 -smp 4
+Premise: #687 widen: thread 0x[0-9a-f]+ is parked on port 0x[0-9a-f]+ and not asleep, and the port's lock is held [0-9]+ us
 
 diff --git a/uros/src/mach_kernel/ipc/mach_port.c b/uros/src/mach_kernel/ipc/mach_port.c
 index cd56af8d..8fba81a6 100644
