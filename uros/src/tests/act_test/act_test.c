@@ -8633,7 +8633,7 @@ arm_forty_two_simple_message_scattered(void)
 #define	A43_TRIES	3
 #define	A43_LIST	3000	/* kalloc.4096 */
 #define	A43_POLLS	2000	/* depressed: a millisecond at most */
-#define	A43_ENDS	4000	/* and the rest asleep: twenty seconds */
+#define	A43_ASLEEP_MS	20000	/* and then asleep, by the clock (#1009) */
 
 static volatile mach_port_t	a43_thread, a43_port;
 static volatile unsigned	a43_ended;
@@ -8708,6 +8708,7 @@ a43_round(mach_port_t host, const char *zone, int what, int *grew)
 	} m;
 	int		before, after;
 	unsigned	i, j;
+	struct act_window w;
 
 	if (!a43_zone(host, zone, &before))
 		return 0;
@@ -8745,15 +8746,25 @@ a43_round(mach_port_t host, const char *zone, int what, int *grew)
 			 * of its 330 minutes, with no line to say why.  And an
 			 * end that never comes is a thing to say.
 			 */
-			for (j = 0; j < A43_ENDS && a43_ended == ended; j++)
+			/*
+			 * #1009: the sleeping half by the clock.  It was
+			 * 2000 waits of a tick, twenty seconds, and since
+			 * 963ca2cc each lasts two.
+			 */
+			for (j = 0; j < A43_POLLS && a43_ended == ended; j++)
 				(void) thread_switch(MACH_PORT_NULL,
-						     j < A43_POLLS ?
-						     SWITCH_OPTION_DEPRESS :
-						     SWITCH_OPTION_WAIT, 1);
+						     SWITCH_OPTION_DEPRESS, 1);
+			act_window_start(&w, 1);
+			while (a43_ended == ended &&
+			       !act_window_over(&w, A43_ASLEEP_MS)) {
+				act_window_wait(&w);
+				j++;
+			}
 			if (a43_ended == ended) {
 				printf("act_test: [43] a receive whose port was "
 				       "destroyed under it had not ended after "
-				       "%u waits — WRONG\n", j);
+				       "%u waits, %ld ms of them asleep — WRONG\n",
+				       j, act_window_ms(&w));
 				return 0;
 			}
 			continue;
