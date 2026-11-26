@@ -7595,19 +7595,31 @@ arm_thirty_nine_send(mach_port_t port, mach_msg_option_t option, int id)
  * The last message a server sees: the queue may be full, so until it is taken.
  * Answers the last send's result: MACH_MSG_SUCCESS once one went in (#925).
  */
+/*
+ * #1009: the 20 s the arms 39 and 40 give a thread, by the clock.  They were
+ * 2000 waits of a tick, and since 963ca2cc each lasts two.
+ */
+#define	ARM39_WAIT_MS	20000
+
+static unsigned	arm_thirty_nine_stop_tries;
+static long	arm_thirty_nine_stop_ms;
+
 static mach_msg_return_t
 arm_thirty_nine_stop_it(void)
 {
 	mach_msg_return_t	mr = MACH_SEND_TIMED_OUT;
-	unsigned		i;
+	struct act_window	w;
 
-	for (i = 0; i < 2000; i++) {
+	act_window_start(&w, 1);
+	for (;;) {
 		mr = arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP);
-		if (mr == MACH_MSG_SUCCESS)
+		arm_thirty_nine_stop_tries = w.waits + 1;
+		arm_thirty_nine_stop_ms = act_window_ms(&w);
+		if (mr == MACH_MSG_SUCCESS ||
+		    arm_thirty_nine_stop_ms >= ARM39_WAIT_MS)
 			return mr;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+		act_window_wait(&w);
 	}
-	return mr;
 }
 
 /*
@@ -7729,8 +7741,10 @@ arm_thirty_nine_end_receiver(pthread_t receiver)
 	int			i, ok = 0;
 
 	if (mr != MACH_MSG_SUCCESS) {
-		printf("act_test: [39] the STOP was refused 2000 times, the "
-		       "last with 0x%x — WRONG\n", (int) mr);
+		printf("act_test: [39] the STOP was refused %u times in %ld ms, "
+		       "the last with 0x%x — WRONG\n",
+		       arm_thirty_nine_stop_tries, arm_thirty_nine_stop_ms,
+		       (int) mr);
 		arm_thirty_nine_port_said();
 	} else {
 		for (i = 0; i < PATIENCE && !arm_thirty_nine_returned; i++)
@@ -7793,6 +7807,7 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 					      "a call that was not a receive";
 	unsigned	try, i, before, r0, t0, r1, t1, reach;
 	unsigned long long start, took = 0;
+	struct act_window w;
 
 	for (try = 0; try < A39_TRIES; try++) {
 		/*
@@ -7834,9 +7849,10 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 			       arm_thirty_nine_tsc() - start < 200000000ULL)
 				;
 		/* On one processor it can run only now. */
-		for (i = 0; i < 2000 && arm_thirty_nine_got == before; i++)
-			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_WAIT, 1);
+		act_window_start(&w, 1);
+		while (arm_thirty_nine_got == before &&
+		       !act_window_over(&w, ARM39_WAIT_MS))
+			act_window_wait(&w);
 		took = arm_thirty_nine_tsc() - start;
 		if (arm_thirty_nine_got == before) {
 			printf("act_test: [39] the thread woken before %s "
@@ -8163,10 +8179,11 @@ arm_forty_rpc(mach_port_t reply)
 static int
 arm_forty_ran(unsigned before)
 {
-	unsigned	i;
+	struct act_window	w;
 
-	for (i = 0; i < 2000 && arm_forty_got == before; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	act_window_start(&w, 1);
+	while (arm_forty_got == before && !act_window_over(&w, ARM39_WAIT_MS))
+		act_window_wait(&w);
 	return arm_forty_got != before;
 }
 
