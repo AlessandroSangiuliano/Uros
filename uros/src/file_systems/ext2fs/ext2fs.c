@@ -2956,10 +2956,15 @@ ext2fs_file_is_directory(fs_private_t private)
  * instead of matching one.  Stops when max entries are written; the
  * caller can detect truncation by comparing *out_count to what it
  * expected or by re-reading with a larger buffer.
+ *
+ * #996: the first `skip' entries are walked and not written, so that a
+ * listing that goes on from an entry needs room for what it returns and
+ * not for everything before it.
  */
 static int
 ext2fs_readdir_impl(struct ext2fs_file *fp,
 		    struct ext2_bref *br,
+		    unsigned int skip,
 		    struct fs_dirent *out,
 		    unsigned int max,
 		    unsigned int *out_count)
@@ -2990,7 +2995,9 @@ ext2fs_readdir_impl(struct ext2fs_file *fp,
 		if (rc != 0)
 			return rc;
 
-		if (le32_to_cpu(dp->inode) != 0) {
+		if (le32_to_cpu(dp->inode) != 0 && skip > 0)
+			skip--;
+		else if (le32_to_cpu(dp->inode) != 0) {
 			nlen = dp->name_len;
 			if (nlen > FS_DIRENT_NAME_MAX)
 				nlen = FS_DIRENT_NAME_MAX;
@@ -3015,12 +3022,22 @@ ext2fs_readdir(fs_private_t private,
 	       unsigned int max,
 	       unsigned int *out_count)
 {
+	return ext2fs_readdir_from(private, 0, out, max, out_count);
+}
+
+int
+ext2fs_readdir_from(fs_private_t private,
+		    unsigned int skip,
+		    struct fs_dirent *out,
+		    unsigned int max,
+		    unsigned int *out_count)
+{
 	struct ext2fs_file	*fp = (struct ext2fs_file *)private;
 	struct ext2_bref	br;
 	int			rc;
 
 	bref_init(&br);
-	rc = ext2fs_readdir_impl(fp, &br, out, max, out_count);
+	rc = ext2fs_readdir_impl(fp, &br, skip, out, max, out_count);
 	bref_release(fp, &br);
 	return rc;
 }

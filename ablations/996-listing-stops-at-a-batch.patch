@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #996
+Takes out: the entry read past a reply's: ext_server reads as many entries as a reply carries, and finding them all answers that the directory ends there.  xfile_test [12] reads a directory of 72 entries listed as 64.
+Run: --entry 14 600 -smp 4
+Expect: xfile_write: \[12\] WRONG . /mnt/disk2/many_x86_64 listed: 64 entries in 1 calls
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -1365,7 +1365,7 @@
+ 	}
+ 
+ 	rc = ext2fs_readdir_from(priv, (unsigned int)cookie, tmp,
+-				 VFS_DIRENT_MAX + 1, &got);
++				 VFS_DIRENT_MAX, &got);
+ 	vfs_op_end(mnt, dir_handle);
+ 	if (rc != 0) {
+ 		free(tmp);

@@ -50,6 +50,10 @@
 #include <mach/thread_switch.h>
 #include <sa_mach.h>
 #include <mach_init.h>			/* name_server_port */
+#include <mach/mach_host.h>		/* processor_set_*(): [11] */
+#include <mach/mach_interface.h>	/* urmach_task_get_name(): [11] */
+#include <mach/task_info.h>		/* ext_server's size: [11] */
+#include <mach/task_name.h>		/* URMACH_TASK_NAME_MAX: [11] */
 #include <servers/netname.h>
 #include <servers/netname_defs.h>	/* netname_name_t */
 #include <libvfs.h>
@@ -906,9 +910,477 @@ xf_listing(const char *path, int arm)
 	}
 }
 
+/* #996: the directory `path' is in, into `dir'; 0, or -1 when it has none. */
+static int
+xf_dir_of(const char *path, char *dir, size_t size)
+{
+	const char	*slash = strrchr(path, '/');
+	size_t		len;
+
+	if (slash == NULL || (size_t)(slash - path) + 2 > size)
+		return -1;
+	len = slash == path ? 1 : (size_t)(slash - path);
+	memcpy(dir, path, len);
+	dir[len] = '\0';
+	return 0;
+}
+
+/*
+ * [11] #996: the task named `name' among those the master host port lists --
+ * the line's -H gives it -- or MACH_PORT_NULL, and why in *why; *listed is
+ * whether the tasks could be listed at all.  The other rights asked for on the
+ * way are given back.
+ */
+static mach_port_t
+xf_task_named(const char *name, const char **why, int *listed)
+{
+	mach_port_t		host = MACH_PORT_NULL, dev = MACH_PORT_NULL;
+	mach_port_t		wired = MACH_PORT_NULL, paged = MACH_PORT_NULL;
+	mach_port_t		sec = MACH_PORT_NULL, pset_name = MACH_PORT_NULL;
+	mach_port_t		pset = MACH_PORT_NULL, me = mach_task_self();
+	mach_port_t		found = MACH_PORT_NULL;
+	task_port_array_t	tasks = 0;
+	mach_msg_type_number_t	ntasks = 0, i;
+	kern_return_t		kr;
+
+	*why = "no task has that name";
+	*listed = 0;
+	kr = bootstrap_ports(bootstrap_port, &host, &dev, &wired, &paged, &sec);
+	if (kr == KERN_SUCCESS)
+		kr = processor_set_default(host, &pset_name);
+	if (kr == KERN_SUCCESS &&
+	    host_processor_set_priv(host, pset_name, &pset) != KERN_SUCCESS) {
+		*why = "the host port this line has is not the master host port "
+		       "(no -H)";
+		kr = KERN_FAILURE;
+	} else if (kr == KERN_SUCCESS &&
+		   processor_set_tasks(pset, &tasks, &ntasks) != KERN_SUCCESS) {
+		*why = "the tasks could not be listed";
+		kr = KERN_FAILURE;
+	} else if (kr != KERN_SUCCESS)
+		*why = "no host port to list the tasks with";
+	else
+		*listed = 1;
+	for (i = 0; kr == KERN_SUCCESS && i < ntasks; i++) {
+		char			got[URMACH_TASK_NAME_MAX];
+		mach_msg_type_number_t	cnt = sizeof got;
+
+		memset(got, 0, sizeof got);
+		if (found == MACH_PORT_NULL &&
+		    urmach_task_get_name(tasks[i], got, &cnt) == KERN_SUCCESS &&
+		    strcmp(got, name) == 0)
+			found = tasks[i];
+		else
+			(void)mach_port_deallocate(me, tasks[i]);
+	}
+	if (tasks != 0)
+		(void)vm_deallocate(me, (vm_address_t)tasks,
+				    ntasks * sizeof(*tasks));
+	if (MACH_PORT_VALID(pset))
+		(void)mach_port_deallocate(me, pset);
+	if (MACH_PORT_VALID(pset_name))
+		(void)mach_port_deallocate(me, pset_name);
+	if (MACH_PORT_VALID(host))
+		(void)mach_port_deallocate(me, host);
+	if (MACH_PORT_VALID(dev))
+		(void)mach_port_deallocate(me, dev);
+	if (MACH_PORT_VALID(wired))
+		(void)mach_port_deallocate(me, wired);
+	if (MACH_PORT_VALID(paged))
+		(void)mach_port_deallocate(me, paged);
+	if (MACH_PORT_VALID(sec))
+		(void)mach_port_deallocate(me, sec);
+	return found;
+}
+
+/*
+ * [11] #996: `task''s size as the kernel says it, the least of
+ * XF_SIZE_SAMPLES readings 20 ms apart, so that a reply in flight to another
+ * of its clients is not counted; 0 when the kernel would not say.
+ */
+#define XF_SIZE_SAMPLES		5
+
+static vm_size_t
+xf_size_of(mach_port_t task)
+{
+	struct task_basic_info	info;
+	mach_msg_type_number_t	count;
+	vm_size_t		least = 0;
+	int			i;
+
+	for (i = 0; i < XF_SIZE_SAMPLES; i++) {
+		count = TASK_BASIC_INFO_COUNT;
+		if (task_info(task, TASK_BASIC_INFO, (task_info_t)&info,
+			      &count) == KERN_SUCCESS &&
+		    (least == 0 || info.virtual_size < least))
+			least = info.virtual_size;
+		if (i + 1 < XF_SIZE_SAMPLES)
+			(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+					    20);
+	}
+	return least;
+}
+
+/*
+ * [11] #996: what listings leave in ext_server.  Its reply to fs_readdir is
+ * out of line and `Dealloc' (vfs.defs): the kernel takes out of ext_server the
+ * pages the reply carries.  Its buffer was made for a whole batch of
+ * VFS_DIRENT_MAX entries, and the pages past the entries sent stayed: four a
+ * listing of this directory, and all five a listing asked at its end, which
+ * carries none.  The kernel says ext_server's size before and after
+ * XF_LISTINGS listings of each kind, once a few have let its heap grow to
+ * what it needs; what stays must be under XF_LISTING_SLACK bytes a listing,
+ * where that buffer left 16 KiB and 20 KiB.  ext_server is found by the name
+ * it gives itself.
+ *
+ * 🔑 THE MEDIAN OF XF_LEAK_ROUNDS ROUNDS, and not one round, nor the least.
+ * ext_server serves other clients meanwhile, and what it grows by for them can
+ * stay: on OMEGA, one round of a fixed tree read 1064960 bytes, 260 pages,
+ * which is no listing's, where every other round read none.  And what it lets
+ * go for them can fall in a round too -- a client leaving FLIPC gives back two
+ * rings of 256 KiB -- where the least would pick that round and hide a leak.
+ * A leak is every listing's, so it is in every round; another client's growth
+ * or release falls in one, and the median is a round of neither.  And the
+ * bound is half a page a listing, where what stays of a buffer is pages, 4096
+ * bytes at the least: another client's growth must pass 512 KiB in three
+ * rounds of the five to be read as a leak.
+ */
+#define XF_LISTINGS		256
+#define XF_LISTING_SLACK	2048	/* bytes a listing: half a page */
+#define XF_WARM_LISTINGS	8
+#define XF_LEAK_ROUNDS		5
+_Static_assert(XF_LEAK_ROUNDS == 5, "[11]'s WRONG line names five rounds");
+
+/* #996 [11]: the median of the XF_LEAK_ROUNDS counts in `v', which it sorts. */
+static long long
+xf_median(long long *v)
+{
+	long long	t;
+	int		i, j;
+
+	for (i = 1; i < XF_LEAK_ROUNDS; i++)
+		for (j = i; j > 0 && v[j - 1] > v[j]; j--) {
+			t = v[j];
+			v[j] = v[j - 1];
+			v[j - 1] = t;
+		}
+	return v[XF_LEAK_ROUNDS / 2];
+}
+
+static void
+xf_listing_leak(const char *path, int arm)
+{
+	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
+	char			dir[VFS_PATH_MAX];
+	mach_port_t		task;
+	const char		*why;
+	vfs_fd_t		fd;
+	uint64_t		cookie, end;
+	vm_size_t		before, mid, after;
+	long long		all[XF_LEAK_ROUNDS], at_end[XF_LEAK_ROUNDS];
+	long long		sorted[XF_LEAK_ROUNDS], mid_all, mid_end;
+	int			i, r, n, entries, wrong = 0, unread = 0, listed;
+
+	if (xf_dir_of(path, dir, sizeof dir) != 0) {
+		printf("%s: [%d] WRONG — not asked: %s has no directory\n", tag,
+		       arm, path);
+		failed++;
+		return;
+	}
+	task = xf_task_named("ext_server", &why, &listed);
+	if (!MACH_PORT_VALID(task) && listed) {
+		/* ext_server names itself: one that did not is ours to fix. */
+		printf("%s: [%d] WRONG — no task is named ext_server among those "
+		       "the master host port lists, and ext_server names itself "
+		       "(#996)\n", tag, arm);
+		failed++;
+		return;
+	}
+	if (!MACH_PORT_VALID(task)) {
+		printf("%s: [%d] NOT ASKED — ext_server's size: %s\n", tag, arm,
+		       why);
+		return;
+	}
+	if (vfs_open_rc(dir, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS) {
+		printf("%s: [%d] WRONG — not asked: %s would not open\n", tag,
+		       arm, dir);
+		failed++;
+		(void)mach_port_deallocate(mach_task_self(), task);
+		return;
+	}
+
+	/* The directory's entries, in one listing, and the cookie at its end. */
+	cookie = 0;
+	entries = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	if (entries <= 0 || cookie != 0) {
+		printf("%s: [%d] WRONG — not asked: %s did not list whole in one "
+		       "call: %d entries, the cookie %llu after\n", tag, arm, dir,
+		       entries, (unsigned long long)cookie);
+		failed++;
+		(void)vfs_close(fd);
+		(void)mach_port_deallocate(mach_task_self(), task);
+		return;
+	}
+	end = ents[entries - 1].d_cookie;
+	for (i = 0; i < XF_WARM_LISTINGS; i++) {
+		cookie = 0;
+		(void)vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+		cookie = end;
+		(void)vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	}
+
+	for (r = 0; r < XF_LEAK_ROUNDS; r++) {
+		before = xf_size_of(task);
+		for (i = 0; i < XF_LISTINGS; i++) {
+			cookie = 0;
+			n = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+			if (n != entries || cookie != 0)
+				wrong++;
+		}
+		mid = xf_size_of(task);
+		for (i = 0; i < XF_LISTINGS; i++) {
+			cookie = end;
+			n = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+			if (n != 0 || cookie != 0)
+				wrong++;
+		}
+		after = xf_size_of(task);
+		if (before == 0 || mid == 0 || after == 0)
+			unread++;
+		all[r] = ((long long)mid - (long long)before) / XF_LISTINGS;
+		at_end[r] = ((long long)after - (long long)mid) / XF_LISTINGS;
+	}
+	(void)vfs_close(fd);
+	(void)mach_port_deallocate(mach_task_self(), task);
+
+	memcpy(sorted, all, sizeof sorted);
+	mid_all = xf_median(sorted);
+	memcpy(sorted, at_end, sizeof sorted);
+	mid_end = xf_median(sorted);
+	if (unread != 0) {
+		printf("%s: [%d] WRONG — the kernel would not say ext_server's "
+		       "size in %d of %d rounds (%d answered wrong)\n", tag, arm,
+		       unread, XF_LEAK_ROUNDS, wrong);
+		failed++;
+	} else if (wrong == 0 && mid_all < XF_LISTING_SLACK &&
+		   mid_end < XF_LISTING_SLACK) {
+		printf("%s: [%d] ext_server's size, as the kernel says it, over %d "
+		       "rounds of %d listings of %s's %d entries and %d at its "
+		       "end: the medians kept %lld and %lld bytes a listing, "
+		       "under %d\n", tag, arm, XF_LEAK_ROUNDS, XF_LISTINGS, dir,
+		       entries, XF_LISTINGS, mid_all, mid_end, XF_LISTING_SLACK);
+		passed++;
+	} else {
+		printf("%s: [%d] WRONG — ext_server kept %lld bytes a listing of "
+		       "%s's %d entries and %lld one at its end, the median of %d "
+		       "rounds of %d (%lld %lld %lld %lld %lld, %lld %lld %lld "
+		       "%lld %lld; %d answered wrong)\n", tag, arm, mid_all, dir,
+		       entries, mid_end, XF_LEAK_ROUNDS, XF_LISTINGS, all[0],
+		       all[1], all[2], all[3], all[4], at_end[0], at_end[1],
+		       at_end[2], at_end[3], at_end[4], wrong);
+		failed++;
+	}
+}
+
+/*
+ * [12] #996: a directory of more entries than a reply carries is listed
+ * whole.  XF_MANY files made here, in a directory of this target's own, with
+ * . and .., are XF_MANY + 2 entries, more than VFS_DIRENT_MAX: each file must
+ * be listed once.  ext_server read cookie + VFS_DIRENT_MAX entries and,
+ * finding as many as it read, answered that the directory ended there: a
+ * listing stopped at its 64th entry.  It is listed twice: from its start, and
+ * on from its first entry, one call taking one entry, so that a reply that
+ * begins past the start must hand back a cookie counted from its own -- one
+ * counted from the reply's first entry would list an entry twice.  The
+ * directory and its files may be there already, from a boot before on the
+ * same disk.  Its path goes to `made', for [13]; "" when it would not open.
+ */
+#define XF_MANY		70
+
+/*
+ * #996 [12]: the directory open at `fd' listed from its start, its first call
+ * asking `first' entries and the rest VFS_DIRENT_MAX: the files fNN counted in
+ * `seen', the entries in *total, the calls in *calls, the cookie at the end in
+ * *end.  The last call's answer, -1 for an error.
+ */
+static int
+xf_list_files(vfs_fd_t fd, unsigned int first, unsigned char *seen,
+	      int *total, int *calls, uint64_t *end)
+{
+	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
+	uint64_t		cookie = 0;
+	unsigned int		max = first;
+	int			i, k, n;
+
+	memset(seen, 0, XF_MANY);
+	*total = 0;
+	*calls = 0;
+	do {
+		n = vfs_readdir(fd, ents, max, &cookie);
+		(*calls)++;
+		max = VFS_DIRENT_MAX;
+		for (i = 0; i < n; i++) {
+			k = (ents[i].d_name[0] == 'f' &&
+			     ents[i].d_name[1] >= '0' && ents[i].d_name[1] <= '9' &&
+			     ents[i].d_name[2] >= '0' && ents[i].d_name[2] <= '9' &&
+			     ents[i].d_name[3] == '\0') ?
+			    (ents[i].d_name[1] - '0') * 10 +
+			    (ents[i].d_name[2] - '0') : -1;
+			if (k >= 0 && k < XF_MANY && seen[k] < 255)
+				seen[k]++;
+		}
+		*total += n > 0 ? n : 0;
+	} while (n > 0 && cookie != 0 && *calls < XF_LIST_CALLS);
+	*end = cookie;
+	return n;
+}
+
+static void
+xf_many(const char *path, int arm, char *made, size_t size)
+{
+	char			dir[VFS_PATH_MAX], name[VFS_PATH_MAX];
+	unsigned char		seen[XF_MANY], seen1[XF_MANY];
+	vfs_fd_t		fd;
+	uint64_t		end, end1;
+	int			i, n, n1, total, total1, calls, calls1;
+	int			unmade = 0, once = 0, once1 = 0;
+
+	made[0] = '\0';
+	if (xf_dir_of(path, name, sizeof name) != 0) {
+		printf("%s: [%d] WRONG — not asked: %s has no directory\n", tag,
+		       arm, path);
+		failed++;
+		return;
+	}
+	(void)snprintf(dir, sizeof dir, "%s/many_%s", name, XF_TARGET);
+	(void)vfs_mkdir(dir, 0755);
+	for (i = 0; i < XF_MANY; i++) {
+		(void)snprintf(name, sizeof name, "%s/f%02d", dir, i);
+		if (vfs_open_rc(name, VFS_O_RDWR | VFS_O_CREAT, 0644, &fd) !=
+		    KERN_SUCCESS)
+			unmade++;
+		else
+			(void)vfs_close(fd);
+	}
+	if (vfs_open_rc(dir, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS) {
+		printf("%s: [%d] WRONG — %s would not open, %d of %d files not "
+		       "made\n", tag, arm, dir, unmade, XF_MANY);
+		failed++;
+		return;
+	}
+	(void)snprintf(made, size, "%s", dir);
+	n = xf_list_files(fd, VFS_DIRENT_MAX, seen, &total, &calls, &end);
+	n1 = xf_list_files(fd, 1, seen1, &total1, &calls1, &end1);
+	(void)vfs_close(fd);
+	for (i = 0; i < XF_MANY; i++) {
+		once += seen[i] == 1;
+		once1 += seen1[i] == 1;
+	}
+	if (unmade == 0 && n >= 0 && n1 >= 0 && end == 0 && end1 == 0 &&
+	    total == XF_MANY + 2 && total1 == XF_MANY + 2 &&
+	    once == XF_MANY && once1 == XF_MANY) {
+		printf("%s: [%d] %s listed whole from its start and on from its "
+		       "first entry: %d and %d entries, in %d and %d calls, each "
+		       "of its %d files once each time\n", tag, arm, dir, total,
+		       total1, calls, calls1, XF_MANY);
+		passed++;
+	} else {
+		printf("%s: [%d] WRONG — %s listed: %d entries in %d calls, %d "
+		       "files once; on from its first entry %d in %d, %d once; "
+		       "%d not made; cookies %llu %llu at the end (-1 an error: "
+		       "%d %d)\n", tag, arm, dir, total, calls, once, total1,
+		       calls1, once1, unmade, (unsigned long long)end,
+		       (unsigned long long)end1, n, n1);
+		failed++;
+	}
+}
+
+/*
+ * [13] #996: listings asked at cookies no directory reaches are answered with
+ * no entries, and ext_server lists the directory after them as before them.
+ * They are asked of [12]'s directory, of 72 entries.
+ *
+ *   XF_FAR_COOKIE   past the directory, answered with no entries.
+ *   XF_EDGE_COOKIE  2^32 - 64 and 2^32 - 65, within the 32 bits ext2fs
+ *   XF_EDGE1_COOKIE counts in, answered so too.  Each brings to 0, in 32
+ *                   bits, a count of entries made from the cookie, and
+ *                   malloc(0) gives nothing: 2^32 - 64 the old code's cookie +
+ *                   VFS_DIRENT_MAX, on both targets, and 2^32 - 65 a room for
+ *                   cookie + 65, a reply's and the entry past it.  (At 2^32 -
+ *                   65 the old count is 2^32 - 1 entries: on i386 malloc()'s
+ *                   own rounding overflows, #1001, and on x86-64 a terabyte
+ *                   is given, lazily, and the old code answered the end.)
+ *   XF_WIDE_COOKIE  2^32, which no listing hands out, refused.
+ *
+ * ⚠️ What it does NOT catch is why XF_FAR_COOKIE is this one: on i386, where
+ * size_t is 32 bits, it made the old count's bytes wrap past 4 GiB.  Measured
+ * with a print that was never committed, the old code asked malloc() for 128
+ * bytes and ext2fs wrote this directory's 19008 into them -- and ext_server
+ * went on answering, this arm passing, in three boots.  The fix takes the
+ * count away: the room is a reply's whatever the cookie.
+ */
+#define XF_FAR_COOKIE	16268752ull	/* 2^32 / 264 bytes, less 64, up */
+#define XF_EDGE_COOKIE	4294967232ull	/* 2^32 - 64 */
+#define XF_EDGE1_COOKIE	4294967231ull	/* 2^32 - 65 */
+#define XF_WIDE_COOKIE	4294967296ull	/* 2^32 */
+
+static void
+xf_far_cookie(const char *dir, int arm)
+{
+	static vfs_dirent_t	ents[VFS_DIRENT_MAX];
+	vfs_fd_t		fd;
+	uint64_t		cookie, far_back, edge_back, edge1_back;
+	int			first, far, edge, edge1, wide, again;
+
+	if (dir[0] == '\0' ||
+	    vfs_open_rc(dir, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS) {
+		printf("%s: [%d] WRONG — not asked: no directory from the arm "
+		       "before to open\n", tag, arm);
+		failed++;
+		return;
+	}
+	cookie = 0;
+	first = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	cookie = XF_FAR_COOKIE;
+	far = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	far_back = far < 0 ? 0 : cookie;
+	cookie = XF_EDGE_COOKIE;
+	edge = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	edge_back = edge < 0 ? 0 : cookie;
+	cookie = XF_EDGE1_COOKIE;
+	edge1 = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	edge1_back = edge1 < 0 ? 0 : cookie;
+	cookie = XF_WIDE_COOKIE;
+	wide = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	cookie = 0;
+	again = vfs_readdir(fd, ents, VFS_DIRENT_MAX, &cookie);
+	(void)vfs_close(fd);
+	if (first > 0 && far == 0 && far_back == 0 && edge == 0 &&
+	    edge_back == 0 && edge1 == 0 && edge1_back == 0 && wide < 0 &&
+	    again == first) {
+		printf("%s: [%d] listings of %s at the cookies %llu, %llu and "
+		       "%llu: no entries, and the end; at %llu refused; the "
+		       "listing after them %d entries, as before\n", tag, arm,
+		       dir, XF_FAR_COOKIE, XF_EDGE_COOKIE, XF_EDGE1_COOKIE,
+		       XF_WIDE_COOKIE, again);
+		passed++;
+	} else {
+		printf("%s: [%d] WRONG — listings of %s at the cookies %llu, %llu, "
+		       "%llu and %llu: %d, %d, %d and %d entries (-1 an error), "
+		       "cookies back %llu %llu %llu (0 if none); before them %d "
+		       "entries, after %d\n", tag, arm, dir, XF_FAR_COOKIE,
+		       XF_EDGE_COOKIE, XF_EDGE1_COOKIE, XF_WIDE_COOKIE, far,
+		       edge, edge1, wide, (unsigned long long)far_back,
+		       (unsigned long long)edge_back,
+		       (unsigned long long)edge1_back, first, again);
+		failed++;
+	}
+}
+
 static void
 xf_write(const char *path)
 {
+	char		many[VFS_PATH_MAX];
 	unsigned char	hdr[XF_HDR];
 	vfs_fd_t	fd;
 	uint32_t	off = 0, n, i;
@@ -974,6 +1446,9 @@ xf_write(const char *path)
 	xf_neighbour_inodes(path, 8);
 	xf_indirect_owner(path, 9);
 	xf_listing(path, 10);
+	xf_listing_leak(path, 11);
+	xf_many(path, 12, many, sizeof many);
+	xf_far_cookie(many, 13);
 }
 
 static void

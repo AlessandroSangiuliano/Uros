@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #996
+Takes out: the refusal of a cookie past 32 bits: ext_server cuts it to 32, and 2^32 lists the directory from its start.  xfile_test [13]'s listing at 2^32 is answered with entries.
+Run: --entry 14 600 -smp 4
+Expect: xfile_write: \[13\] WRONG . listings of .* at the cookies 16268752, 4294967232, 4294967231 and 4294967296: 0, 0, 0 and [1-9][0-9]* entries
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -1348,7 +1348,7 @@
+ 	 * #996: the cookie is the count of entries a listing has had, and no
+ 	 * listing hands out one past 32 bits, which ext2fs counts in.
+ 	 */
+-	if (cookie != (vfs_u64_t)(unsigned int)cookie) {
++	if (0) {
+ 		vfs_op_end(mnt, dir_handle);
+ 		return KERN_INVALID_ARGUMENT;
+ 	}

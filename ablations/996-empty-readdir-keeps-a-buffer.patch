@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #996
+Takes out: no buffer for a reply of no entries: one entry's room is made and sent with nothing in it, so its page stays.  xfile_test [11] reads a page kept a listing at the directory's end.
+Run: --entry 14 600 -smp 4
+Expect: xfile_write: \[11\] WRONG . ext_server kept [0-9-]+ bytes a listing of /mnt/disk2.s [0-9]+ entries and 4096 one at its end
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -1380,12 +1380,8 @@
+ 	 * long as the entries, and a reply of none has none.
+ 	 */
+ 	emit = got > VFS_DIRENT_MAX ? VFS_DIRENT_MAX : got;
+-	if (emit == 0) {
+-		free(tmp);
+-		return KERN_SUCCESS;
+-	}
+ 	kr = vm_allocate(mach_task_self(), &buf,
+-			 emit * sizeof(vfs_dirent_t), TRUE);
++			 (emit > 0 ? emit : 1) * sizeof(vfs_dirent_t), TRUE);
+ 	if (kr != KERN_SUCCESS) {
+ 		free(tmp);
+ 		return kr;

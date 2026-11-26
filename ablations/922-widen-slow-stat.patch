@@ -4,7 +4,6 @@ Holds open: musl_test [22]'s stat thread at about a second a call -- ext_server'
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
-index 42e59c16..98b3e33d 100644
 --- a/uros/src/servers/ext_server/ext_server.c
 +++ b/uros/src/servers/ext_server/ext_server.c
 @@ -42,6 +42,7 @@
@@ -14,8 +13,8 @@ index 42e59c16..98b3e33d 100644
 +#include <mach/thread_switch.h>	/* 922-widen-slow-stat */
  #include <mach/message.h>
  #include <mach/cap_types.h>
- #include <sa_mach.h>
-@@ -1252,6 +1253,15 @@ vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
+ #include <mach/mach_interface.h>	/* urmach_task_set_name() (#996) */
+@@ -1278,6 +1279,15 @@
  
  	if (mnt == NULL)
  		return KERN_INVALID_ARGUMENT;
