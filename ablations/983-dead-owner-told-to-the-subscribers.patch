@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #983
+Takes out: the subscribers' not being told of what a dead task owned -- every capability a death revokes is told to every subscriber, a console line for each notice a full queue refuses; cap_test's [58] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[58\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -905,10 +905,6 @@
+          * notice for each, as there was for each before (#745). */
+         for (e = root; e != NULL;
+              e = cap_subtree_next(root->token.cap_id, e, 1)) {
+-            if (dead != 0 && e->token.owner == dead) {
+-                cap_untold++;				/* #983 */
+-                continue;
+-            }
+             if (n_revoke_subscribers > 0)
+                 fanout_revoke_notify(e->token.cap_id);
+         }
