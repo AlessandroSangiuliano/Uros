@@ -119,6 +119,7 @@ def session(a, build, entry):
         except FileNotFoundError:
             pass
         os.mkfifo(fifo + end)
+        run_lock.remove_at_end(fifo + end)  # #1016: gone with the run, however it ends
 
     log = (a.log or os.environ.get("UROS_X86_64_LOG")
            or os.path.join(build, "ddb-chora.log"))

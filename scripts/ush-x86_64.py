@@ -130,6 +130,7 @@ def session(a, build):
         except FileNotFoundError:
             pass
         os.mkfifo(fifo + end)
+        run_lock.remove_at_end(fifo + end)  # #1016: gone with the run, however it ends
 
     # ablate.sh names each boot's log in UROS_X86_64_LOG (#591).  Without it
     # every boot of an arm wrote the one file in its build, and only the last

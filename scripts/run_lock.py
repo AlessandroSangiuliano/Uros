@@ -28,6 +28,13 @@
 #     behind (measured: char-roundtrip.py sent TERM exited 143, its qemu alive
 #     and the lock still there).
 #
+# And a fifth, since #1016: the run's files in /tmp -- its FIFOs, its
+# monitor's socket -- go with it, however it ends, as its qemu does.  Each tool
+# removed its own, in code a signal could skip: stopped with their systemd
+# units, char-roundtrip.py, rip-sample.py and uart-stall.py left theirs in 8
+# stops of 8 on omen, and ramoops-readback.py in 3.  remove_at_end() names
+# one, and give_back() removes it.
+#
 # Imported, with sys.dont_write_bytecode set first: nothing is to be left in
 # scripts/.
 
@@ -37,6 +44,7 @@ LOCK = "/tmp/uros-x86_64-run.lock"
 PR_SET_PDEATHSIG = 1		# prctl(2): a signal for when the parent dies
 
 _machines = []			# the qemus start_qemu() started
+_paths = []			# #1016: the run's files, for give_back() to remove
 _STOP = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)	# give_back() waits them out
 
 
@@ -58,9 +66,10 @@ def take(who):
 
 
 def give_back(mine, who):
-    """The run's qemu stopped, if the run has not stopped it already, and
-    then the lock removed, only while it is still `mine' -- said, as `who',
-    when it is not.
+    """The run's qemu stopped, if the run has not stopped it already, the
+    files remove_at_end() named removed, and then the lock removed, only
+    while it is still `mine' -- said, as `who', when it is not.  The files
+    are the run's whoever holds the lock: they go either way.
 
     🔴 With TERM, HUP and INT ignored until it is done (#801).  _stop() stays
     the handler, so a second TERM raised SystemExit again in here -- and
@@ -76,6 +85,13 @@ def give_back(mine, who):
             if q.poll() is None:
                 q.kill()
                 q.wait()
+        for p in _paths:
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"{who}: {p} could not be removed: {e}", file=sys.stderr)
         try:
             ours = _owner() == mine
         except FileNotFoundError:
@@ -101,6 +117,14 @@ def _stop(signum, _frame):
     for sig in _STOP:
         signal.signal(sig, signal.SIG_IGN)
     raise SystemExit(128 + signum)
+
+
+def remove_at_end(path):
+    """`path', a file the run makes -- a FIFO, a monitor's socket -- named
+    for give_back() to remove, after the qemu, however the run ends; given
+    back as it came (#1016)."""
+    _paths.append(path)
+    return path
 
 
 def stop_like_ctrl_c():

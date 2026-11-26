@@ -114,7 +114,7 @@ def sample(a, build, kernel):
     subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")], env=env,
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    mon = "/tmp/uros-rip-%d.mon" % os.getpid()
+    mon = run_lock.remove_at_end("/tmp/uros-rip-%d.mon" % os.getpid())  # #1016
     argv = ["qemu-system-x86_64", "-cpu", "max", "-m", "512M", "-smp", str(a.smp),
             "-drive", "file=%s/disk-x86_64.img,if=none,id=urosdisk,format=raw" % build,
             "-device", "virtio-blk-pci,drive=urosdisk,bootindex=0",
