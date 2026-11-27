@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #715
+Takes out: the server's own copy of the forward channel's size as a FLIPC read's cap -- the cap is the header's again, which the client writes, so a read runs past the mapping; mount_test's [36] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: mount_test: \[36\] WRONG
+
+diff --git a/uros/src/servers/ext_server/ext_server.c b/uros/src/servers/ext_server/ext_server.c
+--- a/uros/src/servers/ext_server/ext_server.c
++++ b/uros/src/servers/ext_server/ext_server.c
+@@ -2451,7 +2451,7 @@
+ 			rep->status = VFS_FLIPC_ERR_BADHANDLE;
+ 		} else {
+ 			size_t fsize = ext2fs_file_size(priv);
+-			uint64_t cap = fwd->data_size;		/* #715: ours */
++			uint64_t cap = fwd->hdr->data_size;
+ 			if (cap > VFS_FLIPC_MAX_READ)
+ 				cap = VFS_FLIPC_MAX_READ;
+ 			if (offset >= fsize || count == 0) {

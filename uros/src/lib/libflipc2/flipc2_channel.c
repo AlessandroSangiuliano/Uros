@@ -126,6 +126,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
     /* Cache constants from header */
     ch->ring_entries = hdr->ring_entries;
     ch->ring_mask    = hdr->ring_mask;
+    ch->data_size    = hdr->data_size;		/* #715: the peer's to change after */
 
     /* Set up direct pointers based on layout */
     if (hdr->layout_flags & FLIPC2_LAYOUT_ISOLATED) {

@@ -298,6 +298,15 @@ typedef struct flipc2_channel {
     /* Cached constants from header (avoid ch->hdr-> on fast path) */
     uint32_t    ring_entries;
     uint32_t    ring_mask;
+    /*
+     * The data region's size, as this handle's creator set it up (#715).
+     * The header is shared memory the peer writes, data_size included: a
+     * bound measured against it is the peer's to move.  Taken once, by
+     * flipc2_init_handle(), from a header the peer has not mapped yet on
+     * the side that creates the channel, and from one the creator wrote on
+     * the side that attaches.
+     */
+    uint32_t    data_size;
 
     /* producer-side cached copy of cons_head (avoid false sharing) */
     uint32_t    cached_cons_head;
@@ -968,13 +977,17 @@ flipc2_data_ptr(flipc2_channel_t ch, uint64_t offset)
  * Returns NULL if offset + length exceeds the data region.
  * Use this for untrusted inputs; the unchecked flipc2_data_ptr()
  * is fine for hot paths with validated offsets.
+ *
+ * #715: measured against the handle's own copy of the region's size, never
+ * against the shared header's, which the peer writes -- ext_server's FLIPC
+ * write took its source from an offset and a length the client named, and a
+ * check against the header would have been the client's to pass.  Compared
+ * so that no sum can wrap.
  */
 static inline void *
 flipc2_data_ptr_safe(flipc2_channel_t ch, uint64_t offset, uint64_t length)
 {
-    if (offset + length > ch->hdr->data_size)
-        return (void *)0;
-    if (offset + length < offset)  /* overflow check */
+    if (offset > ch->data_size || length > ch->data_size - offset)
         return (void *)0;
     return (void *)(ch->data + offset);
 }
@@ -1414,7 +1427,13 @@ typedef struct flipc2_endpoint *flipc2_endpoint_t;
  * Registers a contact port with the Mach name server under the
  * given name.  Clients connect via flipc2_endpoint_connect().
  *
- * name:           endpoint name (up to 128 chars)
+ * #715: with a NULL name the endpoint is checked in nowhere, and a client
+ * reaches it only through a send right to its contact port, which the server
+ * hands to whom it chooses (flipc2_endpoint_port()); the client connects with
+ * flipc2_endpoint_connect_port().  A named endpoint lets any task that can
+ * reach the name server connect.
+ *
+ * name:           endpoint name (up to 128 chars), or NULL for none
  * max_clients:    maximum simultaneous connections (1..64)
  * channel_size:   default channel size for new connections
  * ring_entries:   default ring entries for new connections
@@ -1495,7 +1514,10 @@ flipc2_endpoint_destroy(
 /*
  * Server-side: get the endpoint's receive port.
  *
- * Useful for adding to a custom port set for multiplexed receive.
+ * Useful for adding to a custom port set for multiplexed receive.  And the
+ * contact port of an endpoint created without a name (#715): a server hands
+ * a client a send right made from it -- in a MIG reply, as
+ * MACH_MSG_TYPE_MAKE_SEND -- and only a task holding one can connect.
  */
 mach_port_t
 flipc2_endpoint_port(

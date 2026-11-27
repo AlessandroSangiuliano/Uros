@@ -2413,10 +2413,10 @@ kern_return_t vfs_mmap(mach_port_t fp, vfs_u64_t h, vfs_u32_t prot,
 /* /proc is a synthetic fs with no bulk data path — no FLIPC fast-path
  * (#232).  Report unavailable so libvfs stays on the Mach data path. */
 kern_return_t
-vfs_flipc_endpoint(mach_port_t fp, vfs_path_t endpoint, int *result)
+vfs_flipc_endpoint(mach_port_t fp, mach_port_t *endpoint, int *result)
 {
 	(void)fp;
-	endpoint[0] = '\0';
+	*endpoint = MACH_PORT_NULL;		/* #715: a port, where it was a name */
 	*result = -1;
 	return KERN_SUCCESS;
 }

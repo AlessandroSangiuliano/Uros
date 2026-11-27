@@ -699,7 +699,13 @@ Unchecked pointer to inline data at `offset`. Use on hot paths with validated of
 static inline void *
 flipc2_data_ptr_safe(flipc2_channel_t ch, uint64_t offset, uint64_t length);
 ```
-Bounds-checked version. Returns `NULL` if `offset + length > data_size` or overflow.
+Bounds-checked version. Returns `NULL` when `offset + length` passes the data
+region, compared so that no sum can wrap. The region's size is the handle's own
+copy (`ch->data_size`), taken once when the handle is set up, and never the
+shared header's, which the peer writes: a check against that one would be the
+peer's to pass (#715). On the side that creates the channel the copy is its
+own; on the side that attaches it is still the creator's word, unchecked
+against the mapping, which is #928.
 
 ```c
 static inline void *
@@ -721,7 +727,11 @@ flipc2_endpoint_create(const char *name,
                        uint32_t flags,
                        flipc2_endpoint_t *ep);
 ```
-Creates a named endpoint, registers it with the Mach name server. `max_clients`
+Creates an endpoint. With a `name`, registers it with the Mach name server, and
+any task that can reach the name server can connect. With `NULL` it is checked
+in nowhere, and a client reaches it only through a send right to its port
+(`flipc2_endpoint_port()`), which the creator hands to whom it chooses: ext_server
+hands a mount's to a task that asks on the mount's port (#715). `max_clients`
 is the maximum simultaneous connections (1–64). `channel_size` and `ring_entries`
 are defaults for new connections. Pass `FLIPC2_CREATE_ISOLATED` in `flags` for
 page-isolated channels with per-role protections; pass 0 for flat layout.
@@ -740,7 +750,8 @@ notifications on the connections' tokens transparently.
 ```c
 flipc2_return_t flipc2_endpoint_destroy(flipc2_endpoint_t ep);
 ```
-Destroys all connections, unregisters from name server, frees resources.
+Destroys all connections, checks a named endpoint out of the name server,
+frees resources.
 
 ```c
 mach_port_t flipc2_endpoint_port(flipc2_endpoint_t ep);
@@ -770,7 +781,8 @@ flipc2_endpoint_connect_port(mach_port_t server_port,
                              flipc2_channel_t *fwd_ch,
                              flipc2_channel_t *rev_ch);
 ```
-Same as `endpoint_connect` but takes a send right directly (skip name lookup).
+Same as `endpoint_connect` but takes a send right directly, with no name to
+look up: the only way to an endpoint created without a name (#715).
 
 ```c
 flipc2_return_t

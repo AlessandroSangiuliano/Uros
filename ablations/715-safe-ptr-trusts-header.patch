@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #715
+Takes out: the handle's own copy of the data region's size in flipc2_data_ptr_safe() -- the bound is drawn from the shared header again, which the peer writes; mount_test's [35], which says 0xFFFFFFFF there, must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: mount_test: \[35\] WRONG
+
+diff --git a/uros/src/mach_services/include/flipc2.h b/uros/src/mach_services/include/flipc2.h
+--- a/uros/src/mach_services/include/flipc2.h
++++ b/uros/src/mach_services/include/flipc2.h
+@@ -987,7 +987,7 @@
+ static inline void *
+ flipc2_data_ptr_safe(flipc2_channel_t ch, uint64_t offset, uint64_t length)
+ {
+-    if (offset > ch->data_size || length > ch->data_size - offset)
++    if (offset > ch->hdr->data_size || length > ch->hdr->data_size - offset)
+         return (void *)0;
+     return (void *)(ch->data + offset);
+ }

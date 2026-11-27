@@ -167,7 +167,7 @@ struct mount_context {
 	mach_port_t	port;			/* receive port for this mount */
 	char		driver_name[64];	/* block driver name */
 	char		service_name[64];	/* netname registration */
-	char		flipc_ep[80];		/* FLIPC v2 endpoint name (#232) */
+	flipc2_endpoint_t flipc_ep;		/* FLIPC v2 endpoint, NULL: none (#232, #715) */
 };
 
 static struct mount_context	mounts[MAX_MOUNTS];
@@ -1209,6 +1209,19 @@ vfs_close(mach_port_t fs_port, vfs_u64_t handle)
 	return ds_ext2_close(fs_port, (natural_t)handle);
 }
 
+/*
+ * Whether a file offset is one the backend can take, on either data path
+ * (#715): ds_ext2_read and ds_ext2_write take a 32-bit offset, and
+ * bext2_lblkno() answers the file's block as an int, so with 4 KiB blocks
+ * offset 2^44 + X is X's block.  The Mach path refused past 4 GiB; FLIPC
+ * passed any offset on.  Both ask this.
+ */
+static int
+fs_offset_ok(uint64_t offset)
+{
+	return offset <= 0xFFFFFFFFu;
+}
+
 kern_return_t
 vfs_read(
 	mach_port_t		fs_port,
@@ -1221,7 +1234,7 @@ vfs_read(
 	/* Existing ds_ext2_read takes natural_t offset (32-bit).  Until
 	 * the backend grows 64-bit offsets, refuse calls past 4 GiB and
 	 * truncate large reads to 32-bit count. */
-	if (offset > 0xFFFFFFFFu)
+	if (!fs_offset_ok(offset))
 		return KERN_INVALID_ARGUMENT;
 	return ds_ext2_read(fs_port, (natural_t)handle,
 			    (natural_t)offset, (natural_t)count,
@@ -1239,7 +1252,7 @@ vfs_write(
 {
 	kern_return_t kr;
 
-	if (offset > 0xFFFFFFFFu)
+	if (!fs_offset_ok(offset))
 		return KERN_INVALID_ARGUMENT;
 	kr = ds_ext2_write(fs_port, (natural_t)handle,
 			   (natural_t)offset, data, data_count);
@@ -2386,24 +2399,28 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
  * ================================================================ */
 
 /*
- * Control RPC (vfs.defs): hand libvfs the name of the FLIPC endpoint
- * that serves this mount.  Empty name + non-zero result means no
- * fast-path (libvfs stays on the Mach data path).
+ * Control RPC (vfs.defs): hand libvfs the FLIPC endpoint that serves this
+ * mount.  A null port + non-zero result means no fast-path (libvfs stays on
+ * the Mach data path).
+ *
+ * #715: the endpoint's port, made a send right by the reply, and only to a
+ * task that sent this on the mount's port.  The endpoint has no name
+ * (flipc_start_mount()), so this is the one way to it: FLIPC is open to whom
+ * the mount is, as the Mach path is, and to no one else.
  */
 kern_return_t
-vfs_flipc_endpoint(mach_port_t fs_port, vfs_path_t endpoint, int *result)
+vfs_flipc_endpoint(mach_port_t fs_port, mach_port_t *endpoint, int *result)
 {
 	struct mount_context *mnt = mnt_from_payload(fs_port);
 
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	if (mnt && mnt->flipc_ep[0]) {
-		strncpy(endpoint, mnt->flipc_ep, VFS_PATH_MAX - 1);
-		endpoint[VFS_PATH_MAX - 1] = '\0';
+	if (mnt->flipc_ep != NULL) {
+		*endpoint = flipc2_endpoint_port(mnt->flipc_ep);
 		*result = 0;
 	} else {
-		endpoint[0] = '\0';
+		*endpoint = MACH_PORT_NULL;
 		*result = -1;
 	}
 	return KERN_SUCCESS;
@@ -2429,8 +2446,19 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 	uint64_t offset   = req->param[2];
 	uint64_t count    = req->data_length;
 	uint64_t data_off = req->data_offset;
+	/*
+	 * #715: all of it is the client's to write, so each is held to what
+	 * this server keeps.  The write's data must lie in the reverse
+	 * channel's region, as the handle's own copy of its size says
+	 * (flipc2_data_ptr_safe()): it took any offset and length there as its
+	 * source, and copied this server's memory into a file.  The read's cap
+	 * is the forward channel's region by the same copy, where it was the
+	 * header's data_size, which the client writes.  The handle is asked at
+	 * its full width before it becomes an index, and the offset by the
+	 * limit the Mach path keeps (fs_offset_ok()).
+	 */
 	void *wsrc = (op == VFS_FLIPC_OP_WRITE)
-		     ? flipc2_data_ptr(rev, data_off) : (void *)0;
+		     ? flipc2_data_ptr_safe(rev, data_off, count) : (void *)0;
 	flipc2_consume_release(rev);
 
 	struct flipc2_desc *rep = flipc2_produce_wait(fwd, FLIPC2_SPIN_DEFAULT);
@@ -2443,20 +2471,26 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 	rep->data_length = 0;
 	rep->status      = VFS_FLIPC_ERR_INVAL;
 
-	if (op == VFS_FLIPC_OP_READ) {
+	if ((op == VFS_FLIPC_OP_READ || op == VFS_FLIPC_OP_WRITE) &&
+	    (handle < 1 || handle > MAX_OPEN_FILES)) {
+		rep->status = VFS_FLIPC_ERR_BADHANDLE;
+	} else if ((op == VFS_FLIPC_OP_READ || op == VFS_FLIPC_OP_WRITE) &&
+		   !fs_offset_ok(offset)) {
+		rep->status = VFS_FLIPC_ERR_INVAL;
+	} else if (op == VFS_FLIPC_OP_READ) {
 		int idx = (int)handle - 1;
 		fs_private_t priv = of_op_begin(mnt, idx);	/* #388 pin */
 		if (priv == (fs_private_t)0) {
 			rep->status = VFS_FLIPC_ERR_BADHANDLE;
 		} else {
 			size_t fsize = ext2fs_file_size(priv);
-			uint64_t cap = fwd->hdr->data_size;
+			uint64_t cap = fwd->data_size;		/* #715: ours */
 			if (cap > VFS_FLIPC_MAX_READ)
 				cap = VFS_FLIPC_MAX_READ;
 			if (offset >= fsize || count == 0) {
 				rep->status = VFS_FLIPC_OK;
 			} else {
-				if (offset + count > fsize)
+				if (count > fsize - offset)	/* no sum to wrap */
 					count = fsize - offset;
 				if (count > cap)
 					count = cap;
@@ -2479,7 +2513,9 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 		fs_private_t priv = wsrc ? of_op_begin(mnt, idx)	/* #388 pin */
 					 : (fs_private_t)0;
 		if (priv == (fs_private_t)0) {
-			rep->status = VFS_FLIPC_ERR_BADHANDLE;
+			/* #715: no source in the channel is no handle's fault */
+			rep->status = wsrc ? VFS_FLIPC_ERR_BADHANDLE
+					   : VFS_FLIPC_ERR_INVAL;
 		} else {
 			if (count == 0) {
 				rep->status = VFS_FLIPC_OK;
@@ -2613,7 +2649,11 @@ flipc_reactor(void *arg)
 
 /*
  * Create the FLIPC endpoint for one mount and start its reactor thread.
- * On any failure the mount simply has no fast-path (flipc_ep stays "").
+ * On any failure the mount simply has no fast-path (flipc_ep stays NULL).
+ *
+ * #715: created without a name.  It was checked in as "flipc.<service>",
+ * and any task could look it up and connect, without the mount's port; now
+ * a client reaches it only through vfs_flipc_endpoint(), on that port.
  */
 static void
 flipc_start_mount(struct mount_context *mnt)
@@ -2622,21 +2662,15 @@ flipc_start_mount(struct mount_context *mnt)
 	flipc2_return_t ret;
 	static int slot;
 
-	(void)snprintf(mnt->flipc_ep, sizeof(mnt->flipc_ep),
-		       "%s%s", VFS_FLIPC_ENDPOINT_PREFIX, mnt->service_name);
-
-	ret = flipc2_endpoint_create(mnt->flipc_ep, 4,
+	mnt->flipc_ep = NULL;
+	if (slot >= MAX_MOUNTS)
+		return;
+	ret = flipc2_endpoint_create(NULL, 4,
 				     VFS_FLIPC_CHANNEL_SIZE,
 				     VFS_FLIPC_RING_ENTRIES, 0, &ep);
 	if (ret != FLIPC2_SUCCESS) {
-		printf("ext2: FLIPC endpoint_create(%s) failed %d\n",
-		       mnt->flipc_ep, ret);
-		mnt->flipc_ep[0] = '\0';
-		return;
-	}
-
-	if (slot >= MAX_MOUNTS) {
-		mnt->flipc_ep[0] = '\0';
+		printf("ext2: FLIPC endpoint_create for %s failed %d\n",
+		       mnt->service_name, ret);
 		return;
 	}
 	flipc_reactor_args[slot].ep  = ep;
@@ -2646,13 +2680,15 @@ flipc_start_mount(struct mount_context *mnt)
 	if (pthread_create(&t, NULL, flipc_reactor,
 			   &flipc_reactor_args[slot]) != 0) {
 		printf("ext2: FLIPC reactor thread failed for %s\n",
-		       mnt->flipc_ep);
-		mnt->flipc_ep[0] = '\0';
+		       mnt->service_name);
+		(void)flipc2_endpoint_destroy(ep);
 		return;
 	}
 	slot++;
 	pthread_detach(t);
-	printf("ext2: FLIPC fast-path endpoint \"%s\" ready\n", mnt->flipc_ep);
+	mnt->flipc_ep = ep;
+	printf("ext2: FLIPC fast-path endpoint for %s ready, reached through "
+	       "its mount's port (#715)\n", mnt->service_name);
 }
 
 /* ================================================================
