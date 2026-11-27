@@ -79,6 +79,14 @@ cap_manifest_table_get(mach_port_t task_cap_port);
 mach_port_t cap_manifest_table_task(mach_port_t task_cap_port);
 
 /*
+ * #983: the per-task port of a slot made for the task `task' names -- the
+ * port cap_manifest_table_task() answers -- or MACH_PORT_NULL when no slot
+ * is.  A task may hold more than one: a per-task port cap_derive_task() makes
+ * for the task itself is a second slot of the same task.
+ */
+mach_port_t cap_manifest_table_port_of_task(mach_port_t task);
+
+/*
  * Give back the slot of `task_cap_port' (#743): its manifest is freed and the
  * slot is free for the next task.  Answers the task port the slot held, which
  * is the caller's to release or not -- on an error path of the request that

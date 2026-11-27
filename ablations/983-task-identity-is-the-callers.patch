@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #983
+Takes out: urmach_task_identity()'s answering for the task the port names -- it answers the caller's, so cap_server takes no death for the dead owner's and tells the kernel of all it owned; cap_test's [58] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[58\] WRONG
+
+diff --git a/uros/src/mach_kernel/kern/ipc_tt.c b/uros/src/mach_kernel/kern/ipc_tt.c
+--- a/uros/src/mach_kernel/kern/ipc_tt.c
++++ b/uros/src/mach_kernel/kern/ipc_tt.c
+@@ -1288,7 +1288,7 @@
+ 	else if (ip_active(port) && ip_kotype(port) == IKOT_TASK_RIGHTS)
+ 		task = ((struct task_rights *) port->ip_kobject)->tr_task;
+ 	if (task != TASK_NULL)
+-		id = urmach_identity_of(task->sec_token);
++		id = urmach_identity_of(current_task()->sec_token);
+ 	ip_unlock(port);
+ 
+ 	if ((id & URMACH_IDENTITY_TASK_BIT) == 0)

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #983
+Takes out: a port watch's telling the kernel of what it revokes -- the loan a port's death ends, whose owner may live and present it, is not revoked in the kernel; cap_test's [60] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[60\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1533,7 +1533,7 @@
+             continue;
+         if (!e->token.revoked) {
+             /* A refusal by the kernel is said by cap_revoke_tree(). */
+-            (void)cap_revoke_tree(e, w->exact ? w->identity : 0, &n);
++            (void)cap_revoke_tree(e, w->identity, &n);
+             cap_revoke_tell(e, n, w->exact ? w->identity : 0);
+             revoked += n;
+         }

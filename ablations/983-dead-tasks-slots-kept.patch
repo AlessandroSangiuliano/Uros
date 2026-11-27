@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #983
+Takes out: the giving back of a dead task's slots -- a copy of its per-task port another task holds keeps the slot and its manifest; cap_test's [58] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[58\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1518,7 +1518,7 @@
+     int               n, revoked = 0;
+ 
+     w->firing = 1;
+-    while (w->exact &&
++    while (0 && w->exact &&
+            (slot = cap_manifest_table_port_of_task(w->port)) != MACH_PORT_NULL) {
+         task = cap_manifest_table_remove(slot);
+         (void)mach_port_destroy(mach_task_self(), slot);

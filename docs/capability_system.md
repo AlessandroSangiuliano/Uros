@@ -49,7 +49,7 @@ table on the checking path.
 | actor | holds | does |
 |---|---|---|
 | **kernel** (`kern/cap.c`) | the HMAC key, which task may install it, a revocation table and its epoch, the facts about resources it created | verifies tokens; answers ownership questions; tears down materialised authority on revocation; gives every task an identity of its own and stamps it in the trailer of what the task sends (#747) |
-| **cap_server** | the issuance table, by id (#974: the indexes by owner and by parent were never read), the per-task manifests | draws the key; applies policy and mints tokens; cascades revocation |
+| **cap_server** | the issuance table, by id (#974: the indexes by owner and by parent were never read), the per-task manifests, a watch on each task it issued to or lent through (#983) | draws the key; applies policy and mints tokens; cascades revocation; ends a task's capabilities when it dies (§6.6) |
 | **bootstrap** | the boot bundle, cap_server's port | makes cap_server's port and names its task to the kernel; installs each task's manifest before the task runs |
 | **name server** | the names, the mount registry | publishes "cap_server" for bootstrap's port; checks a mount in only on a capability for its prefix |
 | **resource servers** (block, device master, name server, …) | nothing special | check tokens presented to them |
@@ -335,7 +335,7 @@ section is not.
 | `cap_provision_task(task_port, manifest) → cap_port` | bootstrap, on the provisioning port, which no other task holds (#743) | install a policy for the task its identity port names, return the principal port; refuse a port that carries more than identity (#938) |
 | `cap_derive_task(task_port, manifest) → cap_port` | a parent, on its per-task port: exec_server with its caller's (#743) | install the child's manifest cut by the parent's `delegatable[]`, for the child its identity port names (#938); refuse a cut that leaves nothing, and one past the bounds on derived ports (#937) |
 | `cap_slots() → in_use, size, derived, quota, family, family_max` | anyone | how many manifest slots are taken, how many by derived ports, and their bounds: how a test sees a slot come back (#743) and a bound met (#937) |
-| `cap_census() → entries, issued` | anyone | how many capabilities the issuance table holds, and how many ids it has handed out: how a test sees a revoked capability leave the table (#974) |
+| `cap_census() → entries, issued, watches, untold` | anyone | how many capabilities the issuance table holds, how many ids it has handed out, how many deaths it watches, and how many revocations at a death it told no subscriber of: how a test sees a revoked capability leave the table (#974), a watch go with the last capability and slot that held it, and a dead owner's capabilities go unannounced (#983) |
 
 ### Traps — `syscall_sw.h`
 
@@ -549,8 +549,7 @@ decide an answer.
   keeps every revocation (`URMACH_CAP_CLOCK_NEVER_SET`, `<mach/clock_types.h>`).
 
 `cap_census` and trap 47 are how `cap_test` [55] to [57] see the entries go.
-The capabilities of a task that has died, never revoked, still stay in
-cap_server's table: #983.
+The capabilities of a task that has died end with it: §6.6.
 
 🔴 **The trap is the half that cannot wait for a message.** Some authority is
 *materialised*: a capability for a PCI device becomes an IOMMU domain, which is
@@ -648,6 +647,80 @@ block handle reads up to it (`cap_test [54]`), and a claim keeps its page that
 long (`irq_claim_test [21]`). Without the waiter a
 lifetime is refused, since nothing would take back what the capability
 bought.
+
+### 6.6 A capability ends with its lender (#983)
+
+A capability asked for with no lifetime by a task that then died was never
+revoked: nobody could present it, a token being good for its owner alone, and
+nobody could revoke it, since only the task whose per-task port it was asked on
+may, or one above it in the tree, and that port was gone. Every program that
+asked for a capability and ended grew cap_server's table for as long as it ran.
+
+🔑 **A loan ends with its lender** (decided in #983). When a task dies,
+everything asked for on its per-task port is revoked with its tree -- the
+children it lent to other tasks included -- and forgotten as a revoked tree is
+(§6.3); and so is everything it owns, wherever it was asked and whoever lent it.
+It is Mach's rule for ports: when the task that receives dies, the send rights
+others hold to it go dead. Today's one lender is ext_server, lending the block
+server its page-cache buffers; once it has died its DMA regions are reclaimed,
+and the loan named a region that was no longer there.
+
+```
+dead-name notification ──▶ cap_server's death port
+                                  │
+              an EXACT watch (a task's identity port): the task has died
+                 ├─ its slots given back, their per-task ports destroyed
+                 └─ every capability holding the watch, as lender or owner:
+                       revoked with its tree; the kernel told only of the
+                       ones another task owns; all of it forgotten
+              a PORT's watch (the port a borrower with no slot was named by):
+                 └─ the loans made through that port, and nothing else
+```
+
+- **A watch is a dead-name request on a port that dies with what it watches.**
+  An exact one is on the identity port a slot keeps (#938), which dies with its
+  task and with nothing else; a borrower with a slot is watched by its slot's.
+  A port's watch is on the port `cap_derive_for` named a borrower with no slot
+  by, which cap_server keeps from then on: its death may be the borrower's
+  giving the receive right up, and not its death, so it ends the loans made
+  through it alone.
+- **Every capability holds two watches**, its lender's -- the task whose
+  per-task port it was asked on -- and its owner's; a death ends what holds its
+  watch either way. Ids name the watches, never given again; a watch goes with
+  the last capability and slot that held it, its request taken back first. A
+  slot that cannot watch its task is refused.
+- **A per-task port given up is not a death.** Its no-senders notification gives
+  the slot back, and the capabilities asked on it stay, for their owner may live
+  and present them, until the watch says the task has died.
+- 🔴 **What the dead task owned is forgotten, not revoked in the kernel, and
+  no subscriber is told of it.** The kernel keeps a revocation with no deadline
+  for good (§6.3), and for a token nobody can present again it would keep it
+  for nothing; what the token bought the kernel took back when the task
+  terminated, and what a subscriber kept for it ends with the dead task's ports
+  -- the block server's handle with its no-senders -- as it did before #983,
+  when a death revoked nothing. So an exact watch's walk tells the kernel and
+  the subscribers only of capabilities other tasks own, and knows whose death
+  it is by `urmach_task_identity()`, a kernel call that answers the identity of
+  the task any task port names, reduced ports included. A port's watch knows
+  no death, and tells of all it revokes. `cap_census` counts the revocations
+  told to no subscriber.
+- ⚠️ **A notice is a console line when it misses**, and a full subscriber's
+  queue makes most of a burst miss: under char_server, at one processor and
+  TCG, a burst of them overran the kernel's log ring (#762), and the lines other
+  tasks were waiting on went with it.
+
+⚠️ What it does not do. A capability asked for on the well-known port -- a tag,
+on i386 alone since #511 -- has no slot to watch and stays. The kernel keeps,
+for nothing, the revocation of a loan whose borrower with no slot has died, and
+of a capability owned by a third task whose death cap_server has not heard yet:
+both are #1007's, a revocation kept after its owner. And an entry still names
+the per-task port it was asked on by its name, which a later slot can be given:
+#1008.
+
+`cap_test` [58] to [61] see it: tasks made to die, with capabilities asked on
+their ports and lent to them; one that gives its port up and lives; a loan
+through a port destroyed while its task lives; and watches that go while their
+tasks live, once nothing holds them.
 
 ---
 
@@ -975,6 +1048,10 @@ this is where to look, and what to break to confirm it still works.
 | a capability is good for its owner alone, and is derived to a named task | `cap_test [53]` | `ablations/747-owner-unchecked`, `747-owner-unchecked-rpc`, `747-kernel-port-is-a-delegate`, `747-delegate-ignored` |
 | a forked child holding its parent's capability is refused it, and cannot derive from it | `fork_cap_test [4]`, `[5]` | `ablations/747-blk-trusts-the-token`, `747-derive-by-anyone` |
 | a capability is revoked when its deadline comes: a claim made with it gives back its page and the card, and a block handle opened with it ends | `irq_claim_test [21]`, `cap_test [54]` | `ablations/747-deadline-not-swept`, `747-deadline-not-told` |
+| a task's death ends what was asked on its port and lent to it, and the kernel is told of the first alone | `cap_test [58]` | `ablations/983-death-not-acted-on`, `983-dead-owner-told-to-the-kernel`, `983-owner-watch-not-held`, `983-lender-watch-not-held`, `983-dead-tasks-slots-kept`, `983-task-identity-is-the-callers` |
+| a per-task port given up is not a death | `cap_test [59]` | `ablations/983-no-senders-taken-for-a-death`, `983-lender-watch-not-held` |
+| a loan to a task with no slot ends with the port it was named by, and with nothing else | `cap_test [60]` | `ablations/983-port-death-taken-for-the-task`, `983-port-watch-tells-the-kernel-nothing`, `983-owner-watch-not-held` |
+| a watch goes once nothing holds it, while its task lives | `cap_test [61]` | `ablations/983-watch-never-given-up` |
 
 ⚠️ Five guards of #747 have no arm yet. The deadline on #537's cache path
 (`cap_check_in_kernel()`): [50] asks the trap, which has no cache, and no arm

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #983
+Takes out: cap_server's acting on a death -- a dead-name notification is given back and nothing more, so what was asked on a dead task's port and lent to it stays, as before #983; cap_test's [58] must say WRONG
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[58\] WRONG
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -1592,7 +1592,7 @@
+         return;
+     }
+     w = cap_watch_by_port(n->not_port);
+-    if (w != NULL)
++    if (w != NULL && 0)
+         cap_watch_fire(w);
+     else
+         (void)mach_port_deallocate(mach_task_self(), n->not_port);
