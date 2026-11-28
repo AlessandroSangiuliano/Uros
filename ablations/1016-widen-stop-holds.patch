@@ -1,0 +1,25 @@
+Kind: widen
+Issue: #1016
+Holds open: the time between a tool's first stop signal and its run's end, inside _stop() -- it holds 100 ms after saying the signal and before it raises, so that the second SIGTERM that systemctl stop sends, 2-3 ms after the first, comes while the handler runs, every time, where without it it came there in 20 stops of 40 on omen; the fixed tree, which ignores the signals from the first, must still take one and pass
+Premise: none -- its hold is on the path of every stop the check makes, and nothing a boot does can skip it: the line each tool on run_lock.py must say once, written just before the hold, says the path was driven
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -38,7 +38,7 @@
+ # Imported, with sys.dont_write_bytecode set first: nothing is to be left in
+ # scripts/.
+ 
+-import ctypes, os, signal, subprocess, sys
++import ctypes, os, signal, subprocess, sys, time
+ 
+ LOCK = "/tmp/uros-x86_64-run.lock"
+ PR_SET_PDEATHSIG = 1		# prctl(2): a signal for when the parent dies
+@@ -131,6 +131,7 @@ def _stop(signum, _frame):
+         os.write(2, f"{_who}: stopped by {signal.Signals(signum).name}\n".encode())
+     except OSError:
+         pass
++    time.sleep(0.1)
+     raise SystemExit(128 + signum)
+ 
+ 

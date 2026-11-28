@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #1016
+Over: 1016-widen-stop-holds.patch
+Takes out: the signals ignored from a tool's first stop signal -- _stop() stays the handler until give_back() is called, as before the fix, so the second SIGTERM that systemctl stop sends raises SystemExit again in the tool's own cleanup; over the widen, harness-lifecycle-check.sh's unitstop must say that a tool on run_lock.py took two signals, as char-roundtrip.py, ramoops-readback.py and uart-stall.py did on victus under KVM, 28/11
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: unitstop
+Expect: lifecycle: unitstop (char-roundtrip|ramoops-readback|rip-sample|uart-stall)\.py: .*it took [2-9] signals
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -125,8 +125,6 @@
+     with os.write() and not print(): a signal can come in the middle of the
+     run's own print to stderr, and a print from the handler then raises
+     RuntimeError, a reentrant call."""
+-    for sig in _STOP:
+-        signal.signal(sig, signal.SIG_IGN)
+     try:
+         os.write(2, f"{_who}: stopped by {signal.Signals(signum).name}\n".encode())
+     except OSError:
