@@ -119,7 +119,7 @@ extern mach_port_t	bootstrap_port;
 #define	MSG_READY	5380
 #define	MSG_RESULT	5381
 
-#define	FIND_TRIES	400u		/* x 50 ms: the peer has 20 s to appear */
+#define	FIND_MS		20000		/* the peer has 20 s to appear */
 #define	FIND_WAIT_MS	50
 #define	RCV_TIMEOUT_MS	5000
 
@@ -193,20 +193,70 @@ hear(mach_port_t mine, int id, unsigned round, unsigned *value)
 	return 1;
 }
 
+/*
+ * #1009: a window by the realtime clock, its waits only pacing it.  They were
+ * counted -- 400 x 50 ms, waited += 10 -- and since 963ca2cc a timed wait
+ * lasts a tick more: the 20 s were 24, [3]'s 2 s were 4, and the times the
+ * lines said were the counts.  A clock refused counts the waits, as before.
+ */
+static int
+race_clock(tvalspec_t *tv)
+{
+	static mach_port_t	clock_port = MACH_PORT_NULL;
+
+	if (clock_port == MACH_PORT_NULL
+	    && host_get_clock_service(mach_host_self(), REALTIME_CLOCK,
+				      &clock_port) != KERN_SUCCESS)
+		return 0;
+	return clock_get_time(clock_port, tv) == KERN_SUCCESS;
+}
+
+struct race_window {
+	tvalspec_t	t0;
+	int		clocked;
+	unsigned	waits, step_ms;
+};
+
+static void
+race_window_start(struct race_window *w, unsigned step_ms)
+{
+	w->clocked = race_clock(&w->t0);
+	w->waits = 0;
+	w->step_ms = step_ms;
+}
+
+static unsigned
+race_window_ms(struct race_window *w)
+{
+	tvalspec_t	tv;
+
+	if (w->clocked && race_clock(&tv))
+		return (unsigned)((tv.tv_sec - w->t0.tv_sec) * 1000 +
+				  ((long)tv.tv_nsec - (long)w->t0.tv_nsec) /
+				  1000000);
+	return w->waits * w->step_ms;
+}
+
+static void
+race_window_wait(struct race_window *w)
+{
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, w->step_ms);
+	w->waits++;
+}
+
 static mach_port_t
 find(const char *name)
 {
-	mach_port_t	p = MACH_PORT_NULL;
-	unsigned	t;
+	mach_port_t		p = MACH_PORT_NULL;
+	struct race_window	w;
 
-	for (t = 0; t < FIND_TRIES; t++) {
+	for (race_window_start(&w, FIND_WAIT_MS); ; race_window_wait(&w)) {
 		if (netname_look_up(name_server_port, "", (char *)name, &p)
 		    == NETNAME_SUCCESS && p != MACH_PORT_NULL)
 			return p;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
-				     FIND_WAIT_MS);
+		if (race_window_ms(&w) >= FIND_MS)
+			return MACH_PORT_NULL;
 	}
-	return MACH_PORT_NULL;
 }
 
 /* Seconds since the clock service's epoch; 0 if the service is absent. */
@@ -217,14 +267,9 @@ find(const char *name)
 static unsigned
 seconds_now(void)
 {
-	static mach_port_t	clock_port = MACH_PORT_NULL;
 	tvalspec_t		tv;
 
-	if (clock_port == MACH_PORT_NULL
-	    && host_get_clock_service(mach_host_self(), REALTIME_CLOCK,
-				      &clock_port) != KERN_SUCCESS)
-		return 0;
-	if (clock_get_time(clock_port, &tv) != KERN_SUCCESS)
+	if (!race_clock(&tv))
 		return 0;
 	return (unsigned)tv.tv_sec;
 }
@@ -273,7 +318,7 @@ processors(void)
  * window let go of in the middle would make a grant look like the defect.
  */
 #define	VIRTIO_VENDOR		0x1AF4u
-#define	OWNED_TRIES		400u	/* x FIND_WAIT_MS: 20 s */
+#define	OWNED_MS		20000u	/* by the clock (#1009) */
 
 static struct hal_device_info	hal_devs[HAL_MAX_DEVICES];
 
@@ -397,9 +442,10 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 {
 	vm_offset_t		buf = 0;
 	mach_msg_type_number_t	bytes = 0;
-	unsigned int		n = 0, i, b, t, bdf = 0;
+	unsigned int		n = 0, i, b, bdf = 0;
 	unsigned int		win = 0, size = 0, bad = 0;
 	natural_t		v;
+	struct race_window	owned;
 	mach_port_t		hal;
 	kern_return_t		kr;
 	struct overlap_ask	ask[3];
@@ -454,14 +500,14 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 		return;
 	}
 
-	for (t = 0; t < OWNED_TRIES && !still_another_tasks(device, bdf); t++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
-				     FIND_WAIT_MS);
-	if (t == OWNED_TRIES) {
+	race_window_start(&owned, FIND_WAIT_MS);
+	while (!still_another_tasks(device, bdf) &&
+	       race_window_ms(&owned) < OWNED_MS)
+		race_window_wait(&owned);
+	if (!still_another_tasks(device, bdf)) {
 		printf("io_claim_race: [4] NOT ASKED — %u:%u.%u was not claimed "
-		       "by another task within %u s (#563)\n", bdf >> 8,
-		       (bdf >> 3) & 0x1F, bdf & 7,
-		       OWNED_TRIES * FIND_WAIT_MS / 1000);
+		       "by another task within %u ms (#563)\n", bdf >> 8,
+		       (bdf >> 3) & 0x1F, bdf & 7, race_window_ms(&owned));
 		(*arms)--;
 		return;
 	}
@@ -840,20 +886,29 @@ main(int argc, char **argv)
 	 */
 	arms++;
 	{
-		natural_t	released = 0, klog_from = 0;
-		unsigned	waited = 0;
+		natural_t		released = 0, klog_from = 0;
+		unsigned		waited = 0;
+		struct race_window	rw;
 
 		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
 					  &released, &klog_from);
+		/*
+		 * #1009: a patience, counted: the grace periods are the
+		 * kernel's to run, a number of chances given it and not a
+		 * time; the clock only says how long they took.  Bounded by a
+		 * second of the clock, act_test's rpc_pair_start() lost its
+		 * thread at one processor under TCG (27/11).
+		 */
+		race_window_start(&rw, RETIRE_STEP_MS);
 		while (kr == KERN_RESOURCE_SHORTAGE
-		       && waited < RETIRE_WAIT_MS) {
-			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_WAIT, RETIRE_STEP_MS);
-			waited += RETIRE_STEP_MS;
+		       && rw.waits < RETIRE_WAIT_MS / RETIRE_STEP_MS) {
+			race_window_wait(&rw);
 			kr = device_io_port_claim(device, RACE_PORT,
 						  RACE_COUNT, &released,
 						  &klog_from);
 		}
+		if (rw.waits != 0)
+			waited = race_window_ms(&rw);
 		if (kr == KERN_SUCCESS
 		    && device_io_port_unclaim(device, RACE_PORT)
 		       == KERN_SUCCESS) {
@@ -869,9 +924,11 @@ main(int argc, char **argv)
 			passed++;
 		} else if (kr == KERN_RESOURCE_SHORTAGE)
 			printf("io_claim_race: [3] WRONG — the table was still "
-			       "full after %u ms of the %u the test waits, many "
-			       "grace periods: a retired slot never came back "
-			       "(#602)\n", waited, (unsigned)RETIRE_WAIT_MS);
+			       "full after %u of the %u waits of %u ms the test "
+			       "gives it, %u ms, many grace periods: a retired "
+			       "slot never came back (#602)\n", rw.waits,
+			       (unsigned)(RETIRE_WAIT_MS / RETIRE_STEP_MS),
+			       (unsigned)RETIRE_STEP_MS, waited);
 		else
 			printf("io_claim_race: [3] WRONG — the range is not "
 			       "clean after the rounds (claim kr=%d, %s)\n",

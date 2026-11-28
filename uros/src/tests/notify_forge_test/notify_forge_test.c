@@ -56,6 +56,7 @@
 #include <mach/ndr.h>
 #include <mach/notify.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>		/* #1009: getclock(), wait_for()'s ms */
 #include <mach_init.h>			/* name_server_port */
 
 #include <pthread.h>
@@ -362,18 +363,41 @@ pump(void *arg)
 	return NULL;
 }
 
-/* Waits up to ms for *counter to reach want; whether it did. */
-static int
-wait_for(volatile int *counter, int want, int ms)
-{
-	int	waited;
+/*
+ * Waits for *counter to reach want; whether it did, the milliseconds it took
+ * in *took.  #1009: a window -- [3]'s, in which nothing may come -- is read
+ * by the clock, ms of it.  A patience -- for the endpoint's pump to say a
+ * thing, which it can say only when the processor comes back to it -- is a
+ * number of chances, not a time: it gives up after ms / 10 waits of 10 ms,
+ * as they were counted before, and the clock only says how long they took.
+ * Bounded by a second of the clock, act_test's rpc_pair_start() lost its
+ * thread at one processor under TCG (27/11).  A clock refused counts the
+ * waits for the window too, as before.
+ */
+#define WAIT_WINDOW	1
+#define WAIT_PATIENCE	0
 
-	for (waited = 0; waited < ms; waited += 10) {
+static int
+wait_for(volatile int *counter, int want, int ms, int window, int *took)
+{
+	struct timespec	t0, t;
+	int		clocked, waited = 0, waits;
+
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (waits = 0;; waits++) {
+		if (clocked && getclock(TIMEOFDAY, &t) == 0)
+			waited = (int)((t.tv_sec - t0.tv_sec) * 1000 +
+				       (t.tv_nsec - t0.tv_nsec) / 1000000);
+		else
+			waited = waits * 10;
+		if (took != NULL)
+			*took = waited;
 		if (*counter >= want)
 			return 1;
+		if (window ? waited >= ms : waits >= ms / 10)
+			return *counter >= want;
 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
 	}
-	return *counter >= want;
 }
 
 static void
@@ -383,7 +407,7 @@ arm_endpoint(void)
 	pthread_t		t;
 	kern_return_t		ret = KERN_SUCCESS;
 	char			said[SAID_MAX];
-	int			r, dead;
+	int			r, dead, took = 0;
 
 	if (flipc2_endpoint_create("notify_forge_test", 2,
 				   FLIPC2_CHANNEL_SIZE_MIN,
@@ -403,7 +427,8 @@ arm_endpoint(void)
 	if (flipc2_endpoint_connect_port(flipc2_endpoint_port(ep),
 					 FLIPC2_CHANNEL_SIZE_MIN,
 					 FLIPC2_RING_ENTRIES_MIN, &fwd, &rev)
-	    != FLIPC2_SUCCESS || !wait_for(&ep_new, 1, EVENT_WAIT_MS)) {
+	    != FLIPC2_SUCCESS ||
+	    !wait_for(&ep_new, 1, EVENT_WAIT_MS, WAIT_PATIENCE, NULL)) {
 		verdict("notify_forge_test: [3] the client did not connect -- "
 		        "WRONG\n");
 		verdict("notify_forge_test: [4] the client did not connect -- "
@@ -420,7 +445,7 @@ arm_endpoint(void)
 	r = forge(flipc2_endpoint_port(ep), MACH_MSG_TYPE_MAKE_SEND,
 		  MACH_NOTIFY_DEAD_NAME, fwd->conn_token, &ret);
 	say_answer(said, sizeof said, r, ret);
-	dead = wait_for(&ep_dead, 1, EVENT_WAIT_MS / 4);
+	dead = wait_for(&ep_dead, 1, EVENT_WAIT_MS / 4, WAIT_WINDOW, NULL);
 	if (r == FORGE_SENT && ret == MIG_BAD_ID && !dead) {
 		verdict("notify_forge_test: [3] the endpoint refused a message "
 		        "with a dead-name notification's id from a task, naming "
@@ -441,7 +466,7 @@ arm_endpoint(void)
 		        "message, so its real going cannot be asked -- WRONG\n");
 	else {
 		(void)flipc2_endpoint_disconnect(fwd, rev);
-		if (wait_for(&ep_dead, 1, EVENT_WAIT_MS)) {
+		if (wait_for(&ep_dead, 1, EVENT_WAIT_MS, WAIT_PATIENCE, &took)) {
 			verdict("notify_forge_test: [4] a client that went was "
 			        "reported dead, from the kernel's dead-name "
 			        "notification\n");
@@ -450,7 +475,7 @@ arm_endpoint(void)
 			verdict("notify_forge_test: [4] a client that went was "
 			        "not reported dead within %d ms -- WRONG, the "
 			        "kernel's own notification was refused\n",
-			        EVENT_WAIT_MS);
+			        took);
 	}
 	ep_stop = 1;
 	(void)pthread_join(t, NULL);

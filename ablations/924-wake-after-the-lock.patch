@@ -5,6 +5,7 @@ Takes out: the wake under futexv_lock -- futexv_wake_key() notes the slots as it
 Run: --entry 14 600 -smp 4
 Expect: cap_test: \[37\] WRONG
 Note: 4 of 4 caught and 4 of 4 passed at ba74330a on victus, TCG and KVM, two boots each: the ablated arm saw 7 and 6 of its 60 waits answer success beside the owner's 149 and 154 waits, the fixed one all 60 time out beside up to 15953 wakes
+Premise: none -- its catch stands on 924-widen-late-wake's window, whose premise is the widen's: [37]'s line says no time of the owner's exit
 
 diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
 index e10986b1..47ea41c1 100644

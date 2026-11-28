@@ -5,12 +5,11 @@ Run: --entry 14 1200 -smp 4
 Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_claim_race/io_claim_race.c
-index 577caf46..943dd649 100644
 --- a/uros/src/tests/io_claim_race/io_claim_race.c
 +++ b/uros/src/tests/io_claim_race/io_claim_race.c
-@@ -841,6 +841,21 @@ main(int argc, char **argv)
- 		natural_t	released = 0, klog_from = 0;
- 		unsigned	waited = 0;
+@@ -890,6 +890,21 @@ main(int argc, char **argv)
+ 		unsigned		waited = 0;
+ 		struct race_window	rw;
  
 +		/* WIDEN (#602): every free slot retiring at the control claim --
 +		 * four ranges claimed and given back just before it, so the table
@@ -29,4 +28,4 @@ index 577caf46..943dd649 100644
 +
  		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
  					  &released, &klog_from);
- 		while (kr == KERN_RESOURCE_SHORTAGE
+ 		/*

@@ -70,8 +70,8 @@ not_asked(int arm, const char *why)
 	printf("musl_test: [%d] NOT ASKED -- %s\n", arm, why);
 }
 
-/* The longest a thread is given to do what an arm waits for, in 10 ms steps. */
-#define WAIT_STEPS	500
+/* The longest a thread is given to do what an arm waits for, by the clock. */
+#define WAIT_MS		5000
 
 static int
 access_by_stat(const char *path)
@@ -87,6 +87,83 @@ pause_a_little(void)
 	struct timespec	ts = { 0, 10 * 1000 * 1000 };
 
 	(void)nanosleep(&ts, NULL);
+}
+
+/*
+ * #1009: CLOCK_MONOTONIC in milliseconds, or -1 if it is refused.  A time an
+ * arm must keep is counted by it and not in pause_a_little()s: since 963ca2cc
+ * a timed wait lasts at least what it asks, a tick more at 100 Hz, so each of
+ * a run of 10 ms sleeps lasts 20 ms and a time counted in them doubles.
+ */
+static long long
+mono_ms(void)
+{
+	struct timespec	now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return -1;
+	return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/*
+ * #1009: a window by the clock, its pauses only pacing it.  Every window of
+ * this program was counted in pause_a_little()s or naps, "15 s of 10 ms steps",
+ * and doubled at once with 963ca2cc, the times it prints with it.  A clock
+ * refused counts the pauses at what they ask, as before.
+ */
+struct mt_window {
+	long long	t0;
+	int		pauses;
+	int		step_ms;
+};
+
+static void
+mt_window_start(struct mt_window *w, int step_ms)
+{
+	w->t0 = mono_ms();
+	w->pauses = 0;
+	w->step_ms = step_ms;
+}
+
+static long long
+mt_window_ms(const struct mt_window *w)
+{
+	long long	now = w->t0 >= 0 ? mono_ms() : -1;
+
+	return now >= 0 ? now - w->t0 : (long long)w->pauses * w->step_ms;
+}
+
+static int
+mt_window_over(const struct mt_window *w, long long limit_ms)
+{
+	return mt_window_ms(w) >= limit_ms;
+}
+
+/*
+ * #1009: a patience, which a window is not: a wait for another thread to run,
+ * or to give back, is a number of chances given it, not a time -- a pause
+ * ends at a tick, and the pauser looks again only when the processor comes
+ * back to it.  So a patience gives up after its pauses, limit_ms / step of
+ * them, as they were counted before; the clock only says how long they took.
+ * Bounded by a second of the clock, act_test's rpc_pair_start() lost its
+ * thread at one processor under TCG (27/11).  The waits of 10 s and more stay
+ * windows by the clock, wide enough.
+ */
+static int
+mt_window_spent(const struct mt_window *w, long long limit_ms)
+{
+	return (long long)w->pauses >=
+	       limit_ms / (w->step_ms > 0 ? w->step_ms : 1);
+}
+
+static void
+mt_window_pause(struct mt_window *w)
+{
+	struct timespec	ts = { w->step_ms / 1000,
+			       (long)(w->step_ms % 1000) * 1000 * 1000 };
+
+	(void)nanosleep(&ts, NULL);
+	w->pauses++;
 }
 
 /*
@@ -228,7 +305,8 @@ arm_tls(void)
 {
 	static struct tls_report	r;	/* the thread may never get to it */
 	pthread_t		th;
-	int			rc, i;
+	struct mt_window	w;
+	int			rc;
 
 	if (tls_word != 0x5a5a || tls_zero != 0) {
 		verdict(4, 0, "the main thread's __thread variables read %#x "
@@ -249,9 +327,10 @@ arm_tls(void)
 	 * so and not stop here for good.  pause_a_little() keeps errno, and
 	 * the check below reads it.
 	 */
-	for (i = 0; i < WAIT_STEPS && !__atomic_load_n(&r.done, __ATOMIC_SEQ_CST);
-	     i++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (!__atomic_load_n(&r.done, __ATOMIC_SEQ_CST) &&
+	       !mt_window_spent(&w, WAIT_MS))
+		mt_window_pause(&w);
 	if (!__atomic_load_n(&r.done, __ATOMIC_SEQ_CST)) {
 		verdict(4, 0, "a new thread never got as far as its own word");
 		return;
@@ -359,7 +438,7 @@ detached_thread(void *arg)
  * by which time the boot had ended with the verdict unsaid.
  */
 static int
-address_is_free(uintptr_t where, int *steps_left)
+address_is_free(uintptr_t where, struct mt_window *budget)
 {
 	uintptr_t	page = where & ~(uintptr_t)(PAGE - 1);
 	void		*p;
@@ -371,10 +450,9 @@ address_is_free(uintptr_t where, int *steps_left)
 			(void)munmap(p, PAGE);
 			return 1;
 		}
-		if (*steps_left <= 0)
+		if (mt_window_spent(budget, WAIT_MS))
 			return 0;
-		(*steps_left)--;
-		pause_a_little();
+		mt_window_pause(budget);
 	}
 }
 
@@ -383,7 +461,8 @@ arm_detached(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, rc, freed = 0, steps = WAIT_STEPS;
+	struct mt_window w, budget;
+	int		i, rc, freed = 0;
 
 	(void)pthread_attr_init(&attr);
 	(void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -397,15 +476,18 @@ arm_detached(void)
 	}
 	(void)pthread_attr_destroy(&attr);
 
-	for (i = 0; i < WAIT_STEPS && __atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS; i++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (__atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS &&
+	       !mt_window_spent(&w, WAIT_MS))
+		mt_window_pause(&w);
 	if (__atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS) {
 		verdict(6, 0, "%d of %d detached threads ran",
 			__atomic_load_n(&d_done, __ATOMIC_SEQ_CST), D_THREADS);
 		return;
 	}
+	mt_window_start(&budget, 10);
 	for (i = 0; i < D_THREADS; i++)
-		freed += address_is_free(d_stack[i], &steps);
+		freed += address_is_free(d_stack[i], &budget);
 	verdict(6, freed == D_THREADS, "%d detached threads ended and %d of "
 		"their stacks were given back", D_THREADS, freed);
 }
@@ -506,7 +588,7 @@ arm_console(void)
  * the bytes at an offset must be the bytes that offset holds.
  */
 #define F_PATH		"/mach_servers/cow_test"	/* on the root disk, and nobody writes it */
-#define F_MOUNT_WAIT	(15 * 100)			/* 15 s of 10 ms steps */
+#define F_MOUNT_MS	15000				/* by the clock (#1009) */
 
 static void
 arm_file(void)
@@ -514,14 +596,20 @@ arm_file(void)
 	struct stat	by_name, by_fd;
 	unsigned char	head[16], again[16];
 	off_t		end, middle;
-	int		fd, i;
+	struct mt_window w;
+	int		fd, found = 0;
 
-	for (i = 0; i < F_MOUNT_WAIT; i++) {
-		if (stat(F_PATH, &by_name) == 0)
+	mt_window_start(&w, 10);
+	for (;;) {
+		if (stat(F_PATH, &by_name) == 0) {
+			found = 1;
 			break;
-		pause_a_little();
+		}
+		if (mt_window_over(&w, F_MOUNT_MS))
+			break;
+		mt_window_pause(&w);
 	}
-	if (i == F_MOUNT_WAIT) {
+	if (!found) {
 		not_asked(9, "no file on a mounted disk on this boot");
 		return;
 	}
@@ -884,13 +972,15 @@ own_id_thread(void *arg)
 {
 	pthread_mutex_t	*m = arg;
 	pid_t		first = gettid();
-	int		i, rc;
+	struct mt_window w;
+	int		rc;
 
 	rc = pthread_mutex_lock(m);
 	if (rc == 0) {
 		pause_a_little();
-		for (i = 0; i < WAIT_STEPS && gettid() == 0; i++)
-			pause_a_little();
+		mt_window_start(&w, 10);
+		while (gettid() == 0 && !mt_window_spent(&w, WAIT_MS))
+			mt_window_pause(&w);
 		rc = pthread_mutex_unlock(m);
 	}
 	if (first == 0)
@@ -908,7 +998,9 @@ arm_own_id(void)
 {
 	pthread_mutexattr_t	attr;
 	pthread_t		th[O_THREADS];
-	int			i, rc = 0, made = 0, waited;
+	struct mt_window	w;
+	long long		waited;
+	int			i, rc = 0, made = 0;
 	int			answered, nameless, refused;
 
 	(void)pthread_mutexattr_init(&attr);
@@ -921,17 +1013,19 @@ arm_own_id(void)
 		if (rc == 0)
 			made++;
 	}
-	for (waited = 0; waited < WAIT_STEPS &&
-	     __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made; waited++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (__atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made &&
+	       !mt_window_spent(&w, WAIT_MS))
+		mt_window_pause(&w);
+	waited = mt_window_ms(&w);
 	answered = __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST);
 	nameless = __atomic_load_n(&o_nameless, __ATOMIC_SEQ_CST);
 	refused = __atomic_load_n(&o_refused, __ATOMIC_SEQ_CST);
 	if (rc != 0)
 		verdict(24, 0, "pthread_create %d said %d", made, rc);
 	else if (answered < made)
-		verdict(24, 0, "of %d threads, %d had answered after %d "
-			"sleeps of 10 ms asked", made, answered, waited);
+		verdict(24, 0, "of %d threads, %d had answered after %lld ms",
+			made, answered, waited);
 	else
 		verdict(24, nameless == 0 && refused == 0,
 			"%d threads asked for their id as their first act, %d "
@@ -967,17 +1061,19 @@ arm_own_id(void)
  * reached the wrong thread, whose own thread then never comes back.  So the
  * stat thread ends on its count or, once it has a few, on its time, and the
  * wait ends when the four have ended or when one of them has completed no call
- * for R_STALL_STEPS -- per thread, because with the stat thread stuck the fast
+ * for R_STALL_MS -- per thread, because with the stat thread stuck the fast
  * three would go on completing calls for ever.  WRONG names the thread that
- * stopped.
+ * stopped.  #1009: both times by the clock; counted in 10 ms sleeps, they
+ * doubled when each sleep came to last 20 ms, and the old arm's 15 s with them,
+ * so that 922-wait-whole-arm was caught no longer.
  */
 #define R_THREADS	4
 #define R_ROUNDS	1000	/* the least of each of the fast three */
 #define R_STAT		3	/* the kind that goes to the file server */
 #define R_STATS		20	/* and how many of it, which ends all four */
 #define R_STATS_LEAST	3	/* #922: the fewest, when its time ends it */
-#define R_STAT_STEPS	(2 * WAIT_STEPS)	/* #922: the stat thread's time */
-#define R_STALL_STEPS	(3 * WAIT_STEPS)	/* #922: no call this long */
+#define R_STAT_MS	10000	/* #922: the stat thread's time, by the clock */
+#define R_STALL_MS	15000	/* #922: no call this long, by the clock */
 
 static const char *const r_kind[R_THREADS] = {
 	"getsid", "getpgid", "kill", "stat"
@@ -985,11 +1081,11 @@ static const char *const r_kind[R_THREADS] = {
 static int	r_wrong[R_THREADS], r_round[R_THREADS], r_ended[R_THREADS];
 static int	r_done, r_over;
 /*
- * #922: the stat thread's time is up -- raised by the wait, which counts it in
- * the same 10 ms sleeps as everything else here.  Not clock_gettime(): when
- * this was written no handler served it in libposix-uros (#923), and the
- * first version of this read a timespec the call had never written, so the
- * time never ran out.
+ * #922: the stat thread's time is up -- raised by the wait, which counts it by
+ * the clock (#1009), served since #923.  When this was written no handler
+ * served clock_gettime(), and the first version of this read a timespec the
+ * call had never written, so the time never ran out: mono_ms() says -1 for a
+ * refusal, and the arm says it could not count its times.
  */
 static int	r_stat_time_up;
 
@@ -1056,8 +1152,9 @@ arm_threads_in_servers(void)
 {
 	pthread_attr_t	attr;
 	pthread_t	th;
-	int		i, k, n, rc, done, stuck = -1, steps = 0;
-	int		seen[R_THREADS] = { 0 }, still[R_THREADS] = { 0 };
+	int		i, k, n, rc, done, stuck = -1;
+	int		seen[R_THREADS] = { 0 };
+	long long	t0, now, last[R_THREADS];
 
 	if (access_by_stat(F_PATH) != 0) {
 		not_asked(22, "no disk mounted on this boot");
@@ -1076,29 +1173,43 @@ arm_threads_in_servers(void)
 	(void)pthread_attr_destroy(&attr);
 
 	/* #922: until all four have ended, or one has completed no call for
-	 * R_STALL_STEPS -- the reply it waits for is not coming */
+	 * R_STALL_MS -- the reply it waits for is not coming.  #1009: by the
+	 * clock, each thread from its last call. */
+	t0 = mono_ms();
+	for (k = 0; k < R_THREADS; k++)
+		last[k] = t0;
 	while (__atomic_load_n(&r_done, __ATOMIC_SEQ_CST) < R_THREADS
-	       && stuck < 0) {
+	       && stuck < 0 && t0 >= 0) {
 		pause_a_little();
-		if (++steps == R_STAT_STEPS)
+		now = mono_ms();
+		if (now < 0) {
+			t0 = -1;
+			break;
+		}
+		if (now - t0 >= R_STAT_MS)
 			__atomic_store_n(&r_stat_time_up, 1, __ATOMIC_SEQ_CST);
 		for (k = 0; k < R_THREADS; k++) {
 			n = __atomic_load_n(&r_round[k], __ATOMIC_SEQ_CST);
 			if (__atomic_load_n(&r_ended[k], __ATOMIC_SEQ_CST)
 			    || n != seen[k])
-				still[k] = 0;
-			else if (++still[k] >= R_STALL_STEPS && stuck < 0)
+				last[k] = now;
+			else if (now - last[k] >= R_STALL_MS && stuck < 0)
 				stuck = k;
 			seen[k] = n;
 		}
 	}
 	done = __atomic_load_n(&r_done, __ATOMIC_SEQ_CST);
 	__atomic_store_n(&r_over, 1, __ATOMIC_SEQ_CST); /* if stat never came back */
+	if (t0 < 0) {
+		verdict(22, 0, "CLOCK_MONOTONIC refused: the arm could not count "
+			"its times, %d of %d threads ended", done, R_THREADS);
+		return;
+	}
 	if (stuck >= 0) {
 		verdict(22, 0, "the %s thread completed no call in %d s, after "
 			"%d: a reply that never came back -- %s %d/%d, %s %d/%d, "
 			"%s %d/%d, %s %d/%d made/wrong", r_kind[stuck],
-			R_STALL_STEPS / 100, r_round[stuck],
+			R_STALL_MS / 1000, r_round[stuck],
 			r_kind[0], r_round[0], r_wrong[0],
 			r_kind[1], r_round[1], r_wrong[1],
 			r_kind[2], r_round[2], r_wrong[2],
@@ -1258,7 +1369,7 @@ arm_page_zero(void)
  */
 #define CLK_READERS	4
 #define CLK_READS	25000			/* each, 100000 in all */
-#define CLK_STEPS	(12 * WAIT_STEPS)	/* the readers' time, 60 s */
+#define CLK_MS		(12 * WAIT_MS)		/* the readers' time, 60 s */
 #define CLK_NAP_NS	(10LL * 1000 * 1000)
 
 static long long	clk_published;	/* ns, the largest reading published */
@@ -1320,7 +1431,9 @@ arm_clocks(void)
 	struct timeval	tv = { -1, -1 };
 	pthread_t	th[CLK_READERS];
 	int		rc_mono, rc_cal, rc_tv, rc_other, err_other, i;
-	int		rc = 0, made = 0, finished, waited;
+	int		rc = 0, made = 0, finished;
+	struct mt_window w;
+	long long	waited;
 	int		short_both = 0, short_mono = 0;
 	long long	dm, dc, longer, shortest = -1, took = -1;
 
@@ -1337,9 +1450,11 @@ arm_clocks(void)
 		if (rc == 0)
 			made++;
 	}
-	for (waited = 0; waited < CLK_STEPS &&
-	     __atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST) < made; waited++)
-		pause_a_little();
+	mt_window_start(&w, 10);
+	while (__atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST) < made &&
+	       !mt_window_over(&w, CLK_MS))
+		mt_window_pause(&w);
+	waited = mt_window_ms(&w);
 	finished = __atomic_load_n(&clk_finished, __ATOMIC_SEQ_CST);
 	if (finished == made) {
 		for (i = 0; i < made; i++)
@@ -1369,8 +1484,7 @@ arm_clocks(void)
 		verdict(25, 0, "pthread_create %d said %d", made, rc);
 	else if (finished < made)
 		verdict(25, 0, "of %d threads reading the monotonic clock, %d "
-			"had finished after %d sleeps of 10 ms asked", made,
-			finished, waited);
+			"had finished after %lld ms", made, finished, waited);
 	else
 		verdict(25, rc_mono == 0 && rc_cal == 0 && rc_tv == 0 &&
 			rc_other == -1 && err_other == EINVAL &&
@@ -1788,13 +1902,16 @@ arm_pipe(void)
 static int
 watch_children(pid_t *pid, int n, int secs, int *status, int *others)
 {
-	int	left = n, killed = 0, i, step, st, ours;
+	int	left = n, killed = 0, i, st, ours;
 	pid_t	got;
+	struct mt_window w;
 
 	*others = 0;
 	for (i = 0; i < n; i++)
 		status[i] = -1;
-	for (step = 0; left > 0 && step < secs * 100; step++) {
+	/* #1009: secs by the clock, which the lines that print them say. */
+	mt_window_start(&w, 10);
+	while (left > 0 && !mt_window_over(&w, (long long)secs * 1000)) {
 		while (left > 0 && (got = waitpid(-1, &st, WNOHANG)) > 0) {
 			ours = 0;
 			for (i = 0; i < n; i++)
@@ -1807,7 +1924,7 @@ watch_children(pid_t *pid, int n, int secs, int *status, int *others)
 				(*others)++;
 		}
 		if (left > 0)
-			pause_a_little();
+			mt_window_pause(&w);
 	}
 	for (i = 0; i < n; i++) {
 		if (status[i] != -1)
@@ -2538,20 +2655,23 @@ static int
 run_bounded(int (*fn)(void), int secs)
 {
 	pid_t	pid, got;
-	int	st = 0, step;
+	int	st = 0;
+	struct mt_window w;
 
 	pid = fork();
 	if (pid < 0)
 		return -2;
 	if (pid == 0)
 		_exit(fn());
-	for (step = 0; step < secs * 100; step++) {
+	/* #1009: secs by the clock, which the lines that print them say. */
+	mt_window_start(&w, 10);
+	while (!mt_window_over(&w, (long long)secs * 1000)) {
 		got = waitpid(pid, &st, WNOHANG);
 		if (got == pid)
 			return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 		if (got < 0)
 			return -1;
-		pause_a_little();
+		mt_window_pause(&w);
 	}
 	(void)kill(pid, SIGKILL);
 	(void)waitpid(pid, &st, 0);
@@ -2570,8 +2690,9 @@ static void
 arm_wait_nohang(void)
 {
 	struct timespec	t0, t1;
+	struct mt_window w;
 	pid_t		pid, first, got, after;
-	int		st = 0, step, e_after;
+	int		st = 0, e_after;
 	long		first_ms;
 
 	pid = fork();
@@ -2589,8 +2710,9 @@ arm_wait_nohang(void)
 	first_ms = (t1.tv_sec - t0.tv_sec) * 1000 +
 		   (t1.tv_nsec - t0.tv_nsec) / 1000000;
 	got = first;
-	for (step = 0; got == 0 && step < 1000; step++) {
-		pause_a_little();
+	mt_window_start(&w, 10);		/* #1009: 10 s by the clock */
+	while (got == 0 && !mt_window_over(&w, 10000)) {
+		mt_window_pause(&w);
 		got = waitpid(pid, &st, WNOHANG);
 	}
 	if (got == 0) {
@@ -3075,10 +3197,11 @@ static void wait_to_be_killed(void) __attribute__((noreturn));
 static void
 wait_to_be_killed(void)
 {
-	int	i;
+	struct mt_window w;
 
-	for (i = 0; i < 100; i++)
-		nap_ms(100);
+	mt_window_start(&w, 100);		/* #1009: 10 s by the clock */
+	while (!mt_window_over(&w, 10000))
+		mt_window_pause(&w);
 	_exit(9);
 }
 
@@ -3317,7 +3440,8 @@ static int
 wait_group_nohang_run(void)
 {
 	pid_t	a, b, c, r, r0g, r0o, g1 = 0, g2 = 0, o1 = 0, gend, oend;
-	int	s, s1 = 0, s2 = 0, s3 = 0, e_g, e_o, step, wrong = 0;
+	int	s, s1 = 0, s2 = 0, s3 = 0, e_g, e_o, wrong = 0;
+	struct mt_window w;
 
 	a = fork();
 	if (a < 0)
@@ -3344,7 +3468,8 @@ wait_group_nohang_run(void)
 	(void)setpgid(b, a);			/* as a shell does */
 	r0g = waitpid(-a, NULL, WNOHANG);
 	r0o = waitpid(0, NULL, WNOHANG);
-	for (step = 0; step < 1000 && (g2 == 0 || o1 == 0); step++) {
+	mt_window_start(&w, 10);		/* #1009: 10 s by the clock */
+	while ((g2 == 0 || o1 == 0) && !mt_window_over(&w, 10000)) {
 		if (g2 == 0) {
 			s = 0;
 			r = waitpid(-a, &s, WNOHANG);
@@ -3368,7 +3493,7 @@ wait_group_nohang_run(void)
 				s3 = s;
 			}
 		}
-		nap_ms(10);
+		mt_window_pause(&w);
 	}
 	gend = waitpid(-a, NULL, WNOHANG);
 	e_g = errno;
@@ -3496,14 +3621,15 @@ static void dfl_child(int sig) __attribute__((noreturn));
 static void
 dfl_child(int sig)
 {
-	int	i;
+	struct mt_window w;
 
 	(void)signal(sig, SIG_DFL);
 	(void)signal(SIGUSR1, dfl_mark);
 	(void)raise(sig);
 	(void)raise(SIGUSR1);
-	for (i = 0; i < 1000 && !dfl_marked; i++)
-		nap_ms(10);
+	mt_window_start(&w, 10);		/* #1009: 10 s by the clock */
+	while (!dfl_marked && !mt_window_over(&w, 10000))
+		mt_window_pause(&w);
 	_exit(dfl_marked ? 0 : 9);
 }
 

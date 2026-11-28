@@ -98,6 +98,7 @@
 #include <mach.h>
 #include <mach/bootstrap.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>			/* #1009: getclock(), the waits' ms */
 #include <sa_mach.h>			/* printf_init -- the header, not an
 					 * extern beside the call: see the note
 					 * in <device/device_master.h> */
@@ -122,9 +123,57 @@
 
 #define REGION_BYTES	4096
 
-/* How long the checker waits for the holder's slots: 500 x 10 ms. */
-#define RECLAIM_TRIES	500
+/*
+ * How long the checker waits for the holder's slots, and for a name or a
+ * death: RECLAIM_MS / RECLAIM_WAIT_MS waits, 500 of 10 ms (#1009).  Each is
+ * a patience -- for another task to give back, to name itself, to die --
+ * and a patience is a number of chances given it, not a time: a wait ends
+ * at a tick, and the waiter looks again only when the processor comes back
+ * to it.  Since 963ca2cc a timed wait lasts a tick more, so the 500 waits
+ * last 10 s, and "waited %u ms" said half of them: the lines say the clock's
+ * milliseconds.  Bounded by a second of the clock, act_test's
+ * rpc_pair_start() lost its thread at one processor under TCG (27/11).
+ */
+#define RECLAIM_MS	5000
 #define RECLAIM_WAIT_MS	10
+
+struct reclaim_wait {
+	struct timespec	t0;
+	int		clocked;
+	unsigned	waits;
+};
+
+static void
+reclaim_wait_start(struct reclaim_wait *w)
+{
+	w->clocked = getclock(TIMEOFDAY, &w->t0) == 0;
+	w->waits = 0;
+}
+
+static unsigned
+reclaim_wait_ms(struct reclaim_wait *w)
+{
+	struct timespec	t;
+
+	if (w->clocked && getclock(TIMEOFDAY, &t) == 0)
+		return (unsigned)((t.tv_sec - w->t0.tv_sec) * 1000 +
+				  (t.tv_nsec - w->t0.tv_nsec) / 1000000);
+	return w->waits * RECLAIM_WAIT_MS;
+}
+
+static int
+reclaim_wait_over(struct reclaim_wait *w)
+{
+	return w->waits >= RECLAIM_MS / RECLAIM_WAIT_MS;
+}
+
+static void
+reclaim_wait_pause(struct reclaim_wait *w)
+{
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+			     RECLAIM_WAIT_MS);
+	w->waits++;
+}
 
 
 /*
@@ -419,33 +468,31 @@ free_table(const vm_address_t *kva, unsigned n)
 }
 
 /*
- * Wait for the holder's slots to come back, and answer how many tries it took.
- * RECLAIM_TRIES means they never did.
+ * Wait for the holder's slots to come back: 1 when they did, with *ms the
+ * milliseconds it took by the clock; 0 when they had not in its waits.
  *
  * 🔑 The slot taken to find out is given straight back, so the count the
  * checker reports afterwards is the whole table and not the whole table minus
  * the one this probe was holding.
  */
-static unsigned
-wait_for_room(void)
+static int
+wait_for_room(unsigned *ms)
 {
-	unsigned t;
+	struct reclaim_wait w;
 
-	for (t = 0; t < RECLAIM_TRIES; t++) {
+	for (reclaim_wait_start(&w); ; reclaim_wait_pause(&w)) {
 		vm_address_t	kva = 0;
 		uint64_t	id = 0;
 
+		*ms = reclaim_wait_ms(&w);
 		if (take_one(&kva, &id)) {
 			(void) device_dma_free(device_port, DEVICE_DMA_NO_BDF,
 					       kva, REGION_BYTES);
-			return t;
+			return 1;
 		}
-
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
-				     RECLAIM_WAIT_MS);
+		if (reclaim_wait_over(&w))
+			return 0;
 	}
-
-	return RECLAIM_TRIES;
 }
 
 
@@ -640,7 +687,7 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 	mach_port_t	p = MACH_PORT_NULL;
 	mach_port_t	mine = MACH_PORT_NULL;
 	mach_port_t	sig = MACH_PORT_NULL;
-	unsigned	t;
+	struct reclaim_wait w;
 
 	/*
 	 * ⚠️ The receive right is handed back rather than dropped here (#530).
@@ -654,12 +701,11 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 	 * Find the holder while it is still alive -- it is waiting for us and
 	 * will not begin until it sees our own name below.
 	 */
-	for (t = 0; t < RECLAIM_TRIES; t++) {
+	for (reclaim_wait_start(&w); !reclaim_wait_over(&w);
+	     reclaim_wait_pause(&w)) {
 		if (netname_look_up(name_server_port, "", HOLDER_NAME, &p)
 		    == NETNAME_SUCCESS && p != MACH_PORT_NULL)
 			break;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
-				     RECLAIM_WAIT_MS);
 	}
 
 	if (p == MACH_PORT_NULL)
@@ -707,7 +753,8 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 		}
 	}
 
-	for (t = 0; t < RECLAIM_TRIES; t++) {
+	for (reclaim_wait_start(&w); !reclaim_wait_over(&w);
+	     reclaim_wait_pause(&w)) {
 		mach_port_type_t type = 0;
 
 		if (mach_port_type(mach_task_self(), p, &type) != KERN_SUCCESS)
@@ -716,8 +763,6 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 			(void) mach_port_deallocate(mach_task_self(), p);
 			return 1;
 		}
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
-				     RECLAIM_WAIT_MS);
 	}
 
 	(void) mach_port_deallocate(mach_task_self(), p);
@@ -761,7 +806,7 @@ main(int argc, char **argv)
 	role = (argc > 1 && argv[1] != 0) ? argv[1] : "holder";
 
 	if (strcmp(role, "check") != 0) {
-		unsigned	t;
+		struct reclaim_wait w;
 		mach_port_t	peer = MACH_PORT_NULL;
 
 		/*
@@ -785,14 +830,12 @@ main(int argc, char **argv)
 			die();
 		}
 
-		for (t = 0; t < RECLAIM_TRIES; t++) {
+		for (reclaim_wait_start(&w); !reclaim_wait_over(&w);
+		     reclaim_wait_pause(&w)) {
 			if (netname_look_up(name_server_port, "", CHECKER_NAME,
 					    &peer) == NETNAME_SUCCESS
 			    && peer != MACH_PORT_NULL)
 				break;
-			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_WAIT,
-					     RECLAIM_WAIT_MS);
 		}
 
 		if (peer == MACH_PORT_NULL) {
@@ -924,9 +967,7 @@ main(int argc, char **argv)
 	 * wait separates a reclaim that had not finished from one that lost
 	 * something.
 	 */
-	waited = wait_for_room();
-
-	if (waited >= RECLAIM_TRIES) {
+	if (!wait_for_room(&waited)) {
 		arm(1, "a dead task's DMA regions are all given back", 0);
 		/*
 		 * ⚠️ Said rather than skipped.  The remaining arms need a
@@ -935,8 +976,7 @@ main(int argc, char **argv)
 		 * would be reporting a smaller failure than it found.
 		 */
 		printf("dma_reclaim:     waited %u ms and the table is still "
-		       "the dead task's\n",
-		       (unsigned)(RECLAIM_TRIES * RECLAIM_WAIT_MS));
+		       "the dead task's\n", waited);
 		printf("dma_reclaim: [2] and [3] cannot run\n");
 		n_fail += 2;
 		printf("dma_reclaim: %d of %d arms passed\n",
@@ -979,7 +1019,7 @@ main(int argc, char **argv)
 	printf("dma_reclaim:     room after %u ms; the holder took %u, the "
 	       "kernel took back %u, %u of the %u slots were held by somebody "
 	       "else, and this task got %u of the %u that were free\n",
-	       waited * RECLAIM_WAIT_MS, held, reclaimed, in_use, total, n,
+	       waited, held, reclaimed, in_use, total, n,
 	       free_then);
 
 	/*
@@ -1115,7 +1155,7 @@ main(int argc, char **argv)
 	 */
 	if (become_a_driver()) {
 		unsigned int state = (unsigned int)-1;
-		unsigned int t;
+		struct reclaim_wait w;
 
 		/*
 		 * ⚠️ WAITED FOR, not read once.  The HAL learns of the death
@@ -1125,13 +1165,11 @@ main(int argc, char **argv)
 		 * time it was run.  Bounded, so a HAL that never releases the
 		 * device fails the arm instead of hanging the boot.
 		 */
-		for (t = 0; t < RECLAIM_TRIES; t++) {
+		for (reclaim_wait_start(&w); !reclaim_wait_over(&w);
+		     reclaim_wait_pause(&w)) {
 			if (hal_get_device_state(hal_port, 0, 0, 0, &state)
 			    == KERN_SUCCESS && state == HAL_DEV_UNCLAIMED)
 				break;
-			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_WAIT,
-					     RECLAIM_WAIT_MS);
 		}
 
 		arm(4, "the HAL released the dead driver's device",

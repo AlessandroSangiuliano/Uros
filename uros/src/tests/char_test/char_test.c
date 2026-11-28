@@ -53,6 +53,7 @@
 #include <mach/message.h>
 #include <mach/port.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>		/* #1009: getclock(), the arms' waits */
 
 #include <stdio.h>
 #include <string.h>
@@ -92,16 +93,38 @@ extern void		printf_init(mach_port_t device_server_port);
 #define	COM2_SCRATCH	0x2FFu
 
 /*
- * How long the input arm waits, and why it is a count of tries and not a
- * clock.  char_tty_read does not block -- it returns whatever the module's
- * ring holds, which is nothing until a byte arrives -- so the wait is a poll,
- * and thread_switch with a 50 ms hint is what every other waiter in this tree
- * uses.  Forty tries is about two seconds: long enough for a harness that
- * types after the banner, short enough that an unattended boot is not held up
- * by an arm that is going to decline.
+ * How long the input arm waits.  char_tty_read does not block -- it returns
+ * whatever the module's ring holds, which is nothing until a byte arrives --
+ * so the wait is a poll, a try every 50 ms, for two seconds of the clock: long
+ * enough for a harness that types after the banner, short enough that an
+ * unattended boot is not held up by an arm that is going to decline.  #1009:
+ * it was forty tries, "about two seconds", and since 963ca2cc a wait of 50 ms
+ * lasts 60.
  */
-#define	RX_TRIES	40u
+#define	RX_TOTAL_MS	2000
 #define	RX_WAIT_MS	50
+
+/* #1009: the milliseconds since t0, or -1 when the clock is refused. */
+static long
+ms_since(const struct timespec *t0)
+{
+	struct timespec	t;
+
+	if (getclock(TIMEOFDAY, &t) != 0)
+		return -1;
+	return (long)(t.tv_sec - t0->tv_sec) * 1000 +
+	       (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+/* Whether ms have gone since t0: by the clock, or by the tries if refused. */
+static int
+waited_out(const struct timespec *t0, int clocked, unsigned tries,
+	   unsigned step_ms, long ms)
+{
+	long	d = clocked ? ms_since(t0) : -1;
+
+	return d >= 0 ? d >= ms : (long)tries * step_ms >= ms;
+}
 
 /* The byte the harness is asked to type.  Printable, not a control
  * character: ^C and ^Z are eaten by the line discipline (#397) and ^D is the
@@ -188,6 +211,8 @@ main(int argc, char **argv)
 	char			in[CHR_BUF_MAX];
 	mach_msg_type_number_t	in_count;
 	unsigned int		tries;
+	struct timespec		t0;
+	int			clocked;
 
 	(void)argc;
 	(void)argv;
@@ -286,7 +311,9 @@ main(int argc, char **argv)
 	 */
 	arms++;
 	in_count = 0;
-	for (tries = 0; tries < RX_TRIES; tries++) {
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (tries = 0; !waited_out(&t0, clocked, tries, RX_WAIT_MS, RX_TOTAL_MS);
+	     tries++) {
 		in_count = (mach_msg_type_number_t)sizeof(in);
 		result = 0;
 		kr = char_tty_read(char_port, (const char *)&tok,
@@ -313,10 +340,11 @@ main(int argc, char **argv)
 	if (kr != KERN_SUCCESS || result != CHR_OK) {
 		/* already reported above */
 	} else if (in_count == 0) {
-		printf("char_test: [2] NOT ASKED — nothing was typed in %u "
-		       "tries, so the input path was never exercised.  Send a "
-		       "byte on the serial line to ask it (#563)\n",
-		       RX_TRIES);
+		printf("char_test: [2] NOT ASKED — nothing was typed in %ld "
+		       "ms, %u tries, so the input path was never exercised.  "
+		       "Send a byte on the serial line to ask it (#563)\n",
+		       clocked ? ms_since(&t0) : (long)tries * RX_WAIT_MS,
+		       tries);
 		arms--;
 	} else if (in[0] == RX_EXPECT) {
 		printf("char_test: [2] read back '%c' — a character went in "
@@ -379,8 +407,16 @@ main(int argc, char **argv)
 			 * a full table is waited out for a second.
 			 */
 			claim = KERN_RESOURCE_SHORTAGE;
-			for (tries = 0; tries < 50
-			     && claim == KERN_RESOURCE_SHORTAGE; tries++) {
+			/*
+			 * #1009: fifty tries 20 ms apart, counted: a claim
+			 * slot comes free when other tasks' claims have
+			 * retired, a number of chances given them and not a
+			 * time.  Bounded by a second of the clock, act_test's
+			 * rpc_pair_start() lost its thread at one processor
+			 * under TCG (27/11).
+			 */
+			for (tries = 0; claim == KERN_RESOURCE_SHORTAGE &&
+			     tries < 50; tries++) {
 				if (tries != 0)
 					thread_switch(MACH_PORT_NULL,
 						      SWITCH_OPTION_WAIT, 20);

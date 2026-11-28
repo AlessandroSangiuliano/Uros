@@ -155,6 +155,91 @@ extern kern_return_t mig_cap_subscribe_revoke(mach_port_t cap_server,
 extern void printf_init(mach_port_t device_server_port);
 
 /*
+ * #1009: a window is a time, read on the realtime clock.  Its waits were
+ * counted -- "after 200 wait(s) of 10 ms" -- and since 963ca2cc a timed wait
+ * lasts a tick more, so that it never ends early: a wait of 10 ms in a loop
+ * lasts 20, and every window counted in them doubled, the printed time with
+ * it.  Now the waits only pace the reading.  A window whose start the clock
+ * cannot give counts its waits, as before, and the run says once that it did.
+ */
+struct ct_window {
+    tvalspec_t t0;
+    int        clocked;
+    unsigned   waits;
+    unsigned   step_ms;
+};
+
+static mach_port_t ct_window_clock = MACH_PORT_NULL;
+static int         ct_window_refused;
+
+static int
+ct_window_now(tvalspec_t *t)
+{
+    if (ct_window_clock == MACH_PORT_NULL &&
+        host_get_clock_service(mach_host_self(), REALTIME_CLOCK,
+                               &ct_window_clock) != KERN_SUCCESS) {
+        ct_window_clock = MACH_PORT_NULL;
+        return 0;
+    }
+    return clock_get_time(ct_window_clock, t) == KERN_SUCCESS;
+}
+
+static void
+ct_window_start(struct ct_window *w, unsigned step_ms)
+{
+    w->clocked = ct_window_now(&w->t0);
+    if (!w->clocked)
+        ct_window_refused = 1;
+    w->waits = 0;
+    w->step_ms = step_ms;
+}
+
+/* The window's milliseconds so far: by the clock, or its waits' if refused. */
+static long
+ct_window_ms(struct ct_window *w)
+{
+    tvalspec_t t;
+
+    if (w->clocked && ct_window_now(&t))
+        return (long)(t.tv_sec - w->t0.tv_sec) * 1000 +
+               ((long)t.tv_nsec - (long)w->t0.tv_nsec) / 1000000;
+    if (w->clocked) {
+        w->clocked = 0;
+        ct_window_refused = 1;
+    }
+    return (long)w->waits * w->step_ms;
+}
+
+static int
+ct_window_over(struct ct_window *w, unsigned limit_ms)
+{
+    return ct_window_ms(w) >= (long)limit_ms;
+}
+
+/*
+ * #1009: a patience, which a window is not: a wait for another task to do
+ * something -- cap_server to give a slot back, a family to drain, a claim
+ * slot to come free -- is a number of chances given it, not a time.  A wait
+ * ends at a tick, and the waiter looks again only when the processor comes
+ * back to it.  So a patience gives up after its waits, limit_ms / step of
+ * them, as the test counted them before; the clock only says, in the line,
+ * how long they took.  Bounded by a second of the clock, act_test's
+ * rpc_pair_start() lost its thread at one processor under TCG (27/11).
+ */
+static int
+ct_window_spent(struct ct_window *w, unsigned limit_ms)
+{
+    return w->waits >= limit_ms / (w->step_ms ? w->step_ms : 1);
+}
+
+static void
+ct_window_wait(struct ct_window *w)
+{
+    (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, w->step_ms);
+    w->waits++;
+}
+
+/*
  * The port "cap_server" names, once cap_server serves it (#744).
  *
  * 🔴 THE NAME USED TO BE THE BARRIER, AND IT SAYS NOTHING NOW.  cap_server
@@ -608,7 +693,8 @@ a_port_given_back_gives_its_slot_back(void)
     uint32_t      len = manifest_make(blob, sizeof(blob), "cap_test_slot",
                                       rd, 1, NULL, 0);
     mach_port_t   child = MACH_PORT_NULL;
-    unsigned      i, waits = 0, most = 0;
+    unsigned      i;
+    long          waited = 0, most = 0;
     kern_return_t kr = KERN_SUCCESS;
 
     if (len == 0 ||
@@ -618,19 +704,23 @@ a_port_given_back_gives_its_slot_back(void)
         return 0;
     }
 
+    /* #1009: each slot is waited for 200 waits of 10 ms, a patience. */
     for (i = 0; i < 80; i++) {
-        mach_port_t port = MACH_PORT_NULL;
+        mach_port_t      port = MACH_PORT_NULL;
+        struct ct_window w;
 
-        for (waits = 0; ; waits++) {
+        ct_window_start(&w, 10);
+        for (;;) {
             kr = cap_derive_child(mach_cap_port, child, blob, len, &port);
             if ((kr != CAP_ERR_NO_MANIFEST_SLOT &&
                  kr != CAP_ERR_DERIVED_QUOTA && kr != CAP_ERR_LINEAGE_FULL) ||
-                waits == 200)
+                ct_window_spent(&w, 2000))
                 break;
-            (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+            ct_window_wait(&w);
         }
-        if (waits > most)
-            most = waits;
+        waited = ct_window_ms(&w);
+        if (waited > most)
+            most = waited;
         if (kr != KERN_SUCCESS)
             break;
         (void)mach_port_deallocate(mach_task_self(), port);
@@ -641,12 +731,12 @@ a_port_given_back_gives_its_slot_back(void)
     if (i == 80) {
         printf("cap_test: [40] 80 ports derived and each given back, more "
                "than cap_server's 64 slots: all 80 made, the longest wait "
-               "for a slot %u wait(s) of 10 ms (#743)\n", most);
+               "for a slot %ld ms (#743)\n", most);
         return 1;
     }
-    printf("cap_test: [40] WRONG — port %u of 80 refused with %d after %u "
-           "wait(s) of 10 ms: the slots of the ports given back did not "
-           "come back (#743)\n", i + 1, (int)kr, waits);
+    printf("cap_test: [40] WRONG — port %u of 80 refused with %d after %ld "
+           "ms: the slots of the ports given back did not come back "
+           "(#743)\n", i + 1, (int)kr, waited);
     return 0;
 }
 
@@ -737,14 +827,19 @@ a_no_senders_forgery_ends_nothing(void)
  * back the family must come back to none, within two seconds.
  */
 static int
-family_drained(struct slots *s, unsigned *waits)
+family_drained(struct slots *s, long *ms)
 {
-    for (*waits = 0; ; (*waits)++) {
+    struct ct_window w;
+
+    /* #1009: 200 waits of 10 ms, a patience; the clock says how long. */
+    ct_window_start(&w, 10);
+    for (;;) {
+        *ms = ct_window_ms(&w);
         if (slots_now(mach_cap_port, s) != KERN_SUCCESS)
             return 0;
-        if (s->family == 0 || *waits == 200)
+        if (s->family == 0 || ct_window_spent(&w, 2000))
             return s->family == 0;
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+        ct_window_wait(&w);
     }
 }
 
@@ -763,7 +858,8 @@ derived_ports_are_bounded(void)
     mach_port_t   child = MACH_PORT_NULL, eport = MACH_PORT_NULL;
     struct slots  s0 = { 0 }, s1 = { 0 }, at = { 0 }, s2 = { 0 };
     kern_return_t kr_empty, kr = KERN_SUCCESS, want;
-    unsigned      n, i, w0 = 0, w2 = 0;
+    unsigned      n, i;
+    long          w0 = 0, w2 = 0;
     int           room_family, room_quota, want_n;
     int           ok_start, ok_empty, ok_bound, ok_free, ok_back, ok;
 
@@ -827,12 +923,12 @@ derived_ports_are_bounded(void)
                (unsigned)at.family, (unsigned)at.family_max,
                (unsigned)at.derived, (unsigned)at.quota,
                (unsigned)at.in_use, (unsigned)at.size);
-        printf("cap_test: [46] all given back, the family at %u after %u "
-               "wait(s) of 10 ms (#937)\n", (unsigned)s2.family, w2);
+        printf("cap_test: [46] all given back, the family at %u after %ld "
+               "ms (#937)\n", (unsigned)s2.family, w2);
     }
     if (!ok_start)
         printf("cap_test: [46] WRONG — this task's family held %u derived "
-               "port(s) before the arm, after %u wait(s) of 10 ms (#937)\n",
+               "port(s) before the arm, after %ld ms (#937)\n",
                (unsigned)s0.family, w0);
     if (!ok_empty)
         printf("cap_test: [46] WRONG — a derivation that keeps nothing "
@@ -851,7 +947,7 @@ derived_ports_are_bounded(void)
                (unsigned)at.in_use, (unsigned)at.size);
     if (!ok_back)
         printf("cap_test: [46] WRONG — the family held %u derived port(s) "
-               "after all were given back and %u wait(s) of 10 ms (#937)\n",
+               "after all were given back and %ld ms (#937)\n",
                (unsigned)s2.family, w2);
     return ok;
 }
@@ -2841,11 +2937,15 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
     mach_port_t   port = MACH_PORT_NULL;
     natural_t     before = 0, after = 0, size = 0;
     struct slots  s = { 0 };
-    unsigned      waits, waited;
+    struct ct_window w;
+    long          waits, waited;
     int           rc = -1, ok;
     kern_return_t kr, rd = -1, wr = -1, dma = -1;
 
-    for (waited = 0; ; waited += 100) {
+    /* #1009: the name's 30 s by the clock; the slots' patience counted. */
+    ct_window_start(&w, 100);
+    for (;;) {
+        waited = ct_window_ms(&w);
         if (netname_look_up(name_server_port, "", (char *)"exec_server",
                             &exec_port) == KERN_SUCCESS)
             break;
@@ -2854,7 +2954,7 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
                    "— NOT ASKED (#743)\n");
             return 1;
         }
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+        ct_window_wait(&w);
     }
     /* The census is read before the caller's port is derived. */
     if (plen == 0 || slots_now(mach_cap_port, &s) != KERN_SUCCESS ||
@@ -2899,14 +2999,16 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
     (void)mach_port_deallocate(mach_task_self(), task);
     (void)mach_port_deallocate(mach_task_self(), thread);
 
-    for (waits = 0; ; waits++) {
+    ct_window_start(&w, 10);
+    for (;;) {
+        waits = ct_window_ms(&w);
         if (slots_now(mach_cap_port, &s) != KERN_SUCCESS)
             after = before + 1;
         else
             after = s.in_use;
-        if (after <= before || waits == 200)
+        if (after <= before || ct_window_spent(&w, 2000))	/* #1009 */
             break;
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+        ct_window_wait(&w);
     }
 
     ok = rd == KERN_SUCCESS && wr == CAP_ERR_NOT_IN_MANIFEST &&
@@ -2922,8 +3024,8 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
                "may hand on block devices READ: its port granted READ and "
                "refused WRITE and DMA buffers (#743)\n");
         printf("cap_test: [42] once both ports were given back the slots "
-               "were back to %u of %u after %u wait(s) of 10 ms; "
-               "exec_server's name came after %u ms (#743)\n",
+               "were back to %u of %u after %ld ms; "
+               "exec_server's name came after %ld ms (#743)\n",
                (unsigned)after, (unsigned)size, waits, waited);
     }
     if (rd != KERN_SUCCESS || wr != CAP_ERR_NOT_IN_MANIFEST ||
@@ -2934,8 +3036,8 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
                (int)rd, (int)wr, (int)dma, CAP_ERR_NOT_IN_MANIFEST);
     if (after > before)
         printf("cap_test: [42] WRONG — the slots were %u before the exec "
-               "and %u after both ports were given back and %u wait(s) of "
-               "10 ms (#743)\n", (unsigned)before, (unsigned)after, waits);
+               "and %u after both ports were given back and %ld ms "
+               "(#743)\n", (unsigned)before, (unsigned)after, waits);
     return ok;
 }
 
@@ -3174,23 +3276,25 @@ proc_server_holds_only_a_reduced_port(mach_port_t host_priv)
     proc_pid_t    pid = 0, fpid = 0;
     int           rc = -1, frc = -1;
     int           full_held = -1, reduced_held = -1, full_after = -1;
-    unsigned      waited;
+    struct ct_window w;
     int           ok;
     kern_return_t kr, kr_rights = -1, kr_full_read = -1, kr_read = -1;
     kern_return_t kr_info = -1, kr_idstop = -1, kr_amp = -1, kr_odd = -1;
     kern_return_t kr_end = -1, kr_trap_info = -1, kr_trap_stop = -1;
     mach_msg_type_number_t tcnt = TASK_BASIC_INFO_COUNT;
 
-    for (waited = 0; ; waited += 100) {
+    /* #1009: the name's 30 s by the clock. */
+    ct_window_start(&w, 100);
+    for (;;) {
         if (netname_look_up(name_server_port, "", (char *)"proc_server",
                             &proc) == KERN_SUCCESS)
             break;
-        if (waited >= 30000) {
+        if (ct_window_over(&w, 30000)) {
             printf("cap_test: [45] proc_server's name did not come in 30 s "
                    "— NOT ASKED (#927)\n");
             return 1;
         }
-        (void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+        ct_window_wait(&w);
     }
 
     kr = task_create(me, NULL, 0, FALSE, &child);
@@ -5930,28 +6034,32 @@ static int
 a_port_no_claim_covers_is_refused(mach_port_t device_port)
 {
     const unsigned int port = 0x2EF;
-    unsigned int data = 0, released = 0, klog_from = 0, tries;
+    unsigned int data = 0, released = 0, klog_from = 0;
     kern_return_t bare, claim = KERN_RESOURCE_SHORTAGE, claimed, wide;
+    struct ct_window w;
 
     bare = device_io_port_read(device_port, port, 1, &data);
-    for (tries = 0; tries < 50 && claim == KERN_RESOURCE_SHORTAGE; tries++) {
-        if (tries != 0)
-            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+    /* #1009: 50 waits of 20 ms, a patience; the clock says how long. */
+    ct_window_start(&w, 20);
+    for (;;) {
         claim = device_io_port_claim(device_port, port, 1, &released,
                                      &klog_from);
+        if (claim != KERN_RESOURCE_SHORTAGE || ct_window_spent(&w, 1000))
+            break;
+        ct_window_wait(&w);
     }
     if (claim == KERN_RESOURCE_SHORTAGE) {
         if (bare != KERN_NO_ACCESS) {
             printf("cap_test: [28] WRONG — 0x%x read without a claim kr=%d "
-                   "(want %d); no claim slot came free in a second to ask "
-                   "the rest (#620)\n", port, (int)bare,
-                   (int)KERN_NO_ACCESS);
+                   "(want %d); no claim slot came free in %u waits, %ld ms, "
+                   "to ask the rest (#620)\n", port, (int)bare,
+                   (int)KERN_NO_ACCESS, w.waits, ct_window_ms(&w));
             return 0;
         }
         printf("cap_test: [28] NOT ASKED — 0x%x was refused without a "
                "claim, but every legacy claim slot stayed taken or retiring "
-               "for a second, so the claim that is the way in could not be "
-               "made (#620)\n", port);
+               "for %u waits, %ld ms, so the claim that is the way in could "
+               "not be made (#620)\n", port, w.waits, ct_window_ms(&w));
         return 1;
     }
     if (claim != KERN_SUCCESS) {
@@ -6825,7 +6933,8 @@ fx_owner(void *arg)
     v.uaddr = &fx_owner_word;
     v.val = 0;
     while (!fx_stop) {
-        (void)urmach_futex_waitv(&v, 1, 1, &woken);	/* a tick, then gone */
+        /* #1009: the shortest wait, then gone: two ticks since 963ca2cc */
+        (void)urmach_futex_waitv(&v, 1, 1, &woken);
         fx_owner_waits++;
     }
     return NULL;
@@ -7814,6 +7923,10 @@ main(int argc, char **argv)
         pass = 0;		/* #927 */
     if (!cap_server_keeps_identities(host_port, device_port))
         pass = 0;		/* #938 */
+    if (ct_window_refused)
+        printf("cap_test: the realtime clock was refused: some windows were "
+               "counted in their waits, of a tick more each since 963ca2cc "
+               "(#1009)\n");
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");

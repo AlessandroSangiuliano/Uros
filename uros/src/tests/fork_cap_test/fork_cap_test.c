@@ -246,10 +246,20 @@ static pid_t
 wait_for_child(int *status)
 {
 	pid_t	got = 0;
-	int	waited;
+	int	waited, clocked;
+	struct timespec	t0, t;
 
+	/*
+	 * #1009: the wait by CLOCK_MONOTONIC.  It counted waited += FCT_POLL_MS
+	 * for a nap of 50 ms, which since 963ca2cc lasts 60: the 10 s the
+	 * line says were 12.  A clock refused counts the naps, as before.
+	 */
+	clocked = clock_gettime(CLOCK_MONOTONIC, &t0) == 0;
 	for (waited = 0; got == 0 && waited < FCT_WAIT_MS;
-	     waited += FCT_POLL_MS) {
+	     waited = clocked && clock_gettime(CLOCK_MONOTONIC, &t) == 0 ?
+		      (int)((t.tv_sec - t0.tv_sec) * 1000 +
+			    (t.tv_nsec - t0.tv_nsec) / 1000000) :
+		      waited + FCT_POLL_MS) {
 		got = waitpid(-1, status, WNOHANG);
 		if (got == 0)
 			nap(FCT_POLL_MS);

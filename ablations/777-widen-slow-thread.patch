@@ -5,11 +5,10 @@ Run: --entry 14 300 -smp 4
 Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
-index 8b1cb80e..a5ee2e2f 100644
 --- a/uros/src/tests/act_test/act_test.c
 +++ b/uros/src/tests/act_test/act_test.c
-@@ -5920,6 +5920,16 @@ arm_thread_waiting(volatile mach_port_t *thread)
- 	return 0;
+@@ -7514,6 +7514,16 @@ arm_thread_waiting(volatile mach_port_t *thread)
+ 	}
  }
  
 +/* 777-widen-slow-thread: about 20 ms at 3 GHz, running */
@@ -25,7 +24,7 @@ index 8b1cb80e..a5ee2e2f 100644
  /* -N, as the kernel says it.  arm 39 and arm 40. */
  static int
  arm_direct_switch(mach_port_t host)
-@@ -5965,6 +5975,7 @@ arm_thirty_nine_receiver(void *arg)
+@@ -7559,6 +7569,7 @@ arm_thirty_nine_receiver(void *arg)
  
  	(void) arg;
  	arm_thirty_nine_thread = mach_thread_self();
@@ -33,7 +32,7 @@ index 8b1cb80e..a5ee2e2f 100644
  	for (;;) {
  		mr = mach_msg(&m.h, MACH_RCV_MSG, 0, sizeof m,
  			      arm_thirty_nine_port, MACH_MSG_TIMEOUT_NONE,
-@@ -5976,6 +5987,7 @@ arm_thirty_nine_receiver(void *arg)
+@@ -7571,6 +7582,7 @@ arm_thirty_nine_receiver(void *arg)
  			arm_thirty_nine_returned = 1;
  			return NULL;
  		}
@@ -41,7 +40,7 @@ index 8b1cb80e..a5ee2e2f 100644
  		arm_thirty_nine_got++;
  	}
  }
-@@ -6435,11 +6447,13 @@ arm_forty_receiver(void *arg)
+@@ -8118,11 +8130,13 @@ arm_forty_receiver(void *arg)
  
  	(void) arg;
  	arm_forty_thread = mach_thread_self();

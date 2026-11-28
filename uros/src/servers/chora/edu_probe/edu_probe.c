@@ -58,6 +58,7 @@
 
 #include <mach.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>			/* #1009: getclock(), the waits */
 #include <stdio.h>			/* snprintf */
 
 #define EDU_INTR_STATUS		0x24u
@@ -96,8 +97,24 @@
 #define EDU_DMA_REACH_DEFAULT	((1ULL << 28) - 1)
 #define EDU_DMA_REACH_NONE	((1ULL << 20) - 1)
 
-#define PROBE_WAIT_STEPS	100		/* of 10 ms: a second */
-#define DMA_WAIT_STEPS		300		/* of 10 ms: three seconds */
+#define PROBE_WAIT_MS		1000		/* a second, by the clock */
+#define DMA_WAIT_MS		3000		/* three seconds, by the clock */
+
+/*
+ * #1009: whether ms of the clock have gone since t0.  The waits were counted,
+ * 100 and 300 of 10 ms, and since 963ca2cc each lasts 20: "in a second" and "in 3 s" were two and six.  A clock refused
+ * counts the waits, as before.
+ */
+static int
+probe_over(const struct timespec *t0, int clocked, int waits, int ms)
+{
+	struct timespec	t;
+
+	if (clocked && getclock(TIMEOFDAY, &t) == 0)
+		return (t.tv_sec - t0->tv_sec) * 1000 +
+		       (t.tv_nsec - t0->tv_nsec) / 1000000 >= ms;
+	return waits * 10 >= ms;
+}
 
 static volatile uint32_t	*regs;
 static volatile uint64_t	*regs64;	/* the same, by eight bytes */
@@ -132,14 +149,17 @@ static int
 edu_dma(struct driver *d, uint64_t src, uint64_t dst, uint32_t cmd)
 {
 	int	before = rang;
-	int	i;
+	int	i, clocked;
+	struct timespec	t0;
 
 	regs64[EDU_DMA_SRC / 8] = src;
 	regs64[EDU_DMA_DST / 8] = dst;
 	regs64[EDU_DMA_COUNT / 8] = EDU_BUF_BYTES;
 	regs64[EDU_DMA_CMD / 8] = cmd | EDU_DMA_RUN | EDU_DMA_RAISE;
 
-	for (i = 0; i < DMA_WAIT_STEPS && rang == before; i++)
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (i = 0; rang == before && !probe_over(&t0, clocked, i, DMA_WAIT_MS);
+	     i++)
 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
 
 	if (rang == before) {
@@ -338,7 +358,8 @@ edu_attach(struct driver *d)
 	volatile void	*va = NULL;
 	vm_size_t	size = 0;
 	kern_return_t	kr;
-	int		i;
+	int		i, clocked;
+	struct timespec	t0;
 
 	kr = driver_map_region(d, 0, &va, &size);
 	if (kr != KERN_SUCCESS) {
@@ -363,7 +384,8 @@ edu_attach(struct driver *d)
 	}
 
 	regs[EDU_INTR_RAISE / 4] = EDU_INTR_VALUE;
-	for (i = 0; i < PROBE_WAIT_STEPS && rang == 0; i++)
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	for (i = 0; rang == 0 && !probe_over(&t0, clocked, i, PROBE_WAIT_MS); i++)
 		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
 
 	if (rang == 0) {

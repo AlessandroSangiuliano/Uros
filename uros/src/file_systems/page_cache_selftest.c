@@ -36,6 +36,7 @@
 #include <pthread.h>
 #include <mach.h>
 #include <mach/thread_switch.h>
+#include <sys/timers.h>		/* #1009: getclock(), the waits' 5 s */
 #include "page_cache.h"
 
 #define ST_BLOCK	1024u
@@ -93,14 +94,63 @@ st_gate_reset(daddr_t block)
 	st_gate_open = 0;
 }
 
-/* A bounded wait for a flag: 1 ms at a time, 5 s at most. */
+/*
+ * #1009: whether a bounded wait has run out: 5 s of the clock, and at the
+ * least ST_BOUND_WAITS waits.  It waits for another thread of the server to
+ * do something, which is a number of chances given it and not a time -- a
+ * wait ends at a tick, and the waiter looks again only when the processor
+ * comes back to it -- so a loaded processor stretches it; 250 waits are
+ * about the 5 s while a wait of 1 ms lasts 20.  Counted alone, 5000 of them,
+ * they lasted 100 s since 963ca2cc, and a case that failed held ext_server's
+ * start, and "/" with it, that long for each wait.  Bounded by a second of
+ * the clock alone, act_test's rpc_pair_start() lost its thread at one
+ * processor under TCG (27/11).  A clock refused counts the 5000 waits, as
+ * before.
+ */
+#define ST_BOUND_MS	5000
+#define ST_BOUND_WAITS	250
+
+struct st_bound {
+	struct timespec	t0;
+	int		clocked;
+	unsigned int	waits;
+};
+
+static void
+st_bound_start(struct st_bound *b)
+{
+	b->clocked = getclock(TIMEOFDAY, &b->t0) == 0;
+	b->waits = 0;
+}
+
+static int
+st_bound_over(struct st_bound *b)
+{
+	struct timespec	t;
+
+	if (b->clocked && getclock(TIMEOFDAY, &t) == 0)
+		return (long) (t.tv_sec - b->t0.tv_sec) * 1000 +
+		       (t.tv_nsec - b->t0.tv_nsec) / 1000000 >= ST_BOUND_MS &&
+		       b->waits >= ST_BOUND_WAITS;
+	return b->waits >= 5000;
+}
+
+static void
+st_bound_wait(struct st_bound *b)
+{
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	b->waits++;
+}
+
+/* A bounded wait for a flag: 1 ms at a time, until st_bound_over(). */
 static int
 st_wait_for(volatile int *flag)
 {
-	unsigned int i;
+	struct st_bound	b;
 
-	for (i = 0; i < 5000 && !*flag; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	st_bound_start(&b);
+	while (!*flag && !st_bound_over(&b))
+		st_bound_wait(&b);
 	return *flag;
 }
 
@@ -463,11 +513,12 @@ st_get_start(struct st_getter *g, struct page_cache *pc, daddr_t block)
 static int
 st_wait_waiters(struct page_cache *pc, unsigned int n)
 {
-	unsigned int i;
+	struct st_bound	b;
 
-	for (i = 0; i < 5000 && *(volatile unsigned int *)&pc->pc_nwaiters < n;
-	     i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	st_bound_start(&b);
+	while (*(volatile unsigned int *)&pc->pc_nwaiters < n &&
+	       !st_bound_over(&b))
+		st_bound_wait(&b);
 	return *(volatile unsigned int *)&pc->pc_nwaiters >= n;
 }
 

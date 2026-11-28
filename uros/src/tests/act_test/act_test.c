@@ -148,6 +148,95 @@ nap(int ms)
 }
 
 /*
+ * #1009: the milliseconds since t0 by the clock, or -1 when the clock is
+ * refused.  A window is a time, and a count of naps or timed waits is not one:
+ * since 963ca2cc a timed wait lasts a tick more, so that it never ends early,
+ * and a wait of 1 or 10 ms in a loop lasts 20.  The windows counted in them
+ * doubled at once, and one of them took 889-switch-hint-port-first past the
+ * silence its harness waits.  So a window reads this, and its waits only pace
+ * the reading.
+ */
+static long
+act_ms_since(const struct timespec *t0)
+{
+	struct timespec	t;
+
+	if (getclock(TIMEOFDAY, &t) != 0)
+		return -1;
+	return (long) (t.tv_sec - t0->tv_sec) * 1000 +
+	       (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+/*
+ * #1009: a window, read with act_ms_since(), its waits only pacing it: by
+ * nap() or by thread_switch(), as the arm waited before.  A window whose start
+ * the clock cannot give counts its waits, a tick each at the least, as the
+ * windows ran before 963ca2cc.
+ */
+struct act_window {
+	struct timespec	t0;
+	int		clocked;
+	unsigned	waits;
+	unsigned	step_ms;
+};
+
+static void
+act_window_start(struct act_window *w, unsigned step_ms)
+{
+	w->clocked = getclock(TIMEOFDAY, &w->t0) == 0;
+	w->waits = 0;
+	w->step_ms = step_ms;
+}
+
+static long
+act_window_ms(struct act_window *w)
+{
+	long	d = w->clocked ? act_ms_since(&w->t0) : -1;
+
+	if (d >= 0)
+		return d;
+	/* A timed wait lasts a tick at least, 10 ms at 100 Hz. */
+	w->clocked = 0;
+	return (long) w->waits * (w->step_ms > 10 ? w->step_ms : 10);
+}
+
+static int
+act_window_over(struct act_window *w, unsigned ms)
+{
+	return act_window_ms(w) >= (long) ms;
+}
+
+/*
+ * #1009: a patience, which a window is not: a wait for another thread to do
+ * something is a number of chances given it, not a time -- a nap ends at a
+ * tick, and the napper looks again only when the processor comes back to it.
+ * So a patience gives up after its waits, ms / step of them, as the arm
+ * counted them before; the clock only says, in the line, how long they took.
+ * Bounded by a second of the clock, rpc_pair_start()'s thread had not run at
+ * one processor under TCG in one boot of the merge test on omen, 27/11.
+ */
+static int
+act_window_spent(struct act_window *w, unsigned ms)
+{
+	return w->waits >= ms / (w->step_ms ? w->step_ms : 1);
+}
+
+/* A nap of the window's step; what nap() answered, as it said. */
+static kern_return_t
+act_window_nap(struct act_window *w)
+{
+	w->waits++;
+	return nap((int) w->step_ms);
+}
+
+static void
+act_window_wait(struct act_window *w)
+{
+	w->waits++;
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, w->step_ms);
+}
+
+/*
  * ── Arm one: terminate a thread stopped inside exception_raise() ──────
  *
  * The thread faults on an address its task does not own.  The kernel composes
@@ -1791,6 +1880,7 @@ arm_nine_refused_create_running(void)
 	natural_t	st[4] = { 0, 0, 0, 0 };
 	int		before = 0, after = 0, refused = 0, waited = 0, i;
 	int		passed = 0;
+	struct act_window w;
 	kern_return_t	kr;
 
 	kr = bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
@@ -1832,13 +1922,14 @@ arm_nine_refused_create_running(void)
 		 * that patience in microseconds, so it is checked.
 		 */
 		kr = arm_nine_thread_count(pset, &after);
+		act_window_start(&w, 10);	/* #1009: a patience, counted */
 		while (kr == KERN_SUCCESS && after - before >= ARM9_CALLS / 2 &&
-		       waited < ARM9_WAIT_MS) {
-			if (nap(10) != MACH_RCV_TIMED_OUT)
+		       !act_window_spent(&w, ARM9_WAIT_MS)) {
+			if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 				break;
-			waited += 10;
 			kr = arm_nine_thread_count(pset, &after);
 		}
+		waited = (int) act_window_ms(&w);
 
 		if (refused != ARM9_CALLS)
 			printf("act_test: [9] a flavor that does not exist was "
@@ -2410,6 +2501,16 @@ rpc_pair_start(struct rpc_pair *p, pthread_t *server, pthread_t *asker)
 		       "— WRONG\n", p->arm);
 		return 0;
 	}
+	/*
+	 * #1009: PATIENCE naps, counted and not timed, as arms two to eighteen
+	 * wait for their threads.  A wait for another thread to run is a
+	 * number of chances given it, not a time: a nap ends at a tick, and
+	 * the napper looks again only when the processor comes back to it.
+	 * A second of the clock was too little: at one processor under TCG
+	 * the thread had not run in it in one boot of the merge test on omen,
+	 * 27/11, where the counted naps had not missed in the merge tests of
+	 * the twenty days before.
+	 */
 	for (i = 0; i < PATIENCE && p->thread == MACH_PORT_NULL; i++)
 		nap(10);
 	if (p->thread == MACH_PORT_NULL) {
@@ -2688,16 +2789,50 @@ arm13_receiver(void *arg)
 	return NULL;
 }
 
+/*
+ * #1009: the sender's times by the clock, from the moment it sees the call.  It
+ * found the call by naps of 1 ms and then napped 20 and 30, and since 963ca2cc
+ * a nap lasts a tick more: the look came 60 to 90 ms into the widen's 100 ms
+ * hold, where 40 to 60 had been meant, close enough to its end for a slow
+ * host to put it after.  So it yields until it sees the call, and then until
+ * 20 ms and 50 ms of the clock have gone; a clock refused naps as before.
+ */
+#define	ARM13_SEND_MS		20
+#define	ARM13_LOOK_MS		50
+
+static void
+arm13_until(const struct timespec *t0, int clocked, long ms, int nap_ms)
+{
+	long	d;
+
+	if (!clocked) {
+		nap(nap_ms);
+		return;
+	}
+	while ((d = act_ms_since(t0)) >= 0 && d < ms)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+}
+
 static void *
 arm13_sender(void *arg)
 {
 	mach_msg_header_t	msg;
-	int			i;
+	struct timespec		t0;
+	int			clocked, i;
+	long			d;
 
 	(void) arg;
-	for (i = 0; i < PATIENCE * 10 && !arm13_calling; i++)
-		nap(1);
-	nap(20);
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	if (clocked)
+		while (!arm13_calling && (d = act_ms_since(&t0)) >= 0 &&
+		       d < PATIENCE * 100)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_DEPRESS, 1);
+	else
+		for (i = 0; i < PATIENCE * 10 && !arm13_calling; i++)
+			nap(1);
+	clocked = clocked && getclock(TIMEOFDAY, &t0) == 0;
+	arm13_until(&t0, clocked, ARM13_SEND_MS, ARM13_SEND_MS);
 	msg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	msg.msgh_size = sizeof msg;
 	msg.msgh_remote_port = arm13_port;
@@ -2706,7 +2841,7 @@ arm13_sender(void *arg)
 	arm13_sent = mach_msg(&msg, MACH_SEND_MSG, sizeof msg, 0,
 			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
 			      MACH_PORT_NULL);
-	nap(30);
+	arm13_until(&t0, clocked, ARM13_LOOK_MS, ARM13_LOOK_MS - ARM13_SEND_MS);
 	arm13_returned_at_look = arm13_returned;
 	arm13_seen = ((volatile mach_msg_header_t *) &arm13_buf.h)->msgh_id
 		     == ARM13_ID;
@@ -3378,7 +3513,7 @@ arm_fifty_four_create_on_a_dying_task(void)
 #define	ARM55_ROUNDS	20
 #define	ARM55_STACK	(4 * 4096)
 #define	ARM55_SETTLE_MS	20
-#define	ARM55_SAMPLES	10	/* five milliseconds apart */
+#define	ARM55_SAMPLES	10	/* a nap of 5 ms apart: 20 since 963ca2cc */
 #define	ARM55_BOUND_MS	2000
 
 static mach_port_t		arm55_child;
@@ -3432,7 +3567,8 @@ arm55_round(mach_port_t me, int round)
 	mach_port_t			t = MACH_PORT_NULL;
 	pthread_t			helper;
 	kern_return_t			kr;
-	int				ok = 0, rs = -1, i, running, waited;
+	int				ok = 0, rs = -1, i, running;
+	struct act_window		w;
 
 	arm55_child = MACH_PORT_NULL;
 	arm55_go = 0;
@@ -3491,19 +3627,22 @@ arm55_round(mach_port_t me, int round)
 		else {
 			/* The task resumed, it must run. */
 			(void) task_resume(arm55_child);
-			for (waited = 0; waited < ARM55_BOUND_MS; waited += 5) {
+			/* #1009: a patience, 400 naps; the line the clock's */
+			act_window_start(&w, 5);
+			for (;;) {
 				if ((rs = arm55_run_state(t))
-				    == TH_STATE_RUNNING)
+				    == TH_STATE_RUNNING ||
+				    act_window_spent(&w, ARM55_BOUND_MS))
 					break;
-				nap(5);
+				(void) act_window_nap(&w);
 			}
 			if (rs == TH_STATE_RUNNING)
 				ok = 1;
 			else
 				printf("act_test: [55] round %d: the thread is "
-				       "still held %d ms after its task was "
+				       "still held %ld ms after its task was "
 				       "resumed (run state %d) — WRONG (#935)\n",
-				       round, ARM55_BOUND_MS, rs);
+				       round, act_window_ms(&w), rs);
 		}
 	}
 	if (arm55_child != MACH_PORT_NULL) {
@@ -4556,7 +4695,8 @@ arm_twenty_three_float_state_is_what_the_thread_finds(void)
 	kern_return_t			kr_bad, kr_good, kr_regs, kr_go;
 	uint32_t			mask, bit;
 	unsigned			i;
-	int				waited = 0, init_ok, unchanged = 1;
+	int				init_ok, unchanged = 1;
+	struct act_window		w;
 
 	__asm__ volatile("fxsave %0" : "=m" (fx));
 	mask = *(uint32_t *) (fx + 28);
@@ -4619,11 +4759,11 @@ arm_twenty_three_float_state_is_what_the_thread_finds(void)
 	kr_go = KERN_FAILURE;
 	if (kr_good == KERN_SUCCESS && kr_regs == KERN_SUCCESS)
 		kr_go = thread_resume(t);
+	act_window_start(&w, 10);	/* #1009: a patience, counted */
 	while (kr_go == KERN_SUCCESS && !arm23_looked &&
-	       waited < ARM23_WAIT_MS) {
-		if (nap(10) != MACH_RCV_TIMED_OUT)
+	       !act_window_spent(&w, ARM23_WAIT_MS)) {
+		if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 			break;
-		waited += 10;
 	}
 	(void) thread_terminate(t);
 	(void) mach_port_deallocate(mach_task_self(), t);
@@ -4703,12 +4843,12 @@ arm_twenty_four_zero_the_vectors(void)
 static int
 arm_twenty_four_wait(int step)
 {
-	int	waited = 0;
+	struct act_window	w;
 
-	while (arm24_step != step && waited < ARM24_WAIT_MS) {
-		if (nap(10) != MACH_RCV_TIMED_OUT)
+	act_window_start(&w, 10);	/* #1009: a patience, counted */
+	while (arm24_step != step && !act_window_spent(&w, ARM24_WAIT_MS)) {
+		if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 			break;
-		waited += 10;
 	}
 	return arm24_step == step;
 }
@@ -5145,6 +5285,7 @@ static void *
 arm_26_sender(void *arg)
 {
 	mach_msg_header_t	msg;
+	struct act_window	w;
 	int			i;
 
 	(void) arg;
@@ -5152,7 +5293,9 @@ arm_26_sender(void *arg)
 	for (i = 0; i < PATIENCE && !arm_26_ready; i++)
 		nap(100);
 
-	for (i = 0; i < 10 * PATIENCE && arm_26_ready; i++) {
+	/* #1009: 10 s by the clock, not 1000 naps of 10 ms. */
+	act_window_start(&w, 10);
+	while (arm_26_ready && !act_window_over(&w, 10 * PATIENCE * 10)) {
 		struct thread_basic_info	basic;
 		mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
 
@@ -5163,7 +5306,7 @@ arm_26_sender(void *arg)
 			arm_26_saw_waiting = 1;
 			break;
 		}
-		nap(10);
+		(void) act_window_nap(&w);
 	}
 
 	/*
@@ -7376,23 +7519,32 @@ static pthread_t volatile arm_thirty_nine_noise_self;
  * running was 5 us on that desktop and 1.3 ms at the median on EPYC under KVM,
  * and 19 boots of 2256 there said of a good kernel that a thread never came.
  */
+/*
+ * #1009: 40 s by the clock.  They were 4000 waits of 1 ms, which lasted a tick
+ * each when this bound was set and passed -- 40 s -- and two since 963ca2cc,
+ * 80 s.  The 40 that passed are kept.
+ */
+#define	ARM_WAITING_MS	40000
+
 static int
 arm_thread_waiting(volatile mach_port_t *thread)
 {
 	struct thread_basic_info	info;
 	mach_msg_type_number_t		n;
-	unsigned			i;
+	struct act_window		w;
 
-	for (i = 0; i < 4000; i++) {
+	act_window_start(&w, 1);
+	for (;;) {
 		n = THREAD_BASIC_INFO_COUNT;
 		if (*thread != MACH_PORT_NULL &&
 		    thread_info(*thread, THREAD_BASIC_INFO, (thread_info_t) &info,
 				&n) == KERN_SUCCESS &&
 		    info.run_state == TH_STATE_WAITING)
 			return 1;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+		if (act_window_over(&w, ARM_WAITING_MS))
+			return 0;
+		act_window_wait(&w);
 	}
-	return 0;
 }
 
 /* -N, as the kernel says it.  arm 39 and arm 40. */
@@ -7476,19 +7628,31 @@ arm_thirty_nine_send(mach_port_t port, mach_msg_option_t option, int id)
  * The last message a server sees: the queue may be full, so until it is taken.
  * Answers the last send's result: MACH_MSG_SUCCESS once one went in (#925).
  */
+/*
+ * #1009: the 20 s the arms 39 and 40 give a thread, by the clock.  They were
+ * 2000 waits of a tick, and since 963ca2cc each lasts two.
+ */
+#define	ARM39_WAIT_MS	20000
+
+static unsigned	arm_thirty_nine_stop_tries;
+static long	arm_thirty_nine_stop_ms;
+
 static mach_msg_return_t
 arm_thirty_nine_stop_it(void)
 {
 	mach_msg_return_t	mr = MACH_SEND_TIMED_OUT;
-	unsigned		i;
+	struct act_window	w;
 
-	for (i = 0; i < 2000; i++) {
+	act_window_start(&w, 1);
+	for (;;) {
 		mr = arm_thirty_nine_send(arm_thirty_nine_port, 0, A39_STOP);
-		if (mr == MACH_MSG_SUCCESS)
+		arm_thirty_nine_stop_tries = w.waits + 1;
+		arm_thirty_nine_stop_ms = act_window_ms(&w);
+		if (mr == MACH_MSG_SUCCESS ||
+		    arm_thirty_nine_stop_ms >= ARM39_WAIT_MS)
 			return mr;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+		act_window_wait(&w);
 	}
-	return mr;
 }
 
 /*
@@ -7610,8 +7774,10 @@ arm_thirty_nine_end_receiver(pthread_t receiver)
 	int			i, ok = 0;
 
 	if (mr != MACH_MSG_SUCCESS) {
-		printf("act_test: [39] the STOP was refused 2000 times, the "
-		       "last with 0x%x — WRONG\n", (int) mr);
+		printf("act_test: [39] the STOP was refused %u times in %ld ms, "
+		       "the last with 0x%x — WRONG\n",
+		       arm_thirty_nine_stop_tries, arm_thirty_nine_stop_ms,
+		       (int) mr);
 		arm_thirty_nine_port_said();
 	} else {
 		for (i = 0; i < PATIENCE && !arm_thirty_nine_returned; i++)
@@ -7674,6 +7840,7 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 					      "a call that was not a receive";
 	unsigned	try, i, before, r0, t0, r1, t1, reach;
 	unsigned long long start, took = 0;
+	struct act_window w;
 
 	for (try = 0; try < A39_TRIES; try++) {
 		/*
@@ -7715,9 +7882,10 @@ arm_thirty_nine_break(mach_port_t host, mach_port_t own, int at_receive,
 			       arm_thirty_nine_tsc() - start < 200000000ULL)
 				;
 		/* On one processor it can run only now. */
-		for (i = 0; i < 2000 && arm_thirty_nine_got == before; i++)
-			(void) thread_switch(MACH_PORT_NULL,
-					     SWITCH_OPTION_WAIT, 1);
+		act_window_start(&w, 1);
+		while (arm_thirty_nine_got == before &&
+		       !act_window_over(&w, ARM39_WAIT_MS))
+			act_window_wait(&w);
 		took = arm_thirty_nine_tsc() - start;
 		if (arm_thirty_nine_got == before) {
 			printf("act_test: [39] the thread woken before %s "
@@ -8044,10 +8212,11 @@ arm_forty_rpc(mach_port_t reply)
 static int
 arm_forty_ran(unsigned before)
 {
-	unsigned	i;
+	struct act_window	w;
 
-	for (i = 0; i < 2000 && arm_forty_got == before; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	act_window_start(&w, 1);
+	while (arm_forty_got == before && !act_window_over(&w, ARM39_WAIT_MS))
+		act_window_wait(&w);
 	return arm_forty_got != before;
 }
 
@@ -8514,7 +8683,7 @@ arm_forty_two_simple_message_scattered(void)
 #define	A43_TRIES	3
 #define	A43_LIST	3000	/* kalloc.4096 */
 #define	A43_POLLS	2000	/* depressed: a millisecond at most */
-#define	A43_ENDS	4000	/* and the rest asleep: twenty seconds */
+#define	A43_ASLEEP_MS	20000	/* and then asleep, by the clock (#1009) */
 
 static volatile mach_port_t	a43_thread, a43_port;
 static volatile unsigned	a43_ended;
@@ -8589,6 +8758,7 @@ a43_round(mach_port_t host, const char *zone, int what, int *grew)
 	} m;
 	int		before, after;
 	unsigned	i, j;
+	struct act_window w;
 
 	if (!a43_zone(host, zone, &before))
 		return 0;
@@ -8626,15 +8796,25 @@ a43_round(mach_port_t host, const char *zone, int what, int *grew)
 			 * of its 330 minutes, with no line to say why.  And an
 			 * end that never comes is a thing to say.
 			 */
-			for (j = 0; j < A43_ENDS && a43_ended == ended; j++)
+			/*
+			 * #1009: the sleeping half by the clock.  It was
+			 * 2000 waits of a tick, twenty seconds, and since
+			 * 963ca2cc each lasts two.
+			 */
+			for (j = 0; j < A43_POLLS && a43_ended == ended; j++)
 				(void) thread_switch(MACH_PORT_NULL,
-						     j < A43_POLLS ?
-						     SWITCH_OPTION_DEPRESS :
-						     SWITCH_OPTION_WAIT, 1);
+						     SWITCH_OPTION_DEPRESS, 1);
+			act_window_start(&w, 1);
+			while (a43_ended == ended &&
+			       !act_window_over(&w, A43_ASLEEP_MS)) {
+				act_window_wait(&w);
+				j++;
+			}
 			if (a43_ended == ended) {
 				printf("act_test: [43] a receive whose port was "
 				       "destroyed under it had not ended after "
-				       "%u waits — WRONG\n", j);
+				       "%u waits, %ld ms of them asleep — WRONG\n",
+				       j, act_window_ms(&w));
 				return 0;
 			}
 			continue;
@@ -8803,7 +8983,7 @@ arm_forty_four_index_zero_name(void)
 #define	A45_FIN		4503
 #define	A45_NO_SUCH_ID	999999	/* the kernel answers it with MIG_BAD_ID */
 #define	A45_TIMEOUT	500
-#define	A45_TICKS	2000	/* how long it may stay parked: 20 s */
+#define	A45_PARKED_MS	20000	/* how long it may stay parked (#1009: by the clock) */
 
 static mach_port_t	a45_port;
 static volatile mach_port_t a45_server_thread, a45_sender_thread;
@@ -8907,6 +9087,7 @@ a45_round(int with_rpc)
 	kern_return_t		kr;
 	unsigned		i;
 	int			parked = 0, gone = 0, ok = 1;
+	struct act_window	held_w;
 
 	a45_port = arm_own_port(45);
 	reply = arm_own_port(45);
@@ -8982,14 +9163,16 @@ a45_round(int with_rpc)
 	/*
 	 * In time, and not in polls: a depressed thread_switch() comes back at
 	 * once with nothing else to run, and 4000 of those are over before the
-	 * sender has got anywhere under the widen.
+	 * sender has got anywhere under the widen.  #1009: and the time by the
+	 * clock, not 2000 waits of a tick, which since 963ca2cc last two.
 	 */
-	for (i = 0; i < A45_TICKS && !a45_done; i++)
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	act_window_start(&held_w, 1);
+	while (!a45_done && !act_window_over(&held_w, A45_PARKED_MS))
+		act_window_wait(&held_w);
 
 	if (!a45_done) {
-		printf("act_test: [45] after %u ticks the sender stayed parked on "
-		       "a port with room — WRONG (#881)\n", i);
+		printf("act_test: [45] after %ld ms the sender stayed parked on "
+		       "a port with room — WRONG (#881)\n", act_window_ms(&held_w));
 		ok = 0;
 		(void) mach_port_destroy(task, a45_port);
 		gone = 1;
@@ -9522,20 +9705,50 @@ a48_kill_loop(void *arg)
 	return NULL;
 }
 
+/*
+ * #1009: by the clock, ms of it, or until done.  The waits were counted, ms /
+ * 10 of them, and since 963ca2cc each lasts 20 ms: a stopped tree took 184 s to
+ * say so where 92 had been written, past the 150 s of silence its harness
+ * gives 889-switch-hint-port-first.  The clock is an RPC, as printf() is, and
+ * needs no lock of the task's; the arm opens the clock's service before the
+ * threads start, so that no later reading asks the host for it.  A clock
+ * refused at the start counts the waits, as before; one refused on the way
+ * ends the wait, and the line after it says so.
+ */
+static int	a48_clock_refused;
+
 static void
 a48_wait(volatile int *done, unsigned ms)
 {
+	struct timespec	t0;
 	unsigned	i;
+	long		d;
 
-	for (i = 0; i < ms / 10 && (done == NULL || !*done); i++)
+	if (getclock(TIMEOFDAY, &t0) != 0) {
+		a48_clock_refused = 1;
+		for (i = 0; i < ms / 10 && (done == NULL || !*done); i++)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, 10);
+		return;
+	}
+	while (done == NULL || !*done) {
+		d = act_ms_since(&t0);
+		if (d < 0)
+			a48_clock_refused = 1;
+		if (d < 0 || d >= (long) ms)
+			return;
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 10);
+	}
 }
 
 static int
 arm_forty_eight_hint_and_lock_order(void)
 {
 	pthread_t	self, sw, kill;
+	struct timespec	opened;
 
+	/* #1009: the clock's service opened before anything races. */
+	(void) getclock(TIMEOFDAY, &opened);
 	if (pthread_create(&self, NULL, a48_self_loop, NULL) != 0) {
 		printf("act_test: [48] pthread_create failed — WRONG\n");
 		return 0;
@@ -9556,6 +9769,9 @@ arm_forty_eight_hint_and_lock_order(void)
 	a48_stop = 1;
 	a48_wait(&a48_switch_done, A48_MS_LIMIT / 4);
 	a48_wait(&a48_self_done, A48_MS_LIMIT / 4);
+	if (a48_clock_refused)
+		printf("act_test: [48] the clock was refused: its waits were "
+		       "counted, of 20 ms each since 963ca2cc (#1009)\n");
 
 	if (!a48_kill_done || !a48_switch_done || !a48_self_done) {
 		printf("act_test: [48] hint against the lock order stopped: "
@@ -10319,7 +10535,8 @@ arm_fifty_two_fs_base_goes_with_the_thread(void)
 #define	A53_TASKS	32
 #define	A53_THREADS	4
 #define	A53_WAIT_MS	5000
-#define	A53_GONE_WAITS	500	/* ten milliseconds each, on a tick */
+#define	A53_GONE_WAITS	500	/* the clock refused: the waits, as before */
+#define	A53_GONE_MS	5000	/* #1009: the 500 waits of a tick, by the clock */
 #define	A53_SLACK	4	/* tasks of the rest of the system */
 #define	A53_LATE_MS	30000	/* #979: then by the clock, late or never */
 #define	A53_LATE_NAP_MS	100
@@ -10334,7 +10551,8 @@ a53_round(mach_port_t me)
 	mach_msg_type_number_t		n;
 	kern_return_t			kr;
 	unsigned			i, made = 0;
-	int				waited = 0, gone = 0;
+	int				gone = 0;
+	struct act_window		w;
 
 	kr = task_create(me, NULL, 0, FALSE, &child);
 	if (kr == KERN_SUCCESS)
@@ -10364,21 +10582,25 @@ a53_round(mach_port_t me)
 	}
 	for (i = 0; i < made; i++)
 		(void) thread_resume(th[i]);
-	while (waited < A53_WAIT_MS) {
+	/*
+	 * #1009: A53_WAIT_MS by the clock.  It was 5000 waits of 1 ms, which
+	 * lasted a tick each, 50 s, and since 963ca2cc two.
+	 */
+	act_window_start(&w, 1);
+	while (!act_window_over(&w, A53_WAIT_MS)) {
 		n = TASK_BASIC_INFO_COUNT;
 		if (task_info(child, TASK_BASIC_INFO, (task_info_t) &info, &n)
 		    != KERN_SUCCESS) {
 			gone = 1;
 			break;
 		}
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
-		waited++;
+		act_window_wait(&w);
 	}
 	for (i = 0; i < made; i++)
 		(void) mach_port_deallocate(me, th[i]);
 	if (!gone) {
 		printf("act_test: [53] a task whose threads all faulted was "
-		       "still there after %d waits — WRONG\n", waited);
+		       "still there after %ld ms — WRONG\n", act_window_ms(&w));
 		(void) task_terminate(child);
 	}
 	(void) mach_port_deallocate(me, child);
@@ -10443,8 +10665,10 @@ arm_fifty_three_threads_fault_together(void)
 {
 	mach_port_t	me = mach_task_self();
 	mach_port_t	host = mach_host_self();
-	int		before = 0, after = 0, asked;
+	int		before = 0, after = 0, asked, clocked;
 	unsigned	i, waited = 0;
+	struct timespec	t0;
+	long		d;
 
 	asked = a43_zone(host, "tasks", &before);
 	for (i = 0; i < A53_TASKS; i++)
@@ -10452,7 +10676,24 @@ arm_fifty_three_threads_fault_together(void)
 			(void) mach_port_deallocate(me, host);
 			return 0;
 		}
-	while (asked && waited++ < A53_GONE_WAITS) {
+	/*
+	 * #1009: the tasks have A53_GONE_MS by the clock to leave.  It was 500
+	 * waits of 1 ms, "ten milliseconds each, on a tick", and since 963ca2cc
+	 * each lasts 20: 10 s.  A reaper late by less than the window would no
+	 * longer be called late; 979-reaper-late's came back 15.6 s after a
+	 * window of 10, on 21/11, so its catch held, but the window is the 5 s
+	 * written.  The waits are still counted, for the line
+	 * 414-reaper-left-behind reads.
+	 */
+	clocked = getclock(TIMEOFDAY, &t0) == 0;
+	while (asked) {
+		if (clocked) {
+			d = act_ms_since(&t0);
+			if (d < 0 || d >= A53_GONE_MS)
+				break;
+		} else if (waited >= A53_GONE_WAITS)
+			break;
+		waited++;
 		asked = a43_zone(host, "tasks", &after);
 		if (after <= before + A53_SLACK)
 			break;

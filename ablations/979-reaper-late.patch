@@ -4,6 +4,7 @@ Takes out: the reaper's pace for act_test [53]'s threads, and theirs alone: each
 Run: --entry 14 300 -smp 4
 Expect: act_test: \[53\] [0-9]+ tasks of 4 threads faulted together, and the zone of tasks read [0-9]+ before and [0-9]+ after [0-9]+ waits: they are still there, and the zone came back to [0-9]+ [0-9]+ ms later by the clock: the reaper was late
 Note: a delay for every thread the reaper destroys put it behind for the whole boot, with 373 tasks in the zone before [53] began, and the arm said they did not leave; one wait over 414-widen-reaper's 2 ms a thread left nothing late.  So the delay is kept to the arm's threads.
+Premise: none -- what its catch stands on, a reaper later than [53]'s 5 s by the clock, is the ablated boot's own time; the fixed boot's [53], which act_test's count includes, says the tasks went within it
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
 index cadf1c0e..11aab44a 100644
