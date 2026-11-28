@@ -216,6 +216,22 @@ ct_window_over(struct ct_window *w, unsigned limit_ms)
     return ct_window_ms(w) >= (long)limit_ms;
 }
 
+/*
+ * #1009: a patience, which a window is not: a wait for another task to do
+ * something -- cap_server to give a slot back, a family to drain, a claim
+ * slot to come free -- is a number of chances given it, not a time.  A wait
+ * ends at a tick, and the waiter looks again only when the processor comes
+ * back to it.  So a patience gives up after its waits, limit_ms / step of
+ * them, as the test counted them before; the clock only says, in the line,
+ * how long they took.  Bounded by a second of the clock, act_test's
+ * rpc_pair_start() lost its thread at one processor under TCG (27/11).
+ */
+static int
+ct_window_spent(struct ct_window *w, unsigned limit_ms)
+{
+    return w->waits >= limit_ms / (w->step_ms ? w->step_ms : 1);
+}
+
 static void
 ct_window_wait(struct ct_window *w)
 {
@@ -688,7 +704,7 @@ a_port_given_back_gives_its_slot_back(void)
         return 0;
     }
 
-    /* #1009: each slot is waited for 2 s by the clock, in waits of 10 ms. */
+    /* #1009: each slot is waited for 200 waits of 10 ms, a patience. */
     for (i = 0; i < 80; i++) {
         mach_port_t      port = MACH_PORT_NULL;
         struct ct_window w;
@@ -698,7 +714,7 @@ a_port_given_back_gives_its_slot_back(void)
             kr = cap_derive_child(mach_cap_port, child, blob, len, &port);
             if ((kr != CAP_ERR_NO_MANIFEST_SLOT &&
                  kr != CAP_ERR_DERIVED_QUOTA && kr != CAP_ERR_LINEAGE_FULL) ||
-                ct_window_over(&w, 2000))
+                ct_window_spent(&w, 2000))
                 break;
             ct_window_wait(&w);
         }
@@ -815,13 +831,13 @@ family_drained(struct slots *s, long *ms)
 {
     struct ct_window w;
 
-    /* #1009: the two seconds by the clock, in waits of 10 ms. */
+    /* #1009: 200 waits of 10 ms, a patience; the clock says how long. */
     ct_window_start(&w, 10);
     for (;;) {
         *ms = ct_window_ms(&w);
         if (slots_now(mach_cap_port, s) != KERN_SUCCESS)
             return 0;
-        if (s->family == 0 || *ms >= 2000)
+        if (s->family == 0 || ct_window_spent(&w, 2000))
             return s->family == 0;
         ct_window_wait(&w);
     }
@@ -2317,7 +2333,7 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
     int           rc = -1, ok;
     kern_return_t kr, rd = -1, wr = -1, dma = -1;
 
-    /* #1009: the name's 30 s and the slots' 2 s, by the clock. */
+    /* #1009: the name's 30 s by the clock; the slots' patience counted. */
     ct_window_start(&w, 100);
     for (;;) {
         waited = ct_window_ms(&w);
@@ -2381,7 +2397,7 @@ an_execd_program_gets_what_its_caller_may_hand_on(void)
             after = before + 1;
         else
             after = s.in_use;
-        if (after <= before || waits >= 2000)
+        if (after <= before || ct_window_spent(&w, 2000))	/* #1009 */
             break;
         ct_window_wait(&w);
     }
@@ -5414,27 +5430,27 @@ a_port_no_claim_covers_is_refused(mach_port_t device_port)
     struct ct_window w;
 
     bare = device_io_port_read(device_port, port, 1, &data);
-    /* #1009: the second by the clock, in waits of 20 ms. */
+    /* #1009: 50 waits of 20 ms, a patience; the clock says how long. */
     ct_window_start(&w, 20);
     for (;;) {
         claim = device_io_port_claim(device_port, port, 1, &released,
                                      &klog_from);
-        if (claim != KERN_RESOURCE_SHORTAGE || ct_window_over(&w, 1000))
+        if (claim != KERN_RESOURCE_SHORTAGE || ct_window_spent(&w, 1000))
             break;
         ct_window_wait(&w);
     }
     if (claim == KERN_RESOURCE_SHORTAGE) {
         if (bare != KERN_NO_ACCESS) {
             printf("cap_test: [28] WRONG — 0x%x read without a claim kr=%d "
-                   "(want %d); no claim slot came free in a second to ask "
-                   "the rest (#620)\n", port, (int)bare,
-                   (int)KERN_NO_ACCESS);
+                   "(want %d); no claim slot came free in %u waits, %ld ms, "
+                   "to ask the rest (#620)\n", port, (int)bare,
+                   (int)KERN_NO_ACCESS, w.waits, ct_window_ms(&w));
             return 0;
         }
         printf("cap_test: [28] NOT ASKED — 0x%x was refused without a "
                "claim, but every legacy claim slot stayed taken or retiring "
-               "for a second, so the claim that is the way in could not be "
-               "made (#620)\n", port);
+               "for %u waits, %ld ms, so the claim that is the way in could "
+               "not be made (#620)\n", port, w.waits, ct_window_ms(&w));
         return 1;
     }
     if (claim != KERN_SUCCESS) {
