@@ -3727,6 +3727,7 @@ arm_fifty_five_created_while_suspended(void)
 #define	A56_DEPRESS_MS	100	/* longer than any nap: see a56_victim() */
 #define	A56_DEPRESS_TRIES 10	/* depressions run out in a row: a56_victim() */
 #define	A56_ALONE_MAX_MS 30000	/* the rounds at one processor: see the end */
+#define	ARM56_NOT_ASKED	(-1)	/* others held the processor: see the end */
 
 static volatile int		a56_spinning;
 static volatile int		a56_go;
@@ -4156,7 +4157,22 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	 * depression is judged in every round above, so this one is about
 	 * what the scheduler makes of it.
 	 *
-	 * The time others held the processor is read and said (#1022).
+	 * 🔴 AND ONLY OF IT: THE TIME OTHERS HELD THE PROCESSOR IS TAKEN OUT
+	 * (#1022).
+	 *
+	 * The boot's other tests run beside these rounds.  A thread of another
+	 * task that the main thread wakes behind, at its own priority, keeps
+	 * the processor until its quantum ends, and the round waits for it as
+	 * it would for the victim's.  In the merge tests of 28/11 the rounds
+	 * took 65.3 and 32.3 s in 2 of 100 boots under TCG at one processor,
+	 * where in about 700 before they never passed 10.3 s; in the 32 s one
+	 * a test's sixty forked processes ran during them.  So the processor's
+	 * busy ticks and this task's time are read before the rounds and after
+	 * (a56_load_read()), the time others held the processor is said, and
+	 * the bound judges the rest.  When others held more than half of the
+	 * rounds, the rest is too little to tell what the scheduler made of the
+	 * victim, and the arm is not asked.  A reading refused leaves the
+	 * rounds judged whole, as before.
 	 */
 	if (a56_alone) {
 		if (loaded && a56_load_read(&after) == 0) {
@@ -4187,13 +4203,20 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		       "processor held (#925)\n",
 		       depressed, A56_ROUNDS, ran_out, held);
 	}
-	if (cpus <= 1 && took > A56_ALONE_MAX_MS) {
+	if (cpus <= 1 && took - others > A56_ALONE_MAX_MS) {
 		printf("act_test: [56] the rounds took %ld ms at one processor, "
-		       "more than %d ms: the end of the main thread's nap is to "
-		       "preempt the victim at once, and rounds that waited for "
-		       "its quantum took 57 to 71 s — WRONG (#925, #785)\n",
-		       took, A56_ALONE_MAX_MS);
+		       "more than %d ms besides the %ld ms others held it: the "
+		       "end of the main thread's nap is to preempt the victim at "
+		       "once — WRONG (#925, #785)\n",
+		       took, A56_ALONE_MAX_MS, others);
 		return 0;
+	}
+	if (cpus <= 1 && others > took / 2) {
+		printf("act_test: [56] NOT ASKED — at one processor others held "
+		       "it %ld ms of the rounds' %ld, more than half: what is "
+		       "left cannot tell whether the end of the main thread's "
+		       "nap preempts the victim at once (#1022)\n", others, took);
+		return ARM56_NOT_ASKED;
 	}
 	printf("act_test: [56] an abort of a thread spinning in user mode was "
 	       "spent before it waited: in %d rounds both of two %d ms futex "
@@ -11026,7 +11049,11 @@ main(int argc, char **argv)
 	arms++;		/* arm fifty-seven, #940 */
 	passed += timed(57, arm_fifty_seven_dead_space);
 	arms++;		/* arm fifty-six, #925 */
-	passed += timed(56, arm_fifty_six_abort_reaches_user_mode);
+	r = timed(56, arm_fifty_six_abort_reaches_user_mode);
+	if (r == ARM56_NOT_ASKED)	/* not asked is not passed (arm eight) */
+		arms--;
+	else
+		passed += r;
 	arms++;		/* arm fifty-five, #935: before [54], which [16] follows */
 	passed += timed(55, arm_fifty_five_created_while_suspended);
 	arms++;		/* arm fifty-four, #935 */
