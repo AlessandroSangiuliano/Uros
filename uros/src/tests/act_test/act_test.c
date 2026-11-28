@@ -2461,7 +2461,7 @@ static int
 rpc_pair_start(struct rpc_pair *p, pthread_t *server, pthread_t *asker)
 {
 	kern_return_t	kr;
-	struct act_window w;
+	int		i;
 
 	kr = arm_ten_port(&p->port, 1);
 	if (kr == KERN_SUCCESS)
@@ -2486,11 +2486,18 @@ rpc_pair_start(struct rpc_pair *p, pthread_t *server, pthread_t *asker)
 		       "— WRONG\n", p->arm);
 		return 0;
 	}
-	/* #1009: a second by the clock, not PATIENCE naps of 10 ms. */
-	act_window_start(&w, 10);
-	while (p->thread == MACH_PORT_NULL &&
-	       !act_window_over(&w, PATIENCE * 10))
-		(void) act_window_nap(&w);
+	/*
+	 * #1009: PATIENCE naps, counted and not timed, as arms two to eighteen
+	 * wait for their threads.  A wait for another thread to run is a
+	 * number of chances given it, not a time: a nap ends at a tick, and
+	 * the napper looks again only when the processor comes back to it.
+	 * A second of the clock was too little: at one processor under TCG
+	 * the thread had not run in it in one boot of the merge test on omen,
+	 * 27/11, where the counted naps had not missed in the merge tests of
+	 * the twenty days before.
+	 */
+	for (i = 0; i < PATIENCE && p->thread == MACH_PORT_NULL; i++)
+		nap(10);
 	if (p->thread == MACH_PORT_NULL) {
 		printf("act_test: %s the thread never published its port "
 		       "— WRONG\n", p->arm);
