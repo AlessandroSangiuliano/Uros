@@ -57,6 +57,10 @@
 #              the bound after the TERM is over, that said, and the lock given
 #              back -- a stand-in in front of the real qemu on PATH, which says
 #              what qemu says and stays, as the sweep of 22/11 met (#984)
+#   expectcut  ablate.sh's reading of a log, scripts/ablate-match.sh, finds an
+#              Expect lying across a line another writer cut in two, as the
+#              harness's verdict reads it, and not one on no line (#943);
+#              nothing is booted
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
@@ -92,7 +96,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm,deafqemu
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm,deafqemu,expectcut
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -961,6 +965,41 @@ DEAFEOF
 		fi
 	fi
 	PATH=$KEPT_PATH
+fi
+
+# ── expectcut ──────────────────────────────────────────────────────────
+# #943: ablate.sh read an Expect off the raw log, and a WRONG line another
+# writer had cut in two at byte 256 read NOT CAUGHT where the harness, reading
+# the rejoined log, had seen it whole.  It asks scripts/ablate-match.sh now,
+# and this asks that script what ablate.sh asks it, of a log written here: a
+# WRONG line cut mid-word by another writer's, marked as the console marks it
+# (#757: the halves rejoin byte for byte, the mark and its space taken out),
+# with the Expect lying across the cut; and an Expect on no line at all, which
+# a reading that matched anything would find too.
+if wanted expectcut; then
+	cut="$OUT/expectcut.log"
+	{
+		echo 'cap_test: [39] a line of its own -- ok'
+		echo 'cap_test: [40] WRONG — port 16 of 80 refused with 2419 after 2000 ms: the slots o <-cut [t:ffffc00001477170]'
+		echo 'proc: pid=164 zombied (task=0x2e006)'
+		echo '[t:ffffc00001477170]-> f the ports given back did not come back (#743)'
+		echo 'cap_test: [41] the end -- ok'
+	} > "$cut"
+	printf '%s\n' 'cap_test: \[40\] WRONG . port [0-9]+ of 80 refused .* the ports given back did not come back' > "$OUT/expectcut.across"
+	printf '%s\n' 'cap_test: \[42\]' > "$OUT/expectcut.none"
+	"$REPO/scripts/ablate-match.sh" "$cut" "$OUT/expectcut.across"
+	across=$?
+	"$REPO/scripts/ablate-match.sh" "$cut" "$OUT/expectcut.none"
+	none=$?
+	if [ $across = 2 ] || [ $none = 2 ]; then
+		say expectcut "ablate-match.sh could not read the log written here or its patterns ($across, $none)" "NOT ASKED"
+	elif [ $across != 0 ]; then
+		say expectcut "an Expect lying across a line another writer cut in two did NOT MATCH: the log was read as it came, cut ($cut)" WRONG
+	elif [ $none = 0 ]; then
+		say expectcut "an Expect on no line of the log MATCHED ($cut)" WRONG
+	else
+		say expectcut "an Expect lying across a line another writer cut in two matched, the line rejoined, and one on no line did not" PASS
+	fi
 fi
 
 echo "lifecycle: $pass PASS, $wrong WRONG, $unasked NOT ASKED -- $OUT"

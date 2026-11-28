@@ -433,13 +433,14 @@ fi
 # output is what its Expect is read off, and the kernel's lines, where a
 # widen says its window was open, are in the log beside it.  Read off the
 # output alone, 889-widen-a48-round-robin's line was in none of its fixed
-# boots, which said it 4 times of 4 in their logs.
+# boots, which said it 4 times of 4 in their logs.  Each is read as an
+# Expect is, with its cut lines rejoined (#943).
 premise_missing() {	# FILE...
 	local pr f
 	[ -s "$RUNDIR/premise" ] || return 0
 	while IFS= read -r pr; do
 		for f in "$@"; do
-			[ -f "$f" ] && LC_ALL=C.UTF-8 grep -Eq -- "$pr" "$f" && continue 2
+			[ -f "$f" ] && "$REPO/scripts/ablate-match.sh" "$f" <(printf '%s\n' "$pr") && continue 2
 		done
 		printf '%s\n' "$pr"
 		return 0
@@ -676,8 +677,10 @@ for i in $(seq 1 "$BOOTS"); do
 				hit=0
 				# In UTF-8 wherever this runs: over ssh a machine can have
 				# no LANG at all, and in the C locale the . that a patch
-				# writes for an em dash is one byte of three.
-				LC_ALL=C.UTF-8 grep -Eqf "$RUNDIR/expect" "$log" && hit=1
+				# writes for an em dash is one byte of three.  And with the
+				# log's cut lines rejoined, as the harness reads it: a WRONG
+				# line another writer cut at byte 256 read NOT CAUGHT (#943).
+				"$REPO/scripts/ablate-match.sh" "$log" "$RUNDIR/expect" && hit=1
 				lacks=""
 				if [ "$arm" = ablated ]; then
 					if [ $hit = 1 ]; then

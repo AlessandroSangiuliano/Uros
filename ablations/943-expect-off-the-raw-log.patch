@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #943
+Takes out: the rejoining in scripts/ablate-match.sh -- it greps the log as it came, and an Expect lying across a line another writer cut in two at byte 256 reads NOT CAUGHT in a boot whose harness saw the line whole, as 786-xstate-bv-unmarked's did in the rotation's first batch
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: expectcut
+Expect: lifecycle: expectcut: .* -- WRONG
+Note: nothing is booted: expectcut writes a log with a cut line and asks ablate-match.sh of it, so either accelerator reads the same; the run of the fixed arm says PASS
+
+diff --git a/scripts/ablate-match.sh b/scripts/ablate-match.sh
+index 06da561f..404bc668 100755
+--- a/scripts/ablate-match.sh
++++ b/scripts/ablate-match.sh
+@@ -32,5 +32,5 @@ if [ ! -r "$1" ] || [ ! -r "$2" ]; then
+ 	echo "ablate-match: cannot read $1 or $2" >&2
+ 	exit 2
+ fi
+-LC_ALL=C awk -f "$(dirname "$0")/rejoin-lines.awk" "$1" |
+-	LC_ALL=C.UTF-8 grep -Eqf "$2"
++# 943-expect-off-the-raw-log: the log as it came, its cut lines left cut
++LC_ALL=C.UTF-8 grep -Eqf "$2" "$1"
