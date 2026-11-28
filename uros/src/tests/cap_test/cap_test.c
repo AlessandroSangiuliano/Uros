@@ -1511,9 +1511,11 @@ a_capability_is_derived_to_a_named_task(void)
  * deadline has passed: it is read every CT54_POLL_MS from then, for
  * CT54_WAIT_MS at most, and how long the refusal took is said.  As in [50]
  * the clock is read here, so that a control that could not be asked in time
- * says NOT ASKED and not WRONG.
+ * is asked again, CT54_TRIES times in all, and then says NOT ASKED and not
+ * WRONG.
  */
 #define CT54_MS		300u
+#define CT54_TRIES	3u	/* #1021: a control too late, asked again */
 #define CT54_POLL_MS	20u
 #define CT54_WAIT_MS	5000u
 
@@ -1529,8 +1531,8 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
     mach_msg_type_number_t got = 0;
     kern_return_t          kr, okr, r1 = KERN_FAILURE, r2 = KERN_FAILURE;
     uint64_t               before, after, now;
-    unsigned int           waits = 0;
-    int                    asked = 0;
+    unsigned int           waits = 0, try;
+    int                    asked = 0, late;
 
     kr = host_get_clock_service(host, URMACH_CAP_CLOCK, &clk);
     (void)mach_port_deallocate(mach_task_self(), host);
@@ -1539,35 +1541,64 @@ a_handle_ends_with_its_deadline(mach_port_t part_port, const char *name)
                "asked for: %d (#747)\n", (int)kr);
         return 0;
     }
-    memset(&tok, 0, sizeof(tok));
-    before = ct50_now(clk);
-    kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
-                     CAP_OP_BLK_READ, CT54_MS, &tok);
-    okr = KERN_FAILURE;
-    if (kr == KERN_SUCCESS) {
-        memcpy(blob, &tok, sizeof(tok));
-        okr = device_open_cap(part_port, MACH_PORT_NULL, D_READ, null_sec,
-                              (char *)name, blob,
-                              (mach_msg_type_number_t)sizeof(tok), &h);
+    /*
+     * #1021: the control -- the request, the open and a first read -- asked
+     * again, with a capability of its own, while it comes too late: refused
+     * once the deadline had come by the time its answer did, the open with
+     * KERN_NO_ACCESS or the first read, it may have been asked after it,
+     * and says nothing of the handle.  NOT ASKED after CT54_TRIES of those,
+     * with the milliseconds the last stood on; refused with the clock still
+     * before the deadline, it was asked in time, and is WRONG below.  The
+     * open was not looked at here: on 27/11, at one processor under TCG,
+     * it came after the 300 ms in two boots of the merge test on omen, the
+     * block server saying CAP_ERR_EXPIRED, and this said WRONG of it.
+     */
+    for (try = 1; ; try++) {
+        memset(&tok, 0, sizeof(tok));
+        h = MACH_PORT_NULL;
+        r1 = KERN_FAILURE;
+        before = ct50_now(clk);
+        kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
+                         CAP_OP_BLK_READ, CT54_MS, &tok);
+        okr = KERN_FAILURE;
+        if (kr == KERN_SUCCESS) {
+            memcpy(blob, &tok, sizeof(tok));
+            okr = device_open_cap(part_port, MACH_PORT_NULL, D_READ, null_sec,
+                                  (char *)name, blob,
+                                  (mach_msg_type_number_t)sizeof(tok), &h);
+        }
+        if (okr == KERN_SUCCESS) {
+            buf = NULL;
+            got = 0;
+            r1 = device_read(h, 0, 0, 512, &buf, &got);
+            if (r1 == KERN_SUCCESS && buf != NULL && got > 0)
+                (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf, got);
+        }
+        after = ct50_now(clk);
+        late = before != 0 && after != 0 && kr == KERN_SUCCESS &&
+               after >= tok.expires &&
+               (okr == KERN_NO_ACCESS ||
+                (okr == KERN_SUCCESS && r1 != KERN_SUCCESS));
+        if (!late || try == CT54_TRIES)
+            break;
+        if (okr == KERN_SUCCESS) {
+            (void)device_close(h);
+            (void)mach_port_deallocate(mach_task_self(), h);
+        }
     }
-    if (okr == KERN_SUCCESS) {
-        r1 = device_read(h, 0, 0, 512, &buf, &got);
-        if (r1 == KERN_SUCCESS && buf != NULL && got > 0)
-            (void)vm_deallocate(mach_task_self(), (vm_offset_t)buf, got);
-    }
-    after = ct50_now(clk);
-
-    if (before == 0 || after == 0 ||
-        (kr == KERN_SUCCESS && okr == KERN_SUCCESS && r1 != KERN_SUCCESS &&
-         after - before >= CT54_MS * 1000000ULL)) {
+    if (before == 0 || after == 0 || late) {
         if (before == 0 || after == 0)
             printf("cap_test: [54] WRONG — the capability clock could not be "
                    "read (#747)\n");
         else
-            printf("cap_test: [54] NOT ASKED — %llu ms passed between asking "
-                   "for the capability and the first read, past its lifetime "
-                   "of %u ms (#747)\n",
+            printf("cap_test: [54] NOT ASKED — the control came too late in "
+                   "%u tries: the last time %s was refused %llu ms after the "
+                   "capability was asked for, the capability clock %llu ms "
+                   "past its deadline when it answered, its lifetime %u ms "
+                   "(#747, #1021)\n", try,
+                   okr == KERN_SUCCESS ? "the first read" : "the open",
                    (unsigned long long)((after - before) / 1000000ULL),
+                   (unsigned long long)((after - tok.expires) / 1000000ULL),
                    CT54_MS);
         if (okr == KERN_SUCCESS) {
             (void)device_close(h);
