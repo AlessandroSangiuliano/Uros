@@ -98,7 +98,7 @@
 #include <mach.h>
 #include <mach/bootstrap.h>
 #include <mach/thread_switch.h>
-#include <sys/timers.h>			/* #1009: getclock(), the waits' 5 s */
+#include <sys/timers.h>			/* #1009: getclock(), the waits' ms */
 #include <sa_mach.h>			/* printf_init -- the header, not an
 					 * extern beside the call: see the note
 					 * in <device/device_master.h> */
@@ -125,10 +125,14 @@
 
 /*
  * How long the checker waits for the holder's slots, and for a name or a
- * death: RECLAIM_MS by the clock, in waits of RECLAIM_WAIT_MS (#1009).  They
- * were counted, 500 x 10 ms, and since 963ca2cc a timed wait lasts a tick
- * more: the 5 s were 10, and "waited %u ms" said half of them.  A clock
- * refused counts the waits, as before.
+ * death: RECLAIM_MS / RECLAIM_WAIT_MS waits, 500 of 10 ms (#1009).  Each is
+ * a patience -- for another task to give back, to name itself, to die --
+ * and a patience is a number of chances given it, not a time: a wait ends
+ * at a tick, and the waiter looks again only when the processor comes back
+ * to it.  Since 963ca2cc a timed wait lasts a tick more, so the 500 waits
+ * last 10 s, and "waited %u ms" said half of them: the lines say the clock's
+ * milliseconds.  Bounded by a second of the clock, act_test's
+ * rpc_pair_start() lost its thread at one processor under TCG (27/11).
  */
 #define RECLAIM_MS	5000
 #define RECLAIM_WAIT_MS	10
@@ -160,7 +164,7 @@ reclaim_wait_ms(struct reclaim_wait *w)
 static int
 reclaim_wait_over(struct reclaim_wait *w)
 {
-	return reclaim_wait_ms(w) >= RECLAIM_MS;
+	return w->waits >= RECLAIM_MS / RECLAIM_WAIT_MS;
 }
 
 static void
@@ -465,7 +469,7 @@ free_table(const vm_address_t *kva, unsigned n)
 
 /*
  * Wait for the holder's slots to come back: 1 when they did, with *ms the
- * milliseconds it took by the clock; 0 when they had not in RECLAIM_MS.
+ * milliseconds it took by the clock; 0 when they had not in its waits.
  *
  * 🔑 The slot taken to find out is given straight back, so the count the
  * checker reports afterwards is the whole table and not the whole table minus
@@ -486,7 +490,7 @@ wait_for_room(unsigned *ms)
 					       kva, REGION_BYTES);
 			return 1;
 		}
-		if (*ms >= RECLAIM_MS)
+		if (reclaim_wait_over(&w))
 			return 0;
 	}
 }
