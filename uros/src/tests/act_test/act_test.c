@@ -3992,7 +3992,11 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		return 0;
 	}
 	a56_alone = cpus <= 1;
-	loaded = a56_alone && a56_load_read(&before) == 0;	/* #1022 */
+	/*
+	 * At one processor, whether or not the victim depresses: a tree whose
+	 * victim does not is judged on this reading as much (#1022).
+	 */
+	loaded = cpus <= 1 && a56_load_read(&before) == 0;
 	for (round = 0; round < A56_ROUNDS; round++) {
 		pthread_t	victim;
 		kern_return_t	napped = MACH_RCV_TIMED_OUT;
@@ -4174,7 +4178,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	 * victim, and the arm is not asked.  A reading refused leaves the
 	 * rounds judged whole, as before.
 	 */
-	if (a56_alone) {
+	if (cpus <= 1) {
 		if (loaded && a56_load_read(&after) == 0) {
 			natural_t	busy = after.busy - before.busy;
 			natural_t	ticks = after.ticks - before.ticks;
@@ -4192,6 +4196,8 @@ arm_fifty_six_abort_reaches_user_mode(void)
 			printf("act_test: [56] at one processor the time others "
 			       "held it could not be read, and the rounds are "
 			       "judged whole (#1022)\n");
+	}
+	if (a56_alone) {
 		/*
 		 * A line of its own, said whatever the verdict: the one below
 		 * is near the console's 256 (#802).
