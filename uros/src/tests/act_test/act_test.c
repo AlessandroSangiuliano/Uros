@@ -4176,6 +4176,16 @@ arm_fifty_six_abort_reaches_user_mode(void)
 			printf("act_test: [56] at one processor the time others "
 			       "held it could not be read, and the rounds are "
 			       "judged whole (#1022)\n");
+		/*
+		 * A line of its own, said whatever the verdict: the one below
+		 * is near the console's 256 (#802).
+		 */
+		printf("act_test: [56] at one processor the victim read itself "
+		       "depressed in its loop in %d of %d rounds, by "
+		       "SWITCH_OPTION_IDLE; %d depressions ran out and were "
+		       "asked again, and %d rounds ran undepressed, the "
+		       "processor held (#925)\n",
+		       depressed, A56_ROUNDS, ran_out, held);
 	}
 	if (cpus <= 1 && took > A56_ALONE_MAX_MS) {
 		printf("act_test: [56] the rounds took %ld ms at one processor, "
@@ -4185,14 +4195,6 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		       took, A56_ALONE_MAX_MS);
 		return 0;
 	}
-	/* A line of its own: the one below is near the console's 256 (#802). */
-	if (a56_alone)
-		printf("act_test: [56] at one processor the victim read itself "
-		       "depressed in its loop in %d of %d rounds, by "
-		       "SWITCH_OPTION_IDLE; %d depressions ran out and were "
-		       "asked again, and %d rounds ran undepressed, the "
-		       "processor held (#925)\n",
-		       depressed, A56_ROUNDS, ran_out, held);
 	printf("act_test: [56] an abort of a thread spinning in user mode was "
 	       "spent before it waited: in %d rounds both of two %d ms futex "
 	       "waits made %ld us or more after it timed out; the rounds took "
