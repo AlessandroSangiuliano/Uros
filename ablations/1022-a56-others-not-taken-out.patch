@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #1022
+Over: 1022-widen-a56-another-task-spins.patch
+Takes out: the time others held the processor, from what act_test [56]'s bound judges at one processor (90ef194c) -- the bound judges the rounds whole again, and over the widen, two threads of another task spinning beside them, the rounds take more than its 30 s, as they took 32.3 s in the merge test of 28/11 on omen with a test's forked processes beside them
+Run: --entry 14 300 -smp 1
+Expect: act_test: \[56\] the rounds took [0-9]+ ms at one processor, more than
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 7d69f1ed..5d621fc6 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -4290,7 +4290,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
+ 		a56_hog_done = 1;
+ 		(void) pthread_join(keeper, NULL);
+ 	}
+-	if (cpus <= 1 && took - others > A56_ALONE_MAX_MS) {
++	if (cpus <= 1 && took > A56_ALONE_MAX_MS) {
+ 		printf("act_test: [56] the rounds took %ld ms at one processor, "
+ 		       "more than %d ms besides the %ld ms others held it: the "
+ 		       "end of the main thread's nap is to preempt the victim at "
