@@ -1,0 +1,119 @@
+Kind: widen
+Issue: #1022
+Holds open: the processor, at one processor, through act_test [56]'s rounds -- two threads of another task, which the arm makes with this task's memory, spin beside the rounds as a test's sixty forked processes did in the merge test of 28/11 on omen, and a thread of act_test ends that task at the rounds' end, or after 60 s.  On a good tree the line says how long others held the processor, the bound judges the rest, and [56] passes or, when others held more than half of the rounds, says NOT ASKED
+Run: --entry 14 300 -smp 1
+Premise: act_test: \[56\] at one processor others held it [0-9]{4,} ms
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 2449a162..7d69f1ed 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -3845,6 +3845,74 @@ a56_gap(long us)
+ 	return d;
+ }
+ 
++/*
++ * The widen (#1022): two threads of another task spin beside the rounds at
++ * one processor, as a test's forked processes did in the merge test of 28/11.
++ * A thread of this task ends that task once the rounds are over, or after
++ * 60 s if a WRONG ended them first.
++ */
++#define	A56_HOG_THREADS	2
++#define	A56_HOG_STACK	16384
++
++static volatile int	a56_hog_done;
++static mach_port_t	a56_hog_task = MACH_PORT_NULL;
++
++static void
++a56_hog_spin(void)
++{
++	for (;;)
++		__asm__ __volatile__("pause");
++}
++
++static int
++a56_hog_start(void)
++{
++	struct x86_64_thread_state	state;
++	mach_msg_type_number_t		count;
++	vm_address_t			stack;
++	mach_port_t			t;
++	int				i, started = 0;
++
++	if (task_create(mach_task_self(), NULL, 0, TRUE, &a56_hog_task) !=
++	    KERN_SUCCESS)
++		return 0;
++	for (i = 0; i < A56_HOG_THREADS; i++) {
++		stack = 0;
++		count = x86_64_THREAD_STATE_COUNT;
++		if (vm_allocate(a56_hog_task, &stack, A56_HOG_STACK, TRUE) !=
++		    KERN_SUCCESS || thread_create(a56_hog_task, &t) !=
++		    KERN_SUCCESS)
++			break;
++		if (thread_get_state(t, x86_64_THREAD_STATE,
++				     (thread_state_t) &state, &count) ==
++		    KERN_SUCCESS) {
++			state.rip = (uint64_t) (uintptr_t) a56_hog_spin;
++			state.rsp = (uint64_t) (stack + A56_HOG_STACK - 8);
++			if (thread_set_state(t, x86_64_THREAD_STATE,
++					     (thread_state_t) &state, count) ==
++			    KERN_SUCCESS && thread_resume(t) == KERN_SUCCESS)
++				started++;
++		}
++		(void) mach_port_deallocate(mach_task_self(), t);
++	}
++	printf("act_test: [56] the widen: %d threads of another task spin "
++	       "beside the rounds (#1022)\n", started);
++	return 1;
++}
++
++static void *
++a56_hog_keeper(void *arg)
++{
++	int	waited;
++
++	(void) arg;
++	for (waited = 0; !a56_hog_done && waited < 60000; waited += 100)
++		(void) nap(100);
++	(void) task_terminate(a56_hog_task);
++	(void) mach_port_deallocate(mach_task_self(), a56_hog_task);
++	return NULL;
++}
++
+ /* Spin in user mode until told, then wait twice on a word nobody wakes. */
+ static void *
+ a56_victim(void *arg)
+@@ -3980,6 +4048,8 @@ arm_fifty_six_abort_reaches_user_mode(void)
+ 	struct a56_load	before, after;
+ 	int		loaded;
+ 	long		others = 0;	/* ms others held the processor */
++	pthread_t	keeper;
++	int		keeping = 0;
+ 
+ 	/*
+ 	 * How long the rounds take, read by the clock and said on the line:
+@@ -3997,6 +4067,13 @@ arm_fifty_six_abort_reaches_user_mode(void)
+ 	 * victim does not is judged on this reading as much (#1022).
+ 	 */
+ 	loaded = cpus <= 1 && a56_load_read(&before) == 0;
++	/* The widen: another task's threads, from here to the rounds' end. */
++	if (cpus <= 1 && a56_hog_start()) {
++		if (pthread_create(&keeper, NULL, a56_hog_keeper, NULL) == 0)
++			keeping = 1;
++		else
++			(void) task_terminate(a56_hog_task);
++	}
+ 	for (round = 0; round < A56_ROUNDS; round++) {
+ 		pthread_t	victim;
+ 		kern_return_t	napped = MACH_RCV_TIMED_OUT;
+@@ -4209,6 +4286,10 @@ arm_fifty_six_abort_reaches_user_mode(void)
+ 		       "processor held (#925)\n",
+ 		       depressed, A56_ROUNDS, ran_out, held);
+ 	}
++	if (keeping) {
++		a56_hog_done = 1;
++		(void) pthread_join(keeper, NULL);
++	}
+ 	if (cpus <= 1 && took - others > A56_ALONE_MAX_MS) {
+ 		printf("act_test: [56] the rounds took %ld ms at one processor, "
+ 		       "more than %d ms besides the %ld ms others held it: the "
