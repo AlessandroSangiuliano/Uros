@@ -20,8 +20,8 @@
 #   refuse     with the lock held, run-x86_64.sh and every tool that shares the
 #              lock refuse, and none of them has made a disk first
 #   tools      each tool that shares the lock, sent TERM once its qemu is up,
-#              leaves neither its qemu, nor the lock, nor its files in /tmp
-#              (#1016)
+#              leaves neither its qemu, nor the lock, nor its files in /tmp,
+#              and one on run_lock.py says once that it was stopped (#1016)
 #   orphan     a run killed with SIGKILL, which no trap can answer, leaves its
 #              qemu, and the next run names it in its conditions
 #   killed     a tool killed with SIGKILL takes its qemu with it
@@ -30,8 +30,9 @@
 #   unitstop   each of them, run in a transient systemd user unit under a
 #              script with no trap, and the unit stopped with its qemu up --
 #              which signals what is left of the unit twice -- leaves neither
-#              its qemu, nor the lock, nor its files in /tmp, and
-#              run-x86_64.sh says it was stopped (#801, #1016)
+#              its qemu, nor the lock, nor its files in /tmp, run-x86_64.sh
+#              says it was stopped, and a tool on run_lock.py says so once:
+#              the second signal is not taken (#801, #1016)
 #   mtstop     merge-test-x86_64.sh, sent TERM during a boot, says that boot
 #              was stopped, says where it stopped, prints its total and ends
 #              by the signal, and leaves neither the boot's qemu nor the lock:
@@ -226,6 +227,28 @@ tmp_left() {
 	[ -n "$new" ] || return 0
 	printf '; it LEFT %s in /tmp' "$(printf '%s\n' "$new" | sed 's|^/tmp/||' | paste -sd' ' -)"
 	printf '%s\n' "$new" | while IFS= read -r p; do rm -f "$p"; done
+	return 0
+}
+
+# #1016: what a tool on run_lock.py said of the signals that stopped it.
+# _stop() says the first, "<name>: stopped by SIG...", under the name the tool
+# takes the lock as, and ignores the rest until the run has ended; a second
+# such line is a second signal taken, which cut the tool's own cleanup short.
+# Nothing else here sees that: give_back() runs in the outer finally all the
+# same, and its qemu, the lock and its files go.  None is a stop the check
+# cannot read: the tool never said it was stopped.  A tool not on run_lock.py
+# says nothing here.
+stop_said() {	# TOOL OUT-FILE
+	local who n
+	case $1 in *.py) ;; *) return 0 ;; esac
+	grep -q '^import run_lock' "$REPO/scripts/$1" 2>/dev/null || return 0
+	who=${1%.py}
+	n=$(grep -c "^$who: stopped by SIG" "$2" 2>/dev/null)
+	case ${n:-0} in
+	1)	;;
+	0)	printf '; it never said it was stopped: its output ends %s' "$(tail -n 1 "$2" 2>/dev/null)" ;;
+	*)	printf '; it took %s signals: %s' "$n" "$(grep "^$who: stopped by SIG" "$2" | paste -sd' ' -)" ;;
+	esac
 	return 0
 }
 
@@ -457,7 +480,7 @@ if wanted tools; then
 		wait "$P"
 		rc=$?
 		sleep 0.5
-		left="$went_on$(leftovers "$q")"
+		left="$went_on$(leftovers "$q")$(stop_said "$name" "$OUT/tool-$name.out")"
 		if [ -n "$left" ]; then
 			say "tool $name" "sent SIGTERM with its qemu (pid $q) up, it exited $rc$left" WRONG
 		else
@@ -588,7 +611,7 @@ if wanted unitstop; then
 				sleep 0.1
 			done
 			sleep 0.5
-			left=$(leftovers "$q")
+			left=$(leftovers "$q")$(stop_said "$name" "$OUT/unitstop-$name.out")
 			if [ "$name" = run-x86_64.sh ] &&
 			   ! grep -q "^run-x86_64.sh: stopped by SIG" "$OUT/unitstop-$name.out"; then
 				left="$left; it never said it was stopped: its output ends $(tail -n 1 "$OUT/unitstop-$name.out")"
