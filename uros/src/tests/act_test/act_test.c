@@ -3753,6 +3753,63 @@ a56_ms_between(const struct timespec *a, const struct timespec *b)
 }
 
 /*
+ * #1022: what the processors did and what this task's threads took, read
+ * before the rounds and after, so that at one processor the time others held
+ * it is known.  Both counts are the tick's: a processor's state is counted at
+ * each tick (cpustat reads the same), and so is the thread then running.  The
+ * sums are taken modulo 2^32, as the counters wrap, and only their
+ * differences are used.
+ */
+struct a56_load {
+	natural_t	busy;		/* ticks in user, nice and system */
+	natural_t	ticks;		/* and in idle: every tick */
+	long long	task_us;	/* this task's threads, dead and live */
+};
+
+static int
+a56_load_read(struct a56_load *l)
+{
+	integer_t			buf[PROCESSOR_INFO_ARRAY_MAX];
+	mach_msg_type_number_t		count = PROCESSOR_INFO_ARRAY_MAX, n;
+	natural_t			cpus = 0, c;
+	task_basic_info_data_t		dead;
+	task_thread_times_info_data_t	live;
+	mach_port_t			host = mach_host_self();
+	kern_return_t			kr;
+
+	kr = host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &cpus, buf,
+				 &count);
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (kr != KERN_SUCCESS || cpus == 0 ||
+	    count != cpus * PROCESSOR_CPU_LOAD_INFO_COUNT)
+		return -1;
+	l->busy = l->ticks = 0;
+	for (c = 0; c < cpus; c++) {
+		const integer_t	*t = &buf[c * PROCESSOR_CPU_LOAD_INFO_COUNT];
+		natural_t	b = (natural_t) t[CPU_STATE_USER] +
+				    (natural_t) t[CPU_STATE_NICE] +
+				    (natural_t) t[CPU_STATE_SYSTEM];
+
+		l->busy += b;
+		l->ticks += b + (natural_t) t[CPU_STATE_IDLE];
+	}
+	n = TASK_BASIC_INFO_COUNT;
+	if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t) &dead,
+		      &n) != KERN_SUCCESS)
+		return -1;
+	n = TASK_THREAD_TIMES_INFO_COUNT;
+	if (task_info(mach_task_self(), TASK_THREAD_TIMES_INFO,
+		      (task_info_t) &live, &n) != KERN_SUCCESS)
+		return -1;
+	l->task_us = ((long long) dead.user_time.seconds +
+		      dead.system_time.seconds + live.user_time.seconds +
+		      live.system_time.seconds) * 1000000 +
+		     dead.user_time.microseconds + dead.system_time.microseconds +
+		     live.user_time.microseconds + live.system_time.microseconds;
+	return 0;
+}
+
+/*
  * #925: the victim's last depression ran out -- ended by its timer, which
  * thread_switch() answers KERN_ABORTED for, or found gone when read back
  * after a KERN_SUCCESS -- after its whole time, so it is asked again.  One
@@ -3919,6 +3976,9 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	kern_return_t	kr, worst_kr[2] = { KERN_OPERATION_TIMED_OUT,
 					    KERN_OPERATION_TIMED_OUT };
 	struct timespec	start, end;
+	struct a56_load	before, after;
+	int		loaded;
+	long		others = 0;	/* ms others held the processor */
 
 	/*
 	 * How long the rounds take, read by the clock and said on the line:
@@ -3931,6 +3991,7 @@ arm_fifty_six_abort_reaches_user_mode(void)
 		return 0;
 	}
 	a56_alone = cpus <= 1;
+	loaded = a56_alone && a56_load_read(&before) == 0;	/* #1022 */
 	for (round = 0; round < A56_ROUNDS; round++) {
 		pthread_t	victim;
 		kern_return_t	napped = MACH_RCV_TIMED_OUT;
@@ -4094,7 +4155,28 @@ arm_fifty_six_abort_reaches_user_mode(void)
 	 * change to the preemption rule meets this line first.  The victim's
 	 * depression is judged in every round above, so this one is about
 	 * what the scheduler makes of it.
+	 *
+	 * The time others held the processor is read and said (#1022).
 	 */
+	if (a56_alone) {
+		if (loaded && a56_load_read(&after) == 0) {
+			natural_t	busy = after.busy - before.busy;
+			natural_t	ticks = after.ticks - before.ticks;
+			long long	ours = (after.task_us - before.task_us) /
+					       1000;
+			long long	busy_ms = ticks ?
+					  (long long) took * busy / ticks : 0;
+
+			others = busy_ms > ours ? (long) (busy_ms - ours) : 0;
+			printf("act_test: [56] at one processor others held it "
+			       "%ld ms of the rounds' %ld: %u of its %u ticks "
+			       "were busy, %lld ms of them this task's "
+			       "(#1022)\n", others, took, busy, ticks, ours);
+		} else
+			printf("act_test: [56] at one processor the time others "
+			       "held it could not be read, and the rounds are "
+			       "judged whole (#1022)\n");
+	}
 	if (cpus <= 1 && took > A56_ALONE_MAX_MS) {
 		printf("act_test: [56] the rounds took %ld ms at one processor, "
 		       "more than %d ms: the end of the main thread's nap is to "
