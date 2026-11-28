@@ -139,6 +139,23 @@ mt_window_over(const struct mt_window *w, long long limit_ms)
 	return mt_window_ms(w) >= limit_ms;
 }
 
+/*
+ * #1009: a patience, which a window is not: a wait for another thread to run,
+ * or to give back, is a number of chances given it, not a time -- a pause
+ * ends at a tick, and the pauser looks again only when the processor comes
+ * back to it.  So a patience gives up after its pauses, limit_ms / step of
+ * them, as they were counted before; the clock only says how long they took.
+ * Bounded by a second of the clock, act_test's rpc_pair_start() lost its
+ * thread at one processor under TCG (27/11).  The waits of 10 s and more stay
+ * windows by the clock, wide enough.
+ */
+static int
+mt_window_spent(const struct mt_window *w, long long limit_ms)
+{
+	return (long long)w->pauses >=
+	       limit_ms / (w->step_ms > 0 ? w->step_ms : 1);
+}
+
 static void
 mt_window_pause(struct mt_window *w)
 {
@@ -312,7 +329,7 @@ arm_tls(void)
 	 */
 	mt_window_start(&w, 10);
 	while (!__atomic_load_n(&r.done, __ATOMIC_SEQ_CST) &&
-	       !mt_window_over(&w, WAIT_MS))
+	       !mt_window_spent(&w, WAIT_MS))
 		mt_window_pause(&w);
 	if (!__atomic_load_n(&r.done, __ATOMIC_SEQ_CST)) {
 		verdict(4, 0, "a new thread never got as far as its own word");
@@ -433,7 +450,7 @@ address_is_free(uintptr_t where, struct mt_window *budget)
 			(void)munmap(p, PAGE);
 			return 1;
 		}
-		if (mt_window_over(budget, WAIT_MS))
+		if (mt_window_spent(budget, WAIT_MS))
 			return 0;
 		mt_window_pause(budget);
 	}
@@ -461,7 +478,7 @@ arm_detached(void)
 
 	mt_window_start(&w, 10);
 	while (__atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS &&
-	       !mt_window_over(&w, WAIT_MS))
+	       !mt_window_spent(&w, WAIT_MS))
 		mt_window_pause(&w);
 	if (__atomic_load_n(&d_done, __ATOMIC_SEQ_CST) < D_THREADS) {
 		verdict(6, 0, "%d of %d detached threads ran",
@@ -962,7 +979,7 @@ own_id_thread(void *arg)
 	if (rc == 0) {
 		pause_a_little();
 		mt_window_start(&w, 10);
-		while (gettid() == 0 && !mt_window_over(&w, WAIT_MS))
+		while (gettid() == 0 && !mt_window_spent(&w, WAIT_MS))
 			mt_window_pause(&w);
 		rc = pthread_mutex_unlock(m);
 	}
@@ -998,7 +1015,7 @@ arm_own_id(void)
 	}
 	mt_window_start(&w, 10);
 	while (__atomic_load_n(&o_answered, __ATOMIC_SEQ_CST) < made &&
-	       !mt_window_over(&w, WAIT_MS))
+	       !mt_window_spent(&w, WAIT_MS))
 		mt_window_pause(&w);
 	waited = mt_window_ms(&w);
 	answered = __atomic_load_n(&o_answered, __ATOMIC_SEQ_CST);
