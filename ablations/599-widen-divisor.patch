@@ -2,6 +2,7 @@ Kind: widen
 Issue: #599
 Holds open: COM1's divisor latch -- 100 reads of port 0x80 between DLL and DLM in com_set_divisor(), with com_bank_lock held, so that a console byte that ignored the lock would land in it
 Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio -append -U
+Premise: none -- booted by hand on i386, where ablate.sh boots nothing and reads no premise
 
 diff --git a/uros/src/mach_kernel/i386/AT386/com.c b/uros/src/mach_kernel/i386/AT386/com.c
 index 582baba4..fdc10a37 100644

@@ -2,6 +2,7 @@ Kind: widen
 Issue: #777
 Holds open: the window between urmach_msg_rcv_will_block()'s look at an empty queue and the receive -- 300 us after the send of act_test arm 39's replies, when the send handed off, for a request to land in it
 Run: --entry 14 600 -smp 4
+Premise: act_test: \[39\] the queue filled in the window [1-9][0-9]* time\(s\) in [0-9]+ RPCs
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
 index dcf0da25..24a87df4 100644

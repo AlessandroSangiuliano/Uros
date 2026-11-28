@@ -9,6 +9,7 @@ Script: -e
 Script: 14
 Script: -G
 Note: the boots are under KVM, asked of the merge test with -a kvm, as 765-char-test-uncounted is; Accel: tcg is only what ablate.sh writes on the rows.
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/tests/char_test/char_test.c b/uros/src/tests/char_test/char_test.c
 index ae2033ed..35539778 100644

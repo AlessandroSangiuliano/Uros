@@ -2,6 +2,7 @@ Kind: widen
 Issue: #414
 Holds open: the moment between the reaper's unlinking a shuttle's top_act and its dropping the activation's references -- 2 ms, so that a task_terminate() walking the task's list meets an activation in that state whenever one is still listed.  On a good kernel none is
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
 --- a/uros/src/mach_kernel/kern/thread.c

@@ -2,6 +2,8 @@ Kind: widen
 Issue: #940
 Holds open: no window: a probe for the widens and ablations of #940.  A port's memory, as ipc_port_free_after_grace() gives it back to its zone, carries 0xf4eef4eef4eef4ee in its lock's own_pc, which a lock taken overwrites, and in ip_rcu.func, which says it went back through there; io_alloc() asks every port the zone hands out, before it is cleared, whether its lock was taken meanwhile, and stops the kernel naming where from.  w940_watch and w940_watch_back tell a widen that its port's memory is back in the zone.  The fixed tree must pass with it: nothing may lock a port whose memory is in the zone
 Run: --entry 14 600 -smp 4
+Premise: none -- a probe: it opens no window, and the widens over it say theirs
+
 diff --git a/uros/src/mach_kernel/ipc/ipc_object.c b/uros/src/mach_kernel/ipc/ipc_object.c
 index da301256..160004d8 100644
 --- a/uros/src/mach_kernel/ipc/ipc_object.c

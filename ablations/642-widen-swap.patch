@@ -2,6 +2,7 @@ Kind: widen
 Issue: #642
 Holds open: thread_doswapin() just after it marks the stack in, and thread_swapout() just before it unwires it, for 100 ms each, for the activation of the -Q arm that is running -- so [2] and [3] meet their state every time, and the fixed tree must still pass with the windows open
 Run: --entry 25 600 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/thread_swap.c b/uros/src/mach_kernel/kern/thread_swap.c
 index 59416950..c665e6e9 100644

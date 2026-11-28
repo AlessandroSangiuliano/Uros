@@ -2,6 +2,7 @@ Kind: widen
 Issue: #597
 Holds open: the PCI configuration access -- 16 reads of port 0x80 between writing the address to 0xCF8 and touching 0xCFC, each a VM exit under KVM; the fixed tree must keep every access whole with it
 Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Premise: none -- booted by hand on i386, where ablate.sh boots nothing and reads no premise
 
 diff --git a/uros/src/mach_kernel/i386/pci/pcibios.c b/uros/src/mach_kernel/i386/pci/pcibios.c
 index 108b1575..5e18660f 100644

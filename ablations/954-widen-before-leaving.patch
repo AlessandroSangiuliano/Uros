@@ -2,6 +2,7 @@ Kind: widen
 Issue: #954
 Holds open: spins for 50 ms, or until the wakee has run, between the look at handoff_wakee and the waker's leaving for the high thread, so that a tick may let the wakee take the waker's processor before it leaves, every time
 Run: --entry 67 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
 index 5d13982f..9220d00e 100644

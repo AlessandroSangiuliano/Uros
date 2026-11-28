@@ -2,6 +2,7 @@ Kind: widen
 Issue: #661
 Holds open: the -f replay ending inside a sequence with more bytes offered than kept -- nothing is kept after the first 0xE2, the lead byte of the first em dash the boot prints before the screen exists, as past FB_EARLY_SIZE the bytes are not kept and the cut can fall anywhere
 Run: --entry 41 600 -smp 4
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/mach_kernel/x86_64/ddb/fbcons.c b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
 index ca190fa9..dee25cae 100644

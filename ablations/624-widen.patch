@@ -2,6 +2,7 @@ Kind: widen
 Issue: #624
 Holds open: the two loads of a current_thread() without #646's fix, in mutex_lock_assert_safe(), for delay(160), what 1000 pause instructions lasted at OMEGA's maximum clock -- a time and not a count, which under TCG lasts as many times longer as the host is slower (about 1 ms at 1.4 GHz) -- so a preemption and a move between them is likely, and the fixed tree, one load after the same wait, must still pass
 Run: --entry 22 1200 -smp 4
+Premise: none -- its hold runs at every mutex_lock_assert_safe() once the TSC is calibrated; a preemption and a move inside it is what the ablated boot meets, and the fixed tree, with one load, has no window a line could show met
 
 diff --git a/uros/src/mach_kernel/kern/lock.c b/uros/src/mach_kernel/kern/lock.c
 index 55921885..6915ae91 100644

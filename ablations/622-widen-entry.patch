@@ -2,6 +2,7 @@ Kind: widen
 Issue: #622
 Holds open: the window between the entry stub's clock reading and the profiled trap taking it -- every fourth urmach_msg() calls thread_block() with no wait declared before SP_ENTER(33), a yield as swtch() makes one, so that under -e's spinners the thread is taken off its processor there and given one back wherever there is room, by the scheduler; a spin does not do it, since a thread that blocks in every RPC never runs out its quantum inside one (6 crossings in 20 s, with 100000 cycles spun in every call, on victus under KVM; a yield in every sixteenth gave 20 in 5 s under KVM and 4 s under TCG, and -e now asks for a hundred); the trap profile compiled in on x86-64 whatever the cache says, because ablate.sh configures every arm with the reference build's options and a merge build's UROS_SYSCALL_PROFILE is OFF; and no dumps, whose lines the harness reads as garbled; the fixed tree must still pass; not with a hand-off pending, where the yield would be the very block the bet is on, and act_test's arms 39 and 40 would find it won try after try
 Run: --entry 54 600 -smp 4
+Premise: profile_entry: [0-9]+ spinners on [0-9]+ processors for [0-9]+ ms: [1-9][0-9]* profiled traps were taken off their processor between the entry and the dispatch
 
 diff --git a/uros/src/mach_kernel/CMakeLists.txt b/uros/src/mach_kernel/CMakeLists.txt
 index 3ba585a3..6e987947 100644

@@ -3,6 +3,7 @@ Issue: #868
 Takes out: nothing -- it holds urmach_msg_lockfree_resolve() for 120 ms on the message act_test [51] marks, after it has read the two names and before it locks the ports, so that a right can leave in between.  With the check in place the resolve finds that out with the ports locked and gives up, and the RPC after it is refused.
 Run: --entry 14 600 -smp 4
 Expect: act_test: \[51\] a right given up by each route was refused
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
 index a39c73cf..e5f497d1 100644

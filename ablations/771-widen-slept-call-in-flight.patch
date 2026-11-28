@@ -2,6 +2,7 @@ Kind: widen
 Issue: #771
 Holds open: the window between thread_set_syscall_return() marking a system call that slept and that call leaving through thread_user_frame_return -- every such call from the first on waits there, a tick at a time (mutex_pause()), until the quiet census prints its next report, which the census counts in quiet_census_reports -- so that a report finds calls on their way out and none of them out, as run 41255283097's entry 27 found one by chance at four processors under TCG; the fixed tree, which counts a call where it leaves, must still say none yet and pass
 Run: --entry 14 1200 -smp 1
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
 index e42bce2a..d35a9c7c 100644

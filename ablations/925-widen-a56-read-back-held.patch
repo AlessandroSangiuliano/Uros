@@ -2,6 +2,8 @@ Kind: widen
 Issue: #925
 Holds open: the time between thread_switch()'s answer and act_test [56]'s victim reading its depression back, 300 ms by the clock in the first round, past the depression's 100 ms -- what entry 55's -t did at one processor in the merge test of a869dac2 (OMEGA, 13/11), the processor held after a KERN_SUCCESS that left the victim depressed.  The fixed tree finds the depression gone after its whole time and asks it again
 Run: --entry 14 300 -smp 1
+Premise: act_test: \[56\] at one processor .*; [1-9][0-9]* depressions ran out and were asked again
+
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
 index 4b04322f..3f09bfad 100644
 --- a/uros/src/tests/act_test/act_test.c

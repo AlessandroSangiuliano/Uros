@@ -2,6 +2,7 @@ Kind: widen
 Issue: #599
 Holds open: consolewrite()'s printf_lock hold, for an interrupt -- once, after tick 3000, processor 0 raises inside it an ISA line whose handler is intnull(), so intnull()'s printf runs nested in the holder; the fixed tree prints the line and goes on
 Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Premise: none -- booted by hand on i386, where ablate.sh boots nothing and reads no premise
 
 diff --git a/uros/src/mach_kernel/i386/AT386/console_cdev.c b/uros/src/mach_kernel/i386/AT386/console_cdev.c
 index b149bb24..26bb756c 100644

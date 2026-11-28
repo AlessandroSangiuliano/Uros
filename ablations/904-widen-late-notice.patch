@@ -3,6 +3,7 @@ Issue: #904
 Holds open: the time between a token's last send right going and pipe_server reading its no-senders notification -- 300 ms of thread_switch(SWITCH_OPTION_WAIT) before it acts on it, so that a read right after a close() that did not say so finds the pipe as it was
 Accel: tcg,kvm
 Run: --entry 14 600 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/servers/pipe_server/pipe_server.c b/uros/src/servers/pipe_server/pipe_server.c
 index 0d5cdecd..0d3a39e3 100644

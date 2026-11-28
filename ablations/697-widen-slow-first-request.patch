@@ -4,6 +4,7 @@ Holds open: the first request virtio_blk.so submits -- its completion is not see
 Accel: tcg,kvm
 Run: --entry 14 600 -smp 4
 Note: how long the old count lasts is a fortieth of the kernel's own measure of its 400,000,000-pause budget: about 2.3 s under TCG and 0.5 s under KVM on pavillion, 0.17 s under KVM on omen. Entries 0 and 1 boot boot_probe alone and never start the block device server: a first run on entry 1 passed both arms, holding nothing and saying nothing. The clock is asked once every 10,000,000 cycles of the TSC while the request is held, not at every look, so the hold costs the old count nothing it did not spend on its pauses.
+Premise: virtio: 697 widen: the first request is held [0-9]+ ms
 
 diff --git a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
 index e91f17a2..8554d6a8 100644

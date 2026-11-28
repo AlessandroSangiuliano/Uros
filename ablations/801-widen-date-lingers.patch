@@ -1,6 +1,7 @@
 Kind: widen
 Issue: #801
 Holds open: the time bash waits for a $(date +%s)'s child after it has read the child's output -- date() prints, closes its output and takes 10 s more to exit, from the wait's second pass on, where the real date(1) takes a fraction of a millisecond, so that a SIGINT sent to the script alone while it waits for its qemu lands every time where bash only notes it and never runs the trap; the fixed tree, which waits for date as a job with `wait', must still stop at once and pass
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
 index 6be96f43..73596788 100755

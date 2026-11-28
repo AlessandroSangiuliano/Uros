@@ -2,6 +2,7 @@ Kind: widen
 Issue: #744
 Holds open: a revocation no subscriber is told of -- cap_server sends no notice at all, as when a subscriber's queue is full, its slot was never had, or cap_server has stopped, and says so for every one, so that a fixed run that passes shows the notices were missing; a server must still see the revocation, at its next use, from the kernel's epoch
 Run: --entry 14 1200 -smp 1
+Premise: cap: widen #744: the notice of [0-9]+ is sent to nobody
 
 diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
 index 0fd77c61..b2d0c5d6 100644

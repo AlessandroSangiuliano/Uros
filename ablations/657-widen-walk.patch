@@ -2,6 +2,7 @@ Kind: widen
 Issue: #657
 Holds open: the census's walk, delay(3000) per thread between taking it off the list and reading it, with freed zone elements filled with 0xdeadbeef -- so that the 24 threads -c wakes to end are freed in the middle of the walk if nothing stops them, and a walk that reads one follows a pointer into nothing; the fixed walk holds the processor set's lock, and the threads are freed only after it
 Run: --entry 35 600 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/census_test.c b/uros/src/mach_kernel/x86_64/cpu/census_test.c
 index c3b7b9d2..08223f06 100644

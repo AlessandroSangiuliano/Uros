@@ -2,6 +2,7 @@ Kind: widen
 Issue: #659
 Holds open: an AMD engine that ignores GAEn -- the read-back after IommuEn sees it clear, as an engine without GASup would leave it -- so that iommu_amd_enable() refuses an engine it has already turned on
 Run: --iommu amd-xt --entry 48 900 -smp 4
+Premise: none -- a condition it puts in place on every boot it runs in, not a window that a boot may or may not meet
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c

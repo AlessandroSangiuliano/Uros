@@ -2,6 +2,7 @@ Kind: widen
 Issue: #599
 Holds open: the I/O APIC's select/window pair -- 1000 reads of port 0x80 in each of its gaps, on the processors other than 0, so that two read-modify-writes meet inside it at four processors and never at one
 Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Premise: none -- booted by hand on i386, where ablate.sh boots nothing and reads no premise
 
 diff --git a/uros/src/mach_kernel/i386/ioapic.c b/uros/src/mach_kernel/i386/ioapic.c
 index 9c543827..edc7fd6b 100644

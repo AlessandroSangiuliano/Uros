@@ -2,6 +2,7 @@ Kind: widen
 Issue: #519
 Holds open: the gap at level zero just before the boot test of a claimed line raises to the device class, for two of the PIT's 1 ms periods, so that fronts land there for certain -- the fixed test reads both its counts after the raise and must still say one run from one replay
 Run: --entry 0 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
 index 4eb7b020..5c08e566 100644

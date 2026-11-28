@@ -2,6 +2,7 @@ Kind: widen
 Issue: #787
 Holds open: the window in thread_doassign(), after the thread is stopped and before the lock loop, where no set is locked -- doassign_probe(), whose call site this adds, signals doassign_test and waits there, so the test can destroy the set in exactly that window and make the lock loop retry with the default set. The fixed thread_doassign() returns when the retry's set is the one the thread is already in, so the assignment comes back and the test passes. Run at four processors: the driver spins in the probe while the test runs.
 Run: --entry 66 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
 index d3bfe176..52682c27 100644

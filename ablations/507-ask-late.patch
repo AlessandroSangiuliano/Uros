@@ -2,6 +2,7 @@ Kind: widen
 Issue: #507
 Holds open: act_test [1]'s window between the kill and its question -- the handler naps 20 ms before asking the same name, so the teardown the kill started has freed the activation and its port, and the answer met once in 144 one-processor runs (MACH_SEND_INVALID_DEST) comes on demand; the fixed test must pass naming it
 Run: --entry 14 600 -smp 4
+Premise: none -- no patch is written over it
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
 index 7ebfd6a0..0a8048d8 100644

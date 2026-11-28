@@ -1,6 +1,7 @@
 Kind: widen
 Issue: #958
 Holds open: ush prints its first prompt only once the root disk answers -- it opens /hello_world every 100 ms, for two minutes at most, and waits a second more -- so that ext2's ready line, printed as it starts to answer, comes before the prompt every time, as it did on GitHub's runners in 8 of 36 KVM boots of entry 14 @ush
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/cmds/ush/ush.c b/uros/src/cmds/ush/ush.c
 index 7f64e84c..31ba2433 100644

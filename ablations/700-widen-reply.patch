@@ -2,6 +2,7 @@ Kind: widen
 Issue: #700
 Holds open: a reply's window between taking its receiver off the queue and waking it -- 100 ms, while the receiver is being terminated, and that receiver comes back for its message 20 ms late so that the reply finds it still queued; each spin says so, so that a fixed arm that passes shows the window was open; in the fixed tree the spin runs under imq_lock, where the receiver waits for it; and thread_go() panics, its backtrace naming the waker, when it is about to wake a thread queued for the reaper
 Run: --entry 14 600 -smp 4
+Premise: #700 widen: .* [0-9]+ us, thread 0x[0-9a-f]+ being terminated
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
 index 37620827..90e9b68e 100644

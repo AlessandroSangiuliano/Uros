@@ -2,6 +2,7 @@ Kind: widen
 Issue: #710
 Holds open: futex_wait()'s window between its two reads of the word -- the waiter declares its wait at splsched and spins 100 ms before the second read, only for a word holding 0x07100710, pthread_test's, and at most 16 times; pthread_test's last case unmaps the page 20 ms after the waiter says it is calling the kernel, so the unmap lands inside the window, and in the fixed tree the second read fails and the wait answers KERN_NOT_WAITING; each hold says so on the console, before splsched
 Run: --entry 14 1200 -smp 4
+Premise: #710 widen: a futex waiter held [0-9]+ ms between its two reads
 
 diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
 index c6301e2d..b13968b8 100644

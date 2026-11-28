@@ -3,6 +3,7 @@ Issue: #723
 Holds open: the driver of -P's test on an application processor -- startup moves start_kernel_threads() to the first application processor running before it calls preempt_test_run_remote(), where the scheduler had it at times, and says where it stands. At two processors that one is the only processor the test may choose.
 Accel: tcg,kvm
 Run: --entry 5 300 -smp 2
+Premise: 723-widen: the driver stands on processor [1-9][0-9]*
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/startup.c b/uros/src/mach_kernel/x86_64/cpu/startup.c
 index 7a3c6c09..b6deb5cf 100644

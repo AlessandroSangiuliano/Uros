@@ -2,6 +2,7 @@ Kind: widen
 Issue: #935
 Holds open: delays thread_create_in() 2 ms before it attaches the new thread, so that an activation listed on the task before it has a thread -- which the 935-list-in-act-create ablation restores -- stays on the list, threadless, long enough for a task_info(TASK_THREAD_TIMES_INFO) to walk it.  Harmless in the fixed tree, where the activation is not listed until it is whole
 Run: --entry 14 300 -smp 4
+Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
 index 1d05e9f1..943684c3 100644

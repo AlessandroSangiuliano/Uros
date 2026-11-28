@@ -2,6 +2,7 @@ Kind: widen
 Issue: #599
 Holds open: a waker's two halves in thread_wakeup_prim(), for -V's event only, for delay(160): the thread it took off the hash stays at WAKING_EVENT that long, so that -V's thread, clearing its own wait, takes the bucket's lock and its own again while the waker is in flight -- the fixed tree waits for the waker after the relock and must still pass, and says how many times it did
 Run: --entry 34 600 -smp 4
+Premise: clear_wait_test: PASS .* waited for it [1-9][0-9]* times
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
 index cc6ea7cd..280537cc 100644

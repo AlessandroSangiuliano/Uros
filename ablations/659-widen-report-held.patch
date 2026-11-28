@@ -2,6 +2,7 @@ Kind: widen
 Issue: #659
 Holds open: a report held by a processor that will never let go -- apic id 0x7777, which no processor has, planted as the report lock's holder right after timer_selftest(), and let go only by the boot processor's own timer after 80 ticks at 10 Hz, eight seconds; the boot processor prints a line meanwhile and says how long it took, which is the bound where the wait has one and the eight seconds where it has none
 Run: --entry 0 600 -smp 4
+Premise: widen 659-widen-report-held: apic id 0x7777 holds a report and lets go in 8 s
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
 index 14c7cc95..e1b0e846 100644

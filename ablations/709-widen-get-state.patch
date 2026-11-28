@@ -2,6 +2,7 @@ Kind: widen
 Issue: #709
 Holds open: thread_get_state()'s window between stopping its thread and letting it go -- 100 ms after thread_stop_wait() and before the activation's lock is taken again, for a receiver that asked for a receive of 0x7090 bytes, act_test [13]'s, and at most 8 times; act_test [13] sends that receiver a message inside the hold and looks at its buffer before thread_get_state() returns, and in the fixed tree the message waits in the kernel; outside the lock, so that a receiver a delivery restarts is not held up on it; each hold says so on the console
 Run: --entry 14 1200 -smp 4
+Premise: #709 widen: thread_get_state\(\) holds a stopped receiver [0-9]+ ms
 
 diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
 index 998331ab..779a7b05 100644

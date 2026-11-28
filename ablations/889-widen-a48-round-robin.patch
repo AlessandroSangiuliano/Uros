@@ -2,6 +2,7 @@ Kind: widen
 Issue: #889
 Holds open: the order of the run queue in act_test [48] at one processor -- every thread of the arm at POLICY_RR, quantum 50 ms, and one priority, so that where a thread goes back on the queue decides who runs next and nothing else does: the hint thread hands off to the thread it names in a loop, and with the fix it goes to the tail and the arm's main thread and its killer get their turns; under timesharing the priorities moved enough that the stop came only now and then (3 boots in about 45 of the merge tests' IOMMU entries under TCG at -smp 1, on omen).  Its first version asked for a quantum of 0, which thread_set_policy() refuses (#787), and threw the answer away: in force nowhere, its A/B tested timesharing.  Each answer is counted now, the first refusal is said, and the arm's first line says whether its own thread's was taken
 Run: --entry 14 300 -smp 1
+Premise: act_test: \[48\] 889-widen-a48-round-robin: the arm's threads at POLICY_RR, quantum 50 ms, priority [0-9]+ -- this thread's set taken
 
 diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
 index e33584c5..8ac4a3cf 100644

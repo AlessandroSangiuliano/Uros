@@ -2,6 +2,7 @@ Kind: widen
 Issue: #595
 Holds open: the census's wakeup before -b's deadline thread has declared its wait -- the thread sleeps thirty seconds before it declares it, and entry 52's census under -S comes within seconds, so its wakeup finds nobody; the thread says whether the census came first, so that a fixed arm that passes shows the window was open; in the fixed tree the thread reads the census's flag once its wait is declared and holds from there
 Run: --entry 52 600 -smp 4
+Premise: #595 widen: -b's deadline thread declares its wait thirty seconds late, and the census came before it
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/reset.c b/uros/src/mach_kernel/x86_64/cpu/reset.c
 index fd5b28b7..43694ab9 100644
