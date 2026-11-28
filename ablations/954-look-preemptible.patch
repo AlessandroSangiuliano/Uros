@@ -6,10 +6,10 @@ Run: --entry 67 300 -smp 4
 Expect: wakee_test: WRONG . the thread named was not handed off
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
-index 5d13982f..1c74beb4 100644
+index 2f52cf06..efdb29e2 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
-@@ -192,7 +192,7 @@ wakee_test(void)
+@@ -200,7 +200,7 @@ wakee_test(void)
  
  	/* What ipc_mqueue_deliver() does, around another thread's wakeup:
  	 * asked where this thread cannot leave its processor (#954). */
@@ -18,11 +18,11 @@ index 5d13982f..1c74beb4 100644
  	self->handoff_hint = TRUE;
  	self->handoff_target = wakee;
  	thread_wakeup((event_t) &wakee_test_other_event);
-@@ -201,7 +201,6 @@ wakee_test(void)
+@@ -209,7 +209,6 @@ wakee_test(void)
  	took_named = self->handoff_wakee;
  	self->handoff_target = THREAD_NULL;
  	self->handoff_hint = FALSE;
 -	mp_enable_preemption();
  
  	/* And this thread leaves, with something better than the wakee here. */
- 	thread_wakeup((event_t) &wakee_test_high_event);
+ 	/*

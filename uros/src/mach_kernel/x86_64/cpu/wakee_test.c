@@ -26,6 +26,12 @@
  * settled, handoff_wakee cleared, and the look found no hand-off.  So it asks
  * at a priority between the wakee's and the high thread's, with preemption
  * off from the first wakeup to the last look.
+ *
+ * #1015: whether the second question was asked is read as the waker leaves,
+ * from its bet, and a wakee held behind the high thread is WRONG before
+ * anything else is asked.  Read off the undo counter, a defect that drops the
+ * bet without undoing it read as a wakee that had run first, NOT ASKED, in
+ * every boot of 777-wakee-left-behind.
  */
 
 #include <stdint.h>
@@ -144,6 +150,8 @@ wakee_test(void)
 	thread_t	wakee, other, high, took_first, took_named;
 	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE], left;
 	int		me, i, ncpu = 0, was_pri;
+	boolean_t	bet_open;	/* #1015: as this thread left */
+	int		ran_first;	/* #1015: the wakee had run by then */
 
 	for (i = 0; i < NCPUS; i++) {
 		processor_t p = cpu_to_processor(i);
@@ -204,7 +212,21 @@ wakee_test(void)
 	mp_enable_preemption();
 
 	/* And this thread leaves, with something better than the wakee here. */
+	/*
+	 * #1015: what it leaves is read as it leaves, with nothing between the
+	 * look and the high thread's wakeup: whether its bet is still open, and
+	 * whether the wakee has run.  Only an open bet asks the second question.
+	 * The undo counter cannot say it: a defect that leaves the bet without
+	 * undoing it counts nothing either, and read as "no bet" it said NOT
+	 * ASKED of the very wakee it held (777-wakee-left-behind).  And the high
+	 * thread cannot read it: by the time it runs, a wakee the undo sent
+	 * elsewhere may have run already.
+	 */
+	mp_disable_preemption();
+	bet_open = self->handoff_wakee == wakee;
+	ran_first = wakee_test_wakee_ran;
 	thread_wakeup((event_t) &wakee_test_high_event);
+	mp_enable_preemption();
 	assert_wait((event_t) &wakee_test_done_event, FALSE);
 	if (wakee_test_high_done)
 		clear_wait(self, THREAD_AWAKENED, FALSE);
@@ -231,22 +253,30 @@ wakee_test(void)
 		       "the other %d, the high one %d (#777)\n",
 		       wakee_test_wakee_ran, wakee_test_other_ran,
 		       wakee_test_high_done);
-	else if (left == 0)
+	else if (wakee_test_high_held)
+		/* #1015: held is held, whatever the bet or the counter say. */
+		printf("wakee_test: WRONG — the wakee waited behind a thread "
+		       "of higher priority on processor %d for all of %u s, on a "
+		       "queue no other processor reads (#777)\n", me,
+		       WAKEE_TEST_HELD_S);
+	else if (!bet_open && ran_first)
 		/*
-		 * #954: no bet was settled as this thread left, so the wakee
-		 * had already run, here, and the high thread never stood in
-		 * its way: the second question was not asked, and a PASS would
-		 * say it had been.
+		 * #954: the bet was won before this thread left, the wakee
+		 * having run, here, and the high thread never stood in its
+		 * way: the second question was not asked, and a PASS would say
+		 * it had been.
 		 */
 		printf("wakee_test: NOT ASKED — the wakee ran on processor %d "
 		       "before its waker left it, so there was no bet to settle "
 		       "when it did; the hand-off itself was taken (#954)\n",
 		       wakee_test_wakee_on);
-	else if (wakee_test_high_held)
-		printf("wakee_test: WRONG — the wakee waited behind a thread "
-		       "of higher priority on processor %d for all of %u s, on a "
-		       "queue no other processor reads (#777)\n", me,
-		       WAKEE_TEST_HELD_S);
+	else if (!bet_open)
+		/* #1015: settled before it left, by an undo elsewhere. */
+		printf("wakee_test: NOT ASKED — the bet was undone before its "
+		       "waker left processor %d, so there was none to settle when "
+		       "it did; the wakee ran on processor %d; the hand-off "
+		       "itself was taken (#954, #1015)\n", me,
+		       wakee_test_wakee_on);
 	else
 		printf("wakee_test: PASS — the other wakeup went the ordinary "
 		       "way, the wakee named was queued on processor %d, and when "

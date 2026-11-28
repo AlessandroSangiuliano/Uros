@@ -5,10 +5,10 @@ Run: --entry 67 300 -smp 4
 Premise: none -- its hold is on the path every time the test drives it, and nothing a boot does can skip it: the test's own lines, which the harness asks for, say the path was driven
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
-index 5d13982f..9220d00e 100644
+index 2f52cf06..82b2d0e1 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/wakee_test.c
-@@ -202,6 +202,14 @@ wakee_test(void)
+@@ -210,6 +210,14 @@ wakee_test(void)
  	self->handoff_target = THREAD_NULL;
  	self->handoff_hint = FALSE;
  	mp_enable_preemption();
@@ -22,4 +22,4 @@ index 5d13982f..9220d00e 100644
 +	}
  
  	/* And this thread leaves, with something better than the wakee here. */
- 	thread_wakeup((event_t) &wakee_test_high_event);
+ 	/*
