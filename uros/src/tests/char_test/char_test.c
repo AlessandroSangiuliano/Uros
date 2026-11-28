@@ -407,11 +407,16 @@ main(int argc, char **argv)
 			 * a full table is waited out for a second.
 			 */
 			claim = KERN_RESOURCE_SHORTAGE;
-			clocked = getclock(TIMEOFDAY, &t0) == 0;
-			/* #1009: the second by the clock, tries 20 ms apart */
+			/*
+			 * #1009: fifty tries 20 ms apart, counted: a claim
+			 * slot comes free when other tasks' claims have
+			 * retired, a number of chances given them and not a
+			 * time.  Bounded by a second of the clock, act_test's
+			 * rpc_pair_start() lost its thread at one processor
+			 * under TCG (27/11).
+			 */
 			for (tries = 0; claim == KERN_RESOURCE_SHORTAGE &&
-			     !waited_out(&t0, clocked, tries, 20, 1000);
-			     tries++) {
+			     tries < 50; tries++) {
 				if (tries != 0)
 					thread_switch(MACH_PORT_NULL,
 						      SWITCH_OPTION_WAIT, 20);

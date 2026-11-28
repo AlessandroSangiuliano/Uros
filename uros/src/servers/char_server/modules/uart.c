@@ -716,8 +716,6 @@ uart_probe(const struct hal_device_info *dev)
 	natural_t	released = 0, klog_from = 0;
 	kern_return_t	kr = KERN_RESOURCE_SHORTAGE;
 	unsigned int	tries;
-	struct timespec	t0;
-	int		clocked;
 
 	(void)dev;
 	if (uart_singleton.attached)
@@ -731,16 +729,16 @@ uart_probe(const struct hal_device_info *dev)
 	 * makes, which then finds it already this task's and takes no second
 	 * slot; on an absent chip it is given back here.
 	 *
-	 * A full table is waited out for up to a second: four slots, and a
-	 * released one is retiring until a grace period has passed (#538), so
-	 * a claim next to io_claim_race's rounds can find none free for a
+	 * A full table is waited out, fifty tries 20 ms apart: four slots, and
+	 * a released one is retiring until a grace period has passed (#538),
+	 * so a claim next to io_claim_race's rounds can find none free for a
 	 * moment -- and a probe that took that for a refusal would take COM1
-	 * away for the whole boot.
+	 * away for the whole boot.  #1009: the tries are counted, not timed: a
+	 * slot comes free when other tasks' claims have retired, a number of
+	 * chances given them, and bounded by a second of the clock, act_test's
+	 * rpc_pair_start() lost its thread at one processor under TCG (27/11).
 	 */
-	/* #1009: the second by the clock; 50 tries 20 ms apart were 1.5 s */
-	clocked = getclock(TIMEOFDAY, &t0) == 0;
-	for (tries = 0; kr == KERN_RESOURCE_SHORTAGE &&
-	     !uart_waited(&t0, clocked, tries * 2u, 1000u); tries++) {
+	for (tries = 0; kr == KERN_RESOURCE_SHORTAGE && tries < 50; tries++) {
 		if (tries != 0)
 			thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
 		kr = device_io_port_claim(char_core_device_port(), UART_BASE,
