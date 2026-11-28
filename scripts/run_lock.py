@@ -45,6 +45,7 @@ PR_SET_PDEATHSIG = 1		# prctl(2): a signal for when the parent dies
 
 _machines = []			# the qemus start_qemu() started
 _paths = []			# #1016: the run's files, for give_back() to remove
+_who = "run_lock"		# #1016: the run's name, as take() was given it
 _STOP = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)	# give_back() waits them out
 
 
@@ -56,6 +57,8 @@ def _owner():
 def take(who):
     """This run's lock, or None after saying, as `who', that another run has
     it.  Called before anything else of the run is made."""
+    global _who
+    _who = who
     try:
         os.mkdir(LOCK)
     except FileExistsError:
@@ -113,9 +116,21 @@ def _stop(signum, _frame):
     waits up to 10 s for its qemu, and systemctl's second SIGTERM, 2-3 ms
     after the first, raised SystemExit again in there.  Its FIFOs were left at
     every stop of its unit, and in 2 boots of 4 under KVM on omen the lock as
-    well."""
+    well.
+
+    It says which signal stopped the run, as take() was told the run's name,
+    once: a second such line is a second signal taken, which
+    harness-lifecycle-check.sh's tools and unitstop say WRONG -- nothing else
+    showed it, give_back() running in the outer finally all the same.  Said
+    with os.write() and not print(): a signal can come in the middle of the
+    run's own print to stderr, and a print from the handler then raises
+    RuntimeError, a reentrant call."""
     for sig in _STOP:
         signal.signal(sig, signal.SIG_IGN)
+    try:
+        os.write(2, f"{_who}: stopped by {signal.Signals(signum).name}\n".encode())
+    except OSError:
+        pass
     raise SystemExit(128 + signum)
 
 
