@@ -206,6 +206,21 @@ act_window_over(struct act_window *w, unsigned ms)
 	return act_window_ms(w) >= (long) ms;
 }
 
+/*
+ * #1009: a patience, which a window is not: a wait for another thread to do
+ * something is a number of chances given it, not a time -- a nap ends at a
+ * tick, and the napper looks again only when the processor comes back to it.
+ * So a patience gives up after its waits, ms / step of them, as the arm
+ * counted them before; the clock only says, in the line, how long they took.
+ * Bounded by a second of the clock, rpc_pair_start()'s thread had not run at
+ * one processor under TCG in one boot of the merge test on omen, 27/11.
+ */
+static int
+act_window_spent(struct act_window *w, unsigned ms)
+{
+	return w->waits >= ms / (w->step_ms ? w->step_ms : 1);
+}
+
 /* A nap of the window's step; what nap() answered, as it said. */
 static kern_return_t
 act_window_nap(struct act_window *w)
@@ -1907,9 +1922,9 @@ arm_nine_refused_create_running(void)
 		 * that patience in microseconds, so it is checked.
 		 */
 		kr = arm_nine_thread_count(pset, &after);
-		act_window_start(&w, 10);	/* #1009: by the clock */
+		act_window_start(&w, 10);	/* #1009: a patience, counted */
 		while (kr == KERN_SUCCESS && after - before >= ARM9_CALLS / 2 &&
-		       !act_window_over(&w, ARM9_WAIT_MS)) {
+		       !act_window_spent(&w, ARM9_WAIT_MS)) {
 			if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 				break;
 			kr = arm_nine_thread_count(pset, &after);
@@ -3612,12 +3627,12 @@ arm55_round(mach_port_t me, int round)
 		else {
 			/* The task resumed, it must run. */
 			(void) task_resume(arm55_child);
-			/* #1009: the bound by the clock, not 400 naps. */
+			/* #1009: a patience, 400 naps; the line the clock's */
 			act_window_start(&w, 5);
 			for (;;) {
 				if ((rs = arm55_run_state(t))
 				    == TH_STATE_RUNNING ||
-				    act_window_over(&w, ARM55_BOUND_MS))
+				    act_window_spent(&w, ARM55_BOUND_MS))
 					break;
 				(void) act_window_nap(&w);
 			}
@@ -4744,9 +4759,9 @@ arm_twenty_three_float_state_is_what_the_thread_finds(void)
 	kr_go = KERN_FAILURE;
 	if (kr_good == KERN_SUCCESS && kr_regs == KERN_SUCCESS)
 		kr_go = thread_resume(t);
-	act_window_start(&w, 10);	/* #1009: by the clock */
+	act_window_start(&w, 10);	/* #1009: a patience, counted */
 	while (kr_go == KERN_SUCCESS && !arm23_looked &&
-	       !act_window_over(&w, ARM23_WAIT_MS)) {
+	       !act_window_spent(&w, ARM23_WAIT_MS)) {
 		if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 			break;
 	}
@@ -4830,8 +4845,8 @@ arm_twenty_four_wait(int step)
 {
 	struct act_window	w;
 
-	act_window_start(&w, 10);	/* #1009: by the clock */
-	while (arm24_step != step && !act_window_over(&w, ARM24_WAIT_MS)) {
+	act_window_start(&w, 10);	/* #1009: a patience, counted */
+	while (arm24_step != step && !act_window_spent(&w, ARM24_WAIT_MS)) {
 		if (act_window_nap(&w) != MACH_RCV_TIMED_OUT)
 			break;
 	}
