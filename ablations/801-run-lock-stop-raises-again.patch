@@ -1,16 +1,16 @@
 Kind: ablation
 Issue: #801
-Takes out: the signals ignored while run_lock.py's give_back() runs -- _stop() stays the handler in there, as before the fix, so the second SIGTERM that systemctl stop sends raises SystemExit inside the give-back, and a tool on this lock whose unit is stopped leaves the lock; harness-lifecycle-check.sh's unitstop must say so for rip-sample.py or uart-stall.py, which left it in 6 boots of 6 each before the fix
+Takes out: the signals ignored from a tool's first stop signal until its run has ended -- in _stop() since #1016 and in give_back() since #801 -- so the second SIGTERM that systemctl stop sends raises SystemExit wherever the run is, the give-back included, as before #801; harness-lifecycle-check.sh's unitstop must say that a tool left the lock, as rip-sample.py and uart-stall.py did in 6 boots of 6 each before #801, or that it took two signals.  Made again for #1016: taken out of give_back() alone, it was caught 0 of 4 in the giro of the union at b93a68a5, _stop() ignoring them from the first
 Script: scripts/harness-lifecycle-check.sh
 Script: --only
 Script: unitstop
 Expect: lifecycle: unitstop (rip-sample|uart-stall)\.py: .*the lock is STILL THERE
+Expect: lifecycle: unitstop (char-roundtrip|ramoops-readback|rip-sample|uart-stall)\.py: .*it took [2-9] signals
 
 diff --git a/scripts/run_lock.py b/scripts/run_lock.py
-index 54a7bbdb..af6b3b90 100644
 --- a/scripts/run_lock.py
 +++ b/scripts/run_lock.py
-@@ -70,7 +70,7 @@ def give_back(mine, who):
+@@ -82,7 +82,7 @@ def give_back(mine, who):
      uart-stall.py left the lock in 6 boots of 6 and char-roundtrip.py in 1.
      Ignored rather than blocked: blocked in this thread, a signal can be
      taken by another, and Python runs the handler here all the same."""
@@ -19,3 +19,12 @@ index 54a7bbdb..af6b3b90 100644
      try:
          for q in _machines:
              if q.poll() is None:
+@@ -125,8 +125,6 @@ def _stop(signum, _frame):
+     with os.write() and not print(): a signal can come in the middle of the
+     run's own print to stderr, and a print from the handler then raises
+     RuntimeError, a reentrant call."""
+-    for sig in _STOP:
+-        signal.signal(sig, signal.SIG_IGN)
+     try:
+         os.write(2, f"{_who}: stopped by {signal.Signals(signum).name}\n".encode())
+     except OSError:
