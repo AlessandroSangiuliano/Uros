@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #801
+Over: 801-widen-run-lock-give-back.patch
+Takes out: give_back()'s ignoring of TERM, HUP and INT -- _stop() stays the handler while it runs, as before #801, so a signal that comes while a run that ended by itself gives its lock back raises SystemExit in there; over the widen, harness-lifecycle-check.sh's endstop must say that rip-sample.py left the lock or took the signal.  Read first on victus under KVM, 28/11: it exited 143, the lock still there, and said it was stopped by SIGTERM
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: endstop
+Expect: lifecycle: endstop rip-sample\.py: .*(the lock is STILL THERE|it took the signal)
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -82,7 +82,7 @@
+     uart-stall.py left the lock in 6 boots of 6 and char-roundtrip.py in 1.
+     Ignored rather than blocked: blocked in this thread, a signal can be
+     taken by another, and Python runs the handler here all the same."""
+-    before = [(sig, signal.signal(sig, signal.SIG_IGN)) for sig in _STOP]
++    before = []
+     os.write(2, f"{who}: #801 widen: give_back() held 1 s\n".encode())
+     time.sleep(1)
+     try:

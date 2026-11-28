@@ -1,0 +1,26 @@
+Kind: widen
+Issue: #801
+Holds open: give_back()'s run, a second after it has set TERM, HUP and INT ignored and before it stops the qemu -- run_lock.py says it holds it, so that harness-lifecycle-check.sh's endstop sends its TERM to a tool that ended by itself while it gives its lock back, where the window is otherwise milliseconds; the fixed tree, which ignores the signal there, must still give the lock back and pass
+Premise: lifecycle: endstop rip-sample\.py: sent SIGTERM while it gave its lock back
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -38,7 +38,7 @@
+ # Imported, with sys.dont_write_bytecode set first: nothing is to be left in
+ # scripts/.
+ 
+-import ctypes, os, signal, subprocess, sys
++import ctypes, os, signal, subprocess, sys, time
+ 
+ LOCK = "/tmp/uros-x86_64-run.lock"
+ PR_SET_PDEATHSIG = 1		# prctl(2): a signal for when the parent dies
+@@ -83,6 +83,8 @@ def give_back(mine, who):
+     Ignored rather than blocked: blocked in this thread, a signal can be
+     taken by another, and Python runs the handler here all the same."""
+     before = [(sig, signal.signal(sig, signal.SIG_IGN)) for sig in _STOP]
++    os.write(2, f"{who}: #801 widen: give_back() held 1 s\n".encode())
++    time.sleep(1)
+     try:
+         for q in _machines:
+             if q.poll() is None:

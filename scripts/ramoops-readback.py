@@ -160,7 +160,7 @@ def readback(a, build, out):
                if made.stderr.strip() else ""), file=sys.stderr)
         return 2
 
-    mon = f"/tmp/uros-ramoops-{os.getpid()}.mon"
+    mon = run_lock.remove_at_end(f"/tmp/uros-ramoops-{os.getpid()}.mon")  # #1016
     log = os.path.join(out, "ramoops-readback.log")
     zone_file = os.path.join(out, "ramoops-readback.zone")
     for p in (log, zone_file, mon):

@@ -7,13 +7,13 @@ Script: lockover
 Expect: lifecycle: lockover char-roundtrip.py: .*REMOVED the lock
 
 diff --git a/scripts/run_lock.py b/scripts/run_lock.py
-index 54a7bbdb..dc4e8b17 100644
+index 3254d9b1..a5c5f6d7 100644
 --- a/scripts/run_lock.py
 +++ b/scripts/run_lock.py
-@@ -76,10 +76,7 @@ def give_back(mine, who):
-             if q.poll() is None:
-                 q.kill()
-                 q.wait()
+@@ -92,10 +92,7 @@ def give_back(mine, who):
+                 pass
+             except OSError as e:
+                 print(f"{who}: {p} could not be removed: {e}", file=sys.stderr)
 -        try:
 -            ours = _owner() == mine
 -        except FileNotFoundError:

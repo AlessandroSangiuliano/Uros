@@ -28,6 +28,13 @@
 #     behind (measured: char-roundtrip.py sent TERM exited 143, its qemu alive
 #     and the lock still there).
 #
+# And a fifth, since #1016: the run's files in /tmp -- its FIFOs, its
+# monitor's socket -- go with it, however it ends, as its qemu does.  Each tool
+# removed its own, in code a signal could skip: stopped with their systemd
+# units, char-roundtrip.py, rip-sample.py and uart-stall.py left theirs in 8
+# stops of 8 on omen, and ramoops-readback.py in 3.  remove_at_end() names
+# one, and give_back() removes it.
+#
 # Imported, with sys.dont_write_bytecode set first: nothing is to be left in
 # scripts/.
 
@@ -37,6 +44,8 @@ LOCK = "/tmp/uros-x86_64-run.lock"
 PR_SET_PDEATHSIG = 1		# prctl(2): a signal for when the parent dies
 
 _machines = []			# the qemus start_qemu() started
+_paths = []			# #1016: the run's files, for give_back() to remove
+_who = "run_lock"		# #1016: the run's name, as take() was given it
 _STOP = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)	# give_back() waits them out
 
 
@@ -48,6 +57,8 @@ def _owner():
 def take(who):
     """This run's lock, or None after saying, as `who', that another run has
     it.  Called before anything else of the run is made."""
+    global _who
+    _who = who
     try:
         os.mkdir(LOCK)
     except FileExistsError:
@@ -58,9 +69,10 @@ def take(who):
 
 
 def give_back(mine, who):
-    """The run's qemu stopped, if the run has not stopped it already, and
-    then the lock removed, only while it is still `mine' -- said, as `who',
-    when it is not.
+    """The run's qemu stopped, if the run has not stopped it already, the
+    files remove_at_end() named removed, and then the lock removed, only
+    while it is still `mine' -- said, as `who', when it is not.  The files
+    are the run's whoever holds the lock: they go either way.
 
     🔴 With TERM, HUP and INT ignored until it is done (#801).  _stop() stays
     the handler, so a second TERM raised SystemExit again in here -- and
@@ -76,6 +88,13 @@ def give_back(mine, who):
             if q.poll() is None:
                 q.kill()
                 q.wait()
+        for p in _paths:
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"{who}: {p} could not be removed: {e}", file=sys.stderr)
         try:
             ours = _owner() == mine
         except FileNotFoundError:
@@ -91,7 +110,36 @@ def give_back(mine, who):
 
 
 def _stop(signum, _frame):
+    """The run ends: from this signal on, TERM, HUP and INT are ignored until
+    it has (#1016).  give_back() ignored them only once called, and the run's
+    own finally runs before it: char-roundtrip.py's writes the boot's log and
+    waits up to 10 s for its qemu, and systemctl's second SIGTERM, 2-3 ms
+    after the first, raised SystemExit again in there.  Its FIFOs were left at
+    every stop of its unit, and in 2 boots of 4 under KVM on omen the lock as
+    well.
+
+    It says which signal stopped the run, as take() was told the run's name,
+    once: a second such line is a second signal taken, which
+    harness-lifecycle-check.sh's tools and unitstop say WRONG -- nothing else
+    showed it, give_back() running in the outer finally all the same.  Said
+    with os.write() and not print(): a signal can come in the middle of the
+    run's own print to stderr, and a print from the handler then raises
+    RuntimeError, a reentrant call."""
+    for sig in _STOP:
+        signal.signal(sig, signal.SIG_IGN)
+    try:
+        os.write(2, f"{_who}: stopped by {signal.Signals(signum).name}\n".encode())
+    except OSError:
+        pass
     raise SystemExit(128 + signum)
+
+
+def remove_at_end(path):
+    """`path', a file the run makes -- a FIFO, a monitor's socket -- named
+    for give_back() to remove, after the qemu, however the run ends; given
+    back as it came (#1016)."""
+    _paths.append(path)
+    return path
 
 
 def stop_like_ctrl_c():

@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #1016
+Takes out: give_back()'s removal of the run's files -- the FIFOs and monitor sockets remove_at_end() named stay wherever a tool's own unlink is skipped, as before the fix: rip-sample.py's and uart-stall.py's, outside any finally, at every stop; harness-lifecycle-check.sh's tools must say that they left them in /tmp
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: tools
+Expect: lifecycle: tool (rip-sample|uart-stall)\.py: .*it LEFT uros-
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -88,13 +88,6 @@ def give_back(mine, who):
+             if q.poll() is None:
+                 q.kill()
+                 q.wait()
+-        for p in _paths:
+-            try:
+-                os.unlink(p)
+-            except FileNotFoundError:
+-                pass
+-            except OSError as e:
+-                print(f"{who}: {p} could not be removed: {e}", file=sys.stderr)
+         try:
+             ours = _owner() == mine
+         except FileNotFoundError:

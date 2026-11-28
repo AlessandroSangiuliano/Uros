@@ -101,6 +101,7 @@ def roundtrip(a, build):
         except FileNotFoundError:
             pass
         os.mkfifo(fifo + end)
+        run_lock.remove_at_end(fifo + end)  # #1016: gone with the run, however it ends
 
     log = os.path.join(build, "char-roundtrip.log")
 

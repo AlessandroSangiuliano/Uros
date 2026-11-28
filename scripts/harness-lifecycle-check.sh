@@ -15,20 +15,29 @@
 #   signals    a run sent TERM, INT and HUP once its qemu is up ends by that
 #              signal, and leaves neither its qemu nor the lock
 #   lockover   a run whose lock was removed and taken again by someone else
-#              while it ran leaves that lock where it is, and so does a tool
+#              while it ran leaves that lock where it is, and so does a tool,
+#              which leaves nothing of its own in /tmp all the same (#1016)
 #   refuse     with the lock held, run-x86_64.sh and every tool that shares the
 #              lock refuse, and none of them has made a disk first
 #   tools      each tool that shares the lock, sent TERM once its qemu is up,
-#              leaves neither its qemu nor the lock
+#              leaves neither its qemu, nor the lock, nor its files in /tmp,
+#              and one on run_lock.py says once that it was stopped (#1016)
+#   endstop    a tool on run_lock.py that ended by itself, sent TERM while it
+#              gives its lock back, gives it back all the same and takes no
+#              signal: give_back()'s ignoring, the only guard there (#801,
+#              #1016).  The window is milliseconds: it is asked only when
+#              ablations/801-widen-run-lock-give-back.patch holds it open
 #   orphan     a run killed with SIGKILL, which no trap can answer, leaves its
 #              qemu, and the next run names it in its conditions
 #   killed     a tool killed with SIGKILL takes its qemu with it
-#              (PR_SET_PDEATHSIG); the lock it cannot give back is said
+#              (PR_SET_PDEATHSIG); the lock it cannot give back is said, and
+#              its files in /tmp, which it cannot remove either, are cleared
 #   unitstop   each of them, run in a transient systemd user unit under a
 #              script with no trap, and the unit stopped with its qemu up --
 #              which signals what is left of the unit twice -- leaves neither
-#              its qemu nor the lock, and run-x86_64.sh says it was stopped
-#              (#801)
+#              its qemu, nor the lock, nor its files in /tmp, run-x86_64.sh
+#              says it was stopped, and a tool on run_lock.py says so once:
+#              the second signal is not taken (#801, #1016)
 #   mtstop     merge-test-x86_64.sh, sent TERM during a boot, says that boot
 #              was stopped, says where it stopped, prints its total and ends
 #              by the signal, and leaves neither the boot's qemu nor the lock:
@@ -96,7 +105,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm,deafqemu,expectcut
+ONLY=bystander,signals,lockover,refuse,tools,endstop,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm,deafqemu,expectcut
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -206,6 +215,49 @@ leftovers() {	# QEMU-PID
 		printf '; the lock is STILL THERE'
 		rmdir "$LOCK"
 	fi
+	tmp_left
+	return 0
+}
+
+# #1016: and the run's files in /tmp, a tool's FIFOs and its monitor's socket,
+# /tmp/uros-<tool>-<pid>.*: stopped with their units, four tools of five left
+# theirs at nearly every stop, sixty-five on omen, and nothing said so.
+# tmp_mark notes what is there before a tool starts; tmp_left says what has
+# come since, the lock apart, and clears it away.  The mark is a file, not a
+# variable, because leftovers() runs in a command substitution: a subshell.
+tmp_mark() {
+	ls -d /tmp/uros-* 2>/dev/null | grep -vxF "$LOCK" | sort > "$OUT/tmp-mark"
+}
+tmp_left() {
+	local new
+	[ -f "$OUT/tmp-mark" ] || return 0
+	new=$(ls -d /tmp/uros-* 2>/dev/null | grep -vxF "$LOCK" | sort | comm -13 "$OUT/tmp-mark" -)
+	rm -f "$OUT/tmp-mark"
+	[ -n "$new" ] || return 0
+	printf '; it LEFT %s in /tmp' "$(printf '%s\n' "$new" | sed 's|^/tmp/||' | paste -sd' ' -)"
+	printf '%s\n' "$new" | while IFS= read -r p; do rm -f "$p"; done
+	return 0
+}
+
+# #1016: what a tool on run_lock.py said of the signals that stopped it.
+# _stop() says the first, "<name>: stopped by SIG...", under the name the tool
+# takes the lock as, and ignores the rest until the run has ended; a second
+# such line is a second signal taken, which cut the tool's own cleanup short.
+# Nothing else here sees that: give_back() runs in the outer finally all the
+# same, and its qemu, the lock and its files go.  None is a stop the check
+# cannot read: the tool never said it was stopped.  A tool not on run_lock.py
+# says nothing here.
+stop_said() {	# TOOL OUT-FILE
+	local who n
+	case $1 in *.py) ;; *) return 0 ;; esac
+	grep -q '^import run_lock' "$REPO/scripts/$1" 2>/dev/null || return 0
+	who=${1%.py}
+	n=$(grep -c "^$who: stopped by SIG" "$2" 2>/dev/null)
+	case ${n:-0} in
+	1)	;;
+	0)	printf '; it never said it was stopped: its output ends %s' "$(tail -n 1 "$2" 2>/dev/null)" ;;
+	*)	printf '; it took %s signals: %s' "$n" "$(grep "^$who: stopped by SIG" "$2" | paste -sd' ' -)" ;;
+	esac
 	return 0
 }
 
@@ -349,6 +401,7 @@ if wanted lockover; then
 	fi
 	# And a tool, char-roundtrip.py, for the four that give the lock back
 	# through run_lock.py.
+	tmp_mark
 	python3 "$REPO/scripts/char-roundtrip.py" --entry "$ENTRY" --build "$BUILD" \
 		"${KVM[@]}" > "$OUT/lockover-char-roundtrip.out" 2>&1 &
 	P=$!
@@ -356,18 +409,23 @@ if wanted lockover; then
 	if ! q=$(first_qemu_of "$P"); then
 		wait "$P"
 		say "lockover char-roundtrip.py" "it never started its qemu (exit $?)" "NOT ASKED"
+		tmp_left > /dev/null
 	else
 		rmdir "$LOCK" && mkdir "$LOCK" && HOLDING=1
 		kill -s TERM "$P"
 		ended_within "$P" 30 || kill -KILL "$P" 2>/dev/null
 		wait "$P"
 		rc=$?
+		# #1016: its files are its own, whoever holds the lock.
+		files=$(tmp_left)
 		if [ -z "$HOLDING" ]; then
 			say "lockover char-roundtrip.py" "the lock could not be taken over while the tool held it" "NOT ASKED"
 		elif [ ! -d "$LOCK" ]; then
-			say "lockover char-roundtrip.py" "a tool whose lock was taken over while it ran, sent SIGTERM (exit $rc), REMOVED the lock it no longer held" WRONG
+			say "lockover char-roundtrip.py" "a tool whose lock was taken over while it ran, sent SIGTERM (exit $rc), REMOVED the lock it no longer held$files" WRONG
+		elif [ -n "$files" ]; then
+			say "lockover char-roundtrip.py" "a tool whose lock was taken over while it ran, sent SIGTERM (exit $rc), left that lock where it was$files" WRONG
 		else
-			say "lockover char-roundtrip.py" "a tool whose lock was taken over while it ran, sent SIGTERM (exit $rc), left that lock where it was" PASS
+			say "lockover char-roundtrip.py" "a tool whose lock was taken over while it ran, sent SIGTERM (exit $rc), left that lock where it was and nothing in /tmp" PASS
 		fi
 		kill -0 "$q" 2>/dev/null && kill -KILL "$q" 2>/dev/null
 		[ -n "$HOLDING" ] && rmdir "$LOCK" 2>/dev/null
@@ -407,6 +465,7 @@ fi
 if wanted tools; then
 	for t in "${TOOLS[@]:1}"; do
 		name=$(basename "${t%% *}")
+		tmp_mark
 		# shellcheck disable=SC2086
 		python3 "$REPO"/$t "${KVM[@]}" > "$OUT/tool-$name.out" 2>&1 &
 		P=$!
@@ -414,12 +473,14 @@ if wanted tools; then
 		if ! q=$(first_qemu_of "$P"); then
 			wait "$P"
 			say "tool $name" "it never started its qemu (exit $?, $OUT/tool-$name.out)" "NOT ASKED"
+			tmp_left > /dev/null
 			continue
 		fi
 		sleep 2
 		if qemu_gone_before "$q" "tool $name"; then
 			ended_within "$P" 30 || kill -KILL "$P" 2>/dev/null
 			wait "$P" 2>/dev/null
+			tmp_left > /dev/null
 			continue
 		fi
 		kill -s TERM "$P"
@@ -428,13 +489,72 @@ if wanted tools; then
 		wait "$P"
 		rc=$?
 		sleep 0.5
-		left="$went_on$(leftovers "$q")"
+		left="$went_on$(leftovers "$q")$(stop_said "$name" "$OUT/tool-$name.out")"
 		if [ -n "$left" ]; then
 			say "tool $name" "sent SIGTERM with its qemu (pid $q) up, it exited $rc$left" WRONG
 		else
-			say "tool $name" "sent SIGTERM with its qemu (pid $q) up, it exited $rc, its qemu gone and the lock given back" PASS
+			say "tool $name" "sent SIGTERM with its qemu (pid $q) up, it exited $rc, its qemu gone, the lock given back and nothing left in /tmp" PASS
 		fi
 	done
+fi
+
+# ── endstop ───────────────────────────────────────────────────────────
+# #1016: a run that ended by itself is giving its lock back when a TERM comes.
+# give_back() ignores TERM, HUP and INT while it runs (#801), and for a run
+# that was not stopped it is the only guard: _stop()'s ignoring comes with a
+# stop, and no check sent a signal there.  The window is milliseconds:
+# ablations/801-widen-run-lock-give-back.patch holds give_back() open a
+# second and says so, and the signal goes then; without it the signal cannot
+# be timed, and the check says it did not ask.  rip-sample.py, which ends by
+# itself after --seconds.
+if wanted endstop; then
+	name=rip-sample.py
+	who=${name%.py}
+	tmp_mark
+	python3 "$REPO/scripts/$name" --entry "$ENTRY" --build "$BUILD" --seconds 3 \
+		"${KVM[@]}" > "$OUT/endstop.out" 2>&1 &
+	P=$!
+	STARTED+=("$P")
+	if ! q=$(first_qemu_of "$P"); then
+		wait "$P"
+		say "endstop $name" "it never started its qemu (exit $?, $OUT/endstop.out)" "NOT ASKED"
+		tmp_left > /dev/null
+	else
+		held=""
+		for i in $(seq 1 2400); do
+			grep -q "^$who: #801 widen: give_back() held" "$OUT/endstop.out" 2>/dev/null &&
+				{ held=1; break; }
+			kill -0 "$P" 2>/dev/null || break
+			sleep 0.05
+		done
+		if [ -z "$held" ]; then
+			ended_within "$P" 120 || kill -KILL "$P" 2>/dev/null
+			wait "$P"
+			rc=$?
+			sleep 0.5
+			left=$(leftovers "$q")
+			if [ -n "$left" ]; then
+				say "endstop $name" "it ended by itself, exit $rc$left" WRONG
+			else
+				say "endstop $name" "it ended by itself, exit $rc, and gave its lock back before a signal could be timed there: ablations/801-widen-run-lock-give-back.patch holds give_back() open" "NOT ASKED"
+			fi
+		else
+			kill -s TERM "$P"
+			ended_within "$P" 30 || kill -KILL "$P" 2>/dev/null
+			wait "$P"
+			rc=$?
+			sleep 0.5
+			left=$(leftovers "$q")
+			if grep -q "^$who: stopped by SIG" "$OUT/endstop.out"; then
+				left="$left; it took the signal: $(grep "^$who: stopped by SIG" "$OUT/endstop.out" | paste -sd' ' -)"
+			fi
+			if [ -n "$left" ]; then
+				say "endstop $name" "sent SIGTERM while it gave its lock back, having ended by itself, it exited $rc$left" WRONG
+			else
+				say "endstop $name" "sent SIGTERM while it gave its lock back, having ended by itself, it exited $rc, took no signal, its qemu gone, the lock given back and nothing left in /tmp" PASS
+			fi
+		fi
+	fi
 fi
 
 # ── orphan ────────────────────────────────────────────────────────────
@@ -467,6 +587,7 @@ fi
 if wanted killed; then
 	t=${TOOLS[2]}		# char-roundtrip.py, one of the four run_lock.py serves
 	name=$(basename "${t%% *}")
+	tmp_mark
 	# shellcheck disable=SC2086
 	python3 "$REPO"/$t "${KVM[@]}" > "$OUT/killed-$name.out" 2>&1 &
 	P=$!
@@ -474,6 +595,7 @@ if wanted killed; then
 	if ! q=$(first_qemu_of "$P"); then
 		wait "$P"
 		say "killed $name" "it never started its qemu (exit $?)" "NOT ASKED"
+		tmp_left > /dev/null
 	else
 		sleep 2
 		kill -KILL "$P"
@@ -482,6 +604,9 @@ if wanted killed; then
 		lock="the lock it could not give back is there"
 		[ -d "$LOCK" ] || lock="and the lock is GONE, which nothing killed with SIGKILL can have done"
 		[ -d "$LOCK" ] && rmdir "$LOCK"
+		# #1016: its files are as much left as the lock, and as rightly:
+		# cleared away, not judged.
+		tmp_left > /dev/null
 		if kill -0 "$q" 2>/dev/null; then
 			say "killed $name" "killed with SIGKILL, its qemu (pid $q) is STILL RUNNING; $lock" WRONG
 			kill -KILL "$q" 2>/dev/null
@@ -521,6 +646,7 @@ if wanted unitstop; then
 			*)	cmd=("$REPO/scripts/run-x86_64.sh" "${KVM[@]}" --entry "$ENTRY" 120 "${PAUSED[@]}") ;;
 			esac
 			U=uros-lifecycle-unitstop-$$-$name
+			tmp_mark
 			# Two commands, so that bash cannot exec the tool in its own
 			# place: the wrapper stays the unit's main process.
 			systemd-run --user --quiet --collect --unit="$U" \
@@ -538,11 +664,13 @@ if wanted unitstop; then
 			if [ -z "$q" ]; then
 				systemctl --user stop "$U" 2>/dev/null
 				say "unitstop $name" "it never started its qemu under a unit ($OUT/unitstop-$name.out)" "NOT ASKED"
+				tmp_left > /dev/null
 				continue
 			fi
 			sleep 2
 			if qemu_gone_before "$q" "unitstop $name"; then
 				systemctl --user stop "$U" 2>/dev/null
+				tmp_left > /dev/null
 				continue
 			fi
 			systemctl --user stop "$U"
@@ -551,7 +679,7 @@ if wanted unitstop; then
 				sleep 0.1
 			done
 			sleep 0.5
-			left=$(leftovers "$q")
+			left=$(leftovers "$q")$(stop_said "$name" "$OUT/unitstop-$name.out")
 			if [ "$name" = run-x86_64.sh ] &&
 			   ! grep -q "^run-x86_64.sh: stopped by SIG" "$OUT/unitstop-$name.out"; then
 				left="$left; it never said it was stopped: its output ends $(tail -n 1 "$OUT/unitstop-$name.out")"
@@ -559,7 +687,7 @@ if wanted unitstop; then
 			if [ -n "$left" ]; then
 				say "unitstop $name" "its unit stopped with its qemu (pid $q) up$left" WRONG
 			else
-				say "unitstop $name" "its unit stopped with its qemu (pid $q) up, its qemu gone and the lock given back" PASS
+				say "unitstop $name" "its unit stopped with its qemu (pid $q) up, its qemu gone, the lock given back and nothing left in /tmp" PASS
 			fi
 		done
 	fi

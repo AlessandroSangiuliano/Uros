@@ -146,7 +146,7 @@ def stall(a, build, kernel):
     subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")], env=env,
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    mon = f"/tmp/uros-uart-stall-{os.getpid()}.mon"
+    mon = run_lock.remove_at_end(f"/tmp/uros-uart-stall-{os.getpid()}.mon")  # #1016
     fifo = f"/tmp/uros-uart-stall-{os.getpid()}.fifo"
     # qemu's pipe chardev reads <path>.in and writes <path>.out; both must
     # exist or it falls back to one file for both directions.
@@ -154,6 +154,7 @@ def stall(a, build, kernel):
         try: os.unlink(fifo + end)
         except FileNotFoundError: pass
         os.mkfifo(fifo + end)
+        run_lock.remove_at_end(fifo + end)  # #1016: gone with the run, however it ends
     # The reader opens first, non-blocking, so that neither open() waits for
     # the other side; qemu opens its ends O_RDWR and never waits either.
     fd = os.open(fifo + ".out", os.O_RDONLY | os.O_NONBLOCK)
