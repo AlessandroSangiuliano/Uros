@@ -95,12 +95,21 @@ st_gate_reset(daddr_t block)
 }
 
 /*
- * #1009: whether the 5 s of a bounded wait have gone, by the clock.  The waits
- * of 1 ms were counted, 5000 of them, and lasted a tick each, then since
- * 963ca2cc two: 5 s became 100, and a case that failed held ext_server's
- * start, and "/" with it, that long for each wait.  A clock refused counts
- * the waits, as before.
+ * #1009: whether a bounded wait has run out: 5 s of the clock, and at the
+ * least ST_BOUND_WAITS waits.  It waits for another thread of the server to
+ * do something, which is a number of chances given it and not a time -- a
+ * wait ends at a tick, and the waiter looks again only when the processor
+ * comes back to it -- so a loaded processor stretches it; 250 waits are
+ * about the 5 s while a wait of 1 ms lasts 20.  Counted alone, 5000 of them,
+ * they lasted 100 s since 963ca2cc, and a case that failed held ext_server's
+ * start, and "/" with it, that long for each wait.  Bounded by a second of
+ * the clock alone, act_test's rpc_pair_start() lost its thread at one
+ * processor under TCG (27/11).  A clock refused counts the 5000 waits, as
+ * before.
  */
+#define ST_BOUND_MS	5000
+#define ST_BOUND_WAITS	250
+
 struct st_bound {
 	struct timespec	t0;
 	int		clocked;
@@ -121,7 +130,8 @@ st_bound_over(struct st_bound *b)
 
 	if (b->clocked && getclock(TIMEOFDAY, &t) == 0)
 		return (long) (t.tv_sec - b->t0.tv_sec) * 1000 +
-		       (t.tv_nsec - b->t0.tv_nsec) / 1000000 >= 5000;
+		       (t.tv_nsec - b->t0.tv_nsec) / 1000000 >= ST_BOUND_MS &&
+		       b->waits >= ST_BOUND_WAITS;
 	return b->waits >= 5000;
 }
 
@@ -132,7 +142,7 @@ st_bound_wait(struct st_bound *b)
 	b->waits++;
 }
 
-/* A bounded wait for a flag: 1 ms at a time, 5 s at most. */
+/* A bounded wait for a flag: 1 ms at a time, until st_bound_over(). */
 static int
 st_wait_for(volatile int *flag)
 {
