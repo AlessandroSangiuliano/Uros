@@ -22,6 +22,11 @@
 #   tools      each tool that shares the lock, sent TERM once its qemu is up,
 #              leaves neither its qemu, nor the lock, nor its files in /tmp,
 #              and one on run_lock.py says once that it was stopped (#1016)
+#   endstop    a tool on run_lock.py that ended by itself, sent TERM while it
+#              gives its lock back, gives it back all the same and takes no
+#              signal: give_back()'s ignoring, the only guard there (#801,
+#              #1016).  The window is milliseconds: it is asked only when
+#              ablations/801-widen-run-lock-give-back.patch holds it open
 #   orphan     a run killed with SIGKILL, which no trap can answer, leaves its
 #              qemu, and the next run names it in its conditions
 #   killed     a tool killed with SIGKILL takes its qemu with it
@@ -96,7 +101,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm,deafqemu
+ONLY=bystander,signals,lockover,refuse,tools,endstop,orphan,killed,unitstop,mtstop,abstop,jobstop,jobfail,jobnokvm,deafqemu
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -487,6 +492,65 @@ if wanted tools; then
 			say "tool $name" "sent SIGTERM with its qemu (pid $q) up, it exited $rc, its qemu gone, the lock given back and nothing left in /tmp" PASS
 		fi
 	done
+fi
+
+# ── endstop ───────────────────────────────────────────────────────────
+# #1016: a run that ended by itself is giving its lock back when a TERM comes.
+# give_back() ignores TERM, HUP and INT while it runs (#801), and for a run
+# that was not stopped it is the only guard: _stop()'s ignoring comes with a
+# stop, and no check sent a signal there.  The window is milliseconds:
+# ablations/801-widen-run-lock-give-back.patch holds give_back() open a
+# second and says so, and the signal goes then; without it the signal cannot
+# be timed, and the check says it did not ask.  rip-sample.py, which ends by
+# itself after --seconds.
+if wanted endstop; then
+	name=rip-sample.py
+	who=${name%.py}
+	tmp_mark
+	python3 "$REPO/scripts/$name" --entry "$ENTRY" --build "$BUILD" --seconds 3 \
+		"${KVM[@]}" > "$OUT/endstop.out" 2>&1 &
+	P=$!
+	STARTED+=("$P")
+	if ! q=$(first_qemu_of "$P"); then
+		wait "$P"
+		say "endstop $name" "it never started its qemu (exit $?, $OUT/endstop.out)" "NOT ASKED"
+		tmp_left > /dev/null
+	else
+		held=""
+		for i in $(seq 1 2400); do
+			grep -q "^$who: #801 widen: give_back() held" "$OUT/endstop.out" 2>/dev/null &&
+				{ held=1; break; }
+			kill -0 "$P" 2>/dev/null || break
+			sleep 0.05
+		done
+		if [ -z "$held" ]; then
+			ended_within "$P" 120 || kill -KILL "$P" 2>/dev/null
+			wait "$P"
+			rc=$?
+			sleep 0.5
+			left=$(leftovers "$q")
+			if [ -n "$left" ]; then
+				say "endstop $name" "it ended by itself, exit $rc$left" WRONG
+			else
+				say "endstop $name" "it ended by itself, exit $rc, and gave its lock back before a signal could be timed there: ablations/801-widen-run-lock-give-back.patch holds give_back() open" "NOT ASKED"
+			fi
+		else
+			kill -s TERM "$P"
+			ended_within "$P" 30 || kill -KILL "$P" 2>/dev/null
+			wait "$P"
+			rc=$?
+			sleep 0.5
+			left=$(leftovers "$q")
+			if grep -q "^$who: stopped by SIG" "$OUT/endstop.out"; then
+				left="$left; it took the signal: $(grep "^$who: stopped by SIG" "$OUT/endstop.out" | paste -sd' ' -)"
+			fi
+			if [ -n "$left" ]; then
+				say "endstop $name" "sent SIGTERM while it gave its lock back, having ended by itself, it exited $rc$left" WRONG
+			else
+				say "endstop $name" "sent SIGTERM while it gave its lock back, having ended by itself, it exited $rc, took no signal, its qemu gone, the lock given back and nothing left in /tmp" PASS
+			fi
+		fi
+	fi
 fi
 
 # ── orphan ────────────────────────────────────────────────────────────
