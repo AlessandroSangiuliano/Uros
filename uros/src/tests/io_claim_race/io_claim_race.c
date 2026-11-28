@@ -892,9 +892,16 @@ main(int argc, char **argv)
 
 		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
 					  &released, &klog_from);
+		/*
+		 * #1009: a patience, counted: the grace periods are the
+		 * kernel's to run, a number of chances given it and not a
+		 * time; the clock only says how long they took.  Bounded by a
+		 * second of the clock, act_test's rpc_pair_start() lost its
+		 * thread at one processor under TCG (27/11).
+		 */
 		race_window_start(&rw, RETIRE_STEP_MS);
 		while (kr == KERN_RESOURCE_SHORTAGE
-		       && (waited = race_window_ms(&rw)) < RETIRE_WAIT_MS) {
+		       && rw.waits < RETIRE_WAIT_MS / RETIRE_STEP_MS) {
 			race_window_wait(&rw);
 			kr = device_io_port_claim(device, RACE_PORT,
 						  RACE_COUNT, &released,
@@ -917,9 +924,10 @@ main(int argc, char **argv)
 			passed++;
 		} else if (kr == KERN_RESOURCE_SHORTAGE)
 			printf("io_claim_race: [3] WRONG — the table was still "
-			       "full after %u ms of the %u the test waits, many "
-			       "grace periods: a retired slot never came back "
-			       "(#602)\n", waited, (unsigned)RETIRE_WAIT_MS);
+			       "full after the %u waits of %u ms the test gives "
+			       "it, %u ms, many grace periods: a retired slot "
+			       "never came back (#602)\n", rw.waits,
+			       (unsigned)RETIRE_STEP_MS, waited);
 		else
 			printf("io_claim_race: [3] WRONG — the range is not "
 			       "clean after the rounds (claim kr=%d, %s)\n",
