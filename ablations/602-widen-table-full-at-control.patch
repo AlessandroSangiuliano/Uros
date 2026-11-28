@@ -28,4 +28,4 @@ diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_cl
 +
  		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
  					  &released, &klog_from);
- 		race_window_start(&rw, RETIRE_STEP_MS);
+ 		/*

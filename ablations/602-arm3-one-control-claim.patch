@@ -9,12 +9,12 @@ Note: at more than one processor only. At one, a released slot finishes its grac
 diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_claim_race/io_claim_race.c
 --- a/uros/src/tests/io_claim_race/io_claim_race.c
 +++ b/uros/src/tests/io_claim_race/io_claim_race.c
-@@ -908,7 +908,7 @@ main(int argc, char **argv)
- 		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
- 					  &released, &klog_from);
+@@ -915,7 +915,7 @@
+ 		 * thread at one processor under TCG (27/11).
+ 		 */
  		race_window_start(&rw, RETIRE_STEP_MS);
 -		while (kr == KERN_RESOURCE_SHORTAGE
 +		while (0 && kr == KERN_RESOURCE_SHORTAGE
- 		       && (waited = race_window_ms(&rw)) < RETIRE_WAIT_MS) {
+ 		       && rw.waits < RETIRE_WAIT_MS / RETIRE_STEP_MS) {
  			race_window_wait(&rw);
  			kr = device_io_port_claim(device, RACE_PORT,
